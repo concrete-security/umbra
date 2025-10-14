@@ -1,0 +1,10 @@
+[project]
+name = "attestation-service"
+version = "0.1.0"
+requires-python = ">=3.10,<3.14"
+
+dependencies = [
+    "fastapi[standard]~=0.119",
+    "pydantic~=2.7",
+    "dstack-sdk==0.5.3",
+]
