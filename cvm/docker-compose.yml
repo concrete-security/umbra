@@ -43,6 +43,7 @@ services:
         mode: 0444
     networks:
       - vllm
+      - attestation
     depends_on:
       cert-manager:
         condition: service_healthy
@@ -66,8 +67,25 @@ services:
       - /var/run/dstack.sock:/var/run/dstack.sock
     restart: unless-stopped
 
+  # TDX Attestation service
+  attestation-service:
+    image: ghcr.io/concrete-security/attestation-service:latest
+    container_name: attestation-service
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8080
+    volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock
+    expose:
+      - "8080"
+    networks:
+      - attestation
+    restart: unless-stopped
+
 networks:
   vllm:
+    driver: bridge
+  attestation:
     driver: bridge
 
 volumes:
@@ -84,18 +102,12 @@ configs:
           server vllm:8000;
       }
 
-      # HTTP server for ACME challenges and redirect
+      # HTTP server only for redirects
       server {
           listen 80;
           server_name _;
 
-          # ACME challenge endpoint for Let's Encrypt
-          # location /.well-known/acme-challenge/ {
-          #     root /acme-challenge/;
-          #     try_files $$uri =404;
-          # }
-
-          # Redirect all other HTTP requests to HTTPS
+          # Redirect all HTTP requests to HTTPS
           location / {
               return 301 https://$$host$$request_uri;
           }
@@ -121,6 +133,15 @@ configs:
               access_log off;
               return 200 "healthy\n";
               add_header Content-Type text/plain;
+          }
+
+          # Remote attestation service
+          location = /tdx_quote {
+              proxy_pass http://attestation-service:8080;
+              proxy_set_header Host $$host;
+              proxy_set_header X-Real-IP $$remote_addr;
+              proxy_set_header X-Forwarded-For $$proxy_add_x_forwarded_for;
+              proxy_set_header X-Forwarded-Proto $$scheme;
           }
 
           # Proxy to VLLM service
