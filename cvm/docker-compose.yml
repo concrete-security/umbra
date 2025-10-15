@@ -74,6 +74,8 @@ services:
     environment:
       - HOST=0.0.0.0
       - PORT=8080
+      # Keep it to 1 if you want replication at the container orchestration level (see deploy.replicas)
+      - WORKERS=1
     volumes:
       - /var/run/dstack.sock:/var/run/dstack.sock
     expose:
@@ -81,6 +83,10 @@ services:
     networks:
       - attestation
     restart: unless-stopped
+    deploy:
+      mode: replicated
+      # Keep it to 1 if you want replication at the process level (see env.WORKERS)
+      replicas: 1
 
 networks:
   vllm:
