@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Certificate Manager Service
 
@@ -10,6 +9,7 @@ import os
 import sys
 import time
 import logging
+from hashlib import sha256
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -256,6 +256,13 @@ class CertificateManager:
             )
             cert = self.create_lets_encrypt_cert(private_key)
             self.save_certificate_and_key(cert, private_key)
+
+        # Emit new cert event to Dstack (extend RTMR3)
+        cert_pem = cert.public_bytes(Encoding.PEM)
+        cert_hash = sha256(cert_pem).hexdigest()
+        dstack_client = DstackClient()
+        dstack_client.emit_event("New TLS Certificate", cert_hash)
+        logger.info("Emitted new TLS certificate event to Dstack")
 
         logger.info("Certificate management completed successfully")
 
