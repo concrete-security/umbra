@@ -1,3 +1,19 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:677beadd1f6d9c5b81caaf696c4d8d1ec8097752bb2a434b377243499dc61665
-size 859
+{
+    "people": [
+      {
+        "name": "Prof. Christina Garman",
+        "expertise": "Expert in privacy, applied cryptography, and hardware. Co-Founder of Zcash, the first privacy-preserving cryptocurrency and large-scale deployment of zero-knowledge proofs.",
+        "image": "/people/christina.png"
+      },
+      {
+        "name": "Prof. Daniel Genkin",
+        "expertise": "Expert in hardware security, trusted execution environments, and side-channel attacks. Co-discoverer of Spectre and Meltdown.",
+        "image": "/people/daniel.png"
+      },
+      {
+        "name": "Dr. Jordan Frery",
+        "expertise": "Leads the ML team at Zama, driving confidential-AI pipelines that keep data and models private using cutting-edge methods like homomorphic encryption. PhD in Machine Learning.",
+        "image": "/people/jordan.png"
+      }
+    ]
+  }
