@@ -13,8 +13,10 @@ services:
               capabilities: ["gpu"]
     volumes:
       - ./app:/app
-      - /mnt/disk1/tee_models:/mnt/disk1/tee_models
-      - /mnt/disk1/huggingface:/root/.cache/huggingface
+      - models:/models
+      - huggingface-cache:/root/.cache/huggingface
+      # - /mnt/disk1/tee_models:/mnt/disk1/tee_models
+      # - /mnt/disk1/huggingface:/root/.cache/huggingface
     # No external ports - internal access only
     expose:
       - "8000"
