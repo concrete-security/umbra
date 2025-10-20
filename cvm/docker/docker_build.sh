@@ -13,7 +13,7 @@ echo "Mode: $MODE"
 echo "Detected platform: $OSTYPE"
 echo "Services to build: ${SERVICE_LIST[*]}"
 
-echo "🏗️  Building images for: ${SERVICE_LIST[*]}..."
+echo "🏗️ Building images for: ${SERVICE_LIST[*]}..."
 docker compose build "${SERVICE_LIST[@]}"
 
 echo "✅ Build completed successfully."

@@ -11,31 +11,31 @@ services:
             - driver: nvidia
               count: all
               capabilities: ["gpu"]
-    ipc: host
     volumes:
       - ./app:/app
       - /mnt/disk1/tee_models:/mnt/disk1/tee_models
       - /mnt/disk1/huggingface:/root/.cache/huggingface
+    # No external ports - internal access only
+    expose:
+      - "8000"
     networks:
       - vllm
     command: >
-      --host 0.0.0.0
-      --port 8000
       --model openai/gpt-oss-120b
       --tensor-parallel-size 1
-      --gpu-memory-utilization 0.9
-      --max-model-len 10240
-      --max-num-seqs 1
-      --max-num-batched-tokens 8192
+      --gpu-memory-utilization 0.95
+      --max-model-len 131072
+      --max-num-seqs 8
       --download-dir /mnt/disk1/tee_models
       --reasoning-parser openai_gptoss
+      --async-scheduling
+    restart: unless-stopped
     healthcheck:
       start_period: 1h30m # Allow up to 90 minutes for initial model loading
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
-    restart: unless-stopped
 
   # Nginx reverse proxy with HTTPS
   nginx:
@@ -75,10 +75,8 @@ services:
       - /var/run/dstack.sock:/var/run/dstack.sock
     restart: unless-stopped
 
-# docker network inspect vllm --format '{{json .Containers}}' | jq .
 networks:
-  default:
-    name: vllm
+  vllm:
     driver: bridge
 
 volumes:
