@@ -5,28 +5,9 @@ OS="$(uname -s)"
 
 MODE=${1:-"prod"}
 WITH_BASSE_VLLM=${2:-"false"}
-ENV_FILE=".env_${MODE}"
 
-# Load .env
-if [[ -f "$ENV_FILE" ]]; then
-  set -o allexport
-  source "$ENV_FILE"
-  set +o allexport
-fi
-
-if [ "$(uname)" = "Darwin" ]; then
-  export HOST_MODEL_STORAGE_DIR="$(pwd)/tee/models"
-  export HOST_HF_CACHE="$(pwd)/huggingface"
-  export CONTAINER_MODEL_STORAGE_DIR="/tee/models"
-  mkdir -p "${HOST_MODEL_STORAGE_DIR}" "${HOST_HF_CACHE}"
-fi
-
-echo "Using model storage dir: $HOST_MODEL_STORAGE_DIR"
-echo "Using container model storage dir: $CONTAINER_MODEL_STORAGE_DIR"
-echo "Using HF cache dir: $HOST_HF_CACHE"
-
-SERVICE_LIST=("proxy_api_service" "prometheus_service" "grafana_service")
-CONTAINER_LIST=("proxy_api_container" "prometheus_container" "grafana_container")
+SERVICE_LIST=()
+CONTAINER_LIST=()
 
 if [[ "$WITH_BASSE_VLLM" == "true" ]]; then
     CONTAINER_LIST+=("vllm_container")
@@ -35,7 +16,6 @@ fi
 
 echo "Mode: $MODE"
 echo "Detected platform: $OSTYPE"
-echo "Env file: $ENV_FILE"
 echo "Containers to handle: ${CONTAINER_LIST[*]}"
 echo "Services to handle: ${SERVICE_LIST[*]}"
 
@@ -55,7 +35,7 @@ done
 
 # Restart containers
 echo "🚀 Starting containers..."
-docker compose --env-file "$ENV_FILE" up -d --force-recreate "${SERVICE_LIST[@]}"
+docker compose up -d --force-recreate "${SERVICE_LIST[@]}"
 
 # Show logs
 echo "📜 Showing live logs..."
