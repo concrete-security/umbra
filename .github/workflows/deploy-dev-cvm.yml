@@ -67,9 +67,12 @@ jobs:
 
             echo "Current status: $DEPLOYMENT_STATUS (elapsed: ${ELAPSED}s)"
 
-            if [ "$DEPLOYMENT_STATUS" == "running" ]; then
+            if [[ "$DEPLOYMENT_STATUS" == "running" ]]; then
               echo "✅ Deployment verified successfully!"
               exit 0
+            elif [[ "$DEPLOYMENT_STATUS" != "starting" && "$DEPLOYMENT_STATUS" != "stopping" ]]; then
+              echo "❌ Deployment failed with unexpected status: $DEPLOYMENT_STATUS"
+              exit 1
             fi
 
             sleep $INTERVAL
