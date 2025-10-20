@@ -2,8 +2,6 @@ services:
   vllm_service:
     image: vllm/vllm-openai:v0.11.0
     container_name: vllm_container
-    env_file:
-        - .env_prod
     deploy:
       resources:
         reservations:
@@ -12,7 +10,6 @@ services:
               count: all
               capabilities: ["gpu"]
     volumes:
-      - ./app:/app
       - models:/models
       - huggingface-cache:/root/.cache/huggingface
       # - /mnt/disk1/tee_models:/mnt/disk1/tee_models
