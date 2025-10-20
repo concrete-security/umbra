@@ -10,10 +10,8 @@ services:
               count: all
               capabilities: ["gpu"]
     volumes:
-      - models:/models
+      - ./models:/models
       - huggingface-cache:/root/.cache/huggingface
-      # - /mnt/disk1/tee_models:/mnt/disk1/tee_models
-      # - /mnt/disk1/huggingface:/root/.cache/huggingface
     # No external ports - internal access only
     expose:
       - "8000"
@@ -27,6 +25,7 @@ services:
       --max-num-seqs 8
       --reasoning-parser openai_gptoss
       --async-scheduling
+      --download-dir /models
     restart: unless-stopped
     healthcheck:
       start_period: 1h30m # Allow up to 90 minutes for initial model loading
