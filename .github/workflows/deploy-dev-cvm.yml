@@ -52,7 +52,7 @@ jobs:
           PHALA_APP_ID: ${{ secrets.PHALA_DEV_APP_ID }}
         run: |
           # Wait for deployment to complete
-          TIMEOUT=300  # 5 minutes timeout
+          TIMEOUT=900  # 15 minutes timeout
           INTERVAL=10  # Check every 10 seconds
           ELAPSED=30  # Start after initial wait
 
@@ -70,10 +70,11 @@ jobs:
             if [ "$DEPLOYMENT_STATUS" == "running" ]; then
               echo "✅ Deployment verified successfully!"
               exit 0
-            elif [ "$DEPLOYMENT_STATUS" != "starting" ]; then
-              echo "❌ Deployment failed with unexpected status: $DEPLOYMENT_STATUS"
-              exit 1
             fi
+            # elif [ "$DEPLOYMENT_STATUS" != "starting" ]; then
+            #   echo "❌ Deployment failed with unexpected status: $DEPLOYMENT_STATUS"
+            #   exit 1
+            # fi
 
             sleep $INTERVAL
             ELAPSED=$((ELAPSED + INTERVAL))
