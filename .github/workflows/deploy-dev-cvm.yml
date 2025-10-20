@@ -71,10 +71,6 @@ jobs:
               echo "✅ Deployment verified successfully!"
               exit 0
             fi
-            # elif [ "$DEPLOYMENT_STATUS" != "starting" ]; then
-            #   echo "❌ Deployment failed with unexpected status: $DEPLOYMENT_STATUS"
-            #   exit 1
-            # fi
 
             sleep $INTERVAL
             ELAPSED=$((ELAPSED + INTERVAL))
