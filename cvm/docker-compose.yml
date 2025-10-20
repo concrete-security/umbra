@@ -1,11 +1,16 @@
 services:
   vllm_service:
-    image: vllm/vllm-openai:latest
+    image: vllm/vllm-openai:v0.11.0
     container_name: vllm_container
     env_file:
         - .env_prod
-    gpus: all
-    # runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: ["gpu"]
     ports:
       - "${PORT_PROVIDER}:${PORT_PROVIDER}"  # host:container port mapping
     ipc: host
