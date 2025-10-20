@@ -1,12 +1,17 @@
 services:
-  vllm:
-    image: vllm/vllm-openai:latest
-    container_name: vllm
-    environment:
-      - NVIDIA_VISIBLE_DEVICES=all
+  vllm_service:
+    image: vllm/vllm-openai:v0.11.0
+    container_name: vllm_container
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: ["gpu"]
     volumes:
+      - ./models:/models
       - huggingface-cache:/root/.cache/huggingface
-    runtime: nvidia
     # No external ports - internal access only
     expose:
       - "8000"
@@ -20,9 +25,10 @@ services:
       --max-num-seqs 8
       --reasoning-parser openai_gptoss
       --async-scheduling
+      --download-dir /models
     restart: unless-stopped
     healthcheck:
-      start_interval: 1h30m # Allow up to 90 minutes for initial model loading
+      start_period: 1h30m # Allow up to 90 minutes for initial model loading
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
@@ -81,7 +87,7 @@ configs:
     content: |
       # Upstream for VLLM service
       upstream vllm_backend {
-          server vllm:8000;
+          server vllm_service:8000;
       }
 
       # HTTP server for ACME challenges and redirect
