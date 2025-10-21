@@ -1,0 +1,20 @@
+name: check commit compliance
+on:
+  pull_request:
+
+jobs:
+  commit-compliance:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check commit signatures
+        uses: 1Password/check-signed-commits-action@ed2885f3ed2577a4f5d3c3fe895432a557d23d52
+      - name: Check first line
+        uses: gsactions/commit-message-checker@16fa2d5de096ae0d35626443bcd24f1e756cafee # v2.0.0
+        with:
+          pattern: '^(feat|fix|test|bench|docs|chore|refactor|perf)\((cvm|backend|frontend|tools|ci|common).*\): '
+          flags: 'gs'
+          error: 'Your first line has to contain a commit type and scope like "feat(my_feature): msg".'
+          excludeDescription: 'true' # optional: this excludes the description body of a pull request
+          excludeTitle: 'true' # optional: this excludes the title of a pull request
+          checkAllCommitMessages: 'true' # optional: this checks all commits associated with a pull request
+          accessToken: ${{ secrets.GITHUB_TOKEN }} # github access token is only required if checkAllCommitMessages is true
