@@ -53,9 +53,8 @@ tests:
 		exit 1; \
 	fi
 	# fix issue
-	@echo "- Running tests with $(ENV_FILE) and $(VENV)..."
-	@set -a && source $(ENV_FILE) && set +a && \
-	$(VENV)/bin/poetry run pytest -vvx
+	@echo "- Running tests with on $(VENV)..."
+	@$(VENV)/bin/poetry run pytest -vvx
 
 .PHONY: docker-build
 docker-build:
