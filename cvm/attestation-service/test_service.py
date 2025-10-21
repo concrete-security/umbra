@@ -2,11 +2,11 @@
 Test script for the attestation service endpoints
 """
 
+import argparse
 import requests
-import sys
 
 
-def test_health_endpoint(base_url):
+def test_health_endpoint(base_url, **kwargs):
     """Test the health endpoint"""
     try:
         response = requests.get(f"{base_url}/health")
@@ -17,7 +17,7 @@ def test_health_endpoint(base_url):
         return False
 
 
-def test_tdx_quote_post(base_url):
+def test_tdx_quote_post(base_url, no_tdx=False):
     """Test TDX quote POST endpoint with report data"""
     try:
         payload = {"report_data": "deadbeefcafebabe"}
@@ -28,9 +28,17 @@ def test_tdx_quote_post(base_url):
             print(f"  Success: {data.get('success')}")
             print(f"  Quote type: {data.get('quote_type')}")
             return True
-        elif response.status_code == 422:
-            print(f"  Validation Error: {response.json()}")
-            return False
+        elif response.status_code == 500 and no_tdx:
+            expected = {
+                "detail": {
+                    "success": False,
+                    "error": "Unix socket file /var/run/dstack.sock does not exist",
+                    "quote_type": "tdx",
+                }
+            }
+            if response.json() == expected:
+                print("  Received expected error for missing TDX environment")
+                return True
         else:
             print(f"  Error: {response.json()}")
             return False
@@ -41,9 +49,26 @@ def test_tdx_quote_post(base_url):
 
 def main():
     """Main test function"""
-    base_url = sys.argv[1] if len(sys.argv) > 1 else "http://localhost:8080"
+    parser = argparse.ArgumentParser(
+        description="Test script for the attestation service endpoints"
+    )
+    parser.add_argument(
+        "--base-url",
+        default="http://localhost:8080",
+        help="Base URL of the attestation service (default: http://localhost:8080)",
+    )
+    parser.add_argument(
+        "--no-tdx",
+        action="store_true",
+        default=False,
+        help="Expect TDX environment to be unavailable (default: False)",
+    )
 
-    print(f"Testing attestation service at {base_url}")
+    args = parser.parse_args()
+
+    print(f"Testing attestation service at {args.base_url}")
+    if args.no_tdx:
+        print("Running in no-TDX mode (expecting TDX errors)")
     print("=" * 50)
 
     tests = [
@@ -53,11 +78,16 @@ def main():
 
     passed = 0
     for test in tests:
-        if test(base_url):
+        if test(args.base_url, no_tdx=args.no_tdx):
             passed += 1
 
     print("=" * 50)
     print(f"Tests completed: {passed}/{len(tests)} passed")
+
+    if passed == len(tests):
+        exit(0)
+    else:
+        exit(1)
 
 
 if __name__ == "__main__":

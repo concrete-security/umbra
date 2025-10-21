@@ -6,6 +6,9 @@ on:
       - main
     paths:
       - "cvm/attestation-service/**"
+  pull_request:
+    paths:
+      - "cvm/attestation-service/**"
   # for manual trigger from GitHub UI
   workflow_dispatch:
 
@@ -14,9 +17,67 @@ env:
   IMAGE_NAME: concrete-security/attestation-service
 
 jobs:
+  build-and-test:
+    name: Build and Test Docker Image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3
+
+      - name: Build Docker image for testing
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6
+        with:
+          context: ./cvm/attestation-service
+          file: ./cvm/attestation-service/Dockerfile
+          push: false
+          tags: attestation-service:test
+          load: true
+
+      - name: Start attestation service container
+        run: |
+          # Start the container in detached mode
+          docker run -d --name attestation-service-test -p 8080:8080 attestation-service:test
+
+          # Wait for the service to be ready
+          echo "Waiting for service to start..."
+          for i in {1..30}; do
+            if curl -f http://localhost:8080/health > /dev/null 2>&1; then
+              echo "Service is ready!"
+              break
+            fi
+            echo "Attempt $i: Service not ready yet, waiting..."
+            sleep 2
+          done
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@2ddd2b9cb38ad8efd50337e8ab201519a34c9f24 # v3
+
+      - name: Install test dependencies
+        run: |
+          cd cvm/attestation-service
+          uv sync --group test
+
+      - name: Run tests
+        run: |
+          cd cvm/attestation-service
+          uv run python test_service.py --base-url http://localhost:8080 --no-tdx
+
+      - name: Stop and remove test container
+        if: always()
+        run: |
+          docker stop attestation-service-test || true
+          docker rm attestation-service-test || true
+
   build-and-push:
     name: Build and Push Docker Image
     runs-on: ubuntu-latest
+    needs: build-and-test
     permissions:
       contents: read
       packages: write
@@ -44,9 +105,9 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
+            type=sha
             type=ref,event=branch
             type=ref,event=pr
-            type=sha,prefix={{branch}}-
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push Docker image
