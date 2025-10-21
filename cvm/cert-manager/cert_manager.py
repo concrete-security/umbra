@@ -25,10 +25,9 @@ from cryptography.hazmat.primitives.serialization import (
 import schedule
 from dstack_sdk import DstackClient
 
-# Let's Encrypt / ACME imports
-# from acme import client, messages, challenges, errors as acme_errors
-# from acme.client import ClientV2
-# import josepy as jose
+import josepy as jose
+from acme import client, messages, challenges, errors as acme_errors
+from acme.client import ClientV2
 
 # Configure logging
 logging.basicConfig(
@@ -43,13 +42,23 @@ class CertificateManager:
     KEY_FILENAME = "key.pem"
     CERT_EXPIRY_THRESHOLD_DAYS = 30  # Days before expiry to renew
 
-    def __init__(self, domain: str, dev_mode: bool, cert_email: str, letsencrypt_staging: bool):
+    def __init__(
+        self,
+        domain: str,
+        dev_mode: bool,
+        cert_email: str,
+        letsencrypt_staging: bool,
+        letsencrypt_account_version: str
+    ):
         self.domain = domain
         self.dev_mode = dev_mode
         self.cert_email = cert_email
         self.letsencrypt_staging = letsencrypt_staging
+        # used to easily switch to another account
+        self.letsencrypt_account_version = letsencrypt_account_version
 
         self.cert_path = Path("/certs")
+        self.acme_path = Path("/acme-challenge/")
 
         # Ensure directories exist
         self.cert_path.mkdir(exist_ok=True)
@@ -124,7 +133,134 @@ class CertificateManager:
         self, private_key: ec.EllipticCurvePrivateKey
     ) -> x509.Certificate:
         """Create Let's Encrypt certificate using ACME protocol"""
-        raise NotImplementedError
+        logger.info("Creating Let's Encrypt certificate")
+
+        try:
+            # Generate account key
+            # Uses deterministic key so that same instances have the same key (could fix CAA to this account)
+            # Versions allow you to change accounts by setting a different env variable
+            account_key = self.generate_deterministic_key(f"letsencrypt-account/{self.domain}/{self.letsencrypt_account_version}")
+            account_key_jwk = jose.JWKEC(key=account_key)
+
+            # Create ACME client
+            if self.letsencrypt_staging:
+                directory_url = 'https://acme-staging-v02.api.letsencrypt.org/directory'
+                logger.info("Using Let's Encrypt staging environment")
+            else:
+                directory_url = 'https://acme-v02.api.letsencrypt.org/directory'
+                logger.info("Using Let's Encrypt production environment")
+
+            net = client.ClientNetwork(account_key_jwk, user_agent='cert-manager/1.0')
+            directory = messages.Directory.from_json(net.get(directory_url).json())
+            acme_client = ClientV2(directory, net=net)
+
+            # Register account or get existing
+            try:
+                # Try to create a new account
+                acme_client.new_account(
+                    messages.NewRegistration(
+                        key=account_key_jwk.public_key(),
+                        contact=(f'mailto:{self.cert_email}',),
+                        terms_of_service_agreed=True
+                    )
+                )
+                logger.info("Created new Let's Encrypt account")
+            except acme_errors.ConflictError:
+                # Get existing account
+                acme_client.query_registration(
+                    messages.Registration(
+                        key=account_key_jwk.public_key(),
+                        contact=(f'mailto:{self.cert_email}',)
+                    )
+                )
+                logger.info("Using existing Let's Encrypt account")
+
+            # Create certificate signing request
+            csr = x509.CertificateSigningRequestBuilder().subject_name(
+                x509.Name([
+                    x509.NameAttribute(NameOID.COMMON_NAME, self.domain),
+                ])
+            ).add_extension(
+                x509.SubjectAlternativeName([
+                    x509.DNSName(self.domain),
+                ]),
+                critical=False,
+            ).sign(private_key, hashes.SHA256())
+
+            # Request certificate
+            order = acme_client.new_order(csr)
+
+            if len(order.authorizations) > 1:
+                logger.warning("order.authorizations length is > 1")
+
+            # Complete challenges
+            authz = order.authorizations[0]
+            order, self.complete_http01_chall_and_finalize_order(acme_client, authz, order)
+
+            # Get certificate
+            cert_pem = order.fullchain_pem
+            cert = x509.load_pem_x509_certificate(cert_pem.encode())
+
+            logger.info("Successfully obtained Let's Encrypt certificate")
+            return cert
+
+        except Exception as e:
+            logger.error(f"Failed to obtain Let's Encrypt certificate: {e}")
+            logger.info("Falling back to self-signed certificate")
+            return self.create_self_signed_cert(private_key)
+
+    def complete_http01_chall_and_finalize_order(
+        self,
+        acme_client: ClientV2,
+        authz: messages.AuthorizationResource,
+        order: messages.OrderResource
+    ):
+        """Complete HTTP-01 challenge for domain validation"""
+        domain = authz.body.identifier.value
+        logger.info(f"Completing HTTP-01 challenge for domain: {domain}")
+
+        # Find HTTP-01 challenge
+        http01_challenge: messages.ChallengeBody = None
+        for challenge in authz.body.challenges:
+            challenge: messages.ChallengeBody
+            if isinstance(challenge.chall, challenges.HTTP01):
+                http01_challenge: challenges.HTTP01 = challenge
+                break
+
+        if not http01_challenge:
+            raise Exception(f"No HTTP-01 challenge found for domain {domain}")
+
+        # Create challenge response
+        response, validation = http01_challenge.response_and_validation(
+            acme_client.net.key
+        )
+
+        # Save challenge file for nginx to serve
+        challenge_root_dir = self.acme_path
+        challenge_dir = (challenge_root_dir / http01_challenge.path).parent
+        challenge_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            challenge_file = challenge_root_dir / http01_challenge.path
+            with open(challenge_file, 'w') as f:
+                f.write(validation)
+
+            logger.info(f"Created challenge file: {challenge_file}")
+
+            # Answer challenge
+            acme_client.answer_challenge(http01_challenge, response)
+
+            # Finalize order
+            deadline = datetime.now(timezone.utc) + timedelta(seconds=90)
+            order = acme_client.finalize_order(order, deadline)
+
+        finally:
+            # Clean up challenge file
+            if challenge_file.exists():
+                challenge_file.unlink()
+                logger.info(f"Cleaned up challenge file: {challenge_file}")
+
+        return order
 
     def create_self_signed_cert(
         self, private_key: ec.EllipticCurvePrivateKey
@@ -307,6 +443,7 @@ if __name__ == "__main__":
     letsencrypt_staging = (
         os.getenv("LETSENCRYPT_STAGING", "false").lower() == "true"
     )
+    letsencrypt_account_version = os.getenv("LETSENCRYPT_ACCOUNT_VERSION", "v1")
     manager = CertificateManager(
         domain=domain,
         dev_mode=dev_mode,
