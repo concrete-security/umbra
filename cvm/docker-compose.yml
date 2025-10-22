@@ -2,16 +2,13 @@ services:
   vllm_service:
     image: vllm/vllm-openai:v0.11.0
     container_name: vllm_container
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: ["gpu"]
+    gpus: all
     volumes:
-      - ./models:/models
-      - huggingface-cache:/root/.cache/huggingface
+      # - ./models:/models
+      # - huggingface-cache:/root/.cache/huggingface
+      # - ./app:/app
+      - /mnt/disk1/tee_models:/mnt/disk1/tee_models
+      - /mnt/disk1/huggingface:/root/.cache/huggingface
     # No external ports - internal access only
     expose:
       - "8000"
@@ -25,7 +22,8 @@ services:
       --max-num-seqs 8
       --reasoning-parser openai_gptoss
       --async-scheduling
-      --download-dir /models
+      --download-dir /mnt/disk1/tee_models
+    # --download-dir /models
     restart: unless-stopped
     healthcheck:
       start_period: 1h30m # Allow up to 90 minutes for initial model loading
@@ -33,6 +31,32 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+
+  proxy_api_service:
+      build:
+        context: ./vllm_proxy
+        dockerfile: Dockerfile
+      container_name: proxy_api_container
+      depends_on:
+        vllm_service:
+          condition: service_started
+          restart: true
+      networks:
+        - vllm
+      environment:
+        - VLLM_BASE_URL=http://vllm_container:8000
+      # No external ports - internal access only
+      expose:
+        - "7000"
+      command: >
+        sh -c "uvicorn proxy_app:app --host 0.0.0.0 --port 7000"
+      healthcheck:
+        test: ["CMD", "curl", "-f", "http://localhost:7000/health"]
+        interval: 10s
+        timeout: 5s
+        retries: 6
+        start_period: 10s
+      restart: unless-stopped
 
   # Nginx reverse proxy with HTTPS
   nginx:
@@ -52,6 +76,9 @@ services:
     depends_on:
       cert-manager:
         condition: service_healthy
+        restart: true
+      proxy_api_service:
+        condition: service_started
         restart: true
     restart: unless-stopped
     healthcheck:
@@ -75,6 +102,7 @@ services:
 networks:
   vllm:
     driver: bridge
+    name: vllm_network
 
 volumes:
   # Used to store huggingface models
@@ -85,9 +113,9 @@ volumes:
 configs:
   nginx-default-conf:
     content: |
-      # Upstream for VLLM service
+      # Upstream for Proxy VLLM api service
       upstream vllm_backend {
-          server vllm_service:8000;
+          server proxy_api_service:7000;
       }
 
       # HTTP server for ACME challenges and redirect

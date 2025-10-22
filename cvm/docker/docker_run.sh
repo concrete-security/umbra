@@ -6,8 +6,8 @@ OS="$(uname -s)"
 MODE=${1:-"prod"}
 WITH_BASSE_VLLM=${2:-"false"}
 
-SERVICE_LIST=()
-CONTAINER_LIST=()
+SERVICE_LIST=("proxy_api_service" "nginx")
+CONTAINER_LIST=("proxy_api_container" "nginx")
 
 if [[ "$WITH_BASSE_VLLM" == "true" ]]; then
     CONTAINER_LIST+=("vllm_container")

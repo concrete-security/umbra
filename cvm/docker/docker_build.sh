@@ -3,7 +3,7 @@ set -e
 
 MODE=${1:-"prod"}
 WITH_BASSE_VLLM=${2:-"false"}
-SERVICE_LIST=()
+SERVICE_LIST=("proxy_api_service")
 
 if [[ "$WITH_BASSE_VLLM" == "true" ]]; then
     SERVICE_LIST+=("vllm_service")

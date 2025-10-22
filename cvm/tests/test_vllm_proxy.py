@@ -7,9 +7,8 @@ BASE_URL = os.getenv("BASE_URL", "https://localhost")
 MODEL_ID = os.getenv("MODEL_ID", "openai/gpt-oss-120b")
 TIMEOUT = 10
 
-
 # curl -k https://localhost/metrics | head -n 30
-def test_base_vllm_endpoint_metrics():
+def test_vllm_proxy_endpoint_metrics():
     """Test if the /metrics endpoint is reachable and returns expected content."""
     url = f"{BASE_URL}/metrics"
     response = requests.get(url, timeout=TIMEOUT, verify=False)
@@ -18,7 +17,7 @@ def test_base_vllm_endpoint_metrics():
 
 
 # curl -k https://localhost/v1/models
-def test_base_vllm_endpoint_v1_models():
+def test_vllm_proxy_endpoint_v1_models():
     """Test if the /v1/models endpoint returns a valid JSON response."""
     url = f"{BASE_URL}/v1/models"
     response = requests.get(url, timeout=TIMEOUT, verify=False)
@@ -32,30 +31,29 @@ def test_base_vllm_endpoint_v1_models():
     assert MODEL_ID in model_ids, f"Model ID '{MODEL_ID}' not found in available models"
 
 
-# curl -k -X POST https://localhost/v1/completions \
-#   -H "Content-Type: application/json" \
-#   -d '{"model": "openai/gpt-oss-120b", "prompt": "Hello world!", "max_tokens": 10}'
 @pytest.mark.parametrize(
-    "prompt,max_tokens",
+    "prompt",
     [
-        ("Hello world!", 10),
-        ("What is Fully Homomorphic Encryption?", 20),
+        ("Hello world!"),
+        ("What is Fully Homomorphic Encryption? in one word"),
     ],
 )
-def test_base_vllm_endpoint_v1_completions(prompt, max_tokens):
+def test_vllm_proxy_endpoint_v1_completions(prompt):
     """Test if the model can handle `v1_completions` endpoint with a simple request."""
-    url = f"{BASE_URL}/v1/completions"
+    url = f"{BASE_URL}/v1/chat/completions"
     payload = {
         "model": MODEL_ID,
         "prompt": prompt,
-        "max_tokens": max_tokens,
+        "user_id": "test_user_001",
+        "document": "",
     }
 
     response = requests.post(url, json=payload, timeout=TIMEOUT, verify=False)
     assert response.status_code == 200, f"/v1/completions failed: expected `200`, got `{response.status_code}`"
-    data = response.json()
+    response = response.json()
 
-    assert "choices" in data, "Missing 'choices' field in completion response"
-    assert len(data["choices"]) > 0, "No choices returned"
-    output_text = data["choices"][0].get("text", "").strip()
-    assert output_text, "Model returned an empty text response"
+    content = response["choices"][0]["message"]["content"].strip()
+    assert len(content) > 5, f"Empty response"
+
+    reasoning_content = response["choices"][0]["message"]["reasoning_content"].strip()
+    assert len(reasoning_content) > 5, f"Empty reasoning content"
