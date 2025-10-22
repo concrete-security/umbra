@@ -1,0 +1,126 @@
+services:
+  # Mock VLLM service
+  vllm:
+    image: python:3.11-slim
+    container_name: vllm-mock
+    runtime: runc
+    configs:
+      - source: mock_server
+        target: /app/mock_server.py
+        mode: 0444
+      - source: mock_entrypoint
+        target: /app/entrypoint.sh
+        mode: 0744
+    command:
+    entrypoint: /app/entrypoint.sh
+    healthcheck:
+      start_period: 10s # Much faster startup than real vLLM
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  cert-manager:
+    image: cert-manager-dev
+    build:
+      context: ./cert-manager
+      dockerfile: Dockerfile
+    environment:
+      - DOMAIN=localhost
+      - DEV_MODE=true
+
+  attestation-service:
+    image: attestation-service-dev
+    build:
+      context: ./attestation-service
+      dockerfile: Dockerfile
+    environment:
+      - WORKERS=1
+    deploy:
+      mode: replicated
+      replicas: 1
+
+
+configs:
+  mock_entrypoint:
+    content: |
+      #!/bin/sh
+      pip install fastapi[standard] uvicorn pydantic
+      fastapi run --host 0.0.0.0 --port 8000 /app/mock_server.py
+  mock_server:
+    content: |
+      from fastapi import FastAPI, HTTPException
+      from pydantic import BaseModel
+      from typing import List, Optional, Dict, Any
+      import json
+      import time
+      
+      app = FastAPI()
+      
+      class ChatMessage(BaseModel):
+          role: str
+          content: str
+      
+      class ChatCompletionRequest(BaseModel):
+          model: str
+          messages: List[ChatMessage]
+          temperature: Optional[float] = 0.7
+          max_tokens: Optional[int] = None
+          stream: Optional[bool] = False
+      
+      class ChatCompletionResponse(BaseModel):
+          id: str
+          object: str = 'chat.completion'
+          created: int
+          model: str
+          choices: List[Dict[str, Any]]
+          usage: Dict[str, int]
+      
+      @app.get('/health')
+      async def health():
+          return {'status': 'ok'}
+      
+      @app.get('/v1/models')
+      async def list_models():
+          return {
+              'object': 'list',
+              'data': [
+                  {
+                      'id': 'openai/gpt-oss-120b',
+                      'object': 'model',
+                      'created': int(time.time()),
+                      'owned_by': 'mock'
+                  }
+              ]
+          }
+      
+      @app.post('/v1/chat/completions')
+      async def chat_completions(request: ChatCompletionRequest):
+          # Simple mock response
+          mock_response = 'This is a mock response from the vLLM mock service. Your message was: ' + str(request.messages[-1].content if request.messages else 'No message')
+          
+          return {
+              'id': 'chatcmpl-mock-' + str(int(time.time())),
+              'object': 'chat.completion',
+              'created': int(time.time()),
+              'model': request.model,
+              'choices': [
+                  {
+                      'index': 0,
+                      'message': {
+                          'role': 'assistant',
+                          'content': mock_response
+                      },
+                      'finish_reason': 'stop'
+                  }
+              ],
+              'usage': {
+                  'prompt_tokens': 50,
+                  'completion_tokens': 20,
+                  'total_tokens': 70
+              }
+          }
+      
+      if __name__ == '__main__':
+          import uvicorn
+          uvicorn.run(app, host='0.0.0.0', port=8000)
