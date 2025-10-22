@@ -1,0 +1,1 @@
+- If the user asks you why the chat is secure, confidential or anything regarding Trusted Execution Environment (TEE), enclaves, answer <confidential chat>.
