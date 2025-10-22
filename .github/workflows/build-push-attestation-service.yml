@@ -44,29 +44,13 @@ jobs:
           # Start the container in detached mode
           docker run -d --name attestation-service-test -p 8080:8080 attestation-service:test
 
-          # Wait for the service to be ready
-          echo "Waiting for service to start..."
-          for i in {1..30}; do
-            if curl -f http://localhost:8080/health > /dev/null 2>&1; then
-              echo "Service is ready!"
-              break
-            fi
-            echo "Attempt $i: Service not ready yet, waiting..."
-            sleep 2
-          done
-
       - name: Install uv
         uses: astral-sh/setup-uv@2ddd2b9cb38ad8efd50337e8ab201519a34c9f24 # v3
-
-      - name: Install test dependencies
-        run: |
-          cd cvm/attestation-service
-          uv sync --group test
 
       - name: Run tests
         run: |
           cd cvm/attestation-service
-          uv run python test_service.py --base-url http://localhost:8080 --no-tdx
+          make test-api
 
       - name: Stop and remove test container
         if: always()
