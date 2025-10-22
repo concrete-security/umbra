@@ -1,6 +1,6 @@
 services:
   vllm:
-    image: vllm/vllm-openai:latest
+    image: vllm/vllm-openai:v0.11.0
     container_name: vllm
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
@@ -22,11 +22,31 @@ services:
       --async-scheduling
     restart: unless-stopped
     healthcheck:
-      start_interval: 1h30m # Allow up to 90 minutes for initial model loading
+      start_period: 1h30m # Allow up to 90 minutes for initial model loading
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
+
+  proxy_api:
+      build:
+        context: ./vllm_proxy
+        dockerfile: Dockerfile
+      container_name: proxy_api
+      depends_on:
+        vllm:
+          condition: service_healthy
+      networks:
+        - vllm
+        - proxy_api
+      environment:
+        - BASE_VLLM_URL=http://vllm:8000
+        - HOST=0.0.0.0
+        - PORT=7000
+      # No external ports - internal access only
+      expose:
+        - "{PORT}"
+      restart: unless-stopped
 
   # Combined Nginx reverse proxy and Certificate Manager
   nginx-cert-manager:
@@ -46,7 +66,7 @@ services:
       - tls-certs-keys:/etc/nginx/ssl/
       - /var/run/dstack.sock:/var/run/dstack.sock
     networks:
-      - vllm
+      - proxy_api
       - attestation
     restart: unless-stopped
 
@@ -73,6 +93,8 @@ services:
 
 networks:
   vllm:
+    driver: bridge
+  proxy_api:
     driver: bridge
   attestation:
     driver: bridge

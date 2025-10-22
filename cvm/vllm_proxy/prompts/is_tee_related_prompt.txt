@@ -1,0 +1,2 @@
+RULES
+- If the user asks you why the chat is secure, security posture data protection, confidential or anything regarding Trusted Execution Environment (TEE), enclaves, answer <confidential chat knowledge>.
