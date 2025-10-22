@@ -1,0 +1,122 @@
+{
+  "uid": "vllm-throughput",
+  "title": "vLLM - Throughput & Efficiency",
+  "timezone": "browser",
+  "schemaVersion": 36,
+  "version": 1,
+  "refresh": "5s",
+  "_comment": "Dashboard focused on throughput: tokens/s, requests/s, efficiency and batching behavior.",
+
+  "panels": [
+
+    {
+      "title": "Generation Tokens / sec",
+      "type": "timeseries",
+      "_comment": "Output throughput in tokens per second.",
+      "_interpretation": "If ↑: GPU well utilized. If ↓ with high load: GPU saturation or queue bottleneck.",
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "rate(vllm:generation_tokens_total[1m])", "legendFormat": "Generation Tokens/s" }
+      ]
+    },
+
+    {
+      "title": "Prompt Tokens / sec",
+      "type": "timeseries",
+      "_comment": "Input tokens per second (prefill rate).",
+      "_interpretation": "If very high: many long prompts. If low but load high: bottleneck in decoding.",
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "rate(vllm:prompt_tokens_total[1m])", "legendFormat": "Prompt Tokens/s" }
+      ]
+    },
+
+    {
+      "title": "Total Tokens / sec (Prompt + Generation)",
+      "type": "timeseries",
+      "_comment": "Total token read+write throughput.",
+      "_interpretation": "If stable: system at equilibrium. If fluctuating: batching instability.",
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "gridPos": { "x": 0, "y": 8, "w": 24, "h": 8 },
+      "targets": [
+        {
+          "expr": "rate(vllm:prompt_tokens_total[1m]) + rate(vllm:generation_tokens_total[1m])",
+          "legendFormat": "Total Tokens/s"
+        }
+      ]
+    },
+
+    {
+      "title": "Requests per second",
+      "type": "timeseries",
+      "_comment": "Number of completed requests per second.",
+      "_interpretation": "If Requests/s ↑ but Tokens/s stable: many small prompts. If ↓ with long queue: saturation.",
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "gridPos": { "x": 0, "y": 16, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "rate(vllm:request_success_total[1m])", "legendFormat": "Requests/s" }
+      ]
+    },
+
+    {
+      "title": "Average Output Tokens / Request",
+      "type": "timeseries",
+      "_comment": "Average request length for generation.",
+      "_interpretation": "If ↑: users generate longer outputs. If ↓: more short interactions.",
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "gridPos": { "x": 12, "y": 16, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "rate(vllm:generation_tokens_total[1m]) / rate(vllm:request_success_total[1m])",
+          "legendFormat": "Tokens per Request"
+        }
+      ]
+    },
+
+    {
+      "title": "Batch Size (Estimated)",
+      "type": "timeseries",
+      "_comment": "Ratio of tokens processed per batch step.",
+      "_interpretation": "If batch size ↑: good batching efficiency. If always 1: no batching → low GPU efficiency.",
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "gridPos": { "x": 0, "y": 24, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "rate(vllm:generation_tokens_total[1m]) / rate(vllm:inter_token_latency_seconds_count[1m])",
+          "legendFormat": "Approx Batch Size"
+        }
+      ]
+    },
+
+    {
+      "title": "Token Throughput Efficiency (tokens per CPU second)",
+      "type": "timeseries",
+      "_comment": "How many tokens per CPU-second the pipeline produces.",
+      "_interpretation": "If ↓: CPU overhead (tokenization) bottleneck. If ↑: efficient pipeline.",
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "gridPos": { "x": 12, "y": 24, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "(rate(vllm:prompt_tokens_total[1m]) + rate(vllm:generation_tokens_total[1m])) / rate(process_cpu_seconds_total[1m])",
+          "legendFormat": "Tokens per CPU-second"
+        }
+      ]
+    },
+
+    {
+      "title": "Prefill vs Decode Throughput",
+      "type": "timeseries",
+      "_comment": "Compare prompt processing speed vs generation speed.",
+      "_interpretation": "If Prefill >> Decode: decoding bottleneck. If Decode >> Prefill: many short prompts.",
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "gridPos": { "x": 0, "y": 32, "w": 24, "h": 8 },
+      "targets": [
+        { "expr": "rate(vllm:prompt_tokens_total[1m])", "legendFormat": "Prefill Tokens/s" },
+        { "expr": "rate(vllm:generation_tokens_total[1m])", "legendFormat": "Decode Tokens/s" }
+      ]
+    }
+
+  ]
+}

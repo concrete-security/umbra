@@ -1,0 +1,45 @@
+services:
+  prometheus:
+    build:
+      context: prometheus
+      dockerfile: Dockerfile
+    container_name: prometheus
+    networks:
+      - monitoring
+    expose:
+      - "9090"
+    environment:
+      - CONFIG_FILE=/etc/prometheus/prometheus.yml
+      - STORAGE_TSDB_PATH=/prometheus
+      - STORAGE_TSDB_RETENTION_TIME=15d
+      - LOG_LEVEL=debug
+    volumes:
+      - prometheus_data:/prometheus
+    restart: unless-stopped
+
+  grafana:
+    build:
+      context: grafana
+      dockerfile: Dockerfile
+    container_name: grafana
+    networks:
+      - monitoring
+    depends_on:
+      - prometheus
+    ports:
+      - "4000:4000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=${ADMIN_USER}
+      - GF_SECURITY_ADMIN_PASSWORD=${ADMIN_PASSWORD}
+      - GF_SERVER_HTTP_PORT=4000
+      - GF_SERVER_HTTP_ADDR=0.0.0.0
+      - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/etc/grafana/provisioning/dashboards/vllm.json
+    restart: unless-stopped
+
+networks:
+  monitoring:
+    name: monitoring
+    driver: bridge
+
+volumes:
+  prometheus_data:

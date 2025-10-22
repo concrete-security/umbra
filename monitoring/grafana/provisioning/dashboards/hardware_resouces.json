@@ -1,0 +1,155 @@
+{
+  "uid": "vllm-gpu-resources",
+  "title": "vLLM - GPU, CPU & KV Cache Resource Health",
+  "timezone": "browser",
+  "schemaVersion": 36,
+  "version": 1,
+  "refresh": "5s",
+  "_comment": "Dashboard focused on GPU utilization, KV cache occupancy, CPU usage, swap/offload behavior, prefix cache efficiency, and global process health.",
+
+  "panels": [
+
+    {
+      "title": "KV Cache Usage (%)",
+      "type": "timeseries",
+      "_comment": "Percentage of GPU KV cache currently used.",
+      "_interpretation": "If > 80%: high KV saturation → risk of preemptions. If < 60%: system is safe.",
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "avg(vllm:kv_cache_usage_perc)", "legendFormat": "KV Cache (%)" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percentunit" } }
+    },
+
+    {
+      "title": "GPU KV Cache Blocks (Used vs Total)",
+      "type": "timeseries",
+      "_comment": "GPU blocks indicate how many KV cache blocks are allocated on GPU.",
+      "_interpretation": "If used approaches total: GPU KV nearly full. If CPU blocks increase: swap/offload started.",
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "targets": [
+        { "expr": "vllm_cache_config_info{__name__=\"num_gpu_blocks\"}", "legendFormat": "GPU Blocks" },
+        { "expr": "vllm_cache_config_info{__name__=\"num_cpu_blocks\"}", "legendFormat": "CPU Blocks (offload)" }
+      ]
+    },
+
+    {
+      "title": "CPU Offload (GB)",
+      "type": "timeseries",
+      "_comment": "Amount of KV cache offloaded to CPU when GPU cache is full.",
+      "_interpretation": "If > 0: GPU is full → model is using CPU memory for KV cache, slowing down decoding.",
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "targets": [
+        { "expr": "vllm_cache_config_info{__name__=\"cpu_offload_gb\"}", "legendFormat": "CPU Offload (GB)" }
+      ]
+    },
+
+    {
+      "title": "Swap Space (Bytes)",
+      "type": "timeseries",
+      "_comment": "Configured swap space for KV offload.",
+      "_interpretation": "If swap space is too small: KV cache will overflow → errors. If used but CPU offload stays low: swap is safe.",
+      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "targets": [
+        { "expr": "vllm_cache_config_info{__name__=\"swap_space_bytes\"}", "legendFormat": "Swap Space (bytes)" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "bytes" } }
+    },
+
+    {
+      "title": "Prefix Cache Hit-Rate (%)",
+      "type": "timeseries",
+      "_comment": "Prefix cache effectiveness.",
+      "_interpretation": "If > 70%: excellent cache reuse. If < 20%: prompts too unique → prefix cache useless.",
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "gridPos": { "x": 0, "y": 16, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "percentunit" } },
+      "targets": [
+        {
+          "expr": "100*(sum(rate(vllm:prefix_cache_hits_total[1m])) / clamp_min(sum(rate(vllm:prefix_cache_queries_total[1m])),1))",
+          "legendFormat": "Hit-Rate"
+        }
+      ]
+    },
+
+    {
+      "title": "Prefix Cache: Hits & Queries / sec",
+      "type": "timeseries",
+      "_comment": "Shows how often prefix cache is queried, and how often it succeeds.",
+      "_interpretation": "If queries ↑ but hits stay flat: prefix cache mismatches. If hits follow queries: good reuse.",
+      "gridPos": { "x": 12, "y": 16, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "targets": [
+        { "expr": "rate(vllm:prefix_cache_hits_total[1m])", "legendFormat": "Hits/s" },
+        { "expr": "rate(vllm:prefix_cache_queries_total[1m])", "legendFormat": "Queries/s" }
+      ]
+    },
+
+    {
+      "title": "GPU Preemptions / sec",
+      "type": "timeseries",
+      "_comment": "Preemptions happen when KV cache or GPU throughput is insufficient.",
+      "_interpretation": "If > 0: eviction or throttling → GPU fully saturated → increase GPU memory or reduce batch size.",
+      "gridPos": { "x": 0, "y": 24, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "targets": [
+        { "expr": "rate(vllm:num_preemptions_total[1m])", "legendFormat": "Preemptions/s" }
+      ]
+    },
+
+
+        {
+      "title": "GPU Preemptions / sec",
+      "type": "timeseries",
+      "_comment": "Indicates GPU overload or KV cache saturation.",
+      "_interpretation": "If > 0: eviction or throttling → GPU fully saturated.",
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "gridPos": { "x": 0, "y": 40, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "rate(vllm:num_preemptions_total[1m])", "legendFormat": "Preemptions/s" }
+      ]
+    },
+
+    {
+      "title": "CPU Usage (Cores Used)",
+      "type": "timeseries",
+      "_comment": "CPU usage of vLLM process.",
+      "_interpretation": "If > 1.0: more than 1 full CPU core used → heavy tokenization or offload. If < 0.2: normal.",
+      "gridPos": { "x": 12, "y": 24, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "targets": [
+        { "expr": "rate(process_cpu_seconds_total[1m])", "legendFormat": "CPU Cores" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } }
+    },
+
+    {
+      "title": "Process Memory (RSS)",
+      "type": "timeseries",
+      "_comment": "Real memory used by the vLLM process.",
+      "_interpretation": "If always rising: memory leak likely. If stable: healthy.",
+      "gridPos": { "x": 0, "y": 32, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "process_resident_memory_bytes", "legendFormat": "RSS" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "bytes" } }
+    },
+
+    {
+      "title": "Process Virtual Memory",
+      "type": "timeseries",
+      "_comment": "Total virtual memory used by the process.",
+      "_interpretation": "Monotonic increase = possible memory leak. Stable = OK.",
+      "gridPos": { "x": 12, "y": 32, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "process_virtual_memory_bytes", "legendFormat": "VMS" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "bytes" } }
+    }
+
+  ]
+}

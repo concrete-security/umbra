@@ -1,0 +1,45 @@
+{
+  "uid": "vllm-load-saturation",
+  "title": "vLLM - Load & Saturation",
+  "timezone": "browser",
+  "schemaVersion": 36,
+  "version": 1,
+  "refresh": "5s",
+  "_comment": "Dashboard focused on system load, saturation, queue buildup, GPU pressure and latency under load.",
+
+  "panels": [
+
+
+    {
+      "title": "Token Prefill Time (p95): Is it long because my prompts are big?",
+      "type": "timeseries",
+      "_comment": "Latency of the prefill phase (first compute pass).",
+      "_interpretation": "If spikes: prompt lengths too large or GPU memory pressure.",
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "gridPos": { "x": 0, "y": 32, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(vllm:request_prefill_time_seconds_bucket[1m])))",
+          "legendFormat": "Prefill p95"
+        }
+      ]
+    },
+
+    {
+      "title": "Token Decode Time (p95): Does the GPU lag during the generation ?",
+      "type": "timeseries",
+      "_comment": "Latency of each decode step.",
+      "_interpretation": "If rises at same time as queue ↑: GPU fully saturated.",
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "gridPos": { "x": 12, "y": 32, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(vllm:request_decode_time_seconds_bucket[1m])))",
+          "legendFormat": "Decode p95"
+        }
+      ]
+    }
+
+
+  ]
+}

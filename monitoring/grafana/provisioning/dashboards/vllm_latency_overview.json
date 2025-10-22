@@ -1,0 +1,158 @@
+{
+  "uid": "vllm-latency-overview",
+  "title": "vLLM - Latency & Throughput Overview",
+  "timezone": "browser",
+  "schemaVersion": 36,
+  "version": 1,
+  "refresh": "10s",
+  "_comment": "This dashboard provides an overview of vLLM latency and throughput behavior, showing quantiles (P50, P95, P99) for latency metrics, queue waiting times, and token generation throughput.",
+  "panels": [
+    {
+      "title": "E2E Request Latency (P50 / P95 / P99)",
+      "type": "timeseries",
+      "_comment": "Displays the End-to-End (E2E) request latency distribution. Each curve represents a quantile: P50 (median), P95 (high percentile), and P99 (tail). Measures total time per request from start to finish in seconds.",
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 9 },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum(rate(vllm:e2e_request_latency_seconds_bucket[1m])) by (le))", "legendFormat": "P50" },
+        { "expr": "histogram_quantile(0.95, sum(rate(vllm:e2e_request_latency_seconds_bucket[1m])) by (le))", "legendFormat": "P95" },
+        { "expr": "histogram_quantile(0.99, sum(rate(vllm:e2e_request_latency_seconds_bucket[1m])) by (le))", "legendFormat": "P99" }
+      ]
+    },
+
+    {
+      "title": "KV Cache Usage (%)",
+      "type": "timeseries",
+      "_comment": "Percentage of GPU KV cache currently used.",
+      "_interpretation": "If > 80%: high KV saturation → risk of preemptions. If < 60%: system is safe.",
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "avg(vllm:kv_cache_usage_perc)", "legendFormat": "KV Cache (%)" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percentunit" } }
+    },
+
+    {
+      "title": "GPU Preemptions / sec",
+      "type": "timeseries",
+      "_comment": "Preemptions happen when KV cache or GPU throughput is insufficient.",
+      "_interpretation": "If > 0: eviction or throttling → GPU fully saturated → increase GPU memory or reduce batch size.",
+      "gridPos": { "x": 0, "y": 9, "w": 12, "h": 9 },
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "targets": [
+        { "expr": "rate(vllm:num_preemptions_total[1m])", "legendFormat": "Preemptions/s" }
+      ]
+    },
+
+    {
+      "title": "Time To First Token (TTFT): Waiting time before receiving the first response (s)",
+      "type": "timeseries",
+      "_comment": "Shows the latency from the moment a request starts until the first token is generated. Lower values indicate faster response initialization. Displayed with quantiles P50, P95, and P99.",
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "gridPos": { "x": 12, "y": 9, "w": 12, "h": 9 },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum(rate(vllm:time_to_first_token_seconds_bucket[1m])) by (le))", "legendFormat": "P50" },
+        { "expr": "histogram_quantile(0.95, sum(rate(vllm:time_to_first_token_seconds_bucket[1m])) by (le))", "legendFormat": "P95" },
+        { "expr": "histogram_quantile(0.99, sum(rate(vllm:time_to_first_token_seconds_bucket[1m])) by (le))", "legendFormat": "P99" }
+      ]
+    },
+
+    {
+      "title": "Inter-token Latency (TPOT): speed experienced by the user.",
+      "type": "timeseries",
+      "_comment": "Measures the time delay between consecutive output tokens during generation. Useful for assessing decoding efficiency and throughput consistency. Quantiles P50, P95, and P99 are shown.",
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "gridPos": { "x": 0, "y": 18, "w": 24, "h": 9 },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum(rate(vllm:inter_token_latency_seconds_bucket[1m])) by (le))", "legendFormat": "P50" },
+        { "expr": "histogram_quantile(0.95, sum(rate(vllm:inter_token_latency_seconds_bucket[1m])) by (le))", "legendFormat": "P95" },
+        { "expr": "histogram_quantile(0.99, sum(rate(vllm:inter_token_latency_seconds_bucket[1m])) by (le))", "legendFormat": "P99" }
+      ]
+    },
+
+    {
+      "title": "Requests Running vs Waiting",
+      "type": "timeseries",
+      "_comment": "Shows the current number of requests being actively processed (Running) versus those still queued (Waiting). Helps visualize server load and saturation over time.",
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "gridPos": { "x": 0, "y": 36, "w": 24, "h": 9 },
+      "targets": [
+        { "expr": "vllm:num_requests_running", "legendFormat": "Running" },
+        { "expr": "vllm:num_requests_waiting", "legendFormat": "Waiting" }
+      ]
+    },
+
+    {
+    "title": "Throughput (Requests/s & Tokens/s)",
+    "type": "timeseries",
+    "_comment": "Displays overall throughput metrics. 'Requests/s' counts how many requests are completed per second, while 'Tokens/s' measures the total number of generated tokens per second.",
+    "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+    "gridPos": { "x": 0, "y": 45, "w": 24, "h": 9 },
+    "targets": [
+      {
+        "expr": "sum(rate(vllm:request_success_total[1m]))", "legendFormat": "Requests/s"
+      },
+      {
+        "expr": "sum(rate(vllm:generation_tokens_total[1m]))", "legendFormat": "Tokens/s"
+      }
+    ]
+    },
+
+    {
+      "title": "Queue Time (p95): How long users wait before execution (s)",
+      "type": "timeseries",
+      "_comment": "How long users wait before execution.",
+      "_interpretation": "If > 1s: server under heavy load. If > 3s: scaling needed.",
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "gridPos": { "x": 0, "y": 8, "w": 24, "h": 8 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(vllm:request_queue_time_seconds_bucket[1m])))",
+          "legendFormat": "Queue p95"
+        }
+      ]
+    },
+
+    {
+      "title": "Average Queue Wait per Request (s)",
+      "type": "timeseries",
+      "_comment": "Mean queue wait time per request, computed as rate(vllm:request_queue_time_seconds_sum[1m]) / rate(vllm:request_queue_time_seconds_count[1m]). This is the average number of seconds that completed requests spent waiting in the queue over the last minute.",
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "gridPos": { "x": 0, "y": 27, "w": 24, "h": 9 },
+      "targets": [
+        { "expr": "rate(vllm:request_queue_time_seconds_sum[1m]) / rate(vllm:request_queue_time_seconds_count[1m])", "legendFormat": "Average Wait" }
+      ]
+    },
+
+    {
+      "title": "Token Prefill Time (p95): Is it long because my prompts are big?",
+      "type": "timeseries",
+      "_comment": "Latency of the prefill phase (first compute pass).",
+      "_interpretation": "If spikes: prompt lengths too large or GPU memory pressure.",
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "gridPos": { "x": 0, "y": 32, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(vllm:request_prefill_time_seconds_bucket[1m])))",
+          "legendFormat": "Prefill p95"
+        }
+      ]
+    },
+
+    {
+      "title": "Token Decode Time (p95): Does the GPU lag during the generation ?",
+      "type": "timeseries",
+      "_comment": "Latency of each decode step.",
+      "_interpretation": "If rises at same time as queue ↑: GPU fully saturated.",
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "gridPos": { "x": 12, "y": 32, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(vllm:request_decode_time_seconds_bucket[1m])))",
+          "legendFormat": "Decode p95"
+        }
+      ]
+    }
+  ]
+}

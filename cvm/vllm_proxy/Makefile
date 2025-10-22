@@ -6,7 +6,7 @@ SHELL := /bin/bash
 cache ?= --no-cache
 # Environment mode: dev | staging | prod
 MODE ?= dev
-SERVICES ?= proxy_api # vllm
+SERVICES ?= proxy_api vllm
 
 
 .PHONY: setup
@@ -29,7 +29,8 @@ docker-build:
 .PHONY: docker-stop
 docker-stop:
 	@echo "🛑 Stopping & removing: $(SERVICES)"
-	@docker compose rm -f -s $(SERVICES) || true
+	@docker compose stop $(SERVICES) || true
+	@docker compose rm -f -v $(SERVICES) || true
 	@echo "✅ Successfully stopped and removed containers."
 
 .PHONY: docker-run
@@ -45,7 +46,7 @@ docker-logs:
 
 .PHONY: docker-up
 docker-up:
-	@$(MAKE) docker-build SERVICES="$(SERVICES)" cache="$(cache)"
 	@$(MAKE) docker-stop SERVICES="$(SERVICES)"
+	@$(MAKE) docker-build SERVICES="$(SERVICES)" cache="$(cache)"
 	@$(MAKE) docker-run SERVICES="$(SERVICES)"
 	@$(MAKE) docker-logs

@@ -93,6 +93,7 @@ services:
 
 networks:
   vllm:
+    name: vllm
     driver: bridge
   proxy_api:
     driver: bridge

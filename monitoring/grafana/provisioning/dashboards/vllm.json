@@ -1,0 +1,242 @@
+{
+  "uid": "vllm-main",
+  "title": "vLLM Metrics",
+  "description": "vLLM dashboard. Uses the $model multi-select variable to filter by model_name. Default time range: last 1 hour.",
+  "timezone": "browser",
+  "schemaVersion": 38,
+  "version": 2,
+  "time": { "from": "now-1h", "to": "now" },
+
+  "templating": {
+    "list": [
+      {
+        "type": "query",
+        "name": "model",
+        "label": "Model",
+        "description": "Select one or multiple models (regex via =~). Choose 'All' to show every model.",
+        "hide": 0,
+        "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "query": "label_values(vllm:num_requests_running, model_name)",
+        "current": { "selected": true, "text": ["All"], "value": ["All"] }
+      }
+    ]
+  },
+
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "vLLM - Requests waiting",
+      "description": "Number of requests waiting in the queue, aggregated by model_name. Filtered by $model.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "options": { "legend": { "displayMode": "list", "showLegend": true } },
+      "targets": [
+        { "expr": "sum by (model_name) (vllm:num_requests_waiting{model_name=~\"$model\"})", "refId": "A" }
+      ],
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "vLLM - Requests running",
+      "description": "Number of requests currently running, aggregated by model_name. Filtered by $model.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "options": { "legend": { "displayMode": "list", "showLegend": true } },
+      "targets": [
+        { "expr": "sum by (model_name) (vllm:num_requests_running{model_name=~\"$model\"})", "refId": "A" }
+      ],
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" }
+    },
+
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "TTFB (p50/p90/p99) — Time to First Token (s)",
+      "description": "Time to first generated token (quantiles), computed via histogram_quantile over time_to_first_token buckets.",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 8 },
+      "options": { "legend": { "displayMode": "list", "showLegend": true } },
+      "targets": [
+        {
+          "refId": "p50",
+          "expr": "histogram_quantile(0.5,  sum by (le, model_name) (rate(vllm:time_to_first_token_seconds_bucket{model_name=~\"$model\"}[5m])))"
+        },
+        {
+          "refId": "p90",
+          "expr": "histogram_quantile(0.9,  sum by (le, model_name) (rate(vllm:time_to_first_token_seconds_bucket{model_name=~\"$model\"}[5m])))"
+        },
+        {
+          "refId": "p99",
+          "expr": "histogram_quantile(0.99, sum by (le, model_name) (rate(vllm:time_to_first_token_seconds_bucket{model_name=~\"$model\"}[5m])))"
+        }
+      ],
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" }
+    },
+
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "E2E Latency (p90) — seconds",
+      "description": "End-to-end request latency (request → completed response), p90, via e2e_request_latency_seconds.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "options": { "legend": { "displayMode": "list", "showLegend": true } },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.9, sum by (le, model_name) (rate(vllm:e2e_request_latency_seconds_bucket{model_name=~\"$model\"}[5m])))" }
+      ],
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Queue Time (p90) — seconds",
+      "description": "Time spent waiting in the queue before execution, p90, via request_queue_time_seconds.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "options": { "legend": { "displayMode": "list", "showLegend": true } },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.9, sum by (le, model_name) (rate(vllm:request_queue_time_seconds_bucket{model_name=~\"$model\"}[5m])))" }
+      ],
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" }
+    },
+
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Prompt tokens / sec",
+      "description": "Input (prompt) token throughput per second, aggregated by model_name.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "options": { "legend": { "displayMode": "list", "showLegend": true } },
+      "targets": [
+        { "refId": "A", "expr": "sum by (model_name) (rate(vllm:prompt_tokens_total{model_name=~\"$model\"}[5m]))" }
+      ],
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Generation tokens / sec",
+      "description": "Output (generation) token throughput per second, aggregated by model_name.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "options": { "legend": { "displayMode": "list", "showLegend": true } },
+      "targets": [
+        { "refId": "A", "expr": "sum by (model_name) (rate(vllm:generation_tokens_total{model_name=~\"$model\"}[5m]))" }
+      ],
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" }
+    },
+
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Inter-token latency (p90) — seconds",
+      "description": "Time between two generated tokens (decode speed), p90.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+      "options": { "legend": { "displayMode": "list", "showLegend": true } },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.9, sum by (le, model_name) (rate(vllm:inter_token_latency_seconds_bucket{model_name=~\"$model\"}[5m])))" }
+      ],
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "KV cache usage (%)",
+      "description": "Key/Value attention cache utilization (percentage).",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+      "fieldConfig": { "defaults": { "unit": "percentunit" } },
+      "options": { "legend": { "displayMode": "list", "showLegend": true } },
+      "targets": [
+        { "refId": "A", "expr": "avg by (model_name) (vllm:kv_cache_usage_perc{model_name=~\"$model\"})" }
+      ],
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" }
+    },
+
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Prefix cache hit-rate (%)",
+      "description": "Prefix cache hit rate = hits / queries. clamp_min prevents division by zero.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 40 },
+      "fieldConfig": { "defaults": { "unit": "percentunit" } },
+      "options": { "legend": { "displayMode": "list", "showLegend": true } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "100 * (sum by (model_name) (rate(vllm:prefix_cache_hits_total{model_name=~\"$model\"}[5m])) / clamp_min(sum by (model_name) (rate(vllm:prefix_cache_queries_total{model_name=~\"$model\"}[5m])), 1))"
+        }
+      ],
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Preemptions / sec",
+      "description": "Number of preemptions per second (requests interrupted or deferred), aggregated by model_name.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 40 },
+      "options": { "legend": { "displayMode": "list", "showLegend": true } },
+      "targets": [
+        { "refId": "A", "expr": "sum by (model_name) (rate(vllm:num_preemptions_total{model_name=~\"$model\"}[5m]))" }
+      ],
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" }
+    },
+
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Process RSS (bytes)",
+      "description": "Resident memory size of the process (all targets).",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 48 },
+      "fieldConfig": { "defaults": { "unit": "bytes" } },
+      "options": { "legend": { "displayMode": "list", "showLegend": true } },
+      "targets": [
+        { "refId": "A", "expr": "process_resident_memory_bytes" }
+      ],
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" }
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Process CPU — seconds/sec",
+      "description": "CPU usage (seconds per second ≈ number of cores used), computed over 5 minutes.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 48 },
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "options": { "legend": { "displayMode": "list", "showLegend": true } },
+      "targets": [
+        { "refId": "A", "expr": "rate(process_cpu_seconds_total[5m])" }
+      ],
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" }
+    },
+
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Targets UP",
+      "description": "Availability of Prometheus targets for job base_vllm (1 = UP, 0 = DOWN).",
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 56 },
+      "options": { "legend": { "displayMode": "list", "showLegend": true } },
+      "targets": [
+        { "expr": "up{job=\"base_vllm\"}", "refId": "A" }
+      ],
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" }
+    },
+
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "GPU Prefix cache hit-rate (%)",
+      "description": "Hit-rate = hits / queries, calculé à partir des compteurs GPU v1.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 64 },
+      "fieldConfig": { "defaults": { "unit": "percentunit" } },
+      "options": { "legend": { "displayMode": "list", "showLegend": true } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "100 * ( sum by (model_name) ( rate(vllm:prefix_cache_hits_total{model_name=~\"$model\"}[5m]) ) / clamp_min( sum by (model_name) ( rate(vllm:prefix_cache_queries_total{model_name=~\"$model\"}[5m]) ), 1) )"
+        }
+      ],
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" }
+    }
+
+  ]
+}

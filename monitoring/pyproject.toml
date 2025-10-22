@@ -1,5 +1,5 @@
 [project]
-name = "vllm_proxy"
+name = "monitoring"
 version = "0.1.0"
 description = ""
 readme = "README.md"
@@ -12,13 +12,13 @@ dependencies = [
 ]
 
 [dependency-groups]
+bench = [
+    "vllm[bench]>=0.6",
+]
+
 test = [
     "pytest>=8.4,<9.0",
     "requests>=2.32,<3.0",
-]
-
-bench = [
-    "vllm[bench]>=0.6",
 ]
 
 [tool.uv]
