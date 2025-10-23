@@ -7,6 +7,5 @@ dependencies = [
     "cryptography>=43.0.0",
     "schedule==1.2.0",
     "dstack-sdk==0.5.3",
-    "acme==2.7.4",
-    "josepy==1.14.0",
+    "certbot~=5.0",
 ]

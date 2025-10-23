@@ -9,6 +9,8 @@ import os
 import sys
 import time
 import logging
+import subprocess
+import tempfile
 from hashlib import sha256
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -25,15 +27,128 @@ from cryptography.hazmat.primitives.serialization import (
 import schedule
 from dstack_sdk import DstackClient
 
-import josepy as jose
-from acme import client, messages, challenges, errors as acme_errors
-from acme.client import ClientV2
-
 # Configure logging
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+
+class CertbotWrapper:
+    """Wrapper class for certbot operations"""
+
+    def __init__(self, staging: bool = False):
+        self.staging = staging
+        self.server_url = (
+            "https://acme-staging-v02.api.letsencrypt.org/directory"
+            if staging else
+            "https://acme-v02.api.letsencrypt.org/directory"
+        )
+
+    def obtain_certificate_with_csr(
+        self,
+        email: str,
+        webroot_path: str,
+        csr_pem: bytes,
+        account_key_pem: bytes
+    ) -> bytes:
+        """
+        Obtain certificate using certbot with a pre-generated CSR.
+
+        Args:
+            email (str): Email for Let's Encrypt account
+            webroot_path (str): Path where ACME challenges will be served
+            csr_pem (bytes): PEM-encoded Certificate Signing Request
+            account_key_pem (bytes): PEM-encoded account key for Let's Encrypt
+
+        Returns:
+            bytes: Certificate chain in PEM format
+
+        Raises:
+            Exception: If certbot fails to obtain the certificate
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+
+            # Save CSR to temporary file
+            csr_file = temp_path / "csr.pem"
+            with open(csr_file, "wb") as f:
+                f.write(csr_pem)
+            os.chmod(csr_file, 0o600)
+
+            # Save account key to temporary file (for account management)
+            account_key_file = temp_path / "account_key.pem"
+            with open(account_key_file, "wb") as f:
+                f.write(account_key_pem)
+            os.chmod(account_key_file, 0o600)
+
+            # Prepare certbot command using CSR
+            cmd = [
+                "certbot", "certonly",
+                "--webroot",
+                "--webroot-path", webroot_path,
+                "--csr", str(csr_file),
+                "--email", email,
+                "--agree-tos",
+                "--non-interactive",
+                "--server", self.server_url,
+                "--work-dir", str(temp_path / "work"),
+            ]
+
+            logger.info(f"Running certbot command with CSR: {' '.join(cmd)}")
+
+            try:
+                result = subprocess.run(
+                    cmd,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=300  # 5 minute timeout
+                )
+
+                logger.info("Certbot command completed successfully")
+                logger.debug(f"Certbot stdout: {result.stdout}")
+
+                # When using CSR, certbot outputs certificate files in the current directory
+                # with names based on the CSR filename
+                cert_files = list(temp_path.glob("*cert*.pem")) + list(temp_path.glob("*fullchain*.pem"))
+
+                logger.debug(f"Files in temp directory: {[f.name for f in temp_path.iterdir()]}")
+
+                if len(cert_files) != 2:
+                    logger.error("Certificate files not found after certbot execution")
+                    raise Exception("Certificate files not found after certbot execution")
+
+                # Find the certificate and chain files
+                cert_pem = ""
+                chain_pem = ""
+
+                for cert_file in cert_files:
+                    with open(cert_file, "r") as f:
+                        content = f.read()
+                        if "cert" in cert_file.name.lower():
+                            cert_pem = content
+                        elif "chain" in cert_file.name.lower():
+                            chain_pem = content
+
+                # Combine certificate and chain
+                fullchain_pem = cert_pem + chain_pem if chain_pem else cert_pem
+
+                return fullchain_pem.encode()
+
+            except subprocess.CalledProcessError as e:
+                logger.error(f"Certbot command failed with exit code {e.returncode}")
+                logger.error(f"Certbot stderr: {e.stderr}")
+                logger.error(f"Certbot stdout: {e.stdout}")
+                raise Exception(f"Certbot failed: {e.stderr}")
+
+            except subprocess.TimeoutExpired:
+                logger.error("Certbot command timed out")
+                raise Exception("Certbot command timed out")
+
+            except Exception as e:
+                logger.error(f"Unexpected error running certbot: {e}")
+                raise
 
 
 class CertificateManager:
@@ -132,135 +247,58 @@ class CertificateManager:
     def create_lets_encrypt_cert(
         self, private_key: ec.EllipticCurvePrivateKey
     ) -> x509.Certificate:
-        """Create Let's Encrypt certificate using ACME protocol"""
-        logger.info("Creating Let's Encrypt certificate")
+        """Create Let's Encrypt certificate using certbot"""
+        logger.info("Creating Let's Encrypt certificate using certbot")
 
-        try:
-            # Generate account key
-            # Uses deterministic key so that same instances have the same key (could fix CAA to this account)
-            # Versions allow you to change accounts by setting a different env variable
-            account_key = self.generate_deterministic_key(f"letsencrypt-account/{self.domain}/{self.letsencrypt_account_version}")
-            account_key_jwk = jose.JWKEC(key=account_key)
+        # Generate account key
+        # Uses deterministic key so that same instances have the same key (could fix CAA to this account)
+        # Versions allow you to change accounts by setting a different env variable
+        account_key = self.generate_deterministic_key(f"letsencrypt-account/{self.domain}/{self.letsencrypt_account_version}")
 
-            # Create ACME client
-            if self.letsencrypt_staging:
-                directory_url = 'https://acme-staging-v02.api.letsencrypt.org/directory'
-                logger.info("Using Let's Encrypt staging environment")
-            else:
-                directory_url = 'https://acme-v02.api.letsencrypt.org/directory'
-                logger.info("Using Let's Encrypt production environment")
+        # Create Certificate Signing Request with our deterministic private key
+        csr = x509.CertificateSigningRequestBuilder().subject_name(
+            x509.Name([
+                x509.NameAttribute(NameOID.COMMON_NAME, self.domain),
+            ])
+        ).add_extension(
+            x509.SubjectAlternativeName([
+                x509.DNSName(self.domain),
+            ]),
+            critical=False,
+        ).sign(private_key, hashes.SHA256())
 
-            net = client.ClientNetwork(account_key_jwk, user_agent='cert-manager/1.0')
-            directory = messages.Directory.from_json(net.get(directory_url).json())
-            acme_client = ClientV2(directory, net=net)
+        # Serialize CSR and account key to PEM format for certbot
+        csr_pem = csr.public_bytes(Encoding.PEM)
 
-            # Register account or get existing
-            try:
-                # Try to create a new account
-                acme_client.new_account(
-                    messages.NewRegistration(
-                        key=account_key_jwk.public_key(),
-                        contact=(f'mailto:{self.cert_email}',),
-                        terms_of_service_agreed=True
-                    )
-                )
-                logger.info("Created new Let's Encrypt account")
-            except acme_errors.ConflictError:
-                # Get existing account
-                acme_client.query_registration(
-                    messages.Registration(
-                        key=account_key_jwk.public_key(),
-                        contact=(f'mailto:{self.cert_email}',)
-                    )
-                )
-                logger.info("Using existing Let's Encrypt account")
-
-            # Create certificate signing request
-            csr = x509.CertificateSigningRequestBuilder().subject_name(
-                x509.Name([
-                    x509.NameAttribute(NameOID.COMMON_NAME, self.domain),
-                ])
-            ).add_extension(
-                x509.SubjectAlternativeName([
-                    x509.DNSName(self.domain),
-                ]),
-                critical=False,
-            ).sign(private_key, hashes.SHA256())
-
-            # Request certificate
-            order = acme_client.new_order(csr)
-
-            if len(order.authorizations) > 1:
-                logger.warning("order.authorizations length is > 1")
-
-            # Complete challenges
-            authz = order.authorizations[0]
-            order, self.complete_http01_chall_and_finalize_order(acme_client, authz, order)
-
-            # Get certificate
-            cert_pem = order.fullchain_pem
-            cert = x509.load_pem_x509_certificate(cert_pem.encode())
-
-            logger.info("Successfully obtained Let's Encrypt certificate")
-            return cert
-
-        except Exception as e:
-            logger.error(f"Failed to obtain Let's Encrypt certificate: {e}")
-            logger.info("Falling back to self-signed certificate")
-            return self.create_self_signed_cert(private_key)
-
-    def complete_http01_chall_and_finalize_order(
-        self,
-        acme_client: ClientV2,
-        authz: messages.AuthorizationResource,
-        order: messages.OrderResource
-    ):
-        """Complete HTTP-01 challenge for domain validation"""
-        domain = authz.body.identifier.value
-        logger.info(f"Completing HTTP-01 challenge for domain: {domain}")
-
-        # Find HTTP-01 challenge
-        http01_challenge: messages.ChallengeBody = None
-        for challenge in authz.body.challenges:
-            challenge: messages.ChallengeBody
-            if isinstance(challenge.chall, challenges.HTTP01):
-                http01_challenge: challenges.HTTP01 = challenge
-                break
-
-        if not http01_challenge:
-            raise Exception(f"No HTTP-01 challenge found for domain {domain}")
-
-        # Create challenge response
-        response, validation = http01_challenge.response_and_validation(
-            acme_client.net.key
+        account_key_pem = account_key.private_bytes(
+            encoding=Encoding.PEM,
+            format=PrivateFormat.PKCS8,
+            encryption_algorithm=NoEncryption(),
         )
 
-        # Save challenge file for nginx to serve
-        challenge_root_dir = self.acme_path
-        challenge_dir = (challenge_root_dir / http01_challenge.path).parent
-        challenge_dir.mkdir(parents=True, exist_ok=True)
+        # Initialize certbot wrapper
+        certbot = CertbotWrapper(staging=self.letsencrypt_staging)
 
-        try:
-            challenge_file = challenge_root_dir / http01_challenge.path
-            with open(challenge_file, 'w') as f:
-                f.write(validation)
+        if self.letsencrypt_staging:
+            logger.info("Using Let's Encrypt staging environment")
+        else:
+            logger.info("Using Let's Encrypt production environment")
 
-            logger.info(f"Created challenge file: {challenge_file}")
+        # Use certbot to obtain certificate with our CSR
+        fullchain_pem = certbot.obtain_certificate_with_csr(
+            domain=self.domain,
+            email=self.cert_email,
+            webroot_path=str(self.acme_path),
+            csr_pem=csr_pem,
+            account_key_pem=account_key_pem
+        )
 
-            # Answer challenge
-            acme_client.answer_challenge(http01_challenge, response)
+        # Load certificate from PEM
+        cert = x509.load_pem_x509_certificate(fullchain_pem)
 
-            # Finalize order
-            deadline = datetime.now(timezone.utc) + timedelta(seconds=90)
-            order = acme_client.finalize_order(order, deadline)
+        logger.info("Successfully obtained Let's Encrypt certificate using certbot")
+        return cert
 
-        finally:
-            # Clean up challenge file
-            if challenge_file.exists():
-                challenge_file.unlink()
-                logger.info(f"Cleaned up challenge file: {challenge_file}")
-
-        return order
 
     def create_self_signed_cert(
         self, private_key: ec.EllipticCurvePrivateKey
@@ -390,7 +428,26 @@ class CertificateManager:
             private_key = self.generate_deterministic_key(
                 f"cert/letsencrypt/{self.domain}/v1"
             )
-            cert = self.create_lets_encrypt_cert(private_key)
+            # Retry logic for certbot failures
+            wait_time = 10
+            max_tries = 3
+            i = 0
+            success = False
+            while not success:
+                try:
+                    cert = self.create_lets_encrypt_cert(private_key)
+                    success = True
+                except Exception as e:
+                    logger.error(f"Failed to create Let's Encrypt certificate: {e}")
+                    if i < max_tries:
+                        logger.info(f"Retrying in {wait_time} seconds...")
+                        time.sleep(wait_time)
+                        i += 1
+                        wait_time *= 2
+                    else:
+                        logger.error("Max retries reached, giving up.")
+                        raise
+
             self.save_certificate_and_key(cert, private_key)
 
         # Emit new cert event to Dstack (extend RTMR3)
@@ -439,7 +496,7 @@ class CertificateManager:
 if __name__ == "__main__":
     domain = os.getenv("DOMAIN", "localhost")
     dev_mode = os.getenv("DEV_MODE", "true").lower() == "true"
-    cert_email = os.getenv("EMAIL", "admin@example.com")
+    cert_email = os.getenv("EMAIL", "certbot@concrete-security.com")
     letsencrypt_staging = (
         os.getenv("LETSENCRYPT_STAGING", "false").lower() == "true"
     )
@@ -448,7 +505,8 @@ if __name__ == "__main__":
         domain=domain,
         dev_mode=dev_mode,
         cert_email=cert_email,
-        letsencrypt_staging=letsencrypt_staging
+        letsencrypt_staging=letsencrypt_staging,
+        letsencrypt_account_version=letsencrypt_account_version
     )
     try:
         manager.run()
