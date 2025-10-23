@@ -41,16 +41,12 @@ class CertbotWrapper:
         self.staging = staging
         self.server_url = (
             "https://acme-staging-v02.api.letsencrypt.org/directory"
-            if staging else
-            "https://acme-v02.api.letsencrypt.org/directory"
+            if staging
+            else "https://acme-v02.api.letsencrypt.org/directory"
         )
 
     def obtain_certificate_with_csr(
-        self,
-        email: str,
-        webroot_path: str,
-        csr_pem: bytes,
-        account_key_pem: bytes
+        self, email: str, webroot_path: str, csr_pem: bytes, account_key_pem: bytes
     ) -> bytes:
         """
         Obtain certificate using certbot with a pre-generated CSR.
@@ -84,15 +80,21 @@ class CertbotWrapper:
 
             # Prepare certbot command using CSR
             cmd = [
-                "certbot", "certonly",
+                "certbot",
+                "certonly",
                 "--webroot",
-                "--webroot-path", webroot_path,
-                "--csr", str(csr_file),
-                "--email", email,
+                "--webroot-path",
+                webroot_path,
+                "--csr",
+                str(csr_file),
+                "--email",
+                email,
                 "--agree-tos",
                 "--non-interactive",
-                "--server", self.server_url,
-                "--work-dir", str(temp_path / "work"),
+                "--server",
+                self.server_url,
+                "--work-dir",
+                str(temp_path / "work"),
             ]
 
             logger.info(f"Running certbot command with CSR: {' '.join(cmd)}")
@@ -103,7 +105,7 @@ class CertbotWrapper:
                     check=True,
                     capture_output=True,
                     text=True,
-                    timeout=300  # 5 minute timeout
+                    timeout=300,  # 5 minute timeout
                 )
 
                 logger.info("Certbot command completed successfully")
@@ -111,13 +113,19 @@ class CertbotWrapper:
 
                 # When using CSR, certbot outputs certificate files in the current directory
                 # with names based on the CSR filename
-                cert_files = list(temp_path.glob("*cert*.pem")) + list(temp_path.glob("*fullchain*.pem"))
+                cert_files = list(temp_path.glob("*cert*.pem")) + list(
+                    temp_path.glob("*fullchain*.pem")
+                )
 
-                logger.debug(f"Files in temp directory: {[f.name for f in temp_path.iterdir()]}")
+                logger.debug(
+                    f"Files in temp directory: {[f.name for f in temp_path.iterdir()]}"
+                )
 
                 if len(cert_files) != 2:
                     logger.error("Certificate files not found after certbot execution")
-                    raise Exception("Certificate files not found after certbot execution")
+                    raise Exception(
+                        "Certificate files not found after certbot execution"
+                    )
 
                 # Find the certificate and chain files
                 cert_pem = ""
@@ -152,7 +160,6 @@ class CertbotWrapper:
 
 
 class CertificateManager:
-
     CERT_FILENAME = "cert.pem"
     KEY_FILENAME = "key.pem"
     CERT_EXPIRY_THRESHOLD_DAYS = 30  # Days before expiry to renew
@@ -163,7 +170,7 @@ class CertificateManager:
         dev_mode: bool,
         cert_email: str,
         letsencrypt_staging: bool,
-        letsencrypt_account_version: str
+        letsencrypt_account_version: str,
     ):
         self.domain = domain
         self.dev_mode = dev_mode
@@ -253,19 +260,30 @@ class CertificateManager:
         # Generate account key
         # Uses deterministic key so that same instances have the same key (could fix CAA to this account)
         # Versions allow you to change accounts by setting a different env variable
-        account_key = self.generate_deterministic_key(f"letsencrypt-account/{self.domain}/{self.letsencrypt_account_version}")
+        account_key = self.generate_deterministic_key(
+            f"letsencrypt-account/{self.domain}/{self.letsencrypt_account_version}"
+        )
 
         # Create Certificate Signing Request with our deterministic private key
-        csr = x509.CertificateSigningRequestBuilder().subject_name(
-            x509.Name([
-                x509.NameAttribute(NameOID.COMMON_NAME, self.domain),
-            ])
-        ).add_extension(
-            x509.SubjectAlternativeName([
-                x509.DNSName(self.domain),
-            ]),
-            critical=False,
-        ).sign(private_key, hashes.SHA256())
+        csr = (
+            x509.CertificateSigningRequestBuilder()
+            .subject_name(
+                x509.Name(
+                    [
+                        x509.NameAttribute(NameOID.COMMON_NAME, self.domain),
+                    ]
+                )
+            )
+            .add_extension(
+                x509.SubjectAlternativeName(
+                    [
+                        x509.DNSName(self.domain),
+                    ]
+                ),
+                critical=False,
+            )
+            .sign(private_key, hashes.SHA256())
+        )
 
         # Serialize CSR and account key to PEM format for certbot
         csr_pem = csr.public_bytes(Encoding.PEM)
@@ -290,7 +308,7 @@ class CertificateManager:
             email=self.cert_email,
             webroot_path=str(self.acme_path),
             csr_pem=csr_pem,
-            account_key_pem=account_key_pem
+            account_key_pem=account_key_pem,
         )
 
         # Load certificate from PEM
@@ -298,7 +316,6 @@ class CertificateManager:
 
         logger.info("Successfully obtained Let's Encrypt certificate using certbot")
         return cert
-
 
     def create_self_signed_cert(
         self, private_key: ec.EllipticCurvePrivateKey
@@ -494,19 +511,22 @@ class CertificateManager:
 
 
 if __name__ == "__main__":
+    dev_mode = os.getenv("DEV_MODE", "false").lower() == "true"
+    letsencrypt_staging = os.getenv("LETSENCRYPT_STAGING", "false").lower() == "true"
+    if dev_mode or letsencrypt_staging:
+        logger.setLevel(logging.DEBUG)
+        logger.debug("Logging set to DEBUG level due to dev mode or staging")
+
     domain = os.getenv("DOMAIN", "localhost")
-    dev_mode = os.getenv("DEV_MODE", "true").lower() == "true"
     cert_email = os.getenv("EMAIL", "certbot@concrete-security.com")
-    letsencrypt_staging = (
-        os.getenv("LETSENCRYPT_STAGING", "false").lower() == "true"
-    )
     letsencrypt_account_version = os.getenv("LETSENCRYPT_ACCOUNT_VERSION", "v1")
+
     manager = CertificateManager(
         domain=domain,
         dev_mode=dev_mode,
         cert_email=cert_email,
         letsencrypt_staging=letsencrypt_staging,
-        letsencrypt_account_version=letsencrypt_account_version
+        letsencrypt_account_version=letsencrypt_account_version,
     )
     try:
         manager.run()
