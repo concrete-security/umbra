@@ -1,4 +1,4 @@
-name: Build and Push Attestation Service Docker Image
+name: Attestation Service
 
 on:
   push:
@@ -17,9 +17,34 @@ env:
   IMAGE_NAME: concrete-security/attestation-service
 
 jobs:
+  ruff-lint-format:
+    runs-on: ubuntu-latest
+    name: Ruff check
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@2ddd2b9cb38ad8efd50337e8ab201519a34c9f24 # v7
+
+      - name: Install dependencies
+        working-directory: ./cvm/attestation-service
+        run: |
+          uv sync --dev
+
+      - name: Run Ruff linter
+        working-directory: ./cvm/attestation-service
+        run: |
+          uv run ruff check .
+
+      - name: Run Ruff formatter check
+        working-directory: ./cvm/attestation-service
+        run: |
+          uv run ruff format --check .
+
   build-and-test:
     name: Build and Test Docker Image
     runs-on: ubuntu-latest
+    needs: ruff-lint-format
     permissions:
       contents: read
 
@@ -45,7 +70,7 @@ jobs:
           docker run -d --name attestation-service-test -p 8080:8080 attestation-service:test
 
       - name: Install uv
-        uses: astral-sh/setup-uv@2ddd2b9cb38ad8efd50337e8ab201519a34c9f24 # v3
+        uses: astral-sh/setup-uv@2ddd2b9cb38ad8efd50337e8ab201519a34c9f24 # v7
 
       - name: Run tests
         run: |

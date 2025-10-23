@@ -28,9 +28,7 @@ import schedule
 from dstack_sdk import DstackClient
 
 # Configure logging
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 
@@ -117,15 +115,11 @@ class CertbotWrapper:
                     temp_path.glob("*fullchain*.pem")
                 )
 
-                logger.debug(
-                    f"Files in temp directory: {[f.name for f in temp_path.iterdir()]}"
-                )
+                logger.debug(f"Files in temp directory: {[f.name for f in temp_path.iterdir()]}")
 
                 if len(cert_files) != 2:
                     logger.error("Certificate files not found after certbot execution")
-                    raise Exception(
-                        "Certificate files not found after certbot execution"
-                    )
+                    raise Exception("Certificate files not found after certbot execution")
 
                 # Find the certificate and chain files
                 cert_pem = ""
@@ -212,9 +206,7 @@ class CertificateManager:
             # Use dstack SDK to get deterministic 32-byte key material
             result = dstack_client.get_key(f"{key_path}")
             key_material = result.decode_key()  # 32 bytes from dstack
-            logger.info(
-                f"Retrieved deterministic key material from dstack for path: {key_path}"
-            )
+            logger.info(f"Retrieved deterministic key material from dstack for path: {key_path}")
             return key_material
 
         except Exception as e:
@@ -233,9 +225,7 @@ class CertificateManager:
         """
 
         # TODO: check if this can lead to any problems
-        return ec.derive_private_key(
-            int.from_bytes(key_material, "big"), ec.SECP256R1()
-        )
+        return ec.derive_private_key(int.from_bytes(key_material, "big"), ec.SECP256R1())
 
     def generate_deterministic_key(self, key_path: str) -> ec.EllipticCurvePrivateKey:
         """Generate deterministic EC key using Phala dstack SDK.
@@ -251,9 +241,7 @@ class CertificateManager:
         # Derive EC key from the material
         return self.derive_ec_privatekey_from_key_material(key_material)
 
-    def create_lets_encrypt_cert(
-        self, private_key: ec.EllipticCurvePrivateKey
-    ) -> x509.Certificate:
+    def create_lets_encrypt_cert(self, private_key: ec.EllipticCurvePrivateKey) -> x509.Certificate:
         """Create Let's Encrypt certificate using certbot"""
         logger.info("Creating Let's Encrypt certificate using certbot")
 
@@ -317,9 +305,7 @@ class CertificateManager:
         logger.info("Successfully obtained Let's Encrypt certificate using certbot")
         return cert
 
-    def create_self_signed_cert(
-        self, private_key: ec.EllipticCurvePrivateKey
-    ) -> x509.Certificate:
+    def create_self_signed_cert(self, private_key: ec.EllipticCurvePrivateKey) -> x509.Certificate:
         """Create self-signed certificate for development."""
 
         logger.info("Creating self-signed certificate for development")
@@ -410,9 +396,7 @@ class CertificateManager:
                 days=self.CERT_EXPIRY_THRESHOLD_DAYS
             )
             if cert.not_valid_after_utc < expiry_threshold:
-                logger.info(
-                    f"Certificate expires on {cert.not_valid_after_utc}, renewal needed"
-                )
+                logger.info(f"Certificate expires on {cert.not_valid_after_utc}, renewal needed")
                 return False
 
             logger.info(f"Certificate valid until {cert.not_valid_after_utc}")
@@ -429,9 +413,7 @@ class CertificateManager:
         logger.info("Starting certificate creation/renewal process")
 
         if self.dev_mode:  # Development mode: create self-signed certificate
-            private_key = self.generate_deterministic_key(
-                f"cert/debug/{self.domain}/v1"
-            )
+            private_key = self.generate_deterministic_key(f"cert/debug/{self.domain}/v1")
             cert = self.create_self_signed_cert(private_key)
             self.save_certificate_and_key(cert, private_key)
         # TODO: sync using S3 bucket for multiple replicas (in production)
@@ -442,9 +424,7 @@ class CertificateManager:
         else:  # Production mode: use Let's Encrypt
             # TODO: maybe add seed into the S3 bucket for more randomness and key rotation on every
             # cert renewal
-            private_key = self.generate_deterministic_key(
-                f"cert/letsencrypt/{self.domain}/v1"
-            )
+            private_key = self.generate_deterministic_key(f"cert/letsencrypt/{self.domain}/v1")
             # Retry logic for certbot failures
             wait_time = 10
             max_tries = 3
