@@ -28,6 +28,7 @@ services:
     environment:
       - DOMAIN=localhost
       - DEV_MODE=true
+      - EMAIL=test@test.com
 
   attestation-service:
     image: attestation-service-dev

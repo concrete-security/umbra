@@ -7,6 +7,31 @@ dependencies = [
     "cryptography>=43.0.0",
     "schedule==1.2.0",
     "dstack-sdk==0.5.3",
-    "acme==2.7.4",
-    "josepy==1.14.0",
+    "certbot~=5.0",
 ]
+
+[dependency-groups]
+dev = [
+    "ruff",
+]
+
+[tool.ruff]
+line-length = 100
+indent-width = 4
+
+[tool.ruff.format]
+# Like Black, use double quotes for strings.
+quote-style = "double"
+
+# Like Black, indent with spaces, rather than tabs.
+indent-style = "space"
+
+# Like Black, respect magic trailing commas.
+skip-magic-trailing-comma = false
+
+# Like Black, automatically detect the appropriate line ending.
+line-ending = "auto"
+
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"

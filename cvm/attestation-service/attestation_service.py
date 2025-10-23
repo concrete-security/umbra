@@ -13,9 +13,7 @@ from pydantic import BaseModel
 from dstack_sdk import DstackClient, GetQuoteResponse
 
 # Configure logging
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 
@@ -55,13 +53,13 @@ async def post_tdx_quote(request: Request, data: ReportDataRequest):
     """Get TDX quote with report data"""
 
     try:
-        logger.info(f"TDX quote with report data requested")
+        logger.info("TDX quote with report data requested")
 
         # Instantiate dstack client before use
         dstack_client = DstackClient()
         quote = dstack_client.get_quote(data.report_data)
 
-        logger.info(f"Successfully obtained TDX quote")
+        logger.info("Successfully obtained TDX quote")
 
         return QuoteResponse(
             success=True, quote=quote, timestamp=str(int(time.time())), quote_type="tdx"

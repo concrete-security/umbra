@@ -43,7 +43,7 @@ jobs:
         working-directory: ./cvm
         run: |
           echo "=== Service Logs ==="
-          make logs
+          docker compose -f docker-compose.yml -f docker-compose.dev.override.yml logs
           echo "=== Docker Compose Status ==="
           docker compose -f docker-compose.yml -f docker-compose.dev.override.yml ps
 
