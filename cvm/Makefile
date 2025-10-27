@@ -15,7 +15,7 @@ DEV_FLAG = $(if $(filter true,$(DEV)),--dev,)
 # Python runner command
 PYTHON_RUNNER ?= uv run
 
-.PHONY: help dev-full dev-up dev-down prod prod-up prod-down prod-wait prod-test test-all test-health test-attestation test-vllm test-redirect test-certificate wait-services
+.PHONY: help dev-full dev-up dev-down prod prod-up prod-down prod-wait prod-test test-all test-health test-attestation test-vllm test-redirect test-acme test-certificate wait-services
 
 help:
 	@echo "CVM (Confidential Virtual Machine) - Build, Run, and Test"
@@ -32,6 +32,7 @@ help:
 	@echo "  test-attestation  Test attestation service endpoints"
 	@echo "  test-vllm     Test vLLM/mock vLLM endpoints"
 	@echo "  test-redirect Test HTTP to HTTPS redirect"
+	@echo "  test-acme     Test ACME challenge endpoint"
 	@echo "  test-certificate  Test SSL certificate validation"
 	@echo ""
 	@echo "⚙️  Environment Variables:"
@@ -78,6 +79,9 @@ test-vllm:
 
 test-redirect:
 	$(PYTHON_RUNNER) test_cvm.py $(DEV_FLAG) --redirect --base-url $(NGINX_URL) --http-url $(NGINX_HTTP_URL)
+
+test-acme:
+	$(PYTHON_RUNNER) test_cvm.py $(DEV_FLAG) --acme --base-url $(NGINX_URL) --http-url $(NGINX_HTTP_URL)
 
 test-certificate:
 	$(PYTHON_RUNNER) test_cvm.py $(DEV_FLAG) --certificate --base-url $(NGINX_URL)
