@@ -1,0 +1,4 @@
+services:
+  vllm:
+    gpus: all
+    runtime: runc
