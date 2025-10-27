@@ -292,7 +292,6 @@ class CertificateManager:
 
         # Use certbot to obtain certificate with our CSR
         fullchain_pem = certbot.obtain_certificate_with_csr(
-            domain=self.domain,
             email=self.cert_email,
             webroot_path=str(self.acme_path),
             csr_pem=csr_pem,
