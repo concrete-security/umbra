@@ -15,7 +15,7 @@ IS_CVM = os.getenv("IS_CVM", "false")
 # Model Configuration
 MODEL_ID = os.getenv("MODEL_ID", "openai/gpt-oss-120b")
 URL_BASE_VLLM = os.getenv("BASE_VLLM_URL", "http://vllm:8000")
-DEFAULT_MAX_TOKENS = int(os.getenv("MAX_TOKENS", "256"))
+DEFAULT_MAX_TOKENS = int(os.getenv("MAX_TOKENS", "131072"))
 DEFAULT_TEMPERATURE = float(os.getenv("TEMPERATURE", "0.2"))
 
 # Benchmarking
