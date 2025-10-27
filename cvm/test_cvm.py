@@ -282,6 +282,179 @@ class CVMTester:
             self._print_error(f"HTTP redirect test failed: {str(e)}")
             return False
 
+    def test_acme_challenge(self) -> bool:
+        """Test ACME challenge endpoint configuration"""
+        self._print_test_header("Testing ACME Challenge Endpoint")
+
+        try:
+            # Test 1: Check that ACME challenge endpoint returns 404 for non-existent challenge
+            # This is the expected behavior when no challenge file exists
+            test_token = "test-token-12345"
+            challenge_url = f"{self.http_url}/.well-known/acme-challenge/{test_token}"
+
+            response = self.session.get(challenge_url, allow_redirects=False, timeout=3)
+
+            if response.status_code == 404:
+                self._print_success(
+                    "ACME challenge endpoint correctly returns 404 for non-existent challenge"
+                )
+            else:
+                self._print_error(
+                    f"ACME challenge endpoint returned unexpected status {response.status_code} (expected 404)"
+                )
+                return False
+
+            # Test 2: Check that ACME challenge path doesn't redirect to HTTPS
+            # ACME challenges must be served over HTTP for Let's Encrypt to work
+            if response.status_code not in [301, 302, 307, 308]:
+                self._print_success(
+                    "ACME challenge endpoint doesn't redirect to HTTPS (correct behavior)"
+                )
+            else:
+                location = response.headers.get("location", "")
+                self._print_error(
+                    f"ACME challenge endpoint redirects to {location} (should serve over HTTP)"
+                )
+                return False
+
+            # Test 3: Check content-type handling for challenge responses
+            # The response should allow plain text content
+            content_type = response.headers.get("content-type", "")
+            self._print_info(f"ACME challenge endpoint content-type: {content_type}")
+
+            # Test 4: Test with different challenge token formats
+            # ACME challenge tokens are base64url encoded strings
+            test_tokens = [
+                "abcd1234",  # Simple alphanumeric
+                "abcd-1234_efgh",  # With valid base64url characters
+                "test.token.with.dots",  # With dots
+                "VGVzdENoYWxsZW5nZVRva2Vu",  # Base64url encoded
+            ]
+
+            for token in test_tokens:
+                token_url = f"{self.http_url}/.well-known/acme-challenge/{token}"
+                token_response = self.session.get(
+                    token_url, allow_redirects=False, timeout=3
+                )
+
+                if token_response.status_code == 404:
+                    continue  # Expected for non-existent files
+                elif token_response.status_code == 200:
+                    self._print_info(
+                        f"Challenge token '{token}' returned 200 (file exists)"
+                    )
+                else:
+                    self._print_warning(
+                        f"Challenge token '{token}' returned unexpected status {token_response.status_code}"
+                    )
+
+            # Test 5: Verify proper directory traversal protection
+            # Attempt to access files outside the challenge directory
+            malicious_paths = [
+                "../../../etc/passwd",
+                "..%2F..%2F..%2Fetc%2Fpasswd",  # URL encoded
+                "....//....//....//etc/passwd",  # Double dots
+            ]
+
+            for path in malicious_paths:
+                malicious_url = f"{self.http_url}/.well-known/acme-challenge/{path}"
+                malicious_response = self.session.get(
+                    malicious_url, allow_redirects=False, timeout=3
+                )
+
+                if malicious_response.status_code in [404, 403]:
+                    continue  # Good - should not allow directory traversal
+                elif malicious_response.status_code == 200:
+                    # Check if we actually got system files (bad)
+                    content = malicious_response.text.lower()
+                    if "root:" in content or "/bin/bash" in content:
+                        self._print_error(
+                            f"Directory traversal vulnerability detected with path: {path}"
+                        )
+                        return False
+                    else:
+                        # 200 but not system files - might be a custom 404 page
+                        self._print_info(
+                            f"Path '{path}' returned 200 but doesn't appear to be system file"
+                        )
+
+            self._print_success(
+                "ACME challenge endpoint has proper directory traversal protection"
+            )
+
+            # Test 6: Test actual file serving using embedded test files
+            # In development mode, test files are embedded via docker-compose configs
+            if self.dev_mode:
+                # Pre-defined test challenge files embedded in docker-compose.dev.override.yml
+                test_challenges = [
+                    {
+                        "token": "test-challenge-token-dev",
+                        "expected_content": "test-challenge-response-content-dev-mode-12345",
+                    },
+                    {
+                        "token": "VGVzdENoYWxsZW5nZURldg",
+                        "expected_content": "base64url-encoded-token-response-content",
+                    },
+                    {
+                        "token": "dev-test-with-hyphens",
+                        "expected_content": "hyphenated-token-response-for-testing",
+                    },
+                ]
+
+                file_serving_success = 0
+                for challenge in test_challenges:
+                    token = challenge["token"]
+                    expected_content = challenge["expected_content"]
+
+                    try:
+                        # Test file retrieval via HTTP
+                        file_url = f"{self.http_url}/.well-known/acme-challenge/{token}"
+                        file_response = self.session.get(
+                            file_url, allow_redirects=False, timeout=3
+                        )
+
+                        if file_response.status_code == 200:
+                            actual_content = file_response.text.strip()
+                            if expected_content in actual_content:
+                                self._print_success(
+                                    f"ACME challenge file '{token}' served correctly"
+                                )
+                                file_serving_success += 1
+                            else:
+                                self._print_warning(
+                                    f"Content mismatch for '{token}'. Expected: '{expected_content}', Got: '{actual_content}'"
+                                )
+                        else:
+                            self._print_warning(
+                                f"Could not retrieve test challenge file '{token}' (status: {file_response.status_code})"
+                            )
+
+                    except requests.exceptions.RequestException as e:
+                        self._print_warning(
+                            f"Failed to test challenge token '{token}': {str(e)}"
+                        )
+
+                if file_serving_success > 0:
+                    self._print_success(
+                        f"ACME challenge file serving works correctly ({file_serving_success}/{len(test_challenges)} files)"
+                    )
+                else:
+                    self._print_warning(
+                        "ACME challenge file serving failed for all test files"
+                    )
+                    self._print_info(
+                        "Note: Test files are embedded via docker-compose.dev.override.yml configs"
+                    )
+                    self._print_info(
+                        "      Ensure services are started with the override file: make dev-up"
+                    )
+
+            return True
+
+        except requests.exceptions.RequestException as e:
+            self._print_error(f"ACME challenge test failed: {str(e)}")
+            return False
+
     def test_health(self) -> bool:
         """Test health endpoint"""
         self._print_test_header("Testing Health Endpoint")
@@ -435,6 +608,7 @@ class CVMTester:
         results = {
             "certificate": self.test_certificate(),
             "redirect": self.test_http_redirect(),
+            "acme": self.test_acme_challenge(),
             "health": self.test_health(),
             "attestation": self.test_attestation(),
             "vllm": self.test_vllm(),
@@ -473,6 +647,7 @@ Examples:
   %(prog)s --all                    # Run all tests
   %(prog)s --health                 # Test only health endpoint
   %(prog)s --certificate            # Test only certificate validation
+  %(prog)s --acme                   # Test only ACME challenge endpoint (Let's Encrypt compatibility)
   %(prog)s --attestation --vllm     # Test attestation and vLLM endpoints
   %(prog)s --wait                   # Wait for services to be ready
   %(prog)s --base-url https://myhost:8443  # Use custom base URL
@@ -516,6 +691,9 @@ Examples:
     parser.add_argument(
         "--redirect", action="store_true", help="Test HTTP to HTTPS redirect"
     )
+    parser.add_argument(
+        "--acme", action="store_true", help="Test ACME challenge endpoint"
+    )
     parser.add_argument("--health", action="store_true", help="Test health endpoint")
     parser.add_argument(
         "--attestation", action="store_true", help="Test attestation service endpoints"
@@ -532,6 +710,7 @@ Examples:
             args.wait,
             args.certificate,
             args.redirect,
+            args.acme,
             args.health,
             args.attestation,
             args.vllm,
@@ -563,6 +742,9 @@ Examples:
 
     if args.redirect:
         success &= tester.test_http_redirect()
+
+    if args.acme:
+        success &= tester.test_acme_challenge()
 
     if args.health:
         success &= tester.test_health()
