@@ -569,6 +569,64 @@ class CertificateManager:
             logger.error(f"Error checking certificate validity: {e}")
             return False
 
+    def is_cert_self_signed(self) -> bool:
+        """Check if the current certificate is self-signed.
+
+        Returns:
+            bool: True if the certificate is self-signed, False otherwise or if cert doesn't exist.
+        """
+        cert_file = self.cert_path / self.CERT_FILENAME
+
+        if not cert_file.exists():
+            logger.debug("Certificate file not found")
+            return False
+
+        try:
+            with open(cert_file, "rb") as f:
+                cert = x509.load_pem_x509_certificate(f.read())
+
+            # A certificate is self-signed if the issuer and subject are the same
+            is_self_signed = cert.issuer == cert.subject
+
+            if is_self_signed:
+                logger.info("Certificate is self-signed")
+            else:
+                logger.info("Certificate is not self-signed")
+
+            return is_self_signed
+
+        except Exception as e:
+            logger.error(f"Error checking if certificate is self-signed: {e}")
+            return False
+
+    def delete_certificate_files(self):
+        """Delete existing certificate and key files."""
+        cert_file = self.cert_path / self.CERT_FILENAME
+        key_file = self.cert_path / self.KEY_FILENAME
+
+        files_deleted = []
+
+        if cert_file.exists():
+            try:
+                cert_file.unlink()
+                files_deleted.append(str(cert_file))
+                logger.info(f"Deleted certificate file: {cert_file}")
+            except Exception as e:
+                logger.error(f"Error deleting certificate file {cert_file}: {e}")
+
+        if key_file.exists():
+            try:
+                key_file.unlink()
+                files_deleted.append(str(key_file))
+                logger.info(f"Deleted key file: {key_file}")
+            except Exception as e:
+                logger.error(f"Error deleting key file {key_file}: {e}")
+
+        if files_deleted:
+            logger.info(f"Successfully deleted certificate files: {', '.join(files_deleted)}")
+        else:
+            logger.debug("No certificate files found to delete")
+
     def create_or_renew_certificate(self):
         """Create or renew TLS certificate"""
 
@@ -640,6 +698,14 @@ class CertificateManager:
 
     def run(self):
         """Main run loop"""
+
+        # If in production, delete any existing self-signed certificate
+        try:
+            if not self.dev_mode and self.is_cert_self_signed():
+                logger.info("Found self-signed certificate in production mode, deleting it")
+                self.delete_certificate_files()
+        except Exception as e:
+            logger.error(f"Failed to check/delete self-signed certificate: {e}")
 
         # If cert is valid on startup, setup Nginx with HTTPS
         try:
