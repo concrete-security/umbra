@@ -611,7 +611,7 @@ class CertificateManager:
                     break
 
             if issuer_cn:
-                is_staging = "Staging" in issuer_cn
+                is_staging = "staging" in str(issuer_cn).lower()
                 if is_staging:
                     logger.info(f"Certificate is from Let's Encrypt staging (issuer: {issuer_cn})")
                 else:
