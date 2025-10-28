@@ -586,6 +586,47 @@ class CertificateManager:
             logger.error(f"Error checking if certificate is self-signed: {e}")
             return False
 
+    def is_cert_letsencrypt_staging(self) -> bool:
+        """Check if the current certificate was issued by Let's Encrypt staging.
+
+        Returns:
+            bool: True if the certificate was issued by Let's Encrypt staging, False otherwise.
+        """
+        cert_file = self.cert_path / self.CERT_FILENAME
+
+        if not cert_file.exists():
+            logger.debug("Certificate file not found while checking for Let's Encrypt staging")
+            return False
+
+        try:
+            with open(cert_file, "rb") as f:
+                cert = x509.load_pem_x509_certificate(f.read())
+
+            # Check if certificate was issued by Let's Encrypt staging
+            # Let's Encrypt staging issuer contains "Fake LE" or "Staging" in the CN
+            issuer_cn = None
+            for attribute in cert.issuer:
+                if attribute.oid == NameOID.COMMON_NAME:
+                    issuer_cn = attribute.value
+                    break
+
+            if issuer_cn:
+                is_staging = "Staging" in issuer_cn
+                if is_staging:
+                    logger.info(f"Certificate is from Let's Encrypt staging (issuer: {issuer_cn})")
+                else:
+                    logger.info(
+                        f"Certificate is not from Let's Encrypt staging (issuer: {issuer_cn})"
+                    )
+                return is_staging
+            else:
+                logger.debug("Could not determine certificate issuer CN")
+                return False
+
+        except Exception as e:
+            logger.error(f"Error checking if certificate is from Let's Encrypt staging: {e}")
+            return False
+
     def delete_certificate_files(self):
         """Delete existing certificate and key files."""
         cert_file = self.cert_path / self.CERT_FILENAME
@@ -686,13 +727,27 @@ class CertificateManager:
     def run(self):
         """Main run loop"""
 
-        # If in production, delete any existing self-signed certificate
+        # If in production (or staging), delete any existing self-signed certificate
         try:
             if not self.dev_mode and self.is_cert_self_signed():
                 logger.info("Found self-signed certificate in production mode, deleting it")
                 self.delete_certificate_files()
         except Exception as e:
             logger.error(f"Failed to check/delete self-signed certificate: {e}")
+
+        # If in production, delete Let's Encrypt staging certificates
+        try:
+            if (
+                not self.dev_mode
+                and not self.letsencrypt_staging
+                and self.is_cert_letsencrypt_staging()
+            ):
+                logger.info(
+                    "Found Let's Encrypt staging certificate in production mode with staging disabled, deleting it"
+                )
+                self.delete_certificate_files()
+        except Exception as e:
+            logger.error(f"Failed to check/delete Let's Encrypt staging certificate: {e}")
 
         # If cert is valid on startup, setup Nginx with HTTPS
         try:
