@@ -38,7 +38,7 @@ services:
     environment:
       - DOMAIN=vllm.concrete-security.com
       - DEV_MODE=false
-      - LETSENCRYPT_STAGING=true
+      - LETSENCRYPT_STAGING=false
       # Used to versionize accounts: can change account by using another env variable
       # Useful in case an account reaches a rate limit
       - LETSENCRYPT_ACCOUNT_VERSION=v1
