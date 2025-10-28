@@ -449,9 +449,12 @@ class CertificateManager:
         # Emit new cert event to Dstack (extend RTMR3)
         cert_pem = cert.public_bytes(Encoding.PEM)
         cert_hash = sha256(cert_pem).hexdigest()
-        dstack_client = DstackClient()
-        dstack_client.emit_event("New TLS Certificate", cert_hash)
-        logger.info("Emitted new TLS certificate event to Dstack")
+        if self.dev_mode:  # only log cert hash
+            logger.info(f"New TLS Certificate: {cert_hash}")
+        else:
+            dstack_client = DstackClient()
+            dstack_client.emit_event("New TLS Certificate", cert_hash)
+            logger.info("Emitted new TLS certificate event to Dstack")
 
         logger.info("Certificate management completed successfully")
 
