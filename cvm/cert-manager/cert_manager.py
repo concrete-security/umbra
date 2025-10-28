@@ -655,6 +655,25 @@ class CertificateManager:
         else:
             logger.debug("No certificate files found to delete")
 
+    def emit_new_cert_event(self):
+        """Emit new cert event in RTMR3.
+
+        This will only log the cert hash in dev mode.
+        """
+        cert_file = self.cert_path / self.CERT_FILENAME
+        with open(cert_file, "rb") as f:
+            cert = x509.load_pem_x509_certificate(f.read())
+
+        cert_pem = cert.public_bytes(Encoding.PEM)
+        cert_hash = sha256(cert_pem).hexdigest()
+
+        if self.dev_mode:  # only log cert hash
+            logger.info(f"New TLS Certificate: {cert_hash}")
+        else:  # Emit new cert event to Dstack (extend RTMR3)
+            dstack_client = DstackClient()
+            dstack_client.emit_event("New TLS Certificate", cert_hash)
+            logger.info("Emitted new TLS certificate event to Dstack")
+
     def create_or_renew_certificate(self):
         """Create or renew TLS certificate"""
 
@@ -695,15 +714,7 @@ class CertificateManager:
 
             self.save_certificate_and_key(cert, private_key)
 
-        # Emit new cert event to Dstack (extend RTMR3)
-        cert_pem = cert.public_bytes(Encoding.PEM)
-        cert_hash = sha256(cert_pem).hexdigest()
-        if self.dev_mode:  # only log cert hash
-            logger.info(f"New TLS Certificate: {cert_hash}")
-        else:
-            dstack_client = DstackClient()
-            dstack_client.emit_event("New TLS Certificate", cert_hash)
-            logger.info("Emitted new TLS certificate event to Dstack")
+        self.emit_new_cert_event()
 
         logger.info("Certificate management completed successfully")
 
@@ -749,9 +760,12 @@ class CertificateManager:
         except Exception as e:
             logger.error(f"Failed to check/delete Let's Encrypt staging certificate: {e}")
 
-        # If cert is valid on startup, setup Nginx with HTTPS
+        # If cert is valid on startup:
+        # - emit new cert event in RTMR3
+        # - setup Nginx with HTTPS
         try:
             if self.is_cert_valid():
+                self.emit_new_cert_event()
                 self.supervisor.setup_nginx_https_config()
         except Exception as e:
             logger.error(f"Failed to setup and restart Nginx: {e}")
