@@ -239,6 +239,9 @@ class CertbotWrapper:
             os.chmod(account_key_file, 0o600)
 
             # Prepare certbot command using CSR
+            fullchain_path = temp_path / "fullchain.pem"
+            cert_path = temp_path / "cert.pem"
+            chain_path = temp_path / "chain.pem"
             cmd = [
                 "certbot",
                 "certonly",
@@ -253,8 +256,12 @@ class CertbotWrapper:
                 "--non-interactive",
                 "--server",
                 self.server_url,
-                "--work-dir",
-                str(temp_path / "work"),
+                "--cert-path",
+                str(cert_path),
+                "--chain-path",
+                str(chain_path),
+                "--fullchain-path",
+                str(fullchain_path),
             ]
 
             logger.info(f"Running certbot command with CSR: {' '.join(cmd)}")
@@ -271,34 +278,14 @@ class CertbotWrapper:
                 logger.info("Certbot command completed successfully")
                 logger.debug(f"Certbot stdout: {result.stdout}")
 
-                # When using CSR, certbot outputs certificate files in the current directory
-                # with names based on the CSR filename
-                cert_files = list(temp_path.glob("*cert*.pem")) + list(
-                    temp_path.glob("*fullchain*.pem")
-                )
+                if not os.path.exists(fullchain_path):
+                    logger.error(f"Fullchain file not found at expected path: {fullchain_path}")
+                    raise Exception("Fullchain file not found (see logs for more info)")
 
-                logger.debug(f"Files in temp directory: {[f.name for f in temp_path.iterdir()]}")
+                with open(fullchain_path, "rb") as f:
+                    fullchain_pem = f.read()
 
-                if len(cert_files) != 2:
-                    logger.error("Certificate files not found after certbot execution")
-                    raise Exception("Certificate files not found after certbot execution")
-
-                # Find the certificate and chain files
-                cert_pem = ""
-                chain_pem = ""
-
-                for cert_file in cert_files:
-                    with open(cert_file, "r") as f:
-                        content = f.read()
-                        if "cert" in cert_file.name.lower():
-                            cert_pem = content
-                        elif "chain" in cert_file.name.lower():
-                            chain_pem = content
-
-                # Combine certificate and chain
-                fullchain_pem = cert_pem + chain_pem if chain_pem else cert_pem
-
-                return fullchain_pem.encode()
+                return fullchain_pem
 
             except subprocess.CalledProcessError as e:
                 logger.error(f"Certbot command failed with exit code {e.returncode}")
