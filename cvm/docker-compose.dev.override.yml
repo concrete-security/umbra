@@ -20,7 +20,7 @@ services:
       timeout: 10s
       retries: 3
 
-  cert-manager:
+  nginx-cert-manager:
     image: cert-manager-dev
     build:
       context: ./cert-manager
