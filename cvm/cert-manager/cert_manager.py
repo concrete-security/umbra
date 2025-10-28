@@ -14,6 +14,7 @@ import tempfile
 from hashlib import sha256
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Optional
 
 from cryptography import x509
 from cryptography.x509.oid import NameOID
@@ -30,6 +31,167 @@ from dstack_sdk import DstackClient
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
+
+
+class Supervisor:
+    """Supervisor manages both Nginx and this Cert Manager.
+    This class is a helper for configuring Nginx (base/https) and restarting it via Supervisor.
+    """
+
+    SUPERVISOR_CONF_PATH = "/etc/supervisor/conf.d/supervisord.conf"
+    NGINX_CONF_PATH = "/etc/nginx/conf.d/default.conf"
+    NGINX_BASE_CONF_PATH = "./nginx_conf/base.conf"
+    NGINX_HTTPS_CONF_PATH = "./nginx_conf/https.conf"
+
+    def __init__(
+        self,
+        supervisor_conf_path: Optional[str] = None,
+        nginx_conf_path: Optional[str] = None,
+        nginx_base_conf_path: Optional[str] = None,
+        nginx_https_conf_path: Optional[str] = None,
+    ):
+        self.supervisor_conf_path = (
+            supervisor_conf_path if supervisor_conf_path else self.SUPERVISOR_CONF_PATH
+        )
+        self.nginx_conf_path = nginx_conf_path if nginx_conf_path else self.NGINX_CONF_PATH
+        self.nginx_base_conf_path = (
+            nginx_base_conf_path if nginx_base_conf_path else self.NGINX_BASE_CONF_PATH
+        )
+        self.nginx_https_conf_path = (
+            nginx_https_conf_path if nginx_https_conf_path else self.NGINX_HTTPS_CONF_PATH
+        )
+
+    def restart_nginx(self):
+        """
+        Restart nginx via supervisorctl.
+
+        Raises:
+            Exception: If the restart command fails or times out.
+        """
+
+        cmd = ["supervisorctl", "-c", self.supervisor_conf_path, "restart", "nginx"]
+
+        logger.info(f"Restarting nginx via supervisorctl: {' '.join(cmd)}")
+
+        if not os.path.exists(self.supervisor_conf_path):
+            raise Exception(
+                f"Supervisor configuration file not found at {self.supervisor_conf_path}"
+            )
+
+        try:
+            result = subprocess.run(
+                cmd,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=30,  # 30 second timeout for restart
+            )
+
+            logger.info("Nginx restart completed successfully")
+            logger.debug(f"Supervisorctl stdout: {result.stdout}")
+
+            if result.stderr:
+                logger.debug(f"Supervisorctl stderr: {result.stderr}")
+
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Nginx restart failed with exit code {e.returncode}")
+            logger.error(f"Supervisorctl stderr: {e.stderr}")
+            logger.error(f"Supervisorctl stdout: {e.stdout}")
+            raise Exception("Nginx restart failed (see logs for more info)")
+
+        except subprocess.TimeoutExpired:
+            logger.error("Nginx restart command timed out")
+            raise Exception("Nginx restart command timed out")
+
+        except Exception as e:
+            logger.error(f"Unexpected error restarting nginx: {e}")
+            raise
+
+    def setup_nginx_base_config(self):
+        """
+        Set up nginx with the base configuration and restart nginx.
+
+        This configures nginx with HTTP-only settings, typically used during
+        initial setup or when HTTPS certificates are not yet available.
+
+        Raises:
+            Exception: If the configuration setup or restart fails.
+        """
+        logger.info("Setting up nginx with base configuration (no HTTPS)")
+
+        try:
+            if not os.path.exists(self.nginx_base_conf_path):
+                raise Exception(
+                    f"Base nginx configuration not found at {self.nginx_base_conf_path}"
+                )
+
+            with open(self.nginx_base_conf_path, "r") as src:
+                base_config = src.read()
+
+            with open(self.nginx_conf_path, "w") as dst:
+                dst.write(base_config)
+
+            logger.info(f"Base configuration written to {self.nginx_conf_path}")
+
+        except Exception as e:
+            logger.error(f"Failed to setup nginx base configuration: {e}")
+            raise
+
+        # Restart nginx to apply the new configuration
+        try:
+            self.restart_nginx()
+        except Exception as e:
+            logger.error(f"Failed to restart nginx: {e}")
+            raise
+
+    def setup_nginx_https_config(self):
+        """
+        Set up nginx with the base + HTTPS configuration and restart nginx.
+
+        This configures nginx with both HTTP and HTTPS settings, typically used
+        after SSL certificates have been obtained and are available.
+
+        Raises:
+            Exception: If the configuration setup or restart fails.
+        """
+        logger.info("Setting up nginx with base + HTTPS configuration")
+
+        try:
+            if not os.path.exists(self.nginx_base_conf_path):
+                raise Exception(
+                    f"Base nginx configuration not found at {self.nginx_base_conf_path}"
+                )
+            if not os.path.exists(self.nginx_https_conf_path):
+                raise Exception(
+                    f"HTTPS nginx configuration not found at {self.nginx_https_conf_path}"
+                )
+
+            # Read both configurations
+            with open(self.nginx_base_conf_path, "r") as src:
+                base_config = src.read()
+
+            with open(self.nginx_https_conf_path, "r") as src:
+                https_config = src.read()
+
+            # Combine configurations (base + https)
+            combined_config = base_config + "\n" + https_config
+
+            # Write combined configuration to nginx conf directory
+            with open(self.nginx_conf_path, "w") as dst:
+                dst.write(combined_config)
+
+            logger.info(f"Combined base + HTTPS configuration written to {self.nginx_conf_path}")
+
+        except Exception as e:
+            logger.error(f"Failed to setup nginx HTTPS configuration: {e}")
+            raise
+
+        # Restart nginx to apply the new configuration
+        try:
+            self.restart_nginx()
+        except Exception as e:
+            logger.error(f"Failed to restart nginx: {e}")
+            raise
 
 
 class CertbotWrapper:
@@ -77,6 +239,9 @@ class CertbotWrapper:
             os.chmod(account_key_file, 0o600)
 
             # Prepare certbot command using CSR
+            fullchain_path = temp_path / "fullchain.pem"
+            cert_path = temp_path / "cert.pem"
+            chain_path = temp_path / "chain.pem"
             cmd = [
                 "certbot",
                 "certonly",
@@ -91,8 +256,12 @@ class CertbotWrapper:
                 "--non-interactive",
                 "--server",
                 self.server_url,
-                "--work-dir",
-                str(temp_path / "work"),
+                "--cert-path",
+                str(cert_path),
+                "--chain-path",
+                str(chain_path),
+                "--fullchain-path",
+                str(fullchain_path),
             ]
 
             logger.info(f"Running certbot command with CSR: {' '.join(cmd)}")
@@ -109,34 +278,14 @@ class CertbotWrapper:
                 logger.info("Certbot command completed successfully")
                 logger.debug(f"Certbot stdout: {result.stdout}")
 
-                # When using CSR, certbot outputs certificate files in the current directory
-                # with names based on the CSR filename
-                cert_files = list(temp_path.glob("*cert*.pem")) + list(
-                    temp_path.glob("*fullchain*.pem")
-                )
+                if not os.path.exists(fullchain_path):
+                    logger.error(f"Fullchain file not found at expected path: {fullchain_path}")
+                    raise Exception("Fullchain file not found (see logs for more info)")
 
-                logger.debug(f"Files in temp directory: {[f.name for f in temp_path.iterdir()]}")
+                with open(fullchain_path, "rb") as f:
+                    fullchain_pem = f.read()
 
-                if len(cert_files) != 2:
-                    logger.error("Certificate files not found after certbot execution")
-                    raise Exception("Certificate files not found after certbot execution")
-
-                # Find the certificate and chain files
-                cert_pem = ""
-                chain_pem = ""
-
-                for cert_file in cert_files:
-                    with open(cert_file, "r") as f:
-                        content = f.read()
-                        if "cert" in cert_file.name.lower():
-                            cert_pem = content
-                        elif "chain" in cert_file.name.lower():
-                            chain_pem = content
-
-                # Combine certificate and chain
-                fullchain_pem = cert_pem + chain_pem if chain_pem else cert_pem
-
-                return fullchain_pem.encode()
+                return fullchain_pem
 
             except subprocess.CalledProcessError as e:
                 logger.error(f"Certbot command failed with exit code {e.returncode}")
@@ -172,8 +321,9 @@ class CertificateManager:
         self.letsencrypt_staging = letsencrypt_staging
         # used to easily switch to another account
         self.letsencrypt_account_version = letsencrypt_account_version
+        self.supervisor = Supervisor()
 
-        self.cert_path = Path("/certs")
+        self.cert_path = Path("/etc/nginx/ssl/")
         self.acme_path = Path("/acme-challenge/")
 
         # Ensure directories exist
@@ -406,6 +556,124 @@ class CertificateManager:
             logger.error(f"Error checking certificate validity: {e}")
             return False
 
+    def is_cert_self_signed(self) -> bool:
+        """Check if the current certificate is self-signed.
+
+        Returns:
+            bool: True if the certificate is self-signed, False otherwise or if cert doesn't exist.
+        """
+        cert_file = self.cert_path / self.CERT_FILENAME
+
+        if not cert_file.exists():
+            logger.debug("Certificate file not found")
+            return False
+
+        try:
+            with open(cert_file, "rb") as f:
+                cert = x509.load_pem_x509_certificate(f.read())
+
+            # A certificate is self-signed if the issuer and subject are the same
+            is_self_signed = cert.issuer == cert.subject
+
+            if is_self_signed:
+                logger.info("Certificate is self-signed")
+            else:
+                logger.info("Certificate is not self-signed")
+
+            return is_self_signed
+
+        except Exception as e:
+            logger.error(f"Error checking if certificate is self-signed: {e}")
+            return False
+
+    def is_cert_letsencrypt_staging(self) -> bool:
+        """Check if the current certificate was issued by Let's Encrypt staging.
+
+        Returns:
+            bool: True if the certificate was issued by Let's Encrypt staging, False otherwise.
+        """
+        cert_file = self.cert_path / self.CERT_FILENAME
+
+        if not cert_file.exists():
+            logger.debug("Certificate file not found while checking for Let's Encrypt staging")
+            return False
+
+        try:
+            with open(cert_file, "rb") as f:
+                cert = x509.load_pem_x509_certificate(f.read())
+
+            # Check if certificate was issued by Let's Encrypt staging
+            # Let's Encrypt staging issuer contains "Fake LE" or "Staging" in the CN
+            issuer_cn = None
+            for attribute in cert.issuer:
+                if attribute.oid == NameOID.COMMON_NAME:
+                    issuer_cn = attribute.value
+                    break
+
+            if issuer_cn:
+                is_staging = "Staging" in issuer_cn
+                if is_staging:
+                    logger.info(f"Certificate is from Let's Encrypt staging (issuer: {issuer_cn})")
+                else:
+                    logger.info(
+                        f"Certificate is not from Let's Encrypt staging (issuer: {issuer_cn})"
+                    )
+                return is_staging
+            else:
+                logger.debug("Could not determine certificate issuer CN")
+                return False
+
+        except Exception as e:
+            logger.error(f"Error checking if certificate is from Let's Encrypt staging: {e}")
+            return False
+
+    def delete_certificate_files(self):
+        """Delete existing certificate and key files."""
+        cert_file = self.cert_path / self.CERT_FILENAME
+        key_file = self.cert_path / self.KEY_FILENAME
+
+        files_deleted = []
+
+        if cert_file.exists():
+            try:
+                cert_file.unlink()
+                files_deleted.append(str(cert_file))
+                logger.info(f"Deleted certificate file: {cert_file}")
+            except Exception as e:
+                logger.error(f"Error deleting certificate file {cert_file}: {e}")
+
+        if key_file.exists():
+            try:
+                key_file.unlink()
+                files_deleted.append(str(key_file))
+                logger.info(f"Deleted key file: {key_file}")
+            except Exception as e:
+                logger.error(f"Error deleting key file {key_file}: {e}")
+
+        if files_deleted:
+            logger.info(f"Successfully deleted certificate files: {', '.join(files_deleted)}")
+        else:
+            logger.debug("No certificate files found to delete")
+
+    def emit_new_cert_event(self):
+        """Emit new cert event in RTMR3.
+
+        This will only log the cert hash in dev mode.
+        """
+        cert_file = self.cert_path / self.CERT_FILENAME
+        with open(cert_file, "rb") as f:
+            cert = x509.load_pem_x509_certificate(f.read())
+
+        cert_pem = cert.public_bytes(Encoding.PEM)
+        cert_hash = sha256(cert_pem).hexdigest()
+
+        if self.dev_mode:  # only log cert hash
+            logger.info(f"New TLS Certificate: {cert_hash}")
+        else:  # Emit new cert event to Dstack (extend RTMR3)
+            dstack_client = DstackClient()
+            dstack_client.emit_event("New TLS Certificate", cert_hash)
+            logger.info("Emitted new TLS certificate event to Dstack")
+
     def create_or_renew_certificate(self):
         """Create or renew TLS certificate"""
 
@@ -446,12 +714,7 @@ class CertificateManager:
 
             self.save_certificate_and_key(cert, private_key)
 
-        # Emit new cert event to Dstack (extend RTMR3)
-        cert_pem = cert.public_bytes(Encoding.PEM)
-        cert_hash = sha256(cert_pem).hexdigest()
-        dstack_client = DstackClient()
-        dstack_client.emit_event("New TLS Certificate", cert_hash)
-        logger.info("Emitted new TLS certificate event to Dstack")
+        self.emit_new_cert_event()
 
         logger.info("Certificate management completed successfully")
 
@@ -459,12 +722,53 @@ class CertificateManager:
         """Manage certificate creation and renewal process.
 
         Checks if the certificate is valid, and creates or renews it if necessary.
+        This will also setup Nginx with HTTPS, and restart it (load new cert/key).
         """
         if not self.is_cert_valid():
-            self.create_or_renew_certificate()
+            try:
+                self.create_or_renew_certificate()
+            except Exception as e:
+                logger.error(f"Failed to create or renew certificate: {e}")
+                return
+            try:
+                self.supervisor.setup_nginx_https_config()
+            except Exception as e:
+                logger.error(f"Failed to setup and restart Nginx: {e}")
 
     def run(self):
         """Main run loop"""
+
+        # If in production (or staging), delete any existing self-signed certificate
+        try:
+            if not self.dev_mode and self.is_cert_self_signed():
+                logger.info("Found self-signed certificate in production mode, deleting it")
+                self.delete_certificate_files()
+        except Exception as e:
+            logger.error(f"Failed to check/delete self-signed certificate: {e}")
+
+        # If in production, delete Let's Encrypt staging certificates
+        try:
+            if (
+                not self.dev_mode
+                and not self.letsencrypt_staging
+                and self.is_cert_letsencrypt_staging()
+            ):
+                logger.info(
+                    "Found Let's Encrypt staging certificate in production mode with staging disabled, deleting it"
+                )
+                self.delete_certificate_files()
+        except Exception as e:
+            logger.error(f"Failed to check/delete Let's Encrypt staging certificate: {e}")
+
+        # If cert is valid on startup:
+        # - emit new cert event in RTMR3
+        # - setup Nginx with HTTPS
+        try:
+            if self.is_cert_valid():
+                self.emit_new_cert_event()
+                self.supervisor.setup_nginx_https_config()
+        except Exception as e:
+            logger.error(f"Failed to setup and restart Nginx: {e}")
 
         # Initial certificate creation/check
         try:

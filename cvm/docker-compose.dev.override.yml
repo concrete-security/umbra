@@ -20,7 +20,7 @@ services:
       timeout: 10s
       retries: 3
 
-  cert-manager:
+  nginx-cert-manager:
     image: cert-manager-dev
     build:
       context: ./cert-manager
@@ -29,6 +29,16 @@ services:
       - DOMAIN=localhost
       - DEV_MODE=true
       - EMAIL=test@test.com
+    configs:
+      - source: acme_test_token_1
+        target: /acme-challenge/.well-known/acme-challenge/test-challenge-token-dev
+        mode: 0644
+      - source: acme_test_token_2
+        target: /acme-challenge/.well-known/acme-challenge/VGVzdENoYWxsZW5nZURldg
+        mode: 0644
+      - source: acme_test_token_3
+        target: /acme-challenge/.well-known/acme-challenge/dev-test-with-hyphens
+        mode: 0644
 
   attestation-service:
     image: attestation-service-dev
@@ -125,3 +135,16 @@ configs:
       if __name__ == '__main__':
           import uvicorn
           uvicorn.run(app, host='0.0.0.0', port=8000)
+
+  # ACME Challenge test files for development
+  acme_test_token_1:
+    content: |
+      test-challenge-response-content-dev-mode-12345
+
+  acme_test_token_2:
+    content: |
+      base64url-encoded-token-response-content
+
+  acme_test_token_3:
+    content: |
+      hyphenated-token-response-for-testing

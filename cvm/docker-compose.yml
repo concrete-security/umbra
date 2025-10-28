@@ -28,49 +28,26 @@ services:
       timeout: 10s
       retries: 3
 
-  # Nginx reverse proxy with HTTPS
-  nginx:
-    image: nginx
-    container_name: nginx
+  # Combined Nginx reverse proxy and Certificate Manager
+  nginx-cert-manager:
+    image: ghcr.io/concrete-security/cert-manager:latest
+    container_name: nginx-cert-manager
     ports:
       - "80:80"
       - "443:443"
-    volumes:
-      - tls-certs-keys:/etc/nginx/ssl:ro
-      - acme-chall:/acme-challenge/:ro
-    configs:
-      - source: nginx-default-conf
-        target: /etc/nginx/conf.d/default.conf
-        mode: 0444
-    networks:
-      - vllm
-      - attestation
-    depends_on:
-      cert-manager:
-        condition: service_healthy
-        restart: true
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "-k", "https://nginx/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-
-  # Certificate and key management service
-  cert-manager:
-    image: ghcr.io/concrete-security/cert-manager:latest
-    container_name: cert-manager
     environment:
       - DOMAIN=vllm.concrete-security.com
       - DEV_MODE=false
-      - LETSENCRYPT_STAGING=true
+      - LETSENCRYPT_STAGING=false
       # Used to versionize accounts: can change account by using another env variable
       # Useful in case an account reaches a rate limit
       - LETSENCRYPT_ACCOUNT_VERSION=v1
     volumes:
-      - tls-certs-keys:/certs
-      - acme-chall:/acme-challenge/
+      - tls-certs-keys:/etc/nginx/ssl/
       - /var/run/dstack.sock:/var/run/dstack.sock
+    networks:
+      - vllm
+      - attestation
     restart: unless-stopped
 
   # TDX Attestation service
@@ -105,71 +82,3 @@ volumes:
   huggingface-cache:
   # TLS certificates and keys
   tls-certs-keys:
-  # ACME challenge files
-  acme-chall:
-
-configs:
-  nginx-default-conf:
-    content: |
-      # Upstream for VLLM service
-      upstream vllm_backend {
-          server vllm:8000;
-      }
-
-      # HTTP server only for redirects
-      server {
-          listen 80;
-          server_name vllm.concrete-security.com;
-
-          # ACME challenge endpoint for Let's Encrypt
-          location /.well-known/acme-challenge/ {
-              root /acme-challenge/;
-              try_files $$uri =404;
-          }
-
-          # Redirect all other HTTP requests to HTTPS
-          location / {
-              return 301 https://$$host$$request_uri;
-          }
-      }
-
-      # HTTPS server
-      server {
-          listen 443 ssl http2;
-          server_name vllm.concrete-security.com;
-
-          # we want the attestation and following requests
-          # to be part of the same TCP connection. This doesn't
-          # enforce it, but it makes it possible.
-          keepalive_timeout 60;
-          keepalive_requests 100;
-
-          # SSL certificate and key
-          ssl_certificate /etc/nginx/ssl/cert.pem;
-          ssl_certificate_key /etc/nginx/ssl/key.pem;
-
-          # Health check endpoint
-          location = /health {
-              access_log off;
-              return 200 "healthy\n";
-              add_header Content-Type text/plain;
-          }
-
-          # Remote attestation service
-          location = /tdx_quote {
-              proxy_pass http://attestation-service:8080;
-              proxy_set_header Host $$host;
-              proxy_set_header X-Real-IP $$remote_addr;
-              proxy_set_header X-Forwarded-For $$proxy_add_x_forwarded_for;
-              proxy_set_header X-Forwarded-Proto $$scheme;
-          }
-
-          # Proxy to VLLM service
-          location / {
-              proxy_pass http://vllm_backend;
-              proxy_set_header Host $$host;
-              proxy_set_header X-Real-IP $$remote_addr;
-              proxy_set_header X-Forwarded-For $$proxy_add_x_forwarded_for;
-              proxy_set_header X-Forwarded-Proto $$scheme;
-          }
-      }
