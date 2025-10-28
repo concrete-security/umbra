@@ -25,6 +25,7 @@ COPY entrypoint.sh /app/
 RUN chmod +x /app/entrypoint.sh
 COPY cert_manager.py /app/
 COPY nginx_conf /app/nginx_conf
+COPY proc_logger.py /app/
 
 # Setup base nginx config
 COPY nginx_conf/base.conf /etc/nginx/conf.d/default.conf
