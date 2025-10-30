@@ -41,10 +41,29 @@ jobs:
         run: |
           uv run ruff format --check .
 
+  pytest:
+    runs-on: ubuntu-latest
+    name: Pytest
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@2ddd2b9cb38ad8efd50337e8ab201519a34c9f24 # v7
+
+      - name: Install dependencies
+        working-directory: ./cvm/cert-manager
+        run: |
+          uv sync --group test
+
+      - name: Run Pytest
+        working-directory: ./cvm/cert-manager
+        run: |
+          uv run pytest -v
+
   build-and-push:
     name: Build and Push Docker Image
     runs-on: ubuntu-latest
-    needs: ruff-lint-format
+    needs: [ruff-lint-format, pytest]
     permissions:
       contents: read
       packages: write

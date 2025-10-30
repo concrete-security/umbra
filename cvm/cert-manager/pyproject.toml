@@ -2,6 +2,9 @@
 name = "cert-manager"
 version = "0.1.0"
 requires-python = ">=3.10"
+packages = [
+    { include = "cert_manager", from = "src" },
+]
 
 dependencies = [
     "cryptography>=43.0.0",
@@ -13,6 +16,11 @@ dependencies = [
 [dependency-groups]
 dev = [
     "ruff",
+]
+
+test = [
+    "pytest",
+    "pytest-mock",
 ]
 
 [tool.ruff]
@@ -35,3 +43,7 @@ line-ending = "auto"
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
+
+[build-system]
+requires = ["uv_build"]
+build-backend = "uv_build"

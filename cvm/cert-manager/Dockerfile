@@ -15,15 +15,15 @@ RUN apk add --no-cache supervisor
 # Create app directory
 WORKDIR /app
 
-# Install Python dependencies
+# Install Python dependencies (uv sync needs src/)
 COPY pyproject.toml /app/
+COPY src/ /app/src/
 COPY uv.lock /app/
 RUN uv sync --locked --no-cache
 
 # Copy app files
 COPY entrypoint.sh /app/
 RUN chmod +x /app/entrypoint.sh
-COPY cert_manager.py /app/
 COPY nginx_conf /app/nginx_conf
 COPY proc_logger.py /app/
 
