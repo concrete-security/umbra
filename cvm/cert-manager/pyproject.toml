@@ -18,6 +18,11 @@ dev = [
     "ruff",
 ]
 
+test = [
+    "pytest",
+    "pytest-mock",
+]
+
 [tool.ruff]
 line-length = 100
 indent-width = 4
