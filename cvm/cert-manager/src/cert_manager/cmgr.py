@@ -6,15 +6,11 @@ Supports multiple replicas by synchronizing them via an S3 bucket.
 """
 
 import os
-import sys
 import time
 import logging
-import subprocess
-import tempfile
 from hashlib import sha256
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
 
 from cryptography import x509
 from cryptography.x509.oid import NameOID
@@ -28,278 +24,10 @@ from cryptography.hazmat.primitives.serialization import (
 import schedule
 from dstack_sdk import DstackClient
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-logger = logging.getLogger(__name__)
+from cert_manager.supervisor import Supervisor
+from cert_manager.certbot import CertbotWrapper
 
-
-class Supervisor:
-    """Supervisor manages both Nginx and this Cert Manager.
-    This class is a helper for configuring Nginx (base/https) and restarting it via Supervisor.
-    """
-
-    SUPERVISOR_CONF_PATH = "/etc/supervisor/conf.d/supervisord.conf"
-    NGINX_CONF_PATH = "/etc/nginx/conf.d/default.conf"
-    NGINX_BASE_CONF_PATH = "./nginx_conf/base.conf"
-    NGINX_HTTPS_CONF_PATH = "./nginx_conf/https.conf"
-
-    def __init__(
-        self,
-        supervisor_conf_path: Optional[str] = None,
-        nginx_conf_path: Optional[str] = None,
-        nginx_base_conf_path: Optional[str] = None,
-        nginx_https_conf_path: Optional[str] = None,
-    ):
-        self.supervisor_conf_path = (
-            supervisor_conf_path if supervisor_conf_path else self.SUPERVISOR_CONF_PATH
-        )
-        self.nginx_conf_path = nginx_conf_path if nginx_conf_path else self.NGINX_CONF_PATH
-        self.nginx_base_conf_path = (
-            nginx_base_conf_path if nginx_base_conf_path else self.NGINX_BASE_CONF_PATH
-        )
-        self.nginx_https_conf_path = (
-            nginx_https_conf_path if nginx_https_conf_path else self.NGINX_HTTPS_CONF_PATH
-        )
-
-    def restart_nginx(self):
-        """
-        Restart nginx via supervisorctl.
-
-        Raises:
-            Exception: If the restart command fails or times out.
-        """
-
-        cmd = ["supervisorctl", "-c", self.supervisor_conf_path, "restart", "nginx"]
-
-        logger.info(f"Restarting nginx via supervisorctl: {' '.join(cmd)}")
-
-        if not os.path.exists(self.supervisor_conf_path):
-            raise Exception(
-                f"Supervisor configuration file not found at {self.supervisor_conf_path}"
-            )
-
-        try:
-            result = subprocess.run(
-                cmd,
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=30,  # 30 second timeout for restart
-            )
-
-            logger.info("Nginx restart completed successfully")
-            logger.debug(f"Supervisorctl stdout: {result.stdout}")
-
-            if result.stderr:
-                logger.debug(f"Supervisorctl stderr: {result.stderr}")
-
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Nginx restart failed with exit code {e.returncode}")
-            logger.error(f"Supervisorctl stderr: {e.stderr}")
-            logger.error(f"Supervisorctl stdout: {e.stdout}")
-            raise Exception("Nginx restart failed (see logs for more info)")
-
-        except subprocess.TimeoutExpired:
-            logger.error("Nginx restart command timed out")
-            raise Exception("Nginx restart command timed out")
-
-        except Exception as e:
-            logger.error(f"Unexpected error restarting nginx: {e}")
-            raise
-
-    def setup_nginx_base_config(self):
-        """
-        Set up nginx with the base configuration and restart nginx.
-
-        This configures nginx with HTTP-only settings, typically used during
-        initial setup or when HTTPS certificates are not yet available.
-
-        Raises:
-            Exception: If the configuration setup or restart fails.
-        """
-        logger.info("Setting up nginx with base configuration (no HTTPS)")
-
-        try:
-            if not os.path.exists(self.nginx_base_conf_path):
-                raise Exception(
-                    f"Base nginx configuration not found at {self.nginx_base_conf_path}"
-                )
-
-            with open(self.nginx_base_conf_path, "r") as src:
-                base_config = src.read()
-
-            with open(self.nginx_conf_path, "w") as dst:
-                dst.write(base_config)
-
-            logger.info(f"Base configuration written to {self.nginx_conf_path}")
-
-        except Exception as e:
-            logger.error(f"Failed to setup nginx base configuration: {e}")
-            raise
-
-        # Restart nginx to apply the new configuration
-        try:
-            self.restart_nginx()
-        except Exception as e:
-            logger.error(f"Failed to restart nginx: {e}")
-            raise
-
-    def setup_nginx_https_config(self):
-        """
-        Set up nginx with the base + HTTPS configuration and restart nginx.
-
-        This configures nginx with both HTTP and HTTPS settings, typically used
-        after SSL certificates have been obtained and are available.
-
-        Raises:
-            Exception: If the configuration setup or restart fails.
-        """
-        logger.info("Setting up nginx with base + HTTPS configuration")
-
-        try:
-            if not os.path.exists(self.nginx_base_conf_path):
-                raise Exception(
-                    f"Base nginx configuration not found at {self.nginx_base_conf_path}"
-                )
-            if not os.path.exists(self.nginx_https_conf_path):
-                raise Exception(
-                    f"HTTPS nginx configuration not found at {self.nginx_https_conf_path}"
-                )
-
-            # Read both configurations
-            with open(self.nginx_base_conf_path, "r") as src:
-                base_config = src.read()
-
-            with open(self.nginx_https_conf_path, "r") as src:
-                https_config = src.read()
-
-            # Combine configurations (base + https)
-            combined_config = base_config + "\n" + https_config
-
-            # Write combined configuration to nginx conf directory
-            with open(self.nginx_conf_path, "w") as dst:
-                dst.write(combined_config)
-
-            logger.info(f"Combined base + HTTPS configuration written to {self.nginx_conf_path}")
-
-        except Exception as e:
-            logger.error(f"Failed to setup nginx HTTPS configuration: {e}")
-            raise
-
-        # Restart nginx to apply the new configuration
-        try:
-            self.restart_nginx()
-        except Exception as e:
-            logger.error(f"Failed to restart nginx: {e}")
-            raise
-
-
-class CertbotWrapper:
-    """Wrapper class for certbot operations"""
-
-    def __init__(self, staging: bool = False):
-        self.staging = staging
-        self.server_url = (
-            "https://acme-staging-v02.api.letsencrypt.org/directory"
-            if staging
-            else "https://acme-v02.api.letsencrypt.org/directory"
-        )
-
-    def obtain_certificate_with_csr(
-        self, email: str, webroot_path: str, csr_pem: bytes, account_key_pem: bytes
-    ) -> bytes:
-        """
-        Obtain certificate using certbot with a pre-generated CSR.
-
-        Args:
-            email (str): Email for Let's Encrypt account
-            webroot_path (str): Path where ACME challenges will be served
-            csr_pem (bytes): PEM-encoded Certificate Signing Request
-            account_key_pem (bytes): PEM-encoded account key for Let's Encrypt
-
-        Returns:
-            bytes: Certificate chain in PEM format
-
-        Raises:
-            Exception: If certbot fails to obtain the certificate
-        """
-        with tempfile.TemporaryDirectory() as temp_dir:
-            temp_path = Path(temp_dir)
-
-            # Save CSR to temporary file
-            csr_file = temp_path / "csr.pem"
-            with open(csr_file, "wb") as f:
-                f.write(csr_pem)
-            os.chmod(csr_file, 0o600)
-
-            # Save account key to temporary file (for account management)
-            account_key_file = temp_path / "account_key.pem"
-            with open(account_key_file, "wb") as f:
-                f.write(account_key_pem)
-            os.chmod(account_key_file, 0o600)
-
-            # Prepare certbot command using CSR
-            fullchain_path = temp_path / "fullchain.pem"
-            cert_path = temp_path / "cert.pem"
-            chain_path = temp_path / "chain.pem"
-            cmd = [
-                "certbot",
-                "certonly",
-                "--webroot",
-                "--webroot-path",
-                webroot_path,
-                "--csr",
-                str(csr_file),
-                "--email",
-                email,
-                "--agree-tos",
-                "--non-interactive",
-                "--server",
-                self.server_url,
-                "--cert-path",
-                str(cert_path),
-                "--chain-path",
-                str(chain_path),
-                "--fullchain-path",
-                str(fullchain_path),
-            ]
-
-            logger.info(f"Running certbot command with CSR: {' '.join(cmd)}")
-
-            try:
-                result = subprocess.run(
-                    cmd,
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                    timeout=300,  # 5 minute timeout
-                )
-
-                logger.info("Certbot command completed successfully")
-                logger.debug(f"Certbot stdout: {result.stdout}")
-
-                if not os.path.exists(fullchain_path):
-                    logger.error(f"Fullchain file not found at expected path: {fullchain_path}")
-                    raise Exception("Fullchain file not found (see logs for more info)")
-
-                with open(fullchain_path, "rb") as f:
-                    fullchain_pem = f.read()
-
-                return fullchain_pem
-
-            except subprocess.CalledProcessError as e:
-                logger.error(f"Certbot command failed with exit code {e.returncode}")
-                logger.error(f"Certbot stderr: {e.stderr}")
-                logger.error(f"Certbot stdout: {e.stdout}")
-                raise Exception(f"Certbot failed: {e.stderr}")
-
-            except subprocess.TimeoutExpired:
-                logger.error("Certbot command timed out")
-                raise Exception("Certbot command timed out")
-
-            except Exception as e:
-                logger.error(f"Unexpected error running certbot: {e}")
-                raise
+logger = logging.getLogger("cert-manager")
 
 
 class CertificateManager:
@@ -314,6 +42,8 @@ class CertificateManager:
         cert_email: str,
         letsencrypt_staging: bool,
         letsencrypt_account_version: str,
+        cert_path: str = "/etc/nginx/ssl",
+        acme_path: str = "/acme-challenge/",
     ):
         self.domain = domain
         self.dev_mode = dev_mode
@@ -323,8 +53,8 @@ class CertificateManager:
         self.letsencrypt_account_version = letsencrypt_account_version
         self.supervisor = Supervisor()
 
-        self.cert_path = Path("/etc/nginx/ssl/")
-        self.acme_path = Path("/acme-challenge/")
+        self.cert_path = Path(cert_path)
+        self.acme_path = Path(acme_path)
 
         # Ensure directories exist
         self.cert_path.mkdir(exist_ok=True)
@@ -735,8 +465,11 @@ class CertificateManager:
             except Exception as e:
                 logger.error(f"Failed to setup and restart Nginx: {e}")
 
-    def run(self):
-        """Main run loop"""
+    def startup_init(self):
+        """Initialization tasks to run on startup."""
+
+        # TODO: merge different logic that deletes certs into is_cert_valid
+        # and also add a condition where the key must have been generated by the current version?
 
         # If in production (or staging), delete any existing self-signed certificate
         try:
@@ -776,6 +509,12 @@ class CertificateManager:
         except Exception as e:
             logger.error(f"Initial certificate management failed: {e}")
 
+    def run(self):
+        """Main run loop"""
+
+        # Should clean the current certs if needed (depends on current state and cmgr config)
+        self.startup_init()
+
         # Schedule periodic cert management (everyday at midnight)
         try:
             schedule.every().day.at("00:00").do(self.manage_cert_creation_and_renewal)
@@ -791,30 +530,3 @@ class CertificateManager:
                 logger.error(f"Failed while running scheduled tasks: {e}")
 
             time.sleep(3600 * 6)  # Check every 6 hours
-
-
-if __name__ == "__main__":
-    dev_mode = os.getenv("DEV_MODE", "false").lower() == "true"
-    letsencrypt_staging = os.getenv("LETSENCRYPT_STAGING", "false").lower() == "true"
-    if dev_mode or letsencrypt_staging:
-        logger.setLevel(logging.DEBUG)
-        logger.debug("Logging set to DEBUG level due to dev mode or staging")
-
-    domain = os.getenv("DOMAIN", "localhost")
-    cert_email = os.getenv("EMAIL", "certbot@concrete-security.com")
-    letsencrypt_account_version = os.getenv("LETSENCRYPT_ACCOUNT_VERSION", "v1")
-
-    manager = CertificateManager(
-        domain=domain,
-        dev_mode=dev_mode,
-        cert_email=cert_email,
-        letsencrypt_staging=letsencrypt_staging,
-        letsencrypt_account_version=letsencrypt_account_version,
-    )
-    try:
-        manager.run()
-    except KeyboardInterrupt:
-        logger.info("Certificate manager stopped")
-    except Exception as e:
-        logger.error(f"Certificate manager error: {e}")
-        sys.exit(1)
