@@ -3,6 +3,7 @@ SHELL := /bin/bash
 # Docker Compose files
 COMPOSE_FILE = docker-compose.yml
 DEV_COMPOSE_FILE = docker-compose.dev.override.yml
+HS_COMPOSE_FILE = docker-compose.hs.override.yml
 
 # Service endpoints - all traffic goes through nginx proxy
 NGINX_URL = https://localhost
@@ -15,7 +16,7 @@ DEV_FLAG = $(if $(filter true,$(DEV)),--dev,)
 # Python runner command
 PYTHON_RUNNER ?= uv run
 
-.PHONY: help dev-full dev-up dev-down prod prod-up prod-down prod-wait prod-test test-all test-health test-attestation test-vllm test-redirect test-acme test-certificate wait-services
+.PHONY: help dev-full dev-up dev-down hs-up hs-down test-all test-health test-attestation test-vllm test-redirect test-acme test-certificate wait-services
 
 help:
 	@echo "CVM (Confidential Virtual Machine) - Build, Run, and Test"
@@ -25,6 +26,8 @@ help:
 	@echo "  dev-full      Full dev workflow: build, up, wait, test"
 	@echo "  dev-up        Start services in development mode"
 	@echo "  dev-down      Stop development services"
+	@echo "  hs-up         Start services in a Hyperstack environment"
+	@echo "  hs-down       Stop services in a Hyperstack environment"
 	@echo ""
 	@echo "🧪 Test Commands:"
 	@echo "  test-all      Run all tests via Python test script"
@@ -61,6 +64,14 @@ dev-up:
 dev-down:
 	@echo "🛑 Stopping development services..."
 	docker compose -f $(COMPOSE_FILE) -f $(DEV_COMPOSE_FILE) down
+
+hs-up:
+	@echo "🚀 Starting services in Hyperstack environment..."
+	docker compose -f $(COMPOSE_FILE) -f $(HS_COMPOSE_FILE) up -d --build
+
+hs-down:
+	@echo "🛑 Stopping Hyperstack services..."
+	docker compose -f $(COMPOSE_FILE) -f $(HS_COMPOSE_FILE) down
 
 wait-services:
 	$(PYTHON_RUNNER) test_cvm.py $(DEV_FLAG) --wait --base-url $(NGINX_URL)
