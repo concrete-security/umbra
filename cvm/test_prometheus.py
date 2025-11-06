@@ -1,6 +1,7 @@
 import subprocess
 import pytest
 import json
+import csv
 import re
 
 from pprint import pprint
@@ -29,3 +30,20 @@ def test_prometheus_endpoint_target_api():
     print(f"\n->{PROMETHEUS_URL}/api/v1/targets:\n{response}")
     data = json.loads(response)
     pprint(data, indent=5)
+
+
+def test_prometheus_list_all_vllm_metrics():
+    entries = set()
+    output_file = '../../monitoring/vllm_metrics.csv'
+    raw = run_in_prometheus(f"wget -qO- {VLLM_URL}")
+
+    for line in raw.splitlines():
+        if line.startswith('# HELP'):
+            parts = line.split(' ', 3)
+            _, _, name, desc = parts
+            entries.add((name, desc))
+
+    with open(output_file, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["metric", "description"])
+        w.writerows(sorted(entries))

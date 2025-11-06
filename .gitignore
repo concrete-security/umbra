@@ -10,3 +10,4 @@ build/
 __pypackages__/
 .pytest_cache
 monitoring/prometheus_data/
+monitoring/vllm_metrics.csv
