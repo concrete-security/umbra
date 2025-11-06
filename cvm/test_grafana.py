@@ -4,8 +4,8 @@ from pprint import pprint
 
 PROMETHEUS_SERVICE_NAME = "prometheus"
 PROMETHEUS_URL = f"http://{PROMETHEUS_SERVICE_NAME}:9090"
-GRAFANA_URL = "localhost:4000"
 
+GRAFANA_URL = "localhost:4000"
 GRAFANA_USER = GRAFANA_PASS = "admin"
 
 CMD = f'curl -fsS http://{GRAFANA_USER}:{GRAFANA_PASS}@{GRAFANA_URL}'
