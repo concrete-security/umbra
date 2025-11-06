@@ -8,6 +8,8 @@ GRAFANA_URL = "localhost:4000"
 
 GRAFANA_USER = GRAFANA_PASS = "admin"
 
+CMD = f'curl -fsS http://{GRAFANA_USER}:{GRAFANA_PASS}@{GRAFANA_URL}'
+
 def run_in_grafana(cmd: str) -> str:
     full_cmd = ["docker", "exec", "grafana", "sh", "-c", cmd]
     result = subprocess.run(full_cmd, capture_output=True, text=True)
@@ -17,20 +19,16 @@ def run_in_grafana(cmd: str) -> str:
 
 
 def test_grafana_health():
-    cmd = f"wget -qO- http://{GRAFANA_USER}:{GRAFANA_PASS}@{GRAFANA_URL}/api/health"
-    response = run_in_grafana(cmd)
+    response = run_in_grafana(f"{CMD}/api/health")
     response = json.loads(response)
     print(f"\n-> http://{GRAFANA_URL}/api/health:\n{response}")
     assert response["database"] == "ok", f"Database KO: `{response}`"
 
 
 def test_grafana_datasource_prometheus():
-    cmd = f"wget -qO- http://{GRAFANA_USER}:{GRAFANA_PASS}@{GRAFANA_URL}/api/datasources"
-    response = run_in_grafana(cmd)
+    response = run_in_grafana(f"{CMD}/api/datasources")
     data = json.loads(response)[0]
-
     pprint(data, indent=5)
-
     assert data["type"] == PROMETHEUS_SERVICE_NAME, f"Got `{data['type']}`, expected `{PROMETHEUS_SERVICE_NAME}`"
     assert data["url"] == PROMETHEUS_URL, f"Got `{data['url']}`, expected `{PROMETHEUS_URL}`"
     # Grafana queries Prometheus via the backend, not from the browser

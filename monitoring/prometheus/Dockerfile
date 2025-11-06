@@ -1,4 +1,4 @@
-FROM prom/prometheus:latest
+FROM prom/prometheus@sha256:49214755b6153f90a597adcbff0252cc61069f8ab69ce8411285cd4a560e8038
 
 WORKDIR /app
 
