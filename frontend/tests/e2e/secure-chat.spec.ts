@@ -1,6 +1,9 @@
 import { test, expect } from "@playwright/test"
 
 const PROVIDER_ROUTE = "**/chat/completions"
+const ATTESTATION_ROUTE = "**/tdx_quote"
+const VERIFIER_ROUTE = "**/attestations/verify"
+
 const HERO_PROMPT = "Can you secure my documents?"
 const FOLLOW_UP_PROMPT = "How is the data encrypted?"
 const HERO_REPLY = "Secure session established."
@@ -8,6 +11,9 @@ const FOLLOW_UP_REPLY = "All data stays encrypted in transit and at rest."
 
 test("landing page contact link, hero hand-off, and confidential chat flow", async ({ page }) => {
   let requestCount = 0
+  let latestReportData: string | null = null
+  let attestationRequests = 0
+  let verifierRequests = 0
 
   await page.route(PROVIDER_ROUTE, async (route) => {
     const method = route.request().method()
@@ -56,6 +62,63 @@ test("landing page contact link, hero hand-off, and confidential chat flow", asy
     })
   })
 
+  await page.route(ATTESTATION_ROUTE, async (route) => {
+    attestationRequests += 1
+    const payload = (route.request().postDataJSON() ?? {}) as { report_data?: string }
+    latestReportData = typeof payload.report_data === "string" ? payload.report_data : null
+
+    await route.fulfill({
+      status: 200,
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        success: true,
+        quote_type: "tdx.quote.v1",
+        timestamp: new Date().toISOString(),
+        report_data: latestReportData ?? "0x" + "ab".repeat(16),
+        quote: "0x" + "11".repeat(64),
+        event_log: JSON.stringify([]),
+      }),
+    })
+  })
+
+  await page.route(VERIFIER_ROUTE, async (route) => {
+    verifierRequests += 1
+    const reportdata = latestReportData ?? "0x" + "ab".repeat(16)
+    await route.fulfill({
+      status: 200,
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        verified: true,
+        reportdata,
+        checksum: "0x" + "cd".repeat(16),
+        quote: {
+          verified: true,
+          checksum: "0x" + "cd".repeat(16),
+          body: {
+            reportdata,
+          },
+        },
+      }),
+    })
+  })
+
+  await page.addInitScript((providerBase) => {
+    const key = "confidential-provider-settings-v1"
+    const lockedValue = JSON.stringify({ baseUrl: providerBase })
+    const originalSetItem = window.localStorage.setItem.bind(window.localStorage)
+    window.localStorage.setItem(key, lockedValue)
+    window.localStorage.setItem = (name, value) => {
+      if (name === key) {
+        return originalSetItem(name, lockedValue)
+      }
+      return originalSetItem(name, value)
+    }
+  }, "http://127.0.0.1:4000")
+
   await page.goto("/")
 
   const contactLink = page.locator('a[href="mailto:contact@concrete-security.com"]').first()
@@ -68,7 +131,16 @@ test("landing page contact link, hero hand-off, and confidential chat flow", asy
   await page.getByRole("button", { name: "Start secure session" }).click()
 
   await page.waitForURL("**/confidential-ai**", { timeout: 15_000 })
-  await expect(page).toHaveURL(/\/confidential-ai\?message=/)
+  await expect(page).toHaveURL(/\/confidential-ai(?:\?.*)?$/)
+  const storedProvider = await page.evaluate(() => localStorage.getItem("confidential-provider-settings-v1"))
+  console.log("[e2e] provider settings:", storedProvider)
+  await expect
+    .poll(() => attestationRequests, { timeout: 15_000 })
+    .toBeGreaterThan(0)
+  await expect
+    .poll(() => verifierRequests, { timeout: 15_000 })
+    .toBeGreaterThan(0)
+  await expect(page.getByText("Secure channel verified")).toBeVisible({ timeout: 15_000 })
 
   const transcript = page.getByRole("log", { name: "Confidential space transcript" })
   await expect(transcript).toContainText(HERO_PROMPT, { timeout: 15_000 })

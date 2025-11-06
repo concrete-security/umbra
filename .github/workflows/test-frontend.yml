@@ -43,6 +43,8 @@ jobs:
         with:
           version: 1.56.0
 
-      - name: Run Playwright tests
-        run: pnpm test:e2e
+      - name: Run unit + e2e tests
+        run: make test-ci
         working-directory: frontend
+        env:
+          FORM_TOKEN_SECRET: github-actions-form-token

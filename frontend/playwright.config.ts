@@ -21,13 +21,14 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: "pnpm dev -- --hostname 127.0.0.1 --port 3000",
+    command: "pnpm dev --hostname 127.0.0.1 --port 3000",
     url: "http://127.0.0.1:3000",
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,
     env: {
       NEXT_PUBLIC_VLLM_BASE_URL: "http://127.0.0.1:4000",
       NEXT_PUBLIC_VLLM_MODEL: "test-model",
+      FORM_TOKEN_SECRET: process.env.FORM_TOKEN_SECRET ?? "test-form-token",
     },
   },
 })
