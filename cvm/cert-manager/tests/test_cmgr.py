@@ -1330,6 +1330,117 @@ class TestCertificateManagerIntegration:
         mock_day.at.assert_called_with("00:00")
         mock_at.do.assert_called_once()
 
+    def test_force_delete_cert_files_production_letsencrypt_prod(
+        self, temp_dir, mock_letsencrypt_prod_cert, mock_private_key
+    ):
+        """Test force delete removes production Let's Encrypt certificate even in production mode."""
+        # Create manager in production mode with force delete enabled
+        manager = CertificateManager(
+            domain="test.example.com",
+            dev_mode=False,
+            cert_email="test@example.com",
+            letsencrypt_staging=False,
+            letsencrypt_account_version="v1",
+            cert_path=temp_dir,
+            acme_path=temp_dir / "acme",
+            force_rm_cert_files=True,  # This is the key - force delete is enabled
+        )
+
+        # Save a production Let's Encrypt certificate
+        manager.save_certificate_and_key(mock_letsencrypt_prod_cert, mock_private_key)
+
+        # Verify files exist before force delete
+        assert (temp_dir / "cert.pem").exists()
+        assert (temp_dir / "key.pem").exists()
+
+        with patch.object(manager, "emit_new_cert_event") as mock_emit:
+            with patch.object(manager.supervisor, "setup_nginx_https_config") as mock_setup_nginx:
+                with patch.object(manager, "manage_cert_creation_and_renewal") as mock_manage:
+                    manager.startup_init()
+
+                    # Files should be deleted despite being production Let's Encrypt certs in production mode
+                    assert not (temp_dir / "cert.pem").exists()
+                    assert not (temp_dir / "key.pem").exists()
+
+                    # Should not emit event or setup nginx since cert was deleted
+                    mock_emit.assert_not_called()
+                    mock_setup_nginx.assert_not_called()
+                    mock_manage.assert_called_once()
+
+    def test_force_delete_cert_files_disabled_keeps_production_cert(
+        self, temp_dir, mock_letsencrypt_prod_cert, mock_private_key
+    ):
+        """Test that production certs are kept when force delete is disabled (default behavior)."""
+        # Create manager in production mode with force delete disabled (default)
+        manager = CertificateManager(
+            domain="test.example.com",
+            dev_mode=False,
+            cert_email="test@example.com",
+            letsencrypt_staging=False,
+            letsencrypt_account_version="v1",
+            cert_path=temp_dir,
+            acme_path=temp_dir / "acme",
+            force_rm_cert_files=False,  # Explicitly disabled for clarity
+        )
+
+        # Save a production Let's Encrypt certificate
+        manager.save_certificate_and_key(mock_letsencrypt_prod_cert, mock_private_key)
+
+        # Verify files exist before startup
+        assert (temp_dir / "cert.pem").exists()
+        assert (temp_dir / "key.pem").exists()
+
+        with patch.object(manager, "emit_new_cert_event") as mock_emit:
+            with patch.object(manager.supervisor, "setup_nginx_https_config") as mock_setup_nginx:
+                with patch.object(manager, "manage_cert_creation_and_renewal") as mock_manage:
+                    manager.startup_init()
+
+                    # Files should still exist (normal behavior - prod certs are kept)
+                    assert (temp_dir / "cert.pem").exists()
+                    assert (temp_dir / "key.pem").exists()
+
+                    # Should emit event and setup nginx since cert exists and is valid
+                    mock_emit.assert_called_once()
+                    mock_setup_nginx.assert_called_once()
+                    mock_manage.assert_called_once()
+
+    def test_force_delete_cert_files_staging_cert_in_production(
+        self, temp_dir, mock_letsencrypt_staging_cert, mock_private_key
+    ):
+        """Test force delete removes staging certificate in production mode (edge case coverage)."""
+        # Create manager in production mode with force delete enabled
+        manager = CertificateManager(
+            domain="test.example.com",
+            dev_mode=False,
+            cert_email="test@example.com",
+            letsencrypt_staging=False,  # Production mode, staging disabled
+            letsencrypt_account_version="v1",
+            cert_path=temp_dir,
+            acme_path=temp_dir / "acme",
+            force_rm_cert_files=True,
+        )
+
+        # Save a staging Let's Encrypt certificate
+        manager.save_certificate_and_key(mock_letsencrypt_staging_cert, mock_private_key)
+
+        # Verify files exist before force delete
+        assert (temp_dir / "cert.pem").exists()
+        assert (temp_dir / "key.pem").exists()
+
+        with patch.object(manager, "emit_new_cert_event") as mock_emit:
+            with patch.object(manager.supervisor, "setup_nginx_https_config") as mock_setup_nginx:
+                with patch.object(manager, "manage_cert_creation_and_renewal") as mock_manage:
+                    manager.startup_init()
+
+                    # Files should be deleted by force delete (happens first, before staging check)
+                    assert not (temp_dir / "cert.pem").exists()
+                    assert not (temp_dir / "key.pem").exists()
+
+                    # Should not emit event or setup nginx since cert was deleted
+                    mock_emit.assert_not_called()
+                    mock_setup_nginx.assert_not_called()
+                    mock_manage.assert_called_once()
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
