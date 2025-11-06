@@ -4,6 +4,7 @@ import { AuthenticatedAccessError, requireAdminUser } from "@/lib/auth"
 import { createSupabaseRouteHandlerClient } from "@/lib/supabase/route-handler"
 import { createSupabaseServiceRoleClient } from "@/lib/supabase/service-role"
 import { sendWaitlistActivationEmail } from "@/lib/email/templates/waitlist-activation"
+import { CrossOriginRequestError, ensureSameOrigin } from "@/lib/security/origin"
 
 function resolveAppUrl(request: Request): string {
   if (process.env.NEXT_PUBLIC_APP_URL) {
@@ -25,6 +26,15 @@ function resolveAppUrl(request: Request): string {
 }
 
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
+  try {
+    ensureSameOrigin(request)
+  } catch (error) {
+    if (error instanceof CrossOriginRequestError) {
+      return NextResponse.json({ error: error.message }, { status: 403 })
+    }
+    throw error
+  }
+
   const supabase = await createSupabaseRouteHandlerClient()
 
   try {
