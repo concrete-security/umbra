@@ -9,6 +9,28 @@ type WaitlistActivationArgs = {
 
 const SUBJECT = "Your Umbra access link"
 
+function escapeHtml(value: string | null | undefined) {
+  if (!value) {
+    return ""
+  }
+  return value.replace(/[&<>"']/g, (char) => {
+    switch (char) {
+      case "&":
+        return "&amp;"
+      case "<":
+        return "&lt;"
+      case ">":
+        return "&gt;"
+      case '"':
+        return "&quot;"
+      case "'":
+        return "&#39;"
+      default:
+        return char
+    }
+  })
+}
+
 function buildPlainText({ magicLink, company, useCase }: { magicLink: string; company?: string | null; useCase?: string | null }): string {
   const lines = [
     "Hi there,",
@@ -84,8 +106,8 @@ function buildHtml({ magicLink, company, useCase }: { magicLink: string; company
             <td style="padding-top:24px;font-size:14px;line-height:22px;color:#1F1E28;">
               <div style="font-weight:600;color:#08070B;margin-bottom:8px;">Context we noted</div>
               <ul style="padding-left:18px;margin:0;">
-                ${company ? `<li style="margin-bottom:6px;"><strong>Company:</strong> ${company}</li>` : ""}
-                ${useCase ? `<li><strong>Focus:</strong> ${useCase}</li>` : ""}
+                ${company ? `<li style="margin-bottom:6px;"><strong>Company:</strong> ${escapeHtml(company)}</li>` : ""}
+                ${useCase ? `<li><strong>Focus:</strong> ${escapeHtml(useCase)}</li>` : ""}
               </ul>
             </td>
           </tr>`

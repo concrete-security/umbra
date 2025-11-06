@@ -1,10 +1,11 @@
 "use client"
 
-import { useState, type FormEvent } from "react"
+import { useRef, useState, type FormEvent } from "react"
 import Image from "next/image"
 import { ArrowRight, Mail, Building2, Sparkles } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
+import { useFormToken } from "@/hooks/use-form-token"
 
 const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
@@ -14,10 +15,24 @@ export function PreRegisterCard() {
   const [useCase, setUseCase] = useState("")
   const [status, setStatus] = useState<"idle" | "loading" | "success">("idle")
   const [error, setError] = useState<string | null>(null)
+  const honeypotRef = useRef<HTMLInputElement | null>(null)
+  const { token: formToken, loading: formTokenLoading, error: formTokenError, refreshToken } = useFormToken()
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     if (status === "loading") {
+      return
+    }
+
+    const checkpointValue = honeypotRef.current?.value?.trim() ?? ""
+    if (checkpointValue.length > 0) {
+      setError("Unable to submit this request.")
+      return
+    }
+
+    if (!formToken) {
+      setError("Secure form token unavailable. Please refresh and try again.")
+      void refreshToken()
       return
     }
 
@@ -42,6 +57,8 @@ export function PreRegisterCard() {
           email: trimmedEmail,
           company: company.trim() || undefined,
           use_case: useCase.trim() || undefined,
+          form_token: formToken,
+          checkpoint: checkpointValue || undefined,
         }),
       })
 
@@ -57,6 +74,8 @@ export function PreRegisterCard() {
       setEmail("")
       setCompany("")
       setUseCase("")
+      honeypotRef.current && (honeypotRef.current.value = "")
+      void refreshToken()
     } catch (err) {
       console.error("Pre-registration request failed", err)
       setError("We couldn't save your request. Please try again in a moment.")
@@ -90,6 +109,16 @@ export function PreRegisterCard() {
         </div>
 
         <form onSubmit={handleSubmit} className="flex w-full flex-col gap-4 md:max-w-sm">
+          <input
+            ref={honeypotRef}
+            type="text"
+            name="workspace-url"
+            tabIndex={-1}
+            autoComplete="off"
+            aria-hidden="true"
+            className="absolute h-px w-px opacity-0"
+            defaultValue=""
+          />
           <label htmlFor="pre-register-email" className="flex items-center gap-2 rounded-2xl border border-white/15 bg-white/5 px-4 py-3 text-sm text-white/80 focus-within:border-white/50 focus-within:bg-white/10 focus-within:text-white">
             <Mail className="size-4 text-white/60" />
             <input
@@ -127,6 +156,7 @@ export function PreRegisterCard() {
           />
 
           {error ? <p className="text-xs font-medium text-[#fda4af]">{error}</p> : null}
+          {formTokenError ? <p className="text-xs font-medium text-amber-200">{formTokenError}</p> : null}
           {status === "success" ? (
             <p className="rounded-2xl border border-emerald-400/30 bg-emerald-400/10 px-4 py-3 text-sm text-emerald-100">
               You&apos;re on the list. We&apos;ll reach out as we expand access.
@@ -136,7 +166,7 @@ export function PreRegisterCard() {
           <Button
             type="submit"
             className="h-12 rounded-full bg-white px-6 text-sm font-semibold text-[#060511] transition hover:bg-white/90"
-            disabled={status === "loading" || status === "success"}
+            disabled={status === "loading" || status === "success" || formTokenLoading || !formToken}
           >
             {status === "loading" ? "Submitting…" : status === "success" ? "Request received" : "Request early access"}
             <ArrowRight className="ml-2 size-4" />

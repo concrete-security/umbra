@@ -11,6 +11,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { ForceLightTheme } from "@/components/force-light-theme"
 import { createSupabaseBrowserClient } from "@/lib/supabase/client"
 import { isAuthSessionMissingError } from "@/lib/supabase/errors"
+import { useFormToken } from "@/hooks/use-form-token"
 
 const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
@@ -50,6 +51,13 @@ function SignInForm() {
   const [waitlistUseCase, setWaitlistUseCase] = useState("")
   const [waitlistStatus, setWaitlistStatus] = useState<"idle" | "loading" | "success">("idle")
   const [waitlistError, setWaitlistError] = useState<string | null>(null)
+  const waitlistHoneypotRef = useRef<HTMLInputElement | null>(null)
+  const {
+    token: waitlistFormToken,
+    loading: waitlistFormTokenLoading,
+    error: waitlistFormTokenError,
+    refreshToken: refreshWaitlistFormToken,
+  } = useFormToken()
 
   const redirectTo = sanitizeRedirect(searchParams.get("redirect"))
   const authRequired = searchParams.get("auth") === "required"
@@ -141,6 +149,18 @@ function SignInForm() {
       return
     }
 
+    const checkpointValue = waitlistHoneypotRef.current?.value?.trim() ?? ""
+    if (checkpointValue.length > 0) {
+      setWaitlistError("Unable to process the request.")
+      return
+    }
+
+    if (!waitlistFormToken) {
+      setWaitlistError("Secure form token unavailable. Please refresh and try again.")
+      void refreshWaitlistFormToken()
+      return
+    }
+
     const trimmedEmail = waitlistEmail.trim()
     if (!trimmedEmail) {
       setWaitlistError("Add a work email so we know where to reach you.")
@@ -162,6 +182,8 @@ function SignInForm() {
           email: trimmedEmail,
           company: waitlistCompany.trim() || undefined,
           use_case: waitlistUseCase.trim() || undefined,
+          form_token: waitlistFormToken,
+          checkpoint: checkpointValue || undefined,
         }),
       })
 
@@ -177,6 +199,10 @@ function SignInForm() {
       setWaitlistEmail("")
       setWaitlistCompany("")
       setWaitlistUseCase("")
+      if (waitlistHoneypotRef.current) {
+        waitlistHoneypotRef.current.value = ""
+      }
+      void refreshWaitlistFormToken()
     } catch (err) {
       console.error("Pre-registration request failed", err)
       setWaitlistError("We couldn't save your request. Please try again in a moment.")
@@ -303,6 +329,12 @@ function SignInForm() {
                   </div>
                 ) : null}
 
+                {waitlistFormTokenError ? (
+                  <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                    {waitlistFormTokenError}
+                  </div>
+                ) : null}
+
                 {waitlistStatus === "success" ? (
                   <div className="rounded-2xl border border-emerald-400/30 bg-emerald-400/10 px-4 py-3 text-sm text-emerald-700">
                     You're on the list. We'll reach out as we expand access.
@@ -310,6 +342,16 @@ function SignInForm() {
                 ) : null}
 
                 <form onSubmit={handleWaitlistSubmit} className="space-y-4">
+                  <input
+                    ref={waitlistHoneypotRef}
+                    type="text"
+                    name="workspace-url"
+                    tabIndex={-1}
+                    autoComplete="off"
+                    aria-hidden="true"
+                    className="absolute h-px w-px opacity-0"
+                    defaultValue=""
+                  />
                   <label htmlFor="waitlist-email" className="flex items-center gap-2 rounded-2xl border border-[#d7d5eb] bg-white px-4 py-3 text-sm text-[#1F1E28]/80 focus-within:border-[#1B0986] focus-within:bg-white focus-within:text-[#08070B]">
                     <Mail className="size-4 text-[#1B0986]" />
                     <input
@@ -349,7 +391,12 @@ function SignInForm() {
                   <Button
                     type="submit"
                     className="h-12 w-full rounded-full bg-[#08070B] px-6 text-sm font-semibold text-white transition hover:bg-[#111015]"
-                    disabled={waitlistStatus === "loading" || waitlistStatus === "success"}
+                    disabled={
+                      waitlistStatus === "loading" ||
+                      waitlistStatus === "success" ||
+                      waitlistFormTokenLoading ||
+                      !waitlistFormToken
+                    }
                   >
                     {waitlistStatus === "loading" ? "Submitting…" : waitlistStatus === "success" ? "Request received" : "Request early access"}
                     <ArrowRight className="ml-2 size-4" />

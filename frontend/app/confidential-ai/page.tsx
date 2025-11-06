@@ -189,14 +189,11 @@ function getReadableError(error: unknown): string {
 }
 
 function generateReportData(bytes = 32) {
-  const buffer = new Uint8Array(Math.max(1, bytes))
-  if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
-    crypto.getRandomValues(buffer)
-  } else {
-    for (let index = 0; index < buffer.length; index++) {
-      buffer[index] = Math.floor(Math.random() * 256)
-    }
+  if (typeof crypto === "undefined" || typeof crypto.getRandomValues !== "function") {
+    throw new Error("Secure randomness is unavailable in this environment.")
   }
+  const buffer = new Uint8Array(Math.max(1, bytes))
+  crypto.getRandomValues(buffer)
   return Array.from(buffer, (value) => value.toString(16).padStart(2, "0")).join("")
 }
 
@@ -752,7 +749,17 @@ function ConfidentialAIContent() {
     const controller = new AbortController()
     proofAbortRef.current = controller
 
-    const reportData = generateReportData()
+    let reportData: string
+    try {
+      reportData = generateReportData()
+    } catch (error) {
+      const readable = getReadableError(error)
+      console.error("[Attestation] Unable to generate report data", error)
+      setProofState({ status: "error", reportData: "", error: readable, sourceBaseUrl: baseUrl })
+      setVerificationState({ status: "idle" })
+      return
+    }
+
     console.log("[Attestation] Starting attestation request", { baseUrl, reportData: formatReportDataPreview(reportData) })
     setProofState({ status: "loading", reportData, sourceBaseUrl: baseUrl })
     setVerificationState({ status: "idle" })
@@ -2191,7 +2198,7 @@ function ConfidentialAIContent() {
                       }}
                       onKeyDown={onKeyDown}
                       disabled={isSending || guestRestrictionActive}
-                      placeholder="Shift+Enter for a newline. Messages and attachments stay encrypted end-to-end."
+                      placeholder="Shift+Enter for a newline. Messages and attachments stay inside this secure workspace."
                       className="h-[56px] w-full resize-none rounded-2xl border border-border/40 bg-white px-4 py-3 text-sm text-foreground placeholder:text-muted-foreground/70 shadow-sm focus:outline-none focus:ring-2 focus:ring-[#102A8C]/45 dark:border-border/60 dark:bg-card/15"
                       rows={2}
                     />

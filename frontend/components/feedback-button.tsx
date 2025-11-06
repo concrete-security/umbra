@@ -1,11 +1,12 @@
 "use client"
 
-import { FormEvent, useState } from "react"
+import { FormEvent, useRef, useState } from "react"
 import { MessageSquare } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
+import { useFormToken } from "@/hooks/use-form-token"
 
 type FeedbackButtonProps = {
   source: "landing" | "confidential"
@@ -23,6 +24,8 @@ export function FeedbackButton({ source, position = "bottom-right" }: FeedbackBu
   const [form, setForm] = useState(initialFormState)
   const [status, setStatus] = useState<"idle" | "loading" | "success" | "error">("idle")
   const [error, setError] = useState<string | null>(null)
+  const honeypotRef = useRef<HTMLInputElement | null>(null)
+  const { token: formToken, loading: formTokenLoading, error: formTokenError, refreshToken } = useFormToken()
 
   const resetForm = () => {
     setForm(initialFormState)
@@ -33,6 +36,18 @@ export function FeedbackButton({ source, position = "bottom-right" }: FeedbackBu
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     if (status === "loading") return
+
+    const checkpointValue = honeypotRef.current?.value?.trim() ?? ""
+    if (checkpointValue.length > 0) {
+      setError("Unable to send feedback right now.")
+      return
+    }
+
+    if (!formToken) {
+      setError("Secure form token unavailable. Please try again.")
+      void refreshToken()
+      return
+    }
 
     setStatus("loading")
     setError(null)
@@ -48,6 +63,8 @@ export function FeedbackButton({ source, position = "bottom-right" }: FeedbackBu
           email: form.email,
           message: form.message,
           source,
+          form_token: formToken,
+          checkpoint: checkpointValue || undefined,
         }),
       })
 
@@ -57,6 +74,10 @@ export function FeedbackButton({ source, position = "bottom-right" }: FeedbackBu
       }
 
       setStatus("success")
+      if (honeypotRef.current) {
+        honeypotRef.current.value = ""
+      }
+      void refreshToken()
     } catch (err) {
       console.error("Feedback submission failed", err)
       setStatus("error")
@@ -91,6 +112,16 @@ export function FeedbackButton({ source, position = "bottom-right" }: FeedbackBu
             </DialogDescription>
           </DialogHeader>
           <form onSubmit={handleSubmit} className="flex flex-col gap-4 px-6 py-5">
+            <input
+              ref={honeypotRef}
+              type="text"
+              name="workspace-url"
+              tabIndex={-1}
+              autoComplete="off"
+              aria-hidden="true"
+              className="absolute h-px w-px opacity-0"
+              defaultValue=""
+            />
             <label className="text-sm font-medium text-[#1F1E28]">
               Name (optional)
               <input
@@ -126,6 +157,7 @@ export function FeedbackButton({ source, position = "bottom-right" }: FeedbackBu
               />
             </label>
             {error ? <p className="text-sm font-medium text-[#dc2626]">{error}</p> : null}
+            {formTokenError ? <p className="text-sm font-medium text-amber-600">{formTokenError}</p> : null}
             {status === "success" ? (
               <p className="rounded-2xl border border-emerald-400/40 bg-emerald-400/10 px-3 py-2 text-sm text-emerald-900">
                 Thanks for the signal. The team will review it shortly.
@@ -136,7 +168,7 @@ export function FeedbackButton({ source, position = "bottom-right" }: FeedbackBu
               <Button
                 type="submit"
                 className="rounded-full bg-[#1B0986] px-5 py-2 text-sm font-semibold text-white hover:bg-[#120463]"
-                disabled={status === "loading" || status === "success"}
+                disabled={status === "loading" || status === "success" || formTokenLoading || !formToken}
               >
                 {status === "loading" ? "Sending…" : status === "success" ? "Sent" : "Send feedback"}
               </Button>

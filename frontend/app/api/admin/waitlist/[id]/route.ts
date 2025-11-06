@@ -4,6 +4,7 @@ import { AuthenticatedAccessError, requireAdminUser } from "@/lib/auth"
 import { isWaitlistStatus } from "@/lib/waitlist"
 import { createSupabaseRouteHandlerClient } from "@/lib/supabase/route-handler"
 import { createSupabaseServiceRoleClient } from "@/lib/supabase/service-role"
+import { CrossOriginRequestError, UnsupportedContentTypeError, assertJsonRequest, ensureSameOrigin } from "@/lib/security/origin"
 
 type UpdatePayload = {
   status?: unknown
@@ -44,6 +45,19 @@ function sanitizePriority(value: unknown): number | null | undefined {
 }
 
 export async function PATCH(request: Request, { params }: { params: { id: string } }) {
+  try {
+    ensureSameOrigin(request)
+    assertJsonRequest(request)
+  } catch (error) {
+    if (error instanceof CrossOriginRequestError) {
+      return NextResponse.json({ error: error.message }, { status: 403 })
+    }
+    if (error instanceof UnsupportedContentTypeError) {
+      return NextResponse.json({ error: error.message }, { status: 415 })
+    }
+    throw error
+  }
+
   const supabase = await createSupabaseRouteHandlerClient()
 
   try {

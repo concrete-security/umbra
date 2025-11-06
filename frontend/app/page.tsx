@@ -228,14 +228,14 @@ export default function LandingPage() {
               <div className="relative flex flex-col gap-8 pt-4">
                 <div className="flex flex-col gap-6 text-center">
                   <p className="mx-auto max-w-[520px] text-base leading-7 text-[#1F1E28]">
-                    Query your confidential documents securely. Upload sensitive files and ask questions in a cryptographically
-                    secured environment. Every query is encrypted end-to-end with verifiable attestation.
+                    Query your confidential documents securely. Upload sensitive files and ask questions inside a locked-down
+                    confidential workspace. Every interaction stays within our protected channel and vetted runtime.
                   </p>
                 </div>
                 <form onSubmit={handleSubmit} className="flex flex-col gap-6">
                 <div className="flex items-center justify-center gap-2 text-xs font-semibold uppercase tracking-[0.24em] text-[#1F1E28]/70">
                   <Shield className="h-3.5 w-3.5 text-[#1B0986]" />
-                  <span>End-to-end encrypted</span>
+                  <span>Private channel · Secure workspace</span>
                 </div>
                 <div className="flex flex-col gap-4 rounded-[32px] border border-[#d7d5eb] bg-white/80 p-6 backdrop-blur">
                   {uploadedFiles.length > 0 && (
