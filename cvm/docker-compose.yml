@@ -30,7 +30,7 @@ services:
 
   # Combined Nginx reverse proxy and Certificate Manager
   nginx-cert-manager:
-    image: ghcr.io/concrete-security/cert-manager:latest
+    image: ghcr.io/concrete-security/cert-manager@sha256:57b49bd4d70f23a3d034c42273d5f2133a63bf46303786df1e4cddcdf15a2fae
     container_name: nginx-cert-manager
     ports:
       - "80:80"
@@ -42,6 +42,8 @@ services:
       # Used to versionize accounts: can change account by using another env variable
       # Useful in case an account reaches a rate limit
       - LETSENCRYPT_ACCOUNT_VERSION=v1
+      # Force removal of existing certificate files on startup
+      - FORCE_RM_CERT_FILES=false
     volumes:
       - tls-certs-keys:/etc/nginx/ssl/
       - /var/run/dstack.sock:/var/run/dstack.sock
@@ -52,7 +54,7 @@ services:
 
   # TDX Attestation service
   attestation-service:
-    image: ghcr.io/concrete-security/attestation-service:latest
+    image: ghcr.io/concrete-security/attestation-service@sha256:08744809468691ce0a3b37a388b95080a6ec64b2f946505c30ed7de622454a97
     container_name: attestation-service
     environment:
       - HOST=0.0.0.0
