@@ -1,4 +1,4 @@
-# Quick dev workflow for Concrete AI landing page
+# Quick dev workflow for Confidential AI landing page
 
 PORT ?= 3000
 
