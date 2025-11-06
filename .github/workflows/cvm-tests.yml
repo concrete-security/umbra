@@ -36,6 +36,9 @@ jobs:
           make dev-up
           make wait-services
 
+      - name: Docker ps -a
+        run: docker ps -a
+
       - name: Run CVM tests (dev mode)
         working-directory: ./cvm
         run: make test-all

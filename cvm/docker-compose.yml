@@ -50,17 +50,21 @@ services:
 
   prometheus:
     build:
-      context: ../monitoring
+      context: ../monitoring/prometheus
       dockerfile: Dockerfile
     container_name: prometheus
     depends_on:
       proxy_api:
         condition: service_started
-        restart: true
     networks:
       - vllm
     expose:
       - "9090"
+    environment:
+      - CONFIG_FILE=/etc/prometheus/prometheus.yml
+      - STORAGE_TSDB_PATH=/prometheus
+      - STORAGE_TSDB_RETENTION_TIME=15d
+      - LOG_LEVEL=debug
     restart: unless-stopped
 
   grafana:

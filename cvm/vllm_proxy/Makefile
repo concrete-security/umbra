@@ -22,9 +22,9 @@ tests:
 	@echo "\n\n- Running tests for network..."
 	@uv run pytest ../test_network.py
 	@echo "\n\n- Running tests for prometheus..."
-	@uv run pytest -v ../test_prometheus.py
+	@uv run pytest ../test_prometheus.py
 	@echo "\n\n- Running tests for grafana..."
-	@uv run pytest -v ../test_grafana.py
+	@uv run pytest ../test_grafana.py
 
 .PHONY: docker-build
 docker-build:
