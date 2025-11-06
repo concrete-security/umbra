@@ -528,6 +528,162 @@ class CVMTester:
             self._print_error(f"Attestation test failed: {str(e)}")
             return False
 
+    def test_cors(self) -> bool:
+        """Test CORS configuration on multiple endpoints"""
+        self._print_test_header("Testing CORS Configuration on Multiple Endpoints")
+
+        # Test endpoints - each with different request types
+        test_endpoints = [
+            {
+                'path': '/tdx_quote',
+                'name': 'TDX Quote (Attestation)',
+                'test_methods': ['OPTIONS', 'POST'],
+                'post_payload': {"report_data": "cors_test_data"}
+            },
+            {
+                'path': '/v1/models',
+                'name': 'VLLM Models',
+                'test_methods': ['OPTIONS', 'GET'],
+                'post_payload': None
+            },
+            {
+                'path': '/v1/chat/completions',
+                'name': 'VLLM Chat Completions',
+                'test_methods': ['OPTIONS', 'POST'],
+                'post_payload': {
+                    "model": "openai/gpt-oss-120b",
+                    "messages": [{"role": "user", "content": "CORS test"}],
+                    "max_tokens": 10
+                }
+            }
+        ]
+
+        # Test allowed origins
+        allowed_origins = [
+            "https://app.concrete-security.com",
+            "https://secure.concrete-security.com", 
+            "https://demo.vercel.app",
+            "https://my-app.vercel.app"
+        ]
+
+        try:
+            success = True
+
+            # Helper function to test CORS for a specific endpoint
+            def test_cors_for_endpoint(endpoint_info):
+                endpoint_success = True
+                path = endpoint_info['path']
+                name = endpoint_info['name']
+                
+                self._print_info(f"Testing {name} ({path})")
+
+                # Test OPTIONS preflight for allowed origins
+                for origin in allowed_origins:
+                    headers = {
+                        'Origin': origin,
+                        'Access-Control-Request-Method': 'POST' if 'POST' in endpoint_info['test_methods'] else 'GET',
+                    }
+                
+                    response = self.session.options(
+                        f"{self.base_url}{path}",
+                        headers=headers,
+                        verify=self.verify_ssl,
+                        timeout=3,
+                    )
+
+                    if response.status_code == 204:
+                        cors_origin = response.headers.get('Access-Control-Allow-Origin', '')
+                        allowed_methods = response.headers.get('Access-Control-Allow-Methods', '')
+                        
+                        if origin in cors_origin:
+                            self._print_success(f"  ✓ {name} OPTIONS working for {origin}")
+                        else:
+                            self._print_error(f"  ✗ {name} CORS failed for {origin}: got '{cors_origin}'")
+                            endpoint_success = False
+                            
+                        if 'GET' in allowed_methods and 'POST' in allowed_methods and 'OPTIONS' in allowed_methods:
+                            self._print_success(f"  ✓ {name} correct methods allowed: {allowed_methods}")
+                        else:
+                            self._print_error(f"  ✗ {name} incorrect allowed methods: {allowed_methods}")
+                            endpoint_success = False
+                    else:
+                        self._print_error(f"  ✗ {name} OPTIONS failed for {origin}: status {response.status_code}")
+                        endpoint_success = False
+
+                    # Test actual requests for allowed origin
+                    headers = {'Origin': origin}
+                    
+                    for method in endpoint_info['test_methods']:
+                        if method == 'OPTIONS':
+                            continue  # Already tested above
+                            
+                        try:
+                            if method == 'GET':
+                                response = self.session.get(
+                                    f"{self.base_url}{path}",
+                                    headers=headers,
+                                    verify=self.verify_ssl,
+                                    timeout=10,  # Longer timeout for VLLM
+                                )
+                            elif method == 'POST' and endpoint_info['post_payload']:
+                                response = self.session.post(
+                                    f"{self.base_url}{path}",
+                                    json=endpoint_info['post_payload'],
+                                    headers=headers,
+                                    verify=self.verify_ssl,
+                                    timeout=10,  # Longer timeout for VLLM
+                                )
+                            else:
+                                self._print_warning(f"  ~ {name} Unsupported method {method} for testing")
+
+                            cors_origin = response.headers.get('Access-Control-Allow-Origin', '')
+                            if origin in cors_origin:
+                                self._print_success(f"  ✓ {name} {method} request CORS working")
+                            else:
+                                self._print_error(f"  ✗ {name} {method} CORS failed: expected {origin}, got '{cors_origin}'")
+                                endpoint_success = False
+
+                        except requests.exceptions.RequestException as e:
+                            # For VLLM endpoints, some errors are expected in dev mode
+                            if path.startswith('/v1/') and self.dev_mode:
+                                self._print_info(f"  ~ {name} {method} request error (acceptable in dev): {str(e)[:100]}...")
+                            else:
+                                self._print_error(f"  ✗ {name} {method} request failed: {str(e)}")
+                                endpoint_success = False
+
+                # Test disallowed origin (just one per endpoint)
+                disallowed_origin = "https://malicious.com"
+                headers = {'Origin': disallowed_origin}
+                
+                response = self.session.options(
+                    f"{self.base_url}{path}",
+                    headers=headers,
+                    verify=self.verify_ssl,
+                    timeout=3,
+                )
+
+                cors_origin = response.headers.get('Access-Control-Allow-Origin', '')
+                if cors_origin == '' or cors_origin == 'null':
+                    self._print_success(f"  ✓ {name} correctly blocked disallowed origin")
+                elif disallowed_origin not in cors_origin:
+                    self._print_success(f"  ✓ {name} correctly blocked disallowed origin")
+                else:
+                    self._print_error(f"  ✗ {name} incorrectly allowed disallowed origin: {disallowed_origin}")
+                    endpoint_success = False
+
+                return endpoint_success
+
+            # Test each endpoint
+            for endpoint in test_endpoints:
+                if not test_cors_for_endpoint(endpoint):
+                    success = False
+
+            return success
+
+        except requests.exceptions.RequestException as e:
+            self._print_error(f"CORS test failed: {str(e)}")
+            return False
+
     def test_vllm(self) -> bool:
         """Test vLLM/mock vLLM endpoints"""
         self._print_test_header("Testing vLLM/Mock vLLM Endpoints")
@@ -611,6 +767,7 @@ class CVMTester:
             "acme": self.test_acme_challenge(),
             "health": self.test_health(),
             "attestation": self.test_attestation(),
+            "cors": self.test_cors(),
             "vllm": self.test_vllm(),
         }
 
@@ -699,6 +856,9 @@ Examples:
         "--attestation", action="store_true", help="Test attestation service endpoints"
     )
     parser.add_argument(
+        "--cors", action="store_true", help="Test CORS configuration"
+    )
+    parser.add_argument(
         "--vllm", action="store_true", help="Test vLLM/mock vLLM endpoints"
     )
 
@@ -713,6 +873,7 @@ Examples:
             args.acme,
             args.health,
             args.attestation,
+            args.cors,
             args.vllm,
         ]
     ):
@@ -751,6 +912,9 @@ Examples:
 
     if args.attestation:
         success &= tester.test_attestation()
+
+    if args.cors:
+        success &= tester.test_cors()
 
     if args.vllm:
         success &= tester.test_vllm()

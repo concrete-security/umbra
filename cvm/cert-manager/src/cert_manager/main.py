@@ -19,12 +19,15 @@ if __name__ == "__main__":
     cert_email = os.getenv("EMAIL", "certbot@concrete-security.com")
     letsencrypt_account_version = os.getenv("LETSENCRYPT_ACCOUNT_VERSION", "v1")
 
+    force_rm_cert_files = os.getenv("FORCE_RM_CERT_FILES", "false").lower() == "true"
+
     manager = CertificateManager(
         domain=domain,
         dev_mode=dev_mode,
         cert_email=cert_email,
         letsencrypt_staging=letsencrypt_staging,
         letsencrypt_account_version=letsencrypt_account_version,
+        force_rm_cert_files=force_rm_cert_files,
     )
     try:
         manager.run()

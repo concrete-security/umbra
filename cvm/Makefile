@@ -30,13 +30,14 @@ help:
 	@echo "  hs-down       Stop services in a Hyperstack environment"
 	@echo ""
 	@echo "🧪 Test Commands:"
-	@echo "  test-all      Run all tests via Python test script"
-	@echo "  test-health   Test health endpoint"
+	@echo "  test-all          Run all tests via Python test script"
+	@echo "  test-health       Test health endpoint"
 	@echo "  test-attestation  Test attestation service endpoints"
-	@echo "  test-vllm     Test vLLM/mock vLLM endpoints"
-	@echo "  test-redirect Test HTTP to HTTPS redirect"
-	@echo "  test-acme     Test ACME challenge endpoint"
+	@echo "  test-vllm         Test vLLM/mock vLLM endpoints"
+	@echo "  test-redirect     Test HTTP to HTTPS redirect"
+	@echo "  test-acme         Test ACME challenge endpoint"
 	@echo "  test-certificate  Test SSL certificate validation"
+	@echo "  test-cors         Test CORS configuration on multiple endpoints"
 	@echo ""
 	@echo "⚙️  Environment Variables:"
 	@echo "  DEV             Set to 'false' for production mode testing"
@@ -96,3 +97,6 @@ test-acme:
 
 test-certificate:
 	$(PYTHON_RUNNER) test_cvm.py $(DEV_FLAG) --certificate --base-url $(NGINX_URL)
+
+test-cors:
+	$(PYTHON_RUNNER) test_cvm.py $(DEV_FLAG) --cors --base-url $(NGINX_URL)

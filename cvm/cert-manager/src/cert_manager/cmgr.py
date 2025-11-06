@@ -21,6 +21,7 @@ from cryptography.hazmat.primitives.serialization import (
     PrivateFormat,
     NoEncryption,
 )
+from typing import List, Union
 import schedule
 from dstack_sdk import DstackClient
 
@@ -44,6 +45,7 @@ class CertificateManager:
         letsencrypt_account_version: str,
         cert_path: str = "/etc/nginx/ssl",
         acme_path: str = "/acme-challenge/",
+        force_rm_cert_files: bool = False,
     ):
         self.domain = domain
         self.dev_mode = dev_mode
@@ -58,6 +60,8 @@ class CertificateManager:
 
         # Ensure directories exist
         self.cert_path.mkdir(exist_ok=True)
+
+        self.force_rm_cert_files = force_rm_cert_files
 
         logger.info(f"Domain: {self.domain}, Dev mode: {self.dev_mode}")
 
@@ -121,7 +125,9 @@ class CertificateManager:
         # Derive EC key from the material
         return self.derive_ec_privatekey_from_key_material(key_material)
 
-    def create_lets_encrypt_cert(self, private_key: ec.EllipticCurvePrivateKey) -> x509.Certificate:
+    def create_lets_encrypt_cert(
+        self, private_key: ec.EllipticCurvePrivateKey
+    ) -> List[x509.Certificate]:
         """Create Let's Encrypt certificate using certbot"""
         logger.info("Creating Let's Encrypt certificate using certbot")
 
@@ -178,13 +184,17 @@ class CertificateManager:
             account_key_pem=account_key_pem,
         )
 
-        # Load certificate from PEM
-        cert = x509.load_pem_x509_certificate(fullchain_pem)
+        # Load certificate chain from PEM (handles fullchain)
+        certs = x509.load_pem_x509_certificates(fullchain_pem)
 
-        logger.info("Successfully obtained Let's Encrypt certificate using certbot")
-        return cert
+        logger.info(
+            f"Successfully obtained Let's Encrypt certificate chain using certbot ({len(certs)} certificates)"
+        )
+        return certs
 
-    def create_self_signed_cert(self, private_key: ec.EllipticCurvePrivateKey) -> x509.Certificate:
+    def create_self_signed_cert(
+        self, private_key: ec.EllipticCurvePrivateKey
+    ) -> List[x509.Certificate]:
         """Create self-signed certificate for development."""
 
         logger.info("Creating self-signed certificate for development")
@@ -219,25 +229,36 @@ class CertificateManager:
         )
         logger.info("Self-signed certificate created successfully")
 
-        return cert
+        return [cert]
 
     def save_certificate_and_key(
-        self, cert: x509.Certificate, private_key: ec.EllipticCurvePrivateKey
+        self,
+        cert_chain: Union[x509.Certificate, List[x509.Certificate]],
+        private_key: ec.EllipticCurvePrivateKey,
     ):
-        """Save certificate and private key to files.
+        """Save certificate chain and private key to files.
 
         Args:
-            cert (x509.Certificate): Certificate to save.
+            cert_chain (Union[x509.Certificate, List[x509.Certificate]]): Certificate or certificate chain to save (fullchain).
             private_key (ec.EllipticCurvePrivateKey): Private key to save.
         """
-        cert_pem = cert.public_bytes(Encoding.PEM)
+        # Handle both single certificate and certificate chain inputs for backward compatibility
+        if isinstance(cert_chain, x509.Certificate):
+            # Convert single certificate to list
+            cert_chain = [cert_chain]
 
-        # Save certificate
+        # Combine all certificates in the chain into a single PEM file
+        cert_pems = []
+        for cert in cert_chain:
+            cert_pems.append(cert.public_bytes(Encoding.PEM))
+
+        # Save certificate chain (fullchain)
         cert_file = self.cert_path / self.CERT_FILENAME
         with open(cert_file, "wb") as f:
-            f.write(cert_pem)
+            for cert_pem in cert_pems:
+                f.write(cert_pem)
 
-        logger.info(f"Certificate saved to {cert_file}")
+        logger.info(f"Certificate chain saved to {cert_file} ({len(cert_chain)} certificates)")
 
         # Save private key
         key_pem = private_key.private_bytes(
@@ -268,17 +289,24 @@ class CertificateManager:
 
         try:
             with open(cert_file, "rb") as f:
-                cert = x509.load_pem_x509_certificate(f.read())
+                certs = x509.load_pem_x509_certificates(f.read())
 
-            # Check if certificate expires within the defined threshold
+            if not certs:
+                logger.info("No certificates found in certificate file")
+                return False
+
+            # Check the first certificate (leaf certificate) for expiry
+            leaf_cert = certs[0]
             expiry_threshold = datetime.now(timezone.utc) + timedelta(
                 days=self.CERT_EXPIRY_THRESHOLD_DAYS
             )
-            if cert.not_valid_after_utc < expiry_threshold:
-                logger.info(f"Certificate expires on {cert.not_valid_after_utc}, renewal needed")
+            if leaf_cert.not_valid_after_utc < expiry_threshold:
+                logger.info(
+                    f"Certificate expires on {leaf_cert.not_valid_after_utc}, renewal needed"
+                )
                 return False
 
-            logger.info(f"Certificate valid until {cert.not_valid_after_utc}")
+            logger.info(f"Certificate valid until {leaf_cert.not_valid_after_utc}")
             return True
 
         # TODO: better error mgmt. Not all errors should lead to renewal
@@ -300,10 +328,16 @@ class CertificateManager:
 
         try:
             with open(cert_file, "rb") as f:
-                cert = x509.load_pem_x509_certificate(f.read())
+                certs = x509.load_pem_x509_certificates(f.read())
 
+            if not certs:
+                logger.debug("No certificates found in certificate file")
+                return False
+
+            # Check the first certificate (leaf certificate) for self-signing
+            leaf_cert = certs[0]
             # A certificate is self-signed if the issuer and subject are the same
-            is_self_signed = cert.issuer == cert.subject
+            is_self_signed = leaf_cert.issuer == leaf_cert.subject
 
             if is_self_signed:
                 logger.info("Certificate is self-signed")
@@ -330,12 +364,17 @@ class CertificateManager:
 
         try:
             with open(cert_file, "rb") as f:
-                cert = x509.load_pem_x509_certificate(f.read())
+                certs = x509.load_pem_x509_certificates(f.read())
 
-            # Check if certificate was issued by Let's Encrypt staging
+            if not certs:
+                logger.debug("No certificates found in certificate file")
+                return False
+
+            # Check the first certificate (leaf certificate) for Let's Encrypt staging
+            leaf_cert = certs[0]
             # Let's Encrypt staging issuer contains "Fake LE" or "Staging" in the CN
             issuer_cn = None
-            for attribute in cert.issuer:
+            for attribute in leaf_cert.issuer:
                 if attribute.oid == NameOID.COMMON_NAME:
                     issuer_cn = attribute.value
                     break
@@ -392,9 +431,15 @@ class CertificateManager:
         """
         cert_file = self.cert_path / self.CERT_FILENAME
         with open(cert_file, "rb") as f:
-            cert = x509.load_pem_x509_certificate(f.read())
+            certs = x509.load_pem_x509_certificates(f.read())
 
-        cert_pem = cert.public_bytes(Encoding.PEM)
+        if not certs:
+            logger.error("No certificates found in certificate file for event emission")
+            return
+
+        # Use the first certificate (leaf certificate) for the event
+        leaf_cert = certs[0]
+        cert_pem = leaf_cert.public_bytes(Encoding.PEM)
         cert_hash = sha256(cert_pem).hexdigest()
 
         if self.dev_mode:  # only log cert hash
@@ -411,8 +456,8 @@ class CertificateManager:
 
         if self.dev_mode:  # Development mode: create self-signed certificate
             private_key = self.generate_deterministic_key(f"cert/debug/{self.domain}/v1")
-            cert = self.create_self_signed_cert(private_key)
-            self.save_certificate_and_key(cert, private_key)
+            cert_chain = self.create_self_signed_cert(private_key)
+            self.save_certificate_and_key(cert_chain, private_key)
         # TODO: sync using S3 bucket for multiple replicas (in production)
         # We should have a lock file, then only one will push its generated cert, Others
         # will download it.
@@ -429,7 +474,7 @@ class CertificateManager:
             success = False
             while not success:
                 try:
-                    cert = self.create_lets_encrypt_cert(private_key)
+                    cert_chain = self.create_lets_encrypt_cert(private_key)
                     success = True
                 except Exception as e:
                     logger.error(f"Failed to create Let's Encrypt certificate: {e}")
@@ -442,7 +487,7 @@ class CertificateManager:
                         logger.error("Max retries reached, giving up.")
                         raise
 
-            self.save_certificate_and_key(cert, private_key)
+            self.save_certificate_and_key(cert_chain, private_key)
 
         self.emit_new_cert_event()
 
@@ -470,6 +515,14 @@ class CertificateManager:
 
         # TODO: merge different logic that deletes certs into is_cert_valid
         # and also add a condition where the key must have been generated by the current version?
+
+        # Force delete cert files
+        try:
+            if self.force_rm_cert_files:
+                logger.info("Force removal of certificate files")
+                self.delete_certificate_files()
+        except Exception as e:
+            logger.error(f"Failed to force delete certificate files: {e}")
 
         # If in production (or staging), delete any existing self-signed certificate
         try:

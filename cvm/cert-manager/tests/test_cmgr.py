@@ -251,8 +251,11 @@ class TestCertificateManager:
         """Test self-signed certificate creation."""
         manager = create_cert_manager(temp_dir)
 
-        cert = manager.create_self_signed_cert(mock_private_key)
+        cert_chain = manager.create_self_signed_cert(mock_private_key)
 
+        assert isinstance(cert_chain, list)
+        assert len(cert_chain) == 1
+        cert = cert_chain[0]
         assert isinstance(cert, x509.Certificate)
         assert cert.subject == cert.issuer  # Self-signed
 
@@ -283,10 +286,71 @@ class TestCertificateManager:
 
         manager = create_cert_manager(temp_dir, dev_mode=False, letsencrypt_staging=True)
 
-        cert = manager.create_lets_encrypt_cert(mock_private_key)
+        cert_chain = manager.create_lets_encrypt_cert(mock_private_key)
 
+        assert isinstance(cert_chain, list)
+        assert len(cert_chain) == 1  # Mock returns a single cert
+        cert = cert_chain[0]
         assert isinstance(cert, x509.Certificate)
         mock_certbot_class.assert_called_once_with(staging=True)
+        mock_certbot.obtain_certificate_with_csr.assert_called_once()
+        mock_gen_key.assert_called_once()
+
+    @patch.object(CertificateManager, "generate_deterministic_key")
+    @patch("cert_manager.cmgr.CertbotWrapper")
+    def test_create_lets_encrypt_cert_fullchain(
+        self,
+        mock_certbot_class,
+        mock_gen_key,
+        temp_dir,
+        mock_private_key,
+    ):
+        """Test Let's Encrypt certificate creation with fullchain (multiple certificates)."""
+        # Setup mocks
+        mock_gen_key.return_value = mock_private_key
+        mock_certbot = Mock()
+
+        # Create a mock fullchain with 3 certificates
+        leaf_cert = self._create_test_certificate(
+            "example.com", "Intermediate CA", mock_private_key
+        )
+        intermediate_cert = self._create_test_certificate(
+            "Intermediate CA", "Root CA", mock_private_key
+        )
+        root_cert = self._create_test_certificate("Root CA", "Root CA", mock_private_key)
+
+        # Combine certificates into a fullchain PEM
+        fullchain_pem = (
+            leaf_cert.public_bytes(Encoding.PEM)
+            + intermediate_cert.public_bytes(Encoding.PEM)
+            + root_cert.public_bytes(Encoding.PEM)
+        )
+
+        mock_certbot.obtain_certificate_with_csr.return_value = fullchain_pem
+        mock_certbot_class.return_value = mock_certbot
+
+        manager = create_cert_manager(temp_dir, dev_mode=False, letsencrypt_staging=False)
+
+        cert_chain = manager.create_lets_encrypt_cert(mock_private_key)
+
+        # Verify we get all certificates in the chain
+        assert isinstance(cert_chain, list)
+        assert len(cert_chain) == 3, f"Expected 3 certificates in fullchain, got {len(cert_chain)}"
+
+        # Verify each certificate is correct
+        for i, cert in enumerate(cert_chain):
+            assert isinstance(cert, x509.Certificate)
+
+        # Verify order: leaf, intermediate, root
+        leaf_cn = cert_chain[0].subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
+        intermediate_cn = cert_chain[1].subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
+        root_cn = cert_chain[2].subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
+
+        assert leaf_cn == "example.com"
+        assert intermediate_cn == "Intermediate CA"
+        assert root_cn == "Root CA"
+
+        mock_certbot_class.assert_called_once_with(staging=False)
         mock_certbot.obtain_certificate_with_csr.assert_called_once()
         mock_gen_key.assert_called_once()
 
@@ -305,6 +369,87 @@ class TestCertificateManager:
 
         # Verify file permissions on key file
         assert oct(key_file.stat().st_mode)[-3:] == "600"
+
+    def test_save_certificate_chain_fullchain(self, temp_dir, mock_private_key):
+        """Test saving a certificate chain (fullchain) to files."""
+        manager = create_cert_manager(temp_dir)
+
+        # Create a mock certificate chain with 3 certificates (leaf, intermediate, root)
+        leaf_cert = self._create_test_certificate(
+            "example.com", "Intermediate CA", mock_private_key
+        )
+        intermediate_cert = self._create_test_certificate(
+            "Intermediate CA", "Root CA", mock_private_key
+        )
+        root_cert = self._create_test_certificate(
+            "Root CA", "Root CA", mock_private_key
+        )  # Self-signed root
+
+        cert_chain = [leaf_cert, intermediate_cert, root_cert]
+
+        manager.save_certificate_and_key(cert_chain, mock_private_key)
+
+        # Check files were created
+        cert_file = temp_dir / "cert.pem"
+        key_file = temp_dir / "key.pem"
+
+        assert cert_file.exists()
+        assert key_file.exists()
+
+        # Read back the certificate chain and verify all certificates are stored
+        with open(cert_file, "rb") as f:
+            loaded_certs = x509.load_pem_x509_certificates(f.read())
+
+        # Verify we have all 3 certificates in the correct order
+        assert len(loaded_certs) == 3, f"Expected 3 certificates, got {len(loaded_certs)}"
+
+        # Verify the order is preserved (leaf, intermediate, root)
+        leaf_cn = loaded_certs[0].subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
+        intermediate_cn = (
+            loaded_certs[1].subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
+        )
+        root_cn = loaded_certs[2].subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
+
+        assert leaf_cn == "example.com"
+        assert intermediate_cn == "Intermediate CA"
+        assert root_cn == "Root CA"
+
+        # Verify issuer relationships
+        leaf_issuer_cn = loaded_certs[0].issuer.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
+        intermediate_issuer_cn = (
+            loaded_certs[1].issuer.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
+        )
+        root_issuer_cn = loaded_certs[2].issuer.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
+
+        assert leaf_issuer_cn == "Intermediate CA"
+        assert intermediate_issuer_cn == "Root CA"
+        assert root_issuer_cn == "Root CA"  # Self-signed root
+
+        # Verify file permissions on key file
+        assert oct(key_file.stat().st_mode)[-3:] == "600"
+
+    def _create_test_certificate(self, subject_cn: str, issuer_cn: str, private_key):
+        """Helper method to create a test certificate with specified subject and issuer."""
+        subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, subject_cn)])
+        issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, issuer_cn)])
+
+        cert = (
+            x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(issuer)
+            .public_key(private_key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(datetime.now(timezone.utc))
+            .not_valid_after(datetime.now(timezone.utc) + timedelta(days=365))
+            .add_extension(
+                x509.SubjectAlternativeName([x509.DNSName(subject_cn)])
+                if subject_cn != "Intermediate CA" and subject_cn != "Root CA"
+                else x509.SubjectAlternativeName([x509.DNSName("localhost")]),
+                critical=False,
+            )
+            .sign(private_key, hashes.SHA256())
+        )
+        return cert
 
     def test_is_cert_valid_no_files(self, temp_dir):
         """Test certificate validation when files don't exist."""
@@ -1076,6 +1221,81 @@ class TestCertificateManagerIntegration:
                     mock_setup_nginx.assert_not_called()
                     mock_manage.assert_called_once()
 
+    @patch.object(CertificateManager, "generate_deterministic_key")
+    @patch("cert_manager.cmgr.CertbotWrapper")
+    def test_fullchain_integration_lets_encrypt_to_file(
+        self,
+        mock_certbot_class,
+        mock_gen_key,
+        temp_dir,
+        mock_private_key,
+    ):
+        """Integration test: Let's Encrypt fullchain creation -> save -> validate -> read back."""
+        # Setup mocks for Let's Encrypt with fullchain
+        mock_gen_key.return_value = mock_private_key
+        mock_certbot = Mock()
+
+        # Create mock fullchain by combining real certificate structures with our test certificates
+        leaf_cert = TestCertificateManager()._create_test_certificate(
+            "example.com", "Intermediate Authority", mock_private_key
+        )
+        intermediate_cert = TestCertificateManager()._create_test_certificate(
+            "Intermediate Authority", "Root Authority", mock_private_key
+        )
+        root_cert = TestCertificateManager()._create_test_certificate(
+            "Root Authority", "Root Authority", mock_private_key
+        )
+
+        fullchain_pem = (
+            leaf_cert.public_bytes(Encoding.PEM)
+            + intermediate_cert.public_bytes(Encoding.PEM)
+            + root_cert.public_bytes(Encoding.PEM)
+        )
+
+        mock_certbot.obtain_certificate_with_csr.return_value = fullchain_pem
+        mock_certbot_class.return_value = mock_certbot
+
+        # Create manager in production mode
+        manager = create_cert_manager(temp_dir, dev_mode=False, letsencrypt_staging=False)
+
+        # Step 1: Create Let's Encrypt certificate (should return fullchain)
+        cert_chain = manager.create_lets_encrypt_cert(mock_private_key)
+        assert len(cert_chain) == 3, "Should get fullchain with 3 certificates"
+
+        # Step 2: Save the certificate chain
+        manager.save_certificate_and_key(cert_chain, mock_private_key)
+
+        # Step 3: Verify files exist
+        cert_file = temp_dir / "cert.pem"
+        key_file = temp_dir / "key.pem"
+        assert cert_file.exists()
+        assert key_file.exists()
+
+        # Step 4: Read back and verify all certificates are present
+        with open(cert_file, "rb") as f:
+            saved_certs = x509.load_pem_x509_certificates(f.read())
+
+        assert len(saved_certs) == 3, f"Should have saved 3 certificates, got {len(saved_certs)}"
+
+        # Step 5: Verify certificate validation methods work with fullchain
+        assert manager.is_cert_valid(), "Certificate should be valid"
+        assert not manager.is_cert_self_signed(), "Should not be self-signed (has intermediate)"
+        assert not manager.is_cert_letsencrypt_staging(), "Should not be staging"
+
+        # Step 6: Verify certificate order and content match
+        for i, (original, saved) in enumerate(zip(cert_chain, saved_certs)):
+            assert original.subject == saved.subject, f"Certificate {i} subject mismatch"
+            assert original.issuer == saved.issuer, f"Certificate {i} issuer mismatch"
+            assert original.serial_number == saved.serial_number, f"Certificate {i} serial mismatch"
+
+        # Step 7: Verify emit_new_cert_event works with fullchain
+        with patch("cert_manager.cmgr.DstackClient") as mock_dstack_client:
+            mock_client = Mock()
+            mock_dstack_client.return_value = mock_client
+            manager.emit_new_cert_event()  # Should not raise exception
+            mock_dstack_client.assert_called_once()
+            mock_client.emit_event.assert_called_once()
+
     @patch("schedule.every")
     @patch("time.sleep")
     def test_run_method_scheduling(self, mock_sleep, mock_schedule):
@@ -1109,6 +1329,117 @@ class TestCertificateManagerIntegration:
         mock_schedule.assert_called()
         mock_day.at.assert_called_with("00:00")
         mock_at.do.assert_called_once()
+
+    def test_force_delete_cert_files_production_letsencrypt_prod(
+        self, temp_dir, mock_letsencrypt_prod_cert, mock_private_key
+    ):
+        """Test force delete removes production Let's Encrypt certificate even in production mode."""
+        # Create manager in production mode with force delete enabled
+        manager = CertificateManager(
+            domain="test.example.com",
+            dev_mode=False,
+            cert_email="test@example.com",
+            letsencrypt_staging=False,
+            letsencrypt_account_version="v1",
+            cert_path=temp_dir,
+            acme_path=temp_dir / "acme",
+            force_rm_cert_files=True,  # This is the key - force delete is enabled
+        )
+
+        # Save a production Let's Encrypt certificate
+        manager.save_certificate_and_key(mock_letsencrypt_prod_cert, mock_private_key)
+
+        # Verify files exist before force delete
+        assert (temp_dir / "cert.pem").exists()
+        assert (temp_dir / "key.pem").exists()
+
+        with patch.object(manager, "emit_new_cert_event") as mock_emit:
+            with patch.object(manager.supervisor, "setup_nginx_https_config") as mock_setup_nginx:
+                with patch.object(manager, "manage_cert_creation_and_renewal") as mock_manage:
+                    manager.startup_init()
+
+                    # Files should be deleted despite being production Let's Encrypt certs in production mode
+                    assert not (temp_dir / "cert.pem").exists()
+                    assert not (temp_dir / "key.pem").exists()
+
+                    # Should not emit event or setup nginx since cert was deleted
+                    mock_emit.assert_not_called()
+                    mock_setup_nginx.assert_not_called()
+                    mock_manage.assert_called_once()
+
+    def test_force_delete_cert_files_disabled_keeps_production_cert(
+        self, temp_dir, mock_letsencrypt_prod_cert, mock_private_key
+    ):
+        """Test that production certs are kept when force delete is disabled (default behavior)."""
+        # Create manager in production mode with force delete disabled (default)
+        manager = CertificateManager(
+            domain="test.example.com",
+            dev_mode=False,
+            cert_email="test@example.com",
+            letsencrypt_staging=False,
+            letsencrypt_account_version="v1",
+            cert_path=temp_dir,
+            acme_path=temp_dir / "acme",
+            force_rm_cert_files=False,  # Explicitly disabled for clarity
+        )
+
+        # Save a production Let's Encrypt certificate
+        manager.save_certificate_and_key(mock_letsencrypt_prod_cert, mock_private_key)
+
+        # Verify files exist before startup
+        assert (temp_dir / "cert.pem").exists()
+        assert (temp_dir / "key.pem").exists()
+
+        with patch.object(manager, "emit_new_cert_event") as mock_emit:
+            with patch.object(manager.supervisor, "setup_nginx_https_config") as mock_setup_nginx:
+                with patch.object(manager, "manage_cert_creation_and_renewal") as mock_manage:
+                    manager.startup_init()
+
+                    # Files should still exist (normal behavior - prod certs are kept)
+                    assert (temp_dir / "cert.pem").exists()
+                    assert (temp_dir / "key.pem").exists()
+
+                    # Should emit event and setup nginx since cert exists and is valid
+                    mock_emit.assert_called_once()
+                    mock_setup_nginx.assert_called_once()
+                    mock_manage.assert_called_once()
+
+    def test_force_delete_cert_files_staging_cert_in_production(
+        self, temp_dir, mock_letsencrypt_staging_cert, mock_private_key
+    ):
+        """Test force delete removes staging certificate in production mode (edge case coverage)."""
+        # Create manager in production mode with force delete enabled
+        manager = CertificateManager(
+            domain="test.example.com",
+            dev_mode=False,
+            cert_email="test@example.com",
+            letsencrypt_staging=False,  # Production mode, staging disabled
+            letsencrypt_account_version="v1",
+            cert_path=temp_dir,
+            acme_path=temp_dir / "acme",
+            force_rm_cert_files=True,
+        )
+
+        # Save a staging Let's Encrypt certificate
+        manager.save_certificate_and_key(mock_letsencrypt_staging_cert, mock_private_key)
+
+        # Verify files exist before force delete
+        assert (temp_dir / "cert.pem").exists()
+        assert (temp_dir / "key.pem").exists()
+
+        with patch.object(manager, "emit_new_cert_event") as mock_emit:
+            with patch.object(manager.supervisor, "setup_nginx_https_config") as mock_setup_nginx:
+                with patch.object(manager, "manage_cert_creation_and_renewal") as mock_manage:
+                    manager.startup_init()
+
+                    # Files should be deleted by force delete (happens first, before staging check)
+                    assert not (temp_dir / "cert.pem").exists()
+                    assert not (temp_dir / "key.pem").exists()
+
+                    # Should not emit event or setup nginx since cert was deleted
+                    mock_emit.assert_not_called()
+                    mock_setup_nginx.assert_not_called()
+                    mock_manage.assert_called_once()
 
 
 if __name__ == "__main__":
