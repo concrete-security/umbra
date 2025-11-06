@@ -229,7 +229,7 @@ export default function LandingPage() {
                 <div className="flex flex-col gap-6 text-center">
                   <p className="mx-auto max-w-[520px] text-base leading-7 text-[#1F1E28]">
                     Query your confidential documents securely. Upload sensitive files and ask questions inside a locked-down
-                    confidential workspace. Every interaction stays within our protected channel and vetted runtime.
+                    confidential workspace. Every interaction stays within a protected channel and runtime.
                   </p>
                 </div>
                 <form onSubmit={handleSubmit} className="flex flex-col gap-6">

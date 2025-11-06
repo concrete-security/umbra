@@ -1,7 +1,7 @@
 "use client"
 
 import type { ReactNode } from "react"
-import { useEffect, useRef } from "react"
+import { useEffect, useRef, useState } from "react"
 import { useTheme } from "next-themes"
 
 type ForceLightThemeProps = {
@@ -14,33 +14,47 @@ type ForceLightThemeProps = {
  */
 export function ForceLightTheme({ children }: ForceLightThemeProps) {
   const { setTheme, resolvedTheme } = useTheme()
-  const previousTheme = useRef<string | undefined>(undefined)
-  const hasForcedRef = useRef(false)
+  const [isReady, setIsReady] = useState(false)
+  const previousTheme = useRef<string | null>(null)
 
   useEffect(() => {
-    if (!hasForcedRef.current && resolvedTheme) {
-      previousTheme.current = resolvedTheme
-      hasForcedRef.current = true
+    if (isReady || !resolvedTheme || previousTheme.current) {
+      return
     }
-  }, [resolvedTheme])
+
+    previousTheme.current = resolvedTheme
+    setIsReady(true)
+  }, [isReady, resolvedTheme])
 
   useEffect(() => {
-    setTheme("light")
-  }, [])
+    if (!isReady) {
+      return
+    }
 
-  useEffect(() => {
-    if (resolvedTheme && resolvedTheme !== "light") {
+    if (previousTheme.current !== "light") {
       setTheme("light")
     }
-  }, [resolvedTheme, setTheme])
+  }, [isReady, setTheme])
 
   useEffect(() => {
+    if (!isReady || !resolvedTheme || resolvedTheme === "light") {
+      return
+    }
+
+    setTheme("light")
+  }, [isReady, resolvedTheme, setTheme])
+
+  useEffect(() => {
+    if (!isReady) {
+      return
+    }
+
     return () => {
       if (previousTheme.current && previousTheme.current !== "light") {
         setTheme(previousTheme.current)
       }
     }
-  }, [setTheme])
+  }, [isReady, setTheme])
 
   return <>{children}</>
 }
