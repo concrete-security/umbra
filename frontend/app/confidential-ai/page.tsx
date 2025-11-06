@@ -197,6 +197,24 @@ function generateReportData(bytes = 32) {
   return Array.from(buffer, (value) => value.toString(16).padStart(2, "0")).join("")
 }
 
+function generateUUID(): string {
+  if (typeof crypto === "undefined") {
+    throw new Error("crypto is not available in this environment")
+  }
+  if (typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID()
+  }
+  if (typeof crypto.getRandomValues !== "function") {
+    throw new Error("crypto.getRandomValues is not available in this environment")
+  }
+  const bytes = new Uint8Array(16)
+  crypto.getRandomValues(bytes)
+  bytes[6] = (bytes[6] & 0x0f) | 0x40
+  bytes[8] = (bytes[8] & 0x3f) | 0x80
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("")
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`
+}
+
 function formatTimestampLabel(timestamp: string) {
   const numeric = Number(timestamp)
   if (Number.isFinite(numeric) && numeric > 0) {
@@ -649,7 +667,7 @@ function ConfidentialAIContent() {
     const CACHE_SALT_KEY = "confidential-ai-cache-salt"
     let salt = localStorage.getItem(CACHE_SALT_KEY)
     if (!salt) {
-      salt = crypto.randomUUID()
+      salt = generateUUID()
       localStorage.setItem(CACHE_SALT_KEY, salt)
     }
     setCacheSalt(salt)
@@ -2146,7 +2164,7 @@ function ConfidentialAIContent() {
                       ) : hasFailed ? (
                         <>
                           <X className="h-4 w-4 shrink-0" />
-                          <span className="truncate">Security verification failed - channel not secure</span>
+                          <span className="truncate">Security verification failed</span>
                         </>
                       ) : (
                         <>
