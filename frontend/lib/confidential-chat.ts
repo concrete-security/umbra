@@ -190,43 +190,6 @@ export async function* streamConfidentialChat(
   }
 }
 
-export async function sendConfidentialChat(
-  payload: ConfidentialChatPayload,
-  options: ConfidentialChatOptions = {}
-): Promise<{ message: string; reasoning_content?: string; finish_reason?: string }> {
-  let message = ""
-  let reasoning = ""
-  let finishReason: string | undefined
-
-  for await (const chunk of streamConfidentialChat(payload, options)) {
-    if (chunk.type === "delta" && chunk.content) {
-      message += chunk.content
-    }
-
-    if (chunk.type === "reasoning_delta" && chunk.reasoning_content) {
-      reasoning += chunk.reasoning_content
-    }
-
-    if (chunk.type === "done") {
-      if (chunk.content) {
-        message = chunk.content
-      }
-      if (chunk.reasoning_content) {
-        reasoning = chunk.reasoning_content
-      }
-      if (chunk.finish_reason) {
-        finishReason = chunk.finish_reason
-      }
-    }
-
-    if (chunk.type === "error") {
-      throw new Error(chunk.error)
-    }
-  }
-
-  return { message, reasoning_content: reasoning || undefined, finish_reason: finishReason }
-}
-
 async function* readStreamingResponse(
   reader: ReadableStreamDefaultReader<Uint8Array>
 ): AsyncGenerator<ConfidentialChatStreamChunk, void, unknown> {

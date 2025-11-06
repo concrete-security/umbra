@@ -4,8 +4,18 @@ import { AuthenticatedAccessError, requireAdminUser } from "@/lib/auth"
 import { WAITLIST_STATUSES, isWaitlistStatus } from "@/lib/waitlist"
 import { createSupabaseRouteHandlerClient } from "@/lib/supabase/route-handler"
 import { createSupabaseServiceRoleClient } from "@/lib/supabase/service-role"
+import { CrossOriginRequestError, ensureSameOrigin } from "@/lib/security/origin"
 
 export async function GET(request: Request) {
+  try {
+    ensureSameOrigin(request)
+  } catch (error) {
+    if (error instanceof CrossOriginRequestError) {
+      return NextResponse.json({ error: error.message }, { status: 403 })
+    }
+    throw error
+  }
+
   const supabase = await createSupabaseRouteHandlerClient()
 
   try {
