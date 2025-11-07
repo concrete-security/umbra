@@ -1,6 +1,6 @@
 # Deploys frontend to Vercel:
 # - Production: on push to prod (after tests succeed) or manual trigger
-# - Preview: on PR to main (after tests succeed)
+# - Preview: on PR to main (directly or after tests succeed via workflow_run)
 
 name: Vercel Deploy
 
@@ -15,6 +15,14 @@ on:
       - Frontend Tests
     types:
       - completed
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       branch:
@@ -22,11 +30,16 @@ on:
         required: true
         type: string
         default: 'main'
+      pr_number:
+        description: 'PR number to deploy (for testing)'
+        required: false
+        type: string
 
 jobs:
   deploy:
     if: >
       github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'pull_request' ||
       (
         github.event.workflow_run.conclusion == 'success' &&
         (
@@ -42,7 +55,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           lfs: true
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.branch || github.event.workflow_run.head_sha || github.ref }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.branch || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event.workflow_run.head_sha || github.ref }}
 
       - name: Deploy to Vercel (Production)
         id: vercel_production
@@ -63,8 +76,9 @@ jobs:
       - name: Deploy to Vercel (Preview)
         id: vercel_preview
         if: >
-          github.event_name == 'workflow_run' &&
-          github.event.workflow_run.event == 'pull_request'
+          github.event_name == 'pull_request' ||
+          (github.event_name == 'workflow_run' &&
+           github.event.workflow_run.event == 'pull_request')
         uses: amondnet/vercel-action@v25
         with:
           vercel-token: ${{ secrets.VERCEL_TOKEN }}
@@ -75,19 +89,21 @@ jobs:
       - name: Find Existing Preview Comment
         if: >
           always() &&
-          github.event_name == 'workflow_run' &&
-          github.event.workflow_run.event == 'pull_request'
+          (github.event_name == 'pull_request' ||
+           (github.event_name == 'workflow_run' &&
+            github.event.workflow_run.event == 'pull_request'))
         id: find_preview_comment
         uses: peter-evans/find-comment@v3
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          issue-number: ${{ github.event.workflow_run.pull_requests[0].number }}
+          issue-number: ${{ github.event_name == 'pull_request' && github.event.number || github.event.workflow_run.pull_requests[0].number }}
           body-includes: '<!-- vercel-preview-url -->'
 
       - name: Add Preview URL to Summary
         if: >
-          github.event_name == 'workflow_run' &&
-          github.event.workflow_run.event == 'pull_request' &&
+          (github.event_name == 'pull_request' ||
+           (github.event_name == 'workflow_run' &&
+            github.event.workflow_run.event == 'pull_request')) &&
           steps.vercel_preview.outcome == 'success' &&
           steps.vercel_preview.outputs['preview-url']
         run: |
@@ -105,14 +121,15 @@ jobs:
 
       - name: Share Preview URL on PR
         if: >
-          github.event_name == 'workflow_run' &&
-          github.event.workflow_run.event == 'pull_request' &&
+          (github.event_name == 'pull_request' ||
+           (github.event_name == 'workflow_run' &&
+            github.event.workflow_run.event == 'pull_request')) &&
           steps.vercel_preview.outcome == 'success' &&
           steps.vercel_preview.outputs['preview-url']
         uses: peter-evans/create-or-update-comment@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          issue-number: ${{ github.event.workflow_run.pull_requests[0].number }}
+          issue-number: ${{ github.event_name == 'pull_request' && github.event.number || github.event.workflow_run.pull_requests[0].number }}
           comment-id: ${{ steps.find_preview_comment.outputs['comment-id'] }}
           edit-mode: replace
           body: |
@@ -121,14 +138,15 @@ jobs:
 
       - name: Share Preview Failure on PR
         if: >
-          github.event_name == 'workflow_run' &&
-          github.event.workflow_run.event == 'pull_request' &&
+          (github.event_name == 'pull_request' ||
+           (github.event_name == 'workflow_run' &&
+            github.event.workflow_run.event == 'pull_request')) &&
           failure() &&
           steps.vercel_preview.outcome == 'failure'
         uses: peter-evans/create-or-update-comment@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          issue-number: ${{ github.event.workflow_run.pull_requests[0].number }}
+          issue-number: ${{ github.event_name == 'pull_request' && github.event.number || github.event.workflow_run.pull_requests[0].number }}
           comment-id: ${{ steps.find_preview_comment.outputs['comment-id'] }}
           edit-mode: replace
           body: |
@@ -138,8 +156,9 @@ jobs:
       - name: Ensure Preview Deployment Succeeded
         if: >
           always() &&
-          github.event_name == 'workflow_run' &&
-          github.event.workflow_run.event == 'pull_request' &&
+          (github.event_name == 'pull_request' ||
+           (github.event_name == 'workflow_run' &&
+            github.event.workflow_run.event == 'pull_request')) &&
           steps.vercel_preview.outcome == 'failure'
         run: |
           echo "Preview deployment did not succeed. See logs above for details." >&2
