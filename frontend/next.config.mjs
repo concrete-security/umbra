@@ -25,7 +25,7 @@ const nextConfig = {
     //   (plus Supabase) to reduce exfil paths.
     // - Allow Vercel Live for preview deployments and Next.js inline scripts
     const devCsp = "default-src 'self'; script-src 'self' 'unsafe-eval' 'unsafe-inline'; connect-src 'self' https://*.supabase.co wss://*.supabase.co http://localhost:3000 ws://localhost:3000 https: wss:; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; font-src 'self'; frame-ancestors 'self'; base-uri 'self'; form-action 'self'; object-src 'none';";
-    const prodCsp = "default-src 'self'; script-src 'self' 'unsafe-inline' https://vercel.live; connect-src 'self' https://*.supabase.co wss://*.supabase.co https://*.phala.network wss://*.phala.network https://vercel.live wss://vercel.live; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'; upgrade-insecure-requests";
+    const prodCsp = "default-src 'self'; script-src 'self' 'unsafe-inline' https://vercel.live; connect-src 'self' https://*.supabase.co wss://*.supabase.co https://*.phala.network wss://*.phala.network https://*.concrete-security.com wss://*.concrete-security.com https://vercel.live wss://vercel.live; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'; upgrade-insecure-requests";
 
     // Common security headers
     const commonSecurityHeaders = [
