@@ -1,19 +1,25 @@
 # Repository Guidelines
 
-## Project Structure & Module Organization
-`app/` contains Next.js routes, layouts, and route handlers; keep new pages colocated with their data loaders. Shared UI primitives live in `components/`, while request helpers and Supabase utilities live in `lib/` and `supabase/`. Store global styles in `styles/`, static assets in `public/`, background workers in `workers/`, and end-to-end specs in `tests/e2e`.
+## Structure
+- `app/` holds the Next.js route tree; keep route handlers, loaders, and UI together.
+- Shared UI primitives live in `components/`, shared hooks in `hooks/`, and request/Supabase helpers in `lib/` + `supabase/`.
+- Global styles sit in `styles/`, Tailwind config in `tailwind.config.js`, and static assets in `public/`. Background work belongs in `workers/`.
+- Tests: Playwright specs stay under `tests/e2e`, Vitest suites mirror features under `tests/unit`, and any fixtures go in `tests/e2e/fixtures`.
 
-## Build, Test, and Development Commands
-Install dependencies with `pnpm install` (the `Makefile` falls back to npm if pnpm is missing). Use `pnpm dev` for the hot-reloading dev server and `pnpm build` + `pnpm start` to verify the production bundle. Run `pnpm lint` before pushing to keep ESLint happy, and `pnpm test:e2e` (optionally `-- --headed`) to execute Playwright suites. `make dev` and `make dev-open` wrap the same workflow when you prefer make targets.
+## Build & Test
+- Install via `pnpm install`; the `Makefile` falls back to npm when pnpm is missing.
+- Local dev: `pnpm dev` (or `make dev` / `make dev-open`). Production check: `pnpm build && pnpm start`.
+- Quality gates: `pnpm lint`, `pnpm test:unit` (Vitest), and `pnpm test:e2e` (Playwright, append `-- --headed` when debugging). `make test` runs the Vitest + Playwright combo with the required env (`FORM_TOKEN_SECRET`, `ATTESTATION_TEST_MODE`, etc.).
 
-## Coding Style & Naming Conventions
-All code is TypeScript-first with 2-space indentation and single quotes enforced by the ESLint/Next defaults. Keep React component filenames in kebab-case (e.g., `nav-auth-button.tsx`), export components via PascalCase identifiers, and colocate hooks or helpers beside their consumers. Tailwind CSS is the primary styling tool—prefer utility classes over custom CSS unless it lives in `styles/globals.css`. Run `pnpm lint` after major refactors to catch accessibility and import ordering issues.
+## Style
+- TypeScript-first, 2-space indentation, and keep the existing Next/Prettier double-quote formatting.
+- React files use kebab-case filenames that export PascalCase components. Colocate feature-specific hooks/helpers; promote shared ones into `hooks/` or `lib/`.
+- Prefer Tailwind utility classes; only touch `styles/globals.css` for custom CSS. Re-run `pnpm lint` after major refactors for accessibility/import checks.
 
-## Testing Guidelines
-Playwright is configured through `playwright.config.ts`. Specs belong under `tests/e2e` and should follow the `*.spec.ts` suffix. Aim for deterministic flows that seed their own data via Supabase or mock endpoints; avoid depending on prior runs. When iterating on a single suite, run `pnpm test:e2e -- tests/e2e/<file>.spec.ts`. Record any new fixtures under `tests/e2e/fixtures` and keep them minimal.
+## Version Control
+- Use Conventional Commits (`feat(frontend): …`, `fix(auth): …`) in imperative mood.
+- PRs must explain the motivation, list relevant commands/tests, link Supabase issues or design tickets, and include screenshots/video for UX changes.
 
-## Commit & Pull Request Guidelines
-Follow the Conventional Commits style already in history (`feat(frontend): …`, `fix(auth): …`). Group related changes into one commit and keep messages in the imperative mood. Pull requests should describe the motivation, list the commands/tests you ran, and link Supabase issues or design tickets. Include screenshots or short clips when UI changes affect the customer journey.
-
-## Security & Configuration Tips
-Never commit secrets; instead, copy `.env.example` to `.env.local` and fill Supabase credentials plus any optional vLLM settings. Treat `SUPABASE_SERVICE_ROLE_KEY` as production-only—use project-specific anon keys for local UI testing. Reset environment variables when switching branches to avoid leaking state into Playwright runs.
+## Security
+- Copy `.env.example` to `.env.local` and never commit secrets. Use anon Supabase keys for local UI work; reserve `SUPABASE_SERVICE_ROLE_KEY` for backend-only contexts.
+- Reset env vars when switching branches so Playwright and local sessions stay deterministic.
