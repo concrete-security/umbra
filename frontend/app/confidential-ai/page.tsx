@@ -88,6 +88,7 @@ const HERO_MESSAGE_STORAGE_KEY = "hero-initial-message"
 const HERO_FILES_STORAGE_KEY = "hero-uploaded-files"
 const GUEST_USAGE_STORAGE_KEY = "confidential-chat-guest-used"
 const GUEST_ACTIVE_SESSION_KEY = "confidential-chat-guest-active"
+const GUEST_LIMITS_ENABLED = process.env.NEXT_PUBLIC_CONFIDENTIAL_ENABLE_GUEST_LIMITS === "true"
 
 function normalize(value?: string | null): string | null {
   if (!value) return null
@@ -394,19 +395,22 @@ function ConfidentialAIContent() {
     modelDisplayLabel && providerModel && modelDisplayLabel !== providerModel ? providerModel : undefined
   const providerConfigured = Boolean(providerApiBase)
   const tokenPresent = providerApiKeyInput.trim().length > 0
+  const guestLimitsEnabled = Boolean(supabase) && GUEST_LIMITS_ENABLED
   const connectionState: "connected" | "disconnected" = providerConfigured ? "connected" : "disconnected"
   const connectionLabel = providerConfigured ? "Connected" : "Not connected"
-  const guestRestrictionActive = authState === "signed-out" && guestUsageRestricted
+  const guestRestrictionActive = guestLimitsEnabled && authState === "signed-out" && guestUsageRestricted
   const authStatusLabel =
-    authState === "loading"
-      ? "Checking access…"
-      : authState === "signed-in"
-        ? authUserEmail
-          ? `Signed in as ${authUserEmail}`
-          : "Signed in"
-        : guestRestrictionActive
-          ? "Guest preview · limit reached"
-          : "Guest preview"
+    !guestLimitsEnabled
+      ? "Beta preview"
+      : authState === "loading"
+        ? "Checking access…"
+        : authState === "signed-in"
+          ? authUserEmail
+            ? `Signed in as ${authUserEmail}`
+            : "Signed in"
+          : guestRestrictionActive
+            ? "Guest preview · limit reached"
+            : "Guest preview"
 
   const [messages, setMessages] = useState<Message[]>(() => [
     {
@@ -480,6 +484,12 @@ function ConfidentialAIContent() {
   }, [applySupabaseSession, supabase])
 
   useEffect(() => {
+    if (!guestLimitsEnabled) {
+      setGuestUsageRestricted(false)
+      setGuestNotice(null)
+      return
+    }
+
     if (authState === "loading") {
       return
     }
@@ -510,7 +520,7 @@ function ConfidentialAIContent() {
       setGuestUsageRestricted(false)
       setGuestNotice(null)
     }
-  }, [authState])
+  }, [authState, guestLimitsEnabled])
 
   useEffect(() => {
     if (typeof window === "undefined") return
@@ -1480,7 +1490,7 @@ function ConfidentialAIContent() {
       return
     }
 
-    if (authState !== "signed-in") {
+    if (guestLimitsEnabled && authState !== "signed-in") {
       try {
         sessionStorage.setItem(GUEST_ACTIVE_SESSION_KEY, "1")
         localStorage.setItem(GUEST_USAGE_STORAGE_KEY, new Date().toISOString())
@@ -1637,7 +1647,7 @@ function ConfidentialAIContent() {
     if (!pendingSubmission) {
       return
     }
-    if (guestUsageRestricted) {
+    if (guestLimitsEnabled && guestUsageRestricted) {
       heroSubmissionRef.current = null
       return
     }
@@ -1670,7 +1680,7 @@ function ConfidentialAIContent() {
     return () => {
       window.clearTimeout(timeout)
     }
-  }, [providerApiBase, guestUsageRestricted, uploadedFiles, attestationVerified, heroSubmissionVersion])
+  }, [providerApiBase, guestLimitsEnabled, guestUsageRestricted, uploadedFiles, attestationVerified, heroSubmissionVersion])
 
   const onSubmit = (e: FormEvent) => {
     e.preventDefault()
