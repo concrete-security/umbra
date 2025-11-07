@@ -47,17 +47,17 @@ function optionalEnv(value?: string): string | null {
   return trimmed.length > 0 ? trimmed : null
 }
 
-const publicVerifierEndpoint = optionalEnv(process.env.NEXT_PUBLIC_PHALA_TDX_VERIFIER_API) ?? "https://cloud-api.phala.network/api/v1/attestations/verify"
+const DEFAULT_VERIFIER_ENDPOINT = "https://cloud-api.phala.network/api/v1/attestations/verify"
+const LOCAL_VERIFY_ENDPOINT = "/api/attestation/verify"
+const publicVerifierEndpoint = optionalEnv(process.env.NEXT_PUBLIC_PHALA_TDX_VERIFIER_API)
+const privateVerifierEndpoint = optionalEnv(process.env.PHALA_TDX_VERIFIER_API)
+const serverVerifierEndpoint = privateVerifierEndpoint ?? publicVerifierEndpoint ?? DEFAULT_VERIFIER_ENDPOINT
 
-export async function verifyTdxQuote(quoteHex: string): Promise<IntelVerificationPayload> {
-  if (!quoteHex || typeof quoteHex !== "string" || quoteHex.trim().length === 0) {
-    throw new Error("quoteHex is required.")
-  }
-
-  const response = await fetch(publicVerifierEndpoint, {
+async function postJson<T>(url: string, body: unknown): Promise<T> {
+  const response = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ hex: quoteHex }),
+    body: JSON.stringify(body),
     cache: "no-store",
   })
 
@@ -66,8 +66,23 @@ export async function verifyTdxQuote(quoteHex: string): Promise<IntelVerificatio
     throw new Error(message || `Verifier rejected the quote with status ${response.status}`)
   }
 
-  const payload = await response.json()
-  return payload as IntelVerificationPayload
+  return (await response.json()) as T
+}
+
+function isBrowserEnvironment() {
+  return typeof window !== "undefined"
+}
+
+export async function verifyTdxQuote(quoteHex: string): Promise<IntelVerificationPayload> {
+  if (!quoteHex || typeof quoteHex !== "string" || quoteHex.trim().length === 0) {
+    throw new Error("quoteHex is required.")
+  }
+
+  if (isBrowserEnvironment()) {
+    return postJson<IntelVerificationPayload>(LOCAL_VERIFY_ENDPOINT, { quoteHex })
+  }
+
+  return postJson<IntelVerificationPayload>(serverVerifierEndpoint, { hex: quoteHex })
 }
 
 export async function verifyTdxQuoteWithFallback(quoteHex: string): Promise<IntelVerificationPayload> {
