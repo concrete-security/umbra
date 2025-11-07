@@ -6,8 +6,12 @@ SHELL := /bin/bash
 cache ?= --no-cache
 # Environment mode: dev | staging | prod
 MODE ?= dev
-SERVICES ?= proxy_api prometheus grafana # vllm
-
+SERVICES ?= proxy_api prometheus grafana vllm
+VLLM_URL ?= http://localhost:8000/v1
+RPS ?= 30
+NREQ ?= 500
+MAX_OUT ?= 256
+MODEL = openai/gpt-oss-120b
 
 .PHONY: setup
 setup:
@@ -56,3 +60,36 @@ docker-up:
 	@$(MAKE) docker-build SERVICES="$(SERVICES)" cache="$(cache)"
 	@$(MAKE) docker-run SERVICES="$(SERVICES)"
 	@$(MAKE) docker-logs
+
+.PHONY: bench
+bench:
+	@echo "🚀 Running vLLM bench..."
+	@set -Eeuo pipefail; \
+	uv run --group bench --active -- vllm bench serve \
+		--backend openai-chat \
+		--base-url http://localhost:8000 \
+		--endpoint /v1/chat/completions \
+		--model openai/gpt-oss-120b \
+		--dataset-name random \
+		--random-input-len 512 \
+		--random-output-len 128 \
+		--request-rate 8 \
+		--num-prompts 500
+
+.PHONY: watch-gpu
+watch-gpu:
+	@watch -n1 -- nvidia-smi \
+		--query-gpu=index,name,utilization.gpu,utilization.memory,memory.used,memory.total --format=csv,noheader
+
+# watch -n1 'nvidia-smi --query-gpu=index,name,utilization.gpu,utilization.memory,memory.used,memory.total --format=csv,noheader'
+
+.PHONY: watch-requests
+watch-requests:
+	@watch -n1 -- bash -c "curl -s http://localhost:8000/metrics | awk -F' ' '/^vllm:num_requests_running/ {run=\$$NF} /^vllm:num_requests_waiting/ {wait=\$$NF} /cache.*usage|kv.*cache.*usage/ {kv=\$$NF} END { if (kv==\"\") kv=\"NA\"; printf(\"running=%s  waiting=%s  kv_cache=%s\n\", run, wait, kv) }'"
+
+# curl -s http://localhost:8000/metrics \
+# | awk -F" " "
+# /^vllm:num_requests_running/ {run=\$NF}
+# /^vllm:num_requests_waiting/ {wait=\$NF}
+# /cache.*usage|kv.*cache.*usage/ {kv=\$NF}
+# END { if (kv==\"\") kv=\"NA\"; printf(\"running=%s  waiting=%s  kv_cache=%s\n\", run, wait, kv) }"'

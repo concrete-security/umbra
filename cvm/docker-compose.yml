@@ -8,8 +8,8 @@ services:
       - huggingface-cache:/root/.cache/huggingface
     runtime: nvidia
     # No external ports - internal access only
-    expose:
-      - "8000"
+    ports:
+      - "8000:8000"
     networks:
       - vllm
     command: >
