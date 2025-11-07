@@ -39,9 +39,8 @@ jobs:
         working-directory: frontend
 
       - name: Install Playwright Browsers
-        uses: microsoft/playwright-github-action@v1
-        with:
-          version: 1.56.0
+        run: npx playwright install --with-deps
+        working-directory: frontend
 
       - name: Run unit + e2e tests
         run: make test-ci
