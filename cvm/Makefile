@@ -78,13 +78,20 @@ wait-services:
 	$(PYTHON_RUNNER) test_cvm.py $(DEV_FLAG) --wait --base-url $(NGINX_URL)
 
 test-all:
+	echo '\n\n\=============\n\n\'
 	$(PYTHON_RUNNER) test_cvm.py $(DEV_FLAG) --all --base-url $(NGINX_URL) --http-url $(NGINX_HTTP_URL)
+	echo '\n\n\=============\n\n\'
+	# echo 'Now testing vLLM proxy...'
+	# @$(MAKE) test-vllm-proxy
 
 test-health:
 	$(PYTHON_RUNNER) test_cvm.py $(DEV_FLAG) --health --base-url $(NGINX_URL)
 
 test-attestation:
 	$(PYTHON_RUNNER) test_cvm.py $(DEV_FLAG) --attestation --base-url $(NGINX_URL)
+
+test-vllm-proxy:
+	$(PYTHON_RUNNER) -m pytest -vvxs vllm_proxy/test_vllm_proxy.py
 
 test-vllm:
 	$(PYTHON_RUNNER) test_cvm.py $(DEV_FLAG) --vllm --base-url $(NGINX_URL)

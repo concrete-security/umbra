@@ -1,6 +1,6 @@
 services:
   vllm:
-    image: vllm/vllm-openai:latest
+    image: vllm/vllm-openai:v0.11.0
     container_name: vllm
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
@@ -8,8 +8,8 @@ services:
       - huggingface-cache:/root/.cache/huggingface
     runtime: nvidia
     # No external ports - internal access only
-    expose:
-      - "8000"
+    ports:
+      - "8000:8000"
     networks:
       - vllm
     command: >
@@ -20,13 +20,72 @@ services:
       --max-num-seqs 8
       --reasoning-parser openai_gptoss
       --async-scheduling
+    # --no-enable-prefix-caching
     restart: unless-stopped
     healthcheck:
-      start_interval: 1h30m # Allow up to 90 minutes for initial model loading
+      start_period: 1h30m # Allow up to 90 minutes for initial model loading
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
+
+  proxy_api:
+      build:
+        context: ./vllm_proxy
+        dockerfile: Dockerfile
+      container_name: proxy_api
+      depends_on:
+        vllm:
+          condition: service_healthy
+      networks:
+        - vllm
+        - proxy_api
+      environment:
+        - BASE_VLLM_URL=http://vllm:8000
+        - HOST=0.0.0.0
+        - PORT=7000
+      # No external ports - internal access only
+      expose:
+        - "{PORT}"
+      restart: unless-stopped
+
+  prometheus:
+    build:
+      context: ../monitoring/prometheus
+      dockerfile: Dockerfile
+    container_name: prometheus
+    depends_on:
+      proxy_api:
+        condition: service_started
+    networks:
+      - vllm
+    expose:
+      - "9090"
+    environment:
+      - CONFIG_FILE=/etc/prometheus/prometheus.yml
+      - STORAGE_TSDB_PATH=/prometheus
+      - STORAGE_TSDB_RETENTION_TIME=15d
+      - LOG_LEVEL=debug
+    restart: unless-stopped
+
+  grafana:
+    build:
+      context: ../monitoring/grafana
+      dockerfile: Dockerfile
+    container_name: grafana
+    networks:
+      - vllm
+    depends_on:
+      - prometheus
+    ports:
+      - "4000:4000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_SERVER_HTTP_PORT=4000
+      - GF_SERVER_HTTP_ADDR=0.0.0.0
+      - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/etc/grafana/provisioning/dashboards/vllm.json
+    restart: unless-stopped
 
   # Combined Nginx reverse proxy and Certificate Manager
   nginx-cert-manager:
@@ -48,7 +107,7 @@ services:
       - tls-certs-keys:/etc/nginx/ssl/
       - /var/run/dstack.sock:/var/run/dstack.sock
     networks:
-      - vllm
+      - proxy_api
       - attestation
     restart: unless-stopped
 
@@ -75,6 +134,8 @@ services:
 
 networks:
   vllm:
+    driver: bridge
+  proxy_api:
     driver: bridge
   attestation:
     driver: bridge
