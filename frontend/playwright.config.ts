@@ -29,6 +29,8 @@ export default defineConfig({
       NEXT_PUBLIC_VLLM_BASE_URL: "http://127.0.0.1:4000",
       NEXT_PUBLIC_VLLM_MODEL: "test-model",
       FORM_TOKEN_SECRET: process.env.FORM_TOKEN_SECRET ?? "test-form-token",
+      NEXT_PUBLIC_SUPABASE_URL: process.env.NEXT_PUBLIC_SUPABASE_URL ?? "https://dummy.supabase.co",
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? "dummy-anon-key",
     },
   },
 })

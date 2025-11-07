@@ -1,8 +1,8 @@
-import { test, expect } from "@playwright/test"
+import { test, expect, type Route } from "@playwright/test"
 
 const PROVIDER_ROUTE = "**/chat/completions"
 const ATTESTATION_ROUTE = "**/tdx_quote"
-const VERIFIER_ROUTE = "**/attestations/verify"
+const VERIFIER_ROUTES = ["**/api/attestation/verify", "**/attestations/verify"]
 
 const HERO_PROMPT = "Can you secure my documents?"
 const FOLLOW_UP_PROMPT = "How is the data encrypted?"
@@ -66,6 +66,7 @@ test("landing page contact link, hero hand-off, and confidential chat flow", asy
     attestationRequests += 1
     const payload = (route.request().postDataJSON() ?? {}) as { report_data?: string }
     latestReportData = typeof payload.report_data === "string" ? payload.report_data : null
+    const reportData = latestReportData ?? "0x" + "ab".repeat(16)
 
     await route.fulfill({
       status: 200,
@@ -76,14 +77,17 @@ test("landing page contact link, hero hand-off, and confidential chat flow", asy
         success: true,
         quote_type: "tdx.quote.v1",
         timestamp: new Date().toISOString(),
-        report_data: latestReportData ?? "0x" + "ab".repeat(16),
-        quote: "0x" + "11".repeat(64),
+        report_data: reportData,
+        quote: {
+          quote: "0x" + "11".repeat(64),
+          report_data: reportData,
+        },
         event_log: JSON.stringify([]),
       }),
     })
   })
 
-  await page.route(VERIFIER_ROUTE, async (route) => {
+  const handleVerifierRequest = async (route: Route) => {
     verifierRequests += 1
     const reportdata = latestReportData ?? "0x" + "ab".repeat(16)
     await route.fulfill({
@@ -104,7 +108,11 @@ test("landing page contact link, hero hand-off, and confidential chat flow", asy
         },
       }),
     })
-  })
+  }
+
+  for (const pattern of VERIFIER_ROUTES) {
+    await page.route(pattern, handleVerifierRequest)
+  }
 
   await page.addInitScript((providerBase) => {
     const key = "confidential-provider-settings-v1"
@@ -117,7 +125,7 @@ test("landing page contact link, hero hand-off, and confidential chat flow", asy
       }
       return originalSetItem(name, value)
     }
-  }, "http://127.0.0.1:4000")
+  }, "https://e2e-provider.test")
 
   await page.goto("/")
 
