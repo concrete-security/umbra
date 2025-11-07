@@ -61,6 +61,8 @@ docker-up:
 	@$(MAKE) docker-run SERVICES="$(SERVICES)"
 	@$(MAKE) docker-logs
 
+# 		--base-url https://vll.concrete-security.com:8000 \
+
 .PHONY: bench
 bench:
 	@echo "🚀 Running vLLM bench..."
@@ -71,21 +73,42 @@ bench:
 		--endpoint /v1/chat/completions \
 		--model openai/gpt-oss-120b \
 		--dataset-name random \
-		--random-input-len 512 \
-		--random-output-len 128 \
-		--request-rate 8 \
+		--random-input-len 521 \
+		--random-output-len 130 \
+		--request-rate 2 \
 		--num-prompts 500
 
+#  combien de gens on othorise - 8 * 500 * 500
+# --request-rate: This is the average number of requests per second (RPS)
+# throughput (requests processed per second),
+# latency (response time),
+# stability under load.
 .PHONY: watch-gpu
 watch-gpu:
-	@watch -n1 -- nvidia-smi \
-		--query-gpu=index,name,utilization.gpu,utilization.memory,memory.used,memory.total --format=csv,noheader
-
-# watch -n1 'nvidia-smi --query-gpu=index,name,utilization.gpu,utilization.memory,memory.used,memory.total --format=csv,noheader'
+	@bash -c '\
+	while true; do \
+		nvidia-smi --query-gpu=index,name,utilization.gpu,utilization.memory,memory.used,memory.total \
+			--format=csv,noheader,nounits | \
+		while IFS=, read -r index name ugpu umem mused mtotal; do \
+			printf "GPU index=%s, name=%s, utilization.gpu=%s%%, utilization.memory=%s%%, memory.used=%s MiB, memory.total=%s MiB\n" \
+				"$$index" "$$name" "$$ugpu" "$$umem" "$$mused" "$$mtotal"; \
+		done; \
+		sleep 1; \
+	done'
+# watch -n1 'nvidia-smi --query-gpu=index,name,utilization.gpu,utilization.memory,memory.used,memory.total --format=csv,noheader,nounits | awk -F, "{printf \"\033[1;34mGPU index=%s\033[0m, \033[1mname=%s\033[0m, \033[32mutilization.gpu=%s%%\033[0m, \033[33mutilization.memory=%s%%\033[0m, \033[36mmemory.used=%s MiB\033[0m, \033[35mmemory.total=%s MiB\033[0m\n\", \$1, \$2, \$3, \$4, \$5, \$6}"'
 
 .PHONY: watch-requests
 watch-requests:
-	@watch -n1 -- bash -c "curl -s http://localhost:8000/metrics | awk -F' ' '/^vllm:num_requests_running/ {run=\$$NF} /^vllm:num_requests_waiting/ {wait=\$$NF} /cache.*usage|kv.*cache.*usage/ {kv=\$$NF} END { if (kv==\"\") kv=\"NA\"; printf(\"running=%s  waiting=%s  kv_cache=%s\n\", run, wait, kv) }'"
+	@bash -c '\
+	while true; do \
+		clear; \
+		curl -s http://localhost:8000/metrics | \
+		awk -F" " "/^vllm:num_requests_running/ {run=\$$NF} \
+		/^vllm:num_requests_waiting/ {wait=\$$NF} \
+		/cache.*usage|kv.*cache.*usage/ {kv=\$$NF} \
+		END { if (kv==\"\") kv=\"NA\"; printf(\"running=%s  waiting=%s  kv_cache=%s\n\", run, wait, kv) }"; \
+		sleep 1; \
+	done'
 
 # curl -s http://localhost:8000/metrics \
 # | awk -F" " "
