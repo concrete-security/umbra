@@ -407,9 +407,8 @@ export default function LandingPage() {
             <div className="rounded-[28px] border border-[#d4d3e6] bg-white/95 p-6 shadow-[0_32px_78px_-64px_rgba(15,10,80,0.35)]">
               <p className="text-sm leading-6 text-[#1F1E28]">
                 <strong className="font-semibold text-[#08070B]">Security Assumptions:</strong> Umbra assumes the TEE
-                hardware is trusted and correctly implements the security guarantees. The cryptographic verification
-                ensures that only verified code runs in the TEE, protecting against software-based attacks. The system
-                relies on hardware-based attestation to prove the integrity of the execution environment.
+                hardware vendors (Intel, AMD, NVIDIA) are trusted and correctly implements the security guarantees. The cryptographic verification
+                ensures that only verified code runs in the TEE, protecting against software-based attacks.
               </p>
             </div>
           </div>
