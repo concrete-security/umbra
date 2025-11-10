@@ -1,7 +1,7 @@
 """
 Certificate Manager Service
 
-Handles TLS certificate creation, renewal, and key management for the secure-chat CVM.
+Handles TLS certificate creation, renewal, and key management.
 Supports multiple replicas by synchronizing them via an S3 bucket.
 """
 
