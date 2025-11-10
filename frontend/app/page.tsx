@@ -233,11 +233,10 @@ export default function LandingPage() {
                   </p>
                 </div>
                 <form onSubmit={handleSubmit} className="flex flex-col gap-6">
-                <div className="flex items-center justify-center gap-2 text-xs font-semibold uppercase tracking-[0.24em] text-[#1F1E28]/70">
-                  <Shield className="h-3.5 w-3.5 text-[#1B0986]" />
-                  <span>Private channel · Secure workspace</span>
-                </div>
-                <div className="flex flex-col gap-4 rounded-[32px] border border-[#d7d5eb] bg-white/80 p-6 backdrop-blur">
+                  <div className="flex items-center justify-center gap-2 text-xs font-semibold uppercase tracking-[0.24em] text-[#1F1E28]/70">
+                    <Shield className="h-3.5 w-3.5 text-[#1B0986]" />
+                    <span>Private channel · Secure workspace</span>
+                  </div>
                   {uploadedFiles.length > 0 && (
                     <div className="space-y-2">
                       {uploadedFiles.map((file, index) => (
@@ -274,7 +273,7 @@ export default function LandingPage() {
                       onKeyDown={handleKeyDown}
                       disabled={isTransitioning}
                       placeholder="Ask about your confidential documents..."
-                      className="min-h-[120px] w-full resize-none rounded-2xl border border-[#d7d5eb] bg-white px-4 py-4 text-base leading-relaxed text-[#08070B] placeholder:text-[#1F1E28]/40 shadow-sm transition focus:outline-none focus:ring-2 focus:ring-[#1B0986]/45"
+                      className="min-h-[140px] w-full resize-none rounded-[32px] border border-[#d7d5eb] bg-white px-5 py-5 text-base leading-relaxed text-[#08070B] placeholder:text-[#1F1E28]/40 shadow-[0_32px_80px_-60px_rgba(11,31,102,0.55)] transition focus:outline-none focus:ring-2 focus:ring-[#1B0986]/45"
                       rows={4}
                     />
                     <div className="flex w-full items-center gap-3">
@@ -307,9 +306,9 @@ export default function LandingPage() {
                       </Button>
                     </div>
                   </div>
-                  <div className="flex flex-col gap-2">
+                  <div className="flex flex-col gap-2 text-center">
                     <p className="text-xs font-medium uppercase tracking-[0.24em] text-[#1F1E28]/60">Try an example:</p>
-                    <div className="flex flex-wrap gap-2">
+                    <div className="flex flex-wrap justify-center gap-2">
                       {examplePrompts.map((example, idx) => (
                         <button
                           key={idx}
@@ -324,22 +323,21 @@ export default function LandingPage() {
                       ))}
                     </div>
                   </div>
-                </div>
-                <div className="flex items-center gap-4 text-xs text-[#1F1E28]/70">
-                  <div className="flex items-center gap-2">
-                    <Lock className="h-3.5 w-3.5 text-[#1F1E28]" />
-                    <span>Encrypted</span>
+                  <div className="flex items-center justify-center gap-4 text-xs text-[#1F1E28]/70">
+                    <div className="flex items-center gap-2">
+                      <Lock className="h-3.5 w-3.5 text-[#1F1E28]" />
+                      <span>Encrypted</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Shield className="h-3.5 w-3.5 text-[#1F1E28]" />
+                      <span>Attested</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Fingerprint className="h-3.5 w-3.5 text-[#1F1E28]" />
+                      <span>Verified</span>
+                    </div>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <Shield className="h-3.5 w-3.5 text-[#1F1E28]" />
-                    <span>Attested</span>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <Fingerprint className="h-3.5 w-3.5 text-[#1F1E28]" />
-                    <span>Verified</span>
-                  </div>
-                </div>
-              </form>
+                </form>
             </div>
           </div>
         </section>
