@@ -1,8 +1,7 @@
 """
-Certificate Manager Service
+CertbotWrapper class
 
-Handles TLS certificate creation, renewal, and key management for the secure-chat CVM.
-Supports multiple replicas by synchronizing them via an S3 bucket.
+Wraps the certbot cli to obtain Let's Encrypt certificates from Python.
 """
 
 import os

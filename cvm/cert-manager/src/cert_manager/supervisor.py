@@ -1,8 +1,7 @@
 """
-Certificate Manager Service
+Supervisor class
 
-Handles TLS certificate creation, renewal, and key management for the secure-chat CVM.
-Supports multiple replicas by synchronizing them via an S3 bucket.
+Manages different processes (nginx and cert-manager) via Supervisord.
 """
 
 import os
