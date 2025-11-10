@@ -48,7 +48,7 @@ function optionalEnv(value?: string): string | null {
 }
 
 const DEFAULT_VERIFIER_ENDPOINT = "https://cloud-api.phala.network/api/v1/attestations/verify"
-const LOCAL_VERIFY_ENDPOINT = "/api/attestation/verify"
+const PROXY_VERIFY_ENDPOINT = "/api/attestation/verify"
 const publicVerifierEndpoint = optionalEnv(process.env.NEXT_PUBLIC_PHALA_TDX_VERIFIER_API)
 const privateVerifierEndpoint = optionalEnv(process.env.PHALA_TDX_VERIFIER_API)
 const serverVerifierEndpoint = privateVerifierEndpoint ?? publicVerifierEndpoint ?? DEFAULT_VERIFIER_ENDPOINT
@@ -79,7 +79,7 @@ export async function verifyTdxQuote(quoteHex: string): Promise<IntelVerificatio
   }
 
   if (isBrowserEnvironment()) {
-    return postJson<IntelVerificationPayload>(LOCAL_VERIFY_ENDPOINT, { quoteHex })
+    return postJson<IntelVerificationPayload>(PROXY_VERIFY_ENDPOINT, { quoteHex })
   }
 
   return postJson<IntelVerificationPayload>(serverVerifierEndpoint, { hex: quoteHex })

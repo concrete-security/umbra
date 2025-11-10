@@ -22,7 +22,8 @@ Umbra is Concrete Security’s marketing site and secure workspace for routing s
 
 ### API routes & helpers
 - `/api/chat/completions` proxies OpenAI-compatible streaming requests to the configured provider while enforcing HTTPS/loopback hosts.
-- `/api/waitlist`, `/api/feedback`, `/api/form-token`, and `/api/attestation/verify` provide intake, signed form tokens, and attestation verification with strict origin/content-type checks, rate limiting, and signed HMAC tokens.
+- `/api/waitlist`, `/api/feedback`, and `/api/form-token` provide intake and signed form tokens with strict origin/content-type checks, rate limiting, and signed HMAC tokens.
+- `/api/attestation/verify` is a CORS proxy that forwards verification requests to the Phala verifier API (or configured endpoint).
 - `/api/admin/waitlist/*` exposes admin-only CRUD + activation flows using the Supabase service-role client.
 
 ## Stack & tooling
@@ -149,7 +150,7 @@ pnpm build && pnpm start
 - `app/confidential-ai/page.tsx` supports reasoning streams (`reasoning_effort`), cache salts, per-message reasoning accordions, and a hex “cipher preview” before sending content.
 - Attachments (≤100 MB) are appended to the message content before dispatch, and PDFs are converted to text with pdf.js (loaded from `/pdfjs/*`).
 - Model output renders through `components/markdown.tsx`, which uses `remark-gfm` and `rehype-sanitize` plus custom copy buttons for code blocks.
-- `lib/attestation.ts` fetches quotes from `${NEXT_PUBLIC_ATTESTATION_BASE_URL}/tdx_quote`, while `lib/attestation-verifier.ts` verifies them via Phala (or your overrides). `/api/attestation/verify` provides a server proxy for private verifiers.
+- `lib/attestation.ts` fetches quotes from `${NEXT_PUBLIC_ATTESTATION_BASE_URL}/tdx_quote`, while `lib/attestation-verifier.ts` verifies them via Phala (or your overrides). The verification logic runs in the frontend, but browser requests go through `/api/attestation/verify` as a CORS proxy since the Phala API doesn't allow direct browser requests.
 
 ## Email, waitlist, and feedback flows
 - `/api/waitlist` and `/api/feedback` sanitize payloads, enforce same-origin requests, validate emails, rate limit by IP, and require signed form tokens.
