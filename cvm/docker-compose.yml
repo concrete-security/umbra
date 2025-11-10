@@ -20,7 +20,7 @@ services:
       --max-num-seqs 8
       --reasoning-parser openai_gptoss
       --async-scheduling
-      --allow-origins []
+      --allowed-origins []
     restart: unless-stopped
     healthcheck:
       start_interval: 1h30m # Allow up to 90 minutes for initial model loading
