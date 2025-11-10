@@ -90,7 +90,7 @@ describe("verifyTdxQuote", () => {
     expect(url).toBe("https://custom-verifier.example.com/verify")
   })
 
-  it("prefers PHALA_TDX_VERIFIER_API when provided", async () => {
+  it("prefers PHALA_TDX_VERIFIER_API when provided on server", async () => {
     process.env.NEXT_PUBLIC_PHALA_TDX_VERIFIER_API = "https://ignored.example.com/verify"
     process.env.PHALA_TDX_VERIFIER_API = "https://private.example.com/verify"
     const { verifyTdxQuote } = await importModule()
@@ -108,7 +108,7 @@ describe("verifyTdxQuote", () => {
     expect(url).toBe("https://private.example.com/verify")
   })
 
-  it("routes through the internal API when window is present", async () => {
+  it("routes through the proxy API when window is present", async () => {
     simulateBrowserEnv()
     const { verifyTdxQuote } = await importModule()
     const payload = { verified: true }
