@@ -1841,13 +1841,14 @@ function ConfidentialAIContent() {
   return (
     <div className="flex h-[100dvh] flex-col bg-[#E8E7F0] text-foreground dark:bg-background">
       <main className="flex flex-1 flex-col min-h-0">
-        <section className="flex h-full w-full flex-1 flex-col md:flex-row" aria-label="Confidential space">
+        <section className="relative flex h-full w-full flex-1 flex-col md:flex-row" aria-label="Confidential space">
           <aside
             className={cn(
-              "flex flex-none flex-col border-b border-border/40 bg-white/85 transition-all duration-200 md:border-b-0 md:border-r dark:bg-card/25",
+              "flex flex-col border-border/40 bg-white/95 transition-[opacity,transform,width] duration-200 dark:border-border/60 dark:bg-[#0B0820]/95 md:border-border/40 md:bg-white/85 md:dark:bg-card/25",
+              "fixed inset-y-0 left-0 z-[60] h-[100dvh] w-[min(360px,90vw)] overflow-y-auto border-r shadow-[0_20px_60px_-25px_rgba(5,3,15,0.85)] md:static md:h-full md:w-auto md:flex-none md:border-b-0 md:border-r md:shadow-none",
               sidebarOpen
-                ? "h-full w-full gap-6 p-4 sm:p-6 md:w-[320px]"
-                : "w-[56px] items-center justify-between px-2 py-4"
+                ? "translate-x-0 opacity-100 pointer-events-auto gap-6 p-5 sm:p-6 md:p-4 md:w-full md:max-w-[320px]"
+                : "-translate-x-full opacity-0 pointer-events-none md:translate-x-0 md:opacity-100 md:pointer-events-auto md:w-[56px] md:items-center md:justify-between md:px-2 md:py-4"
             )}
           >
             {sidebarOpen ? (
@@ -2032,6 +2033,28 @@ function ConfidentialAIContent() {
               </div>
             )}
           </aside>
+
+          {sidebarOpen ? (
+            <button
+              type="button"
+              aria-label="Close confidential tools"
+              onClick={() => setSidebarOpen(false)}
+              className="fixed inset-0 z-50 bg-[#08070B]/40 backdrop-blur-[2px] transition-opacity md:hidden"
+            />
+          ) : null}
+
+          {!sidebarOpen ? (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              onClick={() => setSidebarOpen(true)}
+              className="fixed left-4 top-[calc(env(safe-area-inset-top,0)+16px)] z-40 rounded-full border border-border/50 bg-white/90 text-muted-foreground shadow-md backdrop-blur md:hidden"
+            >
+              <PanelLeftOpen className="h-4 w-4" />
+              <span className="sr-only">Open confidential tools</span>
+            </Button>
+          ) : null}
 
           <div className="flex flex-1 flex-col min-h-0">
             <div
