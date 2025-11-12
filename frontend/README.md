@@ -17,7 +17,7 @@ Umbra is Concrete Security’s marketing site and secure workspace for routing s
 
 ### Authentication & waitlist flows
 - `/sign-in` renders the Supabase email/password form plus a waitlist request form that hits the same `/api/waitlist` endpoint.
-- `/admin/waitlist` allows admins to filter, annotate, and activate requests. Activation generates Supabase magic links, promotes users to the `member` role, and dispatches branded emails via Resend.
+- `/admin/waitlist` allows admins to filter, annotate, and activate requests. Activation generates Supabase magic links, records invite metadata, and dispatches branded emails via Resend. Roles are granted automatically only after recipients verify their email.
 - `middleware.ts` and `SupabaseAuthListener` keep SSR and client state aligned so protected routes know when a user signs in or out.
 
 ### API routes & helpers
@@ -154,7 +154,8 @@ pnpm build && pnpm start
 
 ## Email, waitlist, and feedback flows
 - `/api/waitlist` and `/api/feedback` sanitize payloads, enforce same-origin requests, validate emails, rate limit by IP, and require signed form tokens.
-- `/api/admin/waitlist/[id]/activate` generates Supabase magic links, enriches user metadata with `member` roles, and sends HTML/text emails via `lib/email/templates/waitlist-activation.ts`.
+- `/api/admin/waitlist/[id]/activate` generates Supabase magic links, stores invite metadata, and sends HTML/text emails via `lib/email/templates/waitlist-activation.ts`.
+- The `public.handle_waitlist_activation` database trigger runs when Supabase marks a user's email as confirmed. It turns matching waitlist entries to `activated`, syncs metadata, and adds the `member` role in `auth.users`.
 - Feedback submissions require `RESEND_TO_EMAIL_FEEDBACK` and fan out to both HTML + plaintext bodies, providing an audit trail.
 
 ## Security posture highlights
