@@ -6,18 +6,18 @@ Umbra is Concrete Security’s marketing site and secure workspace for routing s
 
 ### Landing page (`app/page.tsx`)
 - Hero prompt + attachment form stores the initial context in `sessionStorage` so the confidential workspace can replay it.
-- People carousel, trust badges, and the security flow diagram highlight the team’s credibility.
+- People carousel, trust badges, and the security flow diagram highlight team credibility.
 - Waitlist CTA and floating `FeedbackButton` submit through `/api/waitlist` and `/api/feedback`, reusing the same anti-bot protections as the auth surface.
 
 ### Confidential AI workspace (`app/confidential-ai/page.tsx`)
 - Streaming chat client with reasoning panel, cache salt input, file uploads (text + PDFs via `public/pdfjs`/`workers/pdf.worker.ts`), and transcript controls.
 - Provider settings are kept entirely in the browser (localStorage for base/model/label, sessionStorage for bearer tokens) and proxied through `/api/chat/completions` so secrets never touch the server code.
-- Proof-of-confidentiality tab fetches quotes from your attestation service (`/tdx_quote`) and verifies them with Phala (or your override). The UI blocks prompts until attestation succeeds.
+- Proof-of-confidentiality tab fetches quotes from the attestation service (`/tdx_quote`) and verifies them with Phala (or configured override). The UI blocks prompts until attestation succeeds.
 - Optional guest throttling (`NEXT_PUBLIC_CONFIDENTIAL_ENABLE_GUEST_LIMITS`) limits anonymous visitors to a single session before requiring Supabase auth.
 
 ### Authentication & waitlist flows
 - `/sign-in` renders the Supabase email/password form plus a waitlist request form that hits the same `/api/waitlist` endpoint.
-- `/admin/waitlist` lets admins filter, annotate, and activate requests. Activation generates Supabase magic links, promotes users to the `member` role, and dispatches branded emails via Resend.
+- `/admin/waitlist` allows admins to filter, annotate, and activate requests. Activation generates Supabase magic links, promotes users to the `member` role, and dispatches branded emails via Resend.
 - `middleware.ts` and `SupabaseAuthListener` keep SSR and client state aligned so protected routes know when a user signs in or out.
 
 ### API routes & helpers
@@ -63,7 +63,7 @@ cp .env.example .env.local
 Fill in the variables below. Generate a strong `FORM_TOKEN_SECRET`, e.g. `openssl rand -hex 32`. Never commit `.env.local`.
 
 ### 3. Supabase setup
-1. Create a Supabase project and add `http://localhost:3000/auth/callback` plus your production domain to **Authentication → URL Configuration**.
+1. Create a Supabase project and add `http://localhost:3000/auth/callback` plus the production domain to **Authentication → URL Configuration**.
 2. Record `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, and `SUPABASE_SERVICE_ROLE_KEY` in `.env.local`.
 3. Run `supabase/schema.sql` (SQL editor or `psql`) to create the `waitlist_requests` table, enum, indexes, and RLS policy.
 4. Seed at least one admin user and tag it with the `admin` role:
@@ -150,12 +150,12 @@ pnpm build && pnpm start
 - `app/confidential-ai/page.tsx` supports reasoning streams (`reasoning_effort`), cache salts, per-message reasoning accordions, and a hex “cipher preview” before sending content.
 - Attachments (≤100 MB) are appended to the message content before dispatch, and PDFs are converted to text with pdf.js (loaded from `/pdfjs/*`).
 - Model output renders through `components/markdown.tsx`, which uses `remark-gfm` and `rehype-sanitize` plus custom copy buttons for code blocks.
-- `lib/attestation.ts` fetches quotes from `${NEXT_PUBLIC_ATTESTATION_BASE_URL}/tdx_quote`, while `lib/attestation-verifier.ts` verifies them via Phala (or your overrides). The verification logic runs in the frontend, but browser requests go through `/api/attestation/verify` as a CORS proxy since the Phala API doesn't allow direct browser requests.
+- `lib/attestation.ts` fetches quotes from `${NEXT_PUBLIC_ATTESTATION_BASE_URL}/tdx_quote`, while `lib/attestation-verifier.ts` verifies them via Phala (or configured overrides). The verification logic runs in the frontend, but browser requests go through `/api/attestation/verify` as a CORS proxy since the Phala API doesn't allow direct browser requests.
 
 ## Email, waitlist, and feedback flows
 - `/api/waitlist` and `/api/feedback` sanitize payloads, enforce same-origin requests, validate emails, rate limit by IP, and require signed form tokens.
 - `/api/admin/waitlist/[id]/activate` generates Supabase magic links, enriches user metadata with `member` roles, and sends HTML/text emails via `lib/email/templates/waitlist-activation.ts`.
-- Feedback submissions require `RESEND_TO_EMAIL_FEEDBACK` and fan out to both HTML + plaintext bodies so the team has an audit trail.
+- Feedback submissions require `RESEND_TO_EMAIL_FEEDBACK` and fan out to both HTML + plaintext bodies, providing an audit trail.
 
 ## Security posture highlights
 - CSP, Referrer Policy, HSTS (prod), Permissions Policy, and other headers are defined in `next.config.mjs` and applied to every route.
@@ -171,12 +171,12 @@ pnpm build && pnpm start
 - `make test` – Runs unit + e2e suites with the required env flags (`FORM_TOKEN_SECRET`, attestation test mode).
 
 ## Deployment checklist
-1. Set all required env vars (Supabase, form token, provider defaults, attestation/verifier, Resend) in your hosting provider.
+1. Set all required env vars (Supabase, form token, provider defaults, attestation/verifier, Resend) in the hosting provider.
 2. Ensure `NEXT_PUBLIC_APP_URL` matches the production origin so CSRF checks pass and magic links point to the correct domain.
-3. Confirm your attestation + verifier endpoints permit browser CORS from the production origin.
+3. Confirm the attestation + verifier endpoints permit browser CORS from the production origin.
 4. Populate provider defaults so first-time visitors see sane values.
 5. Run `pnpm build` during CI and deploy the `.next` output (`pnpm start` in Node or Vercel’s build pipeline).
-6. Reset local `.env.local` whenever you switch between staging/prod credentials to keep Playwright and Supabase sessions deterministic.
+6. Reset local `.env.local` when switching between staging/prod credentials to keep Playwright and Supabase sessions deterministic.
 
 ## Operational tips
 - Hero prompt + attachments use the `hero-initial-message` and `hero-uploaded-files` keys in `sessionStorage`.
