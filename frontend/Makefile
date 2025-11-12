@@ -53,12 +53,12 @@ test test-ci:
 		echo "Running unit tests with vitest..."; \
 		FORM_TOKEN_SECRET=$(FORM_TOKEN_SECRET) pnpm test:unit && \
 		echo "Running Playwright E2E suite..."; \
-		NEXT_PUBLIC_ATTESTATION_TEST_MODE=true ATTESTATION_TEST_MODE=true FORM_TOKEN_SECRET=$(FORM_TOKEN_SECRET) pnpm test:e2e; \
+		NEXT_PUBLIC_ATTESTATION_TEST_MODE=true FORM_TOKEN_SECRET=$(FORM_TOKEN_SECRET) pnpm test:e2e; \
 	else \
 		echo "Running unit tests with npm..."; \
 		FORM_TOKEN_SECRET=$(FORM_TOKEN_SECRET) npm run test:unit && \
 		echo "Running Playwright E2E suite with npm..."; \
-		NEXT_PUBLIC_ATTESTATION_TEST_MODE=true ATTESTATION_TEST_MODE=true FORM_TOKEN_SECRET=$(FORM_TOKEN_SECRET) npm run test:e2e; \
+		NEXT_PUBLIC_ATTESTATION_TEST_MODE=true FORM_TOKEN_SECRET=$(FORM_TOKEN_SECRET) npm run test:e2e; \
 	fi
 
 clean:
