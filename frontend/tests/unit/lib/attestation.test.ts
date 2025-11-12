@@ -19,7 +19,6 @@ async function importModule() {
 beforeEach(() => {
   vi.resetModules()
   delete process.env.NEXT_PUBLIC_ATTESTATION_BASE_URL
-  delete process.env.ATTESTATION_BASE_URL
   mockFetch.mockReset()
   vi.stubGlobal("fetch", mockFetch)
 })
@@ -38,21 +37,6 @@ describe("getAttestationServiceBaseUrl", () => {
     process.env.NEXT_PUBLIC_ATTESTATION_BASE_URL = " https://attest.example.com "
     const { getAttestationServiceBaseUrl } = await importModule()
     expect(getAttestationServiceBaseUrl()).toBe("https://attest.example.com")
-  })
-})
-
-describe("getServerAttestationServiceBaseUrl", () => {
-  it("prefers the server variable when provided", async () => {
-    process.env.NEXT_PUBLIC_ATTESTATION_BASE_URL = " https://public.example.com "
-    process.env.ATTESTATION_BASE_URL = " https://server.example.com "
-    const { getServerAttestationServiceBaseUrl } = await importModule()
-    expect(getServerAttestationServiceBaseUrl()).toBe("https://server.example.com")
-  })
-
-  it("falls back to the public variable", async () => {
-    process.env.NEXT_PUBLIC_ATTESTATION_BASE_URL = " https://public.example.com "
-    const { getServerAttestationServiceBaseUrl } = await importModule()
-    expect(getServerAttestationServiceBaseUrl()).toBe("https://public.example.com")
   })
 })
 
@@ -151,11 +135,11 @@ describe("compareReportData", () => {
     expect(compareReportData("deadbeef", "0xDEADBEEF000000000000")).toBe(true)
   })
 
-  it("matches the Phala-style reportdata", () => {
+  it("matches verifier-style padded report data", () => {
     const localNonce = "6465616462656566"
-    const phalaReportData =
+    const verifierReportData =
       "0x64656164626565660000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-    expect(compareReportData(localNonce, phalaReportData)).toBe(true)
+    expect(compareReportData(localNonce, verifierReportData)).toBe(true)
   })
 
   it("fails when verifier data is shorter", () => {

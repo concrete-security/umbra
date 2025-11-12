@@ -1,23 +1,24 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-type MockResponse = {
-  ok: boolean
-  status: number
-  text: () => Promise<string>
-  json: () => Promise<unknown>
-}
+const initMock = vi.fn(() => Promise.resolve())
+const getCollateralMock = vi.fn()
+const verifyMock = vi.fn()
 
-const mockFetch = vi.fn<[
-  input: RequestInfo | URL,
-  init?: RequestInit
-], Promise<MockResponse>>()
+vi.mock("@phala/dcap-qvl-web", () => ({
+  __esModule: true,
+  default: initMock,
+  js_get_collateral: getCollateralMock,
+  js_verify: verifyMock,
+}))
 
 async function importModule() {
   return import("@/lib/attestation-verifier")
 }
 
-function simulateBrowserEnv() {
-  ;(globalThis as unknown as { window?: Record<string, unknown> }).window = {}
+const baseCollateral = {
+  tcb_info: "{}",
+  pck_crl_issuer_chain: "",
+  qe_identity: "",
 }
 
 function resetBrowserEnv() {
@@ -26,146 +27,116 @@ function resetBrowserEnv() {
 
 beforeEach(() => {
   vi.resetModules()
-  delete process.env.NEXT_PUBLIC_PHALA_TDX_VERIFIER_API
-  delete process.env.PHALA_TDX_VERIFIER_API
-  mockFetch.mockReset()
-  vi.stubGlobal("fetch", mockFetch)
+  initMock.mockClear()
+  getCollateralMock.mockReset()
+  verifyMock.mockReset()
+  getCollateralMock.mockResolvedValue(baseCollateral)
+  verifyMock.mockReturnValue({
+    status: "UpToDate",
+    advisory_ids: [],
+    report: {
+      TD10: {
+        report_data: new Uint8Array([0xde, 0xad]),
+      },
+    },
+  })
+  delete process.env.NEXT_PUBLIC_PCCS_URL
+  delete process.env.NEXT_PUBLIC_ATTESTATION_TEST_MODE
   resetBrowserEnv()
 })
 
 afterEach(() => {
-  resetBrowserEnv()
   vi.unstubAllGlobals()
+  resetBrowserEnv()
 })
 
 describe("verifyTdxQuote", () => {
-  it("calls the default verifier endpoint on the server", async () => {
+  it("invokes the DCAP bindings with normalized quote bytes", async () => {
     const { verifyTdxQuote } = await importModule()
-    const payload = {
-      verified: true,
-      quote: {
-        verified: true,
-        body: {
-          reportdata: "0xdeadbeef",
-        },
-      },
-    }
-
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      text: () => Promise.resolve(""),
-      json: () => Promise.resolve(payload),
-    })
 
     const result = await verifyTdxQuote("0xdeadbeef")
 
-    expect(result).toEqual(payload)
-    expect(mockFetch).toHaveBeenCalledTimes(1)
-    const [url, init] = mockFetch.mock.calls[0]
-    expect(url).toBe("https://cloud-api.phala.network/api/v1/attestations/verify")
-    expect(init?.method).toBe("POST")
-    expect(init?.headers).toMatchObject({ "Content-Type": "application/json" })
-    expect(init?.cache).toBe("no-store")
-    const parsedBody = JSON.parse(String(init?.body))
-    expect(parsedBody).toEqual({ hex: "0xdeadbeef" })
+    expect(initMock).toHaveBeenCalledTimes(1)
+    expect(getCollateralMock).toHaveBeenCalledTimes(1)
+    const [, collateralBytes] = getCollateralMock.mock.calls[0]!
+    expect(Array.from(collateralBytes as Uint8Array)).toEqual([0xde, 0xad, 0xbe, 0xef])
+
+    expect(verifyMock).toHaveBeenCalledTimes(1)
+    const [, , timestamp] = verifyMock.mock.calls[0]!
+    expect(typeof timestamp).toBe("bigint")
+
+    expect(result.verifiedReport.status).toBe("UpToDate")
+    expect(result.reportDataHex).toBe("0xdead")
+    expect(result.quoteCollateral).toEqual(baseCollateral)
   })
 
-  it("uses a custom server verifier endpoint from env", async () => {
-    process.env.NEXT_PUBLIC_PHALA_TDX_VERIFIER_API = "https://custom-verifier.example.com/verify"
+  it("throws when quoteHex is missing", async () => {
     const { verifyTdxQuote } = await importModule()
-    const payload = { verified: true }
-
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      text: () => Promise.resolve(""),
-      json: () => Promise.resolve(payload),
-    })
-
-    await verifyTdxQuote("0xabc123")
-
-    expect(mockFetch).toHaveBeenCalledTimes(1)
-    const [url] = mockFetch.mock.calls[0]
-    expect(url).toBe("https://custom-verifier.example.com/verify")
-  })
-
-  it("prefers PHALA_TDX_VERIFIER_API when provided on server", async () => {
-    process.env.NEXT_PUBLIC_PHALA_TDX_VERIFIER_API = "https://ignored.example.com/verify"
-    process.env.PHALA_TDX_VERIFIER_API = "https://private.example.com/verify"
-    const { verifyTdxQuote } = await importModule()
-
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      text: () => Promise.resolve(""),
-      json: () => Promise.resolve({ verified: true }),
-    })
-
-    await verifyTdxQuote("0xabc123")
-
-    const [url] = mockFetch.mock.calls[0]
-    expect(url).toBe("https://private.example.com/verify")
-  })
-
-  it("routes through the proxy API when window is present", async () => {
-    simulateBrowserEnv()
-    const { verifyTdxQuote } = await importModule()
-    const payload = { verified: true }
-
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      text: () => Promise.resolve(""),
-      json: () => Promise.resolve(payload),
-    })
-
-    const result = await verifyTdxQuote("0xfeed")
-
-    expect(result).toEqual(payload)
-    const [url, init] = mockFetch.mock.calls[0]
-    expect(url).toBe("/api/attestation/verify")
-    expect(JSON.parse(String(init?.body))).toEqual({ quoteHex: "0xfeed" })
-  })
-
-  it("throws an error when the response is not ok", async () => {
-    const { verifyTdxQuote } = await importModule()
-
-    mockFetch.mockResolvedValueOnce({
-      ok: false,
-      status: 400,
-      text: () => Promise.resolve("Invalid quote"),
-      json: () => Promise.resolve({}),
-    })
-
-    await expect(verifyTdxQuote("0xbad")).rejects.toThrow("Invalid quote")
-  })
-
-  it("throws an error when quoteHex is missing", async () => {
-    const { verifyTdxQuote } = await importModule()
-
     await expect(verifyTdxQuote("")).rejects.toThrow("quoteHex is required")
+    expect(getCollateralMock).not.toHaveBeenCalled()
+  })
+
+  it("surfaces collateral download errors", async () => {
+    getCollateralMock.mockRejectedValueOnce(new Error("missing pccs"))
+    const { verifyTdxQuote } = await importModule()
+    await expect(verifyTdxQuote("0xdead")).rejects.toThrow("Failed to download quote collateral: missing pccs")
+  })
+
+  it("surfaces verification errors", async () => {
+    verifyMock.mockImplementationOnce(() => {
+      throw new Error("revoked")
+    })
+    const { verifyTdxQuote } = await importModule()
+    await expect(verifyTdxQuote("0xdeadbeef")).rejects.toThrow("Quote verification failed: revoked")
+  })
+
+  it("extracts TD15 base report data", async () => {
+    verifyMock.mockReturnValueOnce({
+      status: "UpToDate",
+      advisory_ids: [],
+      report: {
+        TD15: {
+          base: {
+            report_data: new Uint8Array([0xaa, 0xbb, 0xcc]),
+          },
+        },
+      },
+    })
+
+    const { verifyTdxQuote } = await importModule()
+    const result = await verifyTdxQuote("0x01")
+
+    expect(result.reportDataHex).toBe("0xaabbcc")
+  })
+
+  it("passes NEXT_PUBLIC_PCCS_URL overrides to the wasm binding", async () => {
+    process.env.NEXT_PUBLIC_PCCS_URL = "https://public-pccs.example.com/tdx"
+    const { verifyTdxQuote } = await importModule()
+
+    await verifyTdxQuote("0x1234")
+
+    expect(getCollateralMock).toHaveBeenCalledWith("https://public-pccs.example.com/tdx", expect.any(Uint8Array))
+  })
+
+  it("short-circuits when attestation test mode flag is set", async () => {
+    process.env.NEXT_PUBLIC_ATTESTATION_TEST_MODE = "true"
+    const { verifyTdxQuote } = await importModule()
+
+    const result = await verifyTdxQuote("0x1234")
+
+    expect(getCollateralMock).not.toHaveBeenCalled()
+    expect(result.metadata?.testMode).toBe(true)
+    expect(result.verifiedReport.status).toBe("TEST_MODE")
   })
 })
 
 describe("verifyTdxQuoteWithFallback", () => {
   it("delegates to verifyTdxQuote", async () => {
-    simulateBrowserEnv()
     const { verifyTdxQuoteWithFallback } = await importModule()
-    const payload = { verified: true }
 
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      text: () => Promise.resolve(""),
-      json: () => Promise.resolve(payload),
-    })
+    await verifyTdxQuoteWithFallback("0xfeed")
 
-    const result = await verifyTdxQuoteWithFallback("0xdeadbeef")
-
-    expect(result).toEqual(payload)
-    expect(mockFetch).toHaveBeenCalledTimes(1)
-    const [url] = mockFetch.mock.calls[0]
-    expect(url).toBe("/api/attestation/verify")
+    expect(getCollateralMock).toHaveBeenCalledTimes(1)
+    expect(verifyMock).toHaveBeenCalledTimes(1)
   })
 })

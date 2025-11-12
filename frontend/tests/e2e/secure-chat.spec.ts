@@ -1,8 +1,7 @@
-import { test, expect, type Route } from "@playwright/test"
+import { test, expect } from "@playwright/test"
 
 const PROVIDER_ROUTE = "**/chat/completions"
 const ATTESTATION_ROUTE = "**/tdx_quote"
-const VERIFIER_ROUTES = ["**/api/attestation/verify", "**/attestations/verify"]
 
 const HERO_PROMPT = "Can you secure my documents?"
 const FOLLOW_UP_PROMPT = "How is the data encrypted?"
@@ -13,7 +12,6 @@ test("landing page contact link, hero hand-off, and confidential chat flow", asy
   let requestCount = 0
   let latestReportData: string | null = null
   let attestationRequests = 0
-  let verifierRequests = 0
 
   await page.route(PROVIDER_ROUTE, async (route) => {
     const method = route.request().method()
@@ -87,32 +85,6 @@ test("landing page contact link, hero hand-off, and confidential chat flow", asy
     })
   })
 
-  const handleVerifierRequest = async (route: Route) => {
-    verifierRequests += 1
-    const reportdata = latestReportData ?? "0x" + "ab".repeat(16)
-    await route.fulfill({
-      status: 200,
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        verified: true,
-        reportdata,
-        checksum: "0x" + "cd".repeat(16),
-        quote: {
-          verified: true,
-          checksum: "0x" + "cd".repeat(16),
-          body: {
-            reportdata,
-          },
-        },
-      }),
-    })
-  }
-
-  for (const pattern of VERIFIER_ROUTES) {
-    await page.route(pattern, handleVerifierRequest)
-  }
 
   await page.addInitScript((providerBase) => {
     const key = "confidential-provider-settings-v1"
@@ -144,9 +116,6 @@ test("landing page contact link, hero hand-off, and confidential chat flow", asy
   console.log("[e2e] provider settings:", storedProvider)
   await expect
     .poll(() => attestationRequests, { timeout: 15_000 })
-    .toBeGreaterThan(0)
-  await expect
-    .poll(() => verifierRequests, { timeout: 15_000 })
     .toBeGreaterThan(0)
   await expect(page.getByText("Secure channel verified")).toBeVisible({ timeout: 15_000 })
 
