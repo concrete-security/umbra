@@ -92,10 +92,12 @@ export function FeedbackButton({ source, position = "bottom-right" }: FeedbackBu
     }
   }
   const placementClass =
-    position === "top-right" ? "top-6 right-6" : "bottom-6 right-6"
+    position === "top-right"
+      ? "top-[calc(env(safe-area-inset-top,0)+16px)] right-4 sm:right-6 sm:top-[calc(env(safe-area-inset-top,0)+24px)]"
+      : "bottom-[calc(env(safe-area-inset-bottom,0)+20px)] right-4 sm:bottom-6 sm:right-6"
 
   return (
-    <div className={cn("fixed z-40 flex flex-col items-end gap-3", placementClass)}>
+    <div className={cn("fixed z-30 flex flex-col items-end gap-3 md:z-40", placementClass)}>
       <Button
         onClick={() => setOpen(true)}
         className="rounded-full bg-[#08070B] px-5 py-2 text-sm font-semibold text-white shadow-lg shadow-[#08070B]/30 hover:bg-[#1B0986]"
