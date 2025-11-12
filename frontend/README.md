@@ -12,7 +12,7 @@ Umbra is Concrete Security’s marketing site and secure workspace for routing s
 ### Confidential AI workspace (`app/confidential-ai/page.tsx`)
 - Streaming chat client with reasoning panel, cache salt input, file uploads (text + PDFs via `public/pdfjs`/`workers/pdf.worker.ts`), and transcript controls.
 - Provider settings are kept entirely in the browser (localStorage for base/model/label, sessionStorage for bearer tokens) and proxied through `/api/chat/completions` so secrets never touch the server code.
-- Proof-of-confidentiality tab fetches quotes from the attestation service (`/tdx_quote`) and verifies them with Phala (or configured override). The UI blocks prompts until attestation succeeds.
+- Proof-of-confidentiality tab fetches quotes from the attestation service (`/tdx_quote`) and runs local DCAP verification via `@phala/dcap-qvl-web`. The UI blocks prompts until attestation succeeds.
 - Optional guest throttling (`NEXT_PUBLIC_CONFIDENTIAL_ENABLE_GUEST_LIMITS`) limits anonymous visitors to a single session before requiring Supabase auth.
 
 ### Authentication & waitlist flows
@@ -23,7 +23,7 @@ Umbra is Concrete Security’s marketing site and secure workspace for routing s
 ### API routes & helpers
 - `/api/chat/completions` proxies OpenAI-compatible streaming requests to the configured provider while enforcing HTTPS/loopback hosts.
 - `/api/waitlist`, `/api/feedback`, and `/api/form-token` provide intake and signed form tokens with strict origin/content-type checks, rate limiting, and signed HMAC tokens.
-- `/api/attestation/verify` is a CORS proxy that forwards verification requests to the Phala verifier API (or configured endpoint).
+- Attestation proofs are verified entirely in-browser via `@phala/dcap-qvl-web`; there is no server-side verification pathway.
 - `/api/admin/waitlist/*` exposes admin-only CRUD + activation flows using the Supabase service-role client.
 
 ## Stack & tooling
@@ -121,9 +121,8 @@ pnpm build && pnpm start
 | Name | Required | Description |
 | --- | --- | --- |
 | `NEXT_PUBLIC_ATTESTATION_BASE_URL` | Required for live quotes | Public attestation base URL exposing `/tdx_quote` with CORS. |
-| `ATTESTATION_BASE_URL` | Optional | Private/server-only attestation host override. |
-| `NEXT_PUBLIC_PHALA_TDX_VERIFIER_API` | Optional | Browser-accessible verifier endpoint (defaults to Phala Cloud). |
-| `PHALA_TDX_VERIFIER_API` | Optional | Server-side verifier override. |
+| `NEXT_PUBLIC_PCCS_URL` | Optional | Custom PCCS origin for collateral downloads (defaults to Intel PCS TDX endpoint). |
+| `NEXT_PUBLIC_ATTESTATION_TEST_MODE` | Optional | When `true`, skips real DCAP verification (used by Playwright). |
 
 ### Email & feedback
 | Name | Required | Description |
@@ -150,13 +149,12 @@ pnpm build && pnpm start
 - `app/confidential-ai/page.tsx` supports reasoning streams (`reasoning_effort`), cache salts, per-message reasoning accordions, and a hex “cipher preview” before sending content.
 - Attachments (≤100 MB) are appended to the message content before dispatch, and PDFs are converted to text with pdf.js (loaded from `/pdfjs/*`).
 - Model output renders through `components/markdown.tsx`, which uses `remark-gfm` and `rehype-sanitize` plus custom copy buttons for code blocks.
-- `lib/attestation.ts` fetches quotes from `${NEXT_PUBLIC_ATTESTATION_BASE_URL}/tdx_quote`, while `lib/attestation-verifier.ts` verifies them via Phala (or configured overrides). The verification logic runs in the frontend, but browser requests go through `/api/attestation/verify` as a CORS proxy since the Phala API doesn't allow direct browser requests.
+- `lib/attestation.ts` fetches quotes from `${NEXT_PUBLIC_ATTESTATION_BASE_URL}/tdx_quote`, while `lib/attestation-verifier.ts` uses `@phala/dcap-qvl-web` to fetch collateral and run Intel’s DCAP QVL locally in the browser.
 
 ## Email, waitlist, and feedback flows
 - `/api/waitlist` and `/api/feedback` sanitize payloads, enforce same-origin requests, validate emails, rate limit by IP, and require signed form tokens.
-- `/api/admin/waitlist/[id]/activate` generates Supabase magic links, stores invite metadata, and sends HTML/text emails via `lib/email/templates/waitlist-activation.ts`.
-- The `public.handle_waitlist_activation` database trigger runs when Supabase marks a user's email as confirmed. It turns matching waitlist entries to `activated`, syncs metadata, and adds the `member` role in `auth.users`.
-- Feedback submissions require `RESEND_TO_EMAIL_FEEDBACK` and fan out to both HTML + plaintext bodies, providing an audit trail.
+- `/api/admin/waitlist/[id]/activate` generates Supabase magic links, enriches user metadata with `member` roles, and sends HTML/text emails via `lib/email/templates/waitlist-activation.ts`.
+- Feedback submissions require `RESEND_TO_EMAIL_FEEDBACK` and fan out to both HTML + plaintext bodies for audit trail purposes.
 
 ## Security posture highlights
 - CSP, Referrer Policy, HSTS (prod), Permissions Policy, and other headers are defined in `next.config.mjs` and applied to every route.

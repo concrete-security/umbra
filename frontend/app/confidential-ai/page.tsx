@@ -37,7 +37,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { FeedbackButton } from "@/components/feedback-button"
 import { streamConfidentialChat, confidentialChatConfig } from "@/lib/confidential-chat"
 import { getAttestationServiceBaseUrl, isTdxQuoteSuccess, fetchTdxQuoteWithFallback, type TdxQuoteSuccessResponse } from "@/lib/attestation"
-import { compareReportData, verifyTdxQuoteWithFallback } from "@/lib/attestation-verifier"
+import { compareReportData, normalizeHex, verifyTdxQuoteWithFallback } from "@/lib/attestation-verifier"
 import { Markdown } from "@/components/markdown"
 import { cn } from "@/lib/utils"
 import { createSupabaseBrowserClient } from "@/lib/supabase/client"
@@ -79,7 +79,17 @@ type RuntimeSignal = {
 type VerificationState =
   | { status: "idle" }
   | { status: "running" }
-  | { status: "success"; phalaVerified: boolean | null; reportDataMatches: boolean | null; payload: unknown; checksum?: string | null; quoteHex?: string | null }
+  | {
+      status: "success"
+      quoteVerified: boolean
+      reportDataMatches: boolean | null
+      checksum?: string | null
+      quoteHex?: string | null
+      statusText?: string | null
+      testMode?: boolean
+      derivedReportData?: string | null
+      advisoryIds?: string[]
+    }
   | { status: "error"; error: string }
 
 const PROVIDER_SETTINGS_STORAGE_KEY = "confidential-provider-settings-v1"
@@ -196,6 +206,47 @@ function generateReportData(bytes = 32) {
   const buffer = new Uint8Array(Math.max(1, bytes))
   crypto.getRandomValues(buffer)
   return Array.from(buffer, (value) => value.toString(16).padStart(2, "0")).join("")
+}
+
+function hexStringToUint8Array(value: string): Uint8Array | null {
+  if (!value) return null
+  const stripped = value.trim().toLowerCase().replace(/^0x/, "")
+  if (!stripped || stripped.length === 0 || stripped.length % 2 !== 0) {
+    return null
+  }
+  const bytes = new Uint8Array(stripped.length / 2)
+  for (let index = 0; index < stripped.length; index += 2) {
+    const byte = Number.parseInt(stripped.slice(index, index + 2), 16)
+    if (Number.isNaN(byte)) {
+      return null
+    }
+    bytes[index / 2] = byte
+  }
+  return bytes
+}
+
+function bytesToHex(value: Uint8Array) {
+  return `0x${Array.from(value, (byte) => byte.toString(16).padStart(2, "0")).join("")}`
+}
+
+async function deriveQuoteChecksum(quoteHex: string): Promise<string | null> {
+  const normalized = normalizeHex(quoteHex)
+  if (!normalized) {
+    return null
+  }
+  const bytes = hexStringToUint8Array(normalized)
+  if (!bytes) {
+    return normalized
+  }
+  try {
+    if (typeof crypto !== "undefined" && typeof crypto.subtle?.digest === "function") {
+      const digest = await crypto.subtle.digest("SHA-256", bytes)
+      return bytesToHex(new Uint8Array(digest))
+    }
+  } catch (error) {
+    console.warn("[Verification] Failed to derive checksum", error)
+  }
+  return normalized
 }
 
 function generateUUID(): string {
@@ -425,7 +476,7 @@ function ConfidentialAIContent() {
   }, [proofState])
 
   const quoteVerified =
-    verificationState.status === "success" && verificationState.phalaVerified && verificationState.reportDataMatches === true
+    verificationState.status === "success" && verificationState.quoteVerified && verificationState.reportDataMatches === true
 
   const applySupabaseSession = useCallback(
     (sessionUserEmail: string | null) => {
@@ -717,42 +768,50 @@ function ConfidentialAIContent() {
           ? rawQuote.report_data
           : expectedReportData
 
-      console.log("[Verification] Starting verification with Phala Network", { 
+      console.log("[Verification] Starting DCAP verification", {
         reportData: formatReportDataPreview(attestedReportData),
-        quoteLength: quoteHex.length 
+        quoteLength: quoteHex.length,
       })
       setVerificationState({ status: "running" })
       try {
-        const payload = await verifyTdxQuoteWithFallback(quoteHex)
-        
-        console.log("[Verification] Full API response:", JSON.stringify(payload, null, 2))
-        
-        const phalaVerified = Boolean(payload?.quote?.verified ?? payload?.verified)
-        const reportDataMatches = compareReportData(
-          attestedReportData,
-          payload?.quote?.body?.reportdata ?? payload?.reportdata ?? null
-        )
-        
-        let checksum = payload?.checksum ?? payload?.quote?.checksum ?? payload?.hash ?? null
-        
-        if (checksum && typeof checksum === "string") {
-          checksum = checksum.trim().toLowerCase().replace(/^0x/, '').replace(/\s+/g, '')
-          if (checksum.length === 0) {
-            checksum = null
-          }
-        }
+        const result = await verifyTdxQuoteWithFallback(quoteHex)
+
+        console.log("[Verification] dcap-qvl result:", JSON.stringify(result, null, 2))
+
+        const statusTextRaw =
+          typeof result?.verifiedReport?.status === "string" ? result.verifiedReport.status.trim() : null
+        const statusText = statusTextRaw && statusTextRaw.length > 0 ? statusTextRaw : null
+        const testMode = result?.metadata?.testMode === true
+        const advisoryIds = Array.isArray(result?.verifiedReport?.advisory_ids)
+          ? result.verifiedReport.advisory_ids.filter((id): id is string => typeof id === "string" && id.trim().length > 0)
+          : []
+        const derivedReportData = result?.reportDataHex ?? null
+        const reportDataMatches = testMode ? true : compareReportData(attestedReportData, derivedReportData)
+        const verificationPassed = testMode ? true : Boolean(statusText && statusText.toLowerCase() === "uptodate")
+        const checksum = await deriveQuoteChecksum(quoteHex)
 
         console.log("[Verification] Verification completed", {
-          phalaVerified,
+          statusText,
+          quoteVerified: verificationPassed,
           reportDataMatches,
           checksum: checksum ? formatHexSnippet(checksum) : null,
           checksumRaw: checksum,
-          verified: phalaVerified && reportDataMatches === true,
-          payloadKeys: Object.keys(payload || {}),
-          quoteHexLength: quoteHex.length
+          testMode,
+          advisoryCount: advisoryIds.length,
+          quoteHexLength: quoteHex.length,
         })
 
-        setVerificationState({ status: "success", phalaVerified, reportDataMatches, payload, checksum, quoteHex })
+        setVerificationState({
+          status: "success",
+          quoteVerified: verificationPassed,
+          reportDataMatches,
+          checksum,
+          quoteHex,
+          statusText,
+          testMode,
+          derivedReportData,
+          advisoryIds,
+        })
       } catch (error) {
         console.error("[Verification] Verification error", error)
         setVerificationState({ status: "error", error: getReadableError(error) })
@@ -892,7 +951,7 @@ function ConfidentialAIContent() {
         case "ready": {
           const isVerified =
             verificationState.status === "success" &&
-            verificationState.phalaVerified &&
+            verificationState.quoteVerified &&
             verificationState.reportDataMatches === true
           const checksum = verificationState.status === "success" ? verificationState.checksum : null
           return (
@@ -1134,12 +1193,12 @@ function ConfidentialAIContent() {
             <div className="space-y-3">
               <h3 className="text-sm font-semibold text-foreground">External Verification</h3>
               <div className="rounded-2xl border border-border/40 bg-card/70 p-3 shadow-sm dark:border-border/60 dark:bg-card/10">
-                <p className="text-[10px] uppercase tracking-[0.28em] text-muted-foreground/70 mb-2">Phala Network Verification</p>
+                <p className="text-[10px] uppercase tracking-[0.28em] text-muted-foreground/70 mb-2">Intel DCAP Verification</p>
                 {verificationState.status === "idle" && (
                   <p className="mt-2 text-xs text-muted-foreground">Verification not yet performed.</p>
                 )}
                 {verificationState.status === "running" && (
-                  <p className="mt-2 text-xs text-muted-foreground">Verifying attestation with Phala Network…</p>
+                  <p className="mt-2 text-xs text-muted-foreground">Running quote verification via @phala/dcap-qvl-web…</p>
                 )}
                 {verificationState.status === "error" && (
                   <p className="mt-2 text-xs text-rose-600">{verificationState.error}</p>
@@ -1149,24 +1208,48 @@ function ConfidentialAIContent() {
                     <p
                       className={cn(
                         "flex items-center gap-2",
-                        verificationState.phalaVerified && verificationState.reportDataMatches === true
+                        verificationState.quoteVerified && verificationState.reportDataMatches === true
                           ? "text-emerald-600"
                           : "text-rose-600"
                       )}
                     >
-                      {verificationState.phalaVerified && verificationState.reportDataMatches === true ? (
+                      {verificationState.quoteVerified && verificationState.reportDataMatches === true ? (
                         <CheckCircle2 className="h-3.5 w-3.5" />
                       ) : (
                         <X className="h-3.5 w-3.5" />
                       )}
                       <span className="font-medium">
-                        Phala verdict: {verificationState.phalaVerified && verificationState.reportDataMatches === true ? "verified" : "rejected"}
+                        Intel verdict:{" "}
+                        {verificationState.quoteVerified && verificationState.reportDataMatches === true ? "verified" : "rejected"}
                       </span>
                     </p>
+                    {verificationState.statusText && (
+                      <p className="text-xs text-muted-foreground">
+                        TCB status: <span className="font-semibold text-foreground">{verificationState.statusText}</span>
+                      </p>
+                    )}
+                    {verificationState.testMode && (
+                      <p className="text-xs text-amber-600">Test mode enabled — DCAP verification simulated for automated checks.</p>
+                    )}
                     {verificationState.reportDataMatches !== null && (
                       <p className={cn("text-xs", verificationState.reportDataMatches ? "text-emerald-600" : "text-rose-600")}>
                         Nonce binding: {verificationState.reportDataMatches ? "matches" : "mismatch"}
                       </p>
+                    )}
+                    {verificationState.advisoryIds && verificationState.advisoryIds.length > 0 && (
+                      <div className="pt-2 border-t border-border/40 dark:border-border/60 space-y-1">
+                        <p className="text-xs text-muted-foreground">Advisory IDs:</p>
+                        <div className="flex flex-wrap gap-1">
+                          {verificationState.advisoryIds.map((advisory) => (
+                            <span
+                              key={advisory}
+                              className="rounded-full border border-border/50 px-2 py-0.5 text-[10px] text-muted-foreground"
+                            >
+                              {advisory}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
                     )}
                     {verificationState.checksum && (
                       <div className="pt-2 border-t border-border/40 dark:border-border/60 space-y-2">
@@ -1630,7 +1713,7 @@ function ConfidentialAIContent() {
 
   const attestationVerified =
     verificationState.status === "success" &&
-    verificationState.phalaVerified &&
+    verificationState.quoteVerified &&
     verificationState.reportDataMatches === true
 
   useEffect(() => {

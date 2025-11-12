@@ -81,14 +81,9 @@ export function isTdxQuoteSuccess(payload: unknown): payload is TdxQuoteSuccessR
 }
 
 const publicAttestationBaseUrl = optionalEnv(process.env.NEXT_PUBLIC_ATTESTATION_BASE_URL)
-const serverAttestationBaseUrl = optionalEnv(process.env.ATTESTATION_BASE_URL) ?? publicAttestationBaseUrl
 
 export function getAttestationServiceBaseUrl() {
   return publicAttestationBaseUrl
-}
-
-export function getServerAttestationServiceBaseUrl() {
-  return serverAttestationBaseUrl
 }
 
 export async function fetchTdxQuote(

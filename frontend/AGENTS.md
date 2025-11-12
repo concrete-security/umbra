@@ -9,7 +9,7 @@
 ## Build & Test
 - Install via `pnpm install`; the `Makefile` falls back to npm when pnpm is missing.
 - Local dev: `pnpm dev` (or `make dev` / `make dev-open`). Production check: `pnpm build && pnpm start`.
-- Quality gates: `pnpm lint`, `pnpm test:unit` (Vitest), and `pnpm test:e2e` (Playwright, append `-- --headed` when debugging). `make test` runs the Vitest + Playwright combo with the required env (`FORM_TOKEN_SECRET`, `ATTESTATION_TEST_MODE`, etc.).
+- Quality gates: `pnpm lint`, `pnpm test:unit` (Vitest), and `pnpm test:e2e` (Playwright, append `-- --headed` when debugging). `make test` runs the Vitest + Playwright combo with the required env (`FORM_TOKEN_SECRET`, etc.).
 
 ## Style
 - TypeScript-first, 2-space indentation, and keep the existing Next/Prettier double-quote formatting.
