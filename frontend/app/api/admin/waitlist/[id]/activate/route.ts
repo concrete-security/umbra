@@ -96,24 +96,6 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
 
   const supabaseUserId = linkData?.user?.id ?? entry.supabase_user_id ?? null
 
-  if (supabaseUserId) {
-    try {
-      await serviceRole.auth.admin.updateUserById(supabaseUserId, {
-        app_metadata: {
-          roles: ["member"],
-          waitlist_request_id: entry.id,
-        },
-        user_metadata: {
-          company: entry.company ?? undefined,
-          use_case: entry.use_case ?? undefined,
-        },
-      })
-    } catch (error) {
-      console.error("Failed to update Supabase user metadata", error)
-      // Continue; metadata enrichment is secondary.
-    }
-  }
-
   try {
     await sendWaitlistActivationEmail({
       email: entry.email,

@@ -15,6 +15,7 @@ export type WaitlistRequestRow = {
   supabase_user_id: string | null
   activation_sent_at: string | null
   activation_link: string | null
+  activated_at: string | null
   metadata: Json | null
 }
 

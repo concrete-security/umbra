@@ -30,6 +30,7 @@ create table if not exists public.waitlist_requests (
   supabase_user_id uuid references auth.users (id) on delete set null,
   activation_sent_at timestamptz,
   activation_link text,
+  activated_at timestamptz,
   metadata jsonb
 );
 
@@ -43,6 +44,7 @@ alter table public.waitlist_requests
   add column if not exists supabase_user_id uuid references auth.users (id) on delete set null,
   add column if not exists activation_sent_at timestamptz,
   add column if not exists activation_link text,
+  add column if not exists activated_at timestamptz,
   add column if not exists metadata jsonb;
 
 create index if not exists waitlist_requests_created_at_idx
@@ -63,3 +65,90 @@ create policy "allow service role access to waitlist requests"
   on public.waitlist_requests
   using (auth.role() = 'service_role')
   with check (auth.role() = 'service_role');
+
+-- Waitlist activation trigger -------------------------------------------------
+create or replace function public.handle_waitlist_activation()
+returns trigger
+language plpgsql
+security definer
+set search_path = public, auth
+as $$
+declare
+  waitlist_entry public.waitlist_requests%rowtype;
+  merged_roles jsonb;
+  app_meta jsonb;
+  user_meta jsonb;
+  now_utc timestamptz := timezone('utc', now());
+begin
+  if TG_OP = 'UPDATE' and (OLD.email_confirmed_at is not distinct from NEW.email_confirmed_at) then
+    return NEW;
+  end if;
+
+  if NEW.email_confirmed_at is null then
+    return NEW;
+  end if;
+
+  select *
+    into waitlist_entry
+    from public.waitlist_requests
+   where email = NEW.email::citext
+     and status = 'invited'
+   limit 1;
+
+  if not found then
+    return NEW;
+  end if;
+
+  update public.waitlist_requests
+     set status = 'activated',
+         supabase_user_id = NEW.id,
+         activated_at = coalesce(activated_at, now_utc),
+         last_contacted_at = coalesce(last_contacted_at, now_utc),
+         metadata = coalesce(metadata, '{}'::jsonb) || jsonb_build_object(
+           'activated_via',
+           'auth_trigger',
+           'activated_at',
+           now_utc
+         )
+   where id = waitlist_entry.id;
+
+  app_meta := coalesce(NEW.raw_app_meta_data, '{}'::jsonb);
+
+  merged_roles := (
+    select coalesce(jsonb_agg(role order by role), jsonb_build_array('member'))
+    from (
+      select distinct role
+      from (
+        select jsonb_array_elements_text(coalesce(app_meta->'roles', '[]'::jsonb)) as role
+        union all
+        select 'member'
+      ) roles
+    ) distinct_roles
+  );
+
+  app_meta := jsonb_set(app_meta, '{roles}', merged_roles, true);
+  app_meta := jsonb_set(app_meta, '{waitlist_request_id}', to_jsonb(waitlist_entry.id::text), true);
+  NEW.raw_app_meta_data := app_meta;
+
+  user_meta := coalesce(NEW.raw_user_meta_data, '{}'::jsonb);
+
+  if waitlist_entry.company is not null then
+    user_meta := jsonb_set(user_meta, '{company}', to_jsonb(waitlist_entry.company), true);
+  end if;
+
+  if waitlist_entry.use_case is not null then
+    user_meta := jsonb_set(user_meta, '{use_case}', to_jsonb(waitlist_entry.use_case), true);
+  end if;
+
+  NEW.raw_user_meta_data := user_meta;
+
+  return NEW;
+end;
+$$;
+
+drop trigger if exists promote_invited_waitlist_user on auth.users;
+create trigger promote_invited_waitlist_user
+before insert or update of email_confirmed_at on auth.users
+for each row
+when (NEW.email_confirmed_at is not null)
+execute function public.handle_waitlist_activation();
