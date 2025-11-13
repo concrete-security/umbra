@@ -11,9 +11,9 @@ export const metadata: Metadata = {
     "Umbra for sensitive data — security, privacy, and confidentiality backed by modern cryptography.",
   generator: "Umbra",
   icons: {
-    icon: "/icon.svg",
-    shortcut: "/icon.svg",
-    apple: "/icon.svg",
+    icon: "/icon.png",
+    shortcut: "/favicon.ico",
+    apple: "/apple-icon.png",
   },
 }
 
