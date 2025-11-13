@@ -52,8 +52,17 @@ export function ensureSameOrigin(request: Request) {
   if (!host) {
     throw new CrossOriginRequestError("Unable to verify request origin.")
   }
-  const forwardedProto = request.headers.get("x-forwarded-proto") ?? "https"
-  const fallbackOrigin = `${forwardedProto}://${host.toLowerCase()}`
+  const forwardedProto = request.headers.get("x-forwarded-proto")
+  let protocol = forwardedProto?.trim().toLowerCase() ?? null
+  if (!protocol) {
+    try {
+      const urlProtocol = new URL(request.url).protocol
+      protocol = urlProtocol.endsWith(":") ? urlProtocol.slice(0, -1) : urlProtocol
+    } catch {
+      protocol = "https"
+    }
+  }
+  const fallbackOrigin = `${protocol}://${host.toLowerCase()}`
   if (normalizedOrigin !== fallbackOrigin) {
     throw new CrossOriginRequestError()
   }

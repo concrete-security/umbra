@@ -23,3 +23,4 @@
 ## Security
 - Copy `.env.example` to `.env.local` and never commit secrets. Use anon Supabase keys for local UI work; reserve `SUPABASE_SERVICE_ROLE_KEY` for backend-only contexts.
 - Reset env vars when switching branches so Playwright and local sessions stay deterministic.
+- Attestation fetch + DCAP verification must succeed before enabling encrypted chat; failures surface in the Proof-of-Confidentiality panel and keep messaging disabled.

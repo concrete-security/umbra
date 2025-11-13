@@ -3,6 +3,7 @@ export type TdxQuoteSuccessResponse = {
   quote_type: string
   timestamp: string
   quote?: unknown
+  test_mode?: boolean
 }
 
 export type TdxQuoteFailureResponse = {
