@@ -1845,7 +1845,7 @@ function ConfidentialAIContent() {
           <aside
             className={cn(
               "flex flex-col border-border/40 bg-white/95 transition-[opacity,transform,width] duration-200 dark:border-border/60 dark:bg-[#0B0820]/95 md:border-border/40 md:bg-white/85 md:dark:bg-card/25",
-              "fixed inset-y-0 left-0 z-[60] h-[100dvh] w-[min(360px,90vw)] overflow-y-auto border-r shadow-[0_20px_60px_-25px_rgba(5,3,15,0.85)] md:static md:h-full md:w-auto md:flex-none md:border-b-0 md:border-r md:shadow-none",
+              "fixed inset-y-0 left-0 z-40 h-[100dvh] w-[min(360px,90vw)] overflow-y-auto border-r shadow-[0_20px_60px_-25px_rgba(5,3,15,0.85)] md:static md:h-full md:w-auto md:flex-none md:border-b-0 md:border-r md:shadow-none",
               sidebarOpen
                 ? "translate-x-0 opacity-100 pointer-events-auto gap-6 p-5 sm:p-6 md:p-4 md:w-full md:max-w-[320px]"
                 : "-translate-x-full opacity-0 pointer-events-none md:translate-x-0 md:opacity-100 md:pointer-events-auto md:w-[56px] md:items-center md:justify-between md:px-2 md:py-4"
@@ -2039,7 +2039,7 @@ function ConfidentialAIContent() {
               type="button"
               aria-label="Close confidential tools"
               onClick={() => setSidebarOpen(false)}
-              className="fixed inset-0 z-50 bg-[#08070B]/40 backdrop-blur-[2px] transition-opacity md:hidden"
+              className="fixed inset-0 z-30 bg-[#08070B]/40 backdrop-blur-[2px] transition-opacity md:hidden"
             />
           ) : null}
 
@@ -2049,7 +2049,7 @@ function ConfidentialAIContent() {
               variant="ghost"
               size="icon"
               onClick={() => setSidebarOpen(true)}
-              className="fixed left-4 top-[calc(env(safe-area-inset-top,0)+16px)] z-40 rounded-full border border-border/50 bg-white/90 text-muted-foreground shadow-md backdrop-blur md:hidden"
+              className="fixed left-4 top-[calc(env(safe-area-inset-top,0)+16px)] z-30 rounded-full border border-border/50 bg-white/90 text-muted-foreground shadow-md backdrop-blur md:hidden"
             >
               <PanelLeftOpen className="h-4 w-4" />
               <span className="sr-only">Open confidential tools</span>
@@ -2354,12 +2354,12 @@ function ConfidentialAIContent() {
                     className="h-[56px] w-[56px] shrink-0 rounded-xl border border-border/40 bg-white text-foreground transition hover:bg-white/90 dark:border-border/60 dark:bg-card/20 dark:hover:bg-card/30"
                     title="Upload files"
                   >
-                    <Paperclip className="h-5 w-5 text-[#102A8C]" />
+                    <Paperclip className="h-5 w-5 text-[#102A8C] dark:text-foreground" />
                   </Button>
                   <Button
                     type="submit"
                     size="icon"
-                    className="h-[56px] w-[56px] shrink-0 rounded-xl bg-[linear-gradient(135deg,#102A8C,#0B1F66)] text-white transition hover:brightness-110"
+                    className="h-[56px] w-[56px] shrink-0 rounded-xl bg-[linear-gradient(135deg,#102A8C,#0B1F66)] text-white transition hover:brightness-110 dark:bg-white dark:text-foreground"
                     disabled={
                       guestRestrictionActive ||
                       isSending ||
