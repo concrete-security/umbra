@@ -45,6 +45,8 @@ services:
       - LETSENCRYPT_ACCOUNT_VERSION=v1
       # Force removal of existing certificate files on startup
       - FORCE_RM_CERT_FILES=false
+      # # Set log level
+      - LOG_LEVEL=INFO
     volumes:
       - tls-certs-keys:/etc/nginx/ssl/
       - /var/run/dstack.sock:/var/run/dstack.sock

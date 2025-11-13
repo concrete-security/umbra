@@ -7,6 +7,13 @@ from cert_manager.cmgr import CertificateManager
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("cert-manager")
 
+LOG_LEVELS = {
+    "debug": logging.DEBUG,
+    "info": logging.INFO,
+    "error": logging.ERROR,
+    "warning": logging.WARNING,
+    "fatal": logging.FATAL,
+}
 
 if __name__ == "__main__":
     dev_mode = os.getenv("DEV_MODE", "false").lower() == "true"
@@ -14,6 +21,11 @@ if __name__ == "__main__":
     if dev_mode or letsencrypt_staging:
         logger.setLevel(logging.DEBUG)
         logger.debug("Logging set to DEBUG level due to dev mode or staging")
+
+    log_level = os.getenv("LOG_LEVEL", "").lower()
+    if log_level in LOG_LEVELS.keys():
+        logger.setLevel(LOG_LEVELS[log_level])
+        logger.debug(f"Logging level set to {log_level.upper()} from LOG_LEVEL env variable")
 
     domain = os.getenv("DOMAIN", "localhost")
     cert_email = os.getenv("EMAIL", "certbot@concrete-security.com")
