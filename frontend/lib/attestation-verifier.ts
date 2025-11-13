@@ -10,6 +10,11 @@ type ByteSource =
 
 type DcapModule = typeof import("@phala/dcap-qvl-web")
 
+export type VerifyTdxQuoteOptions = {
+  pccsUrl?: string | null
+  forceTestMode?: boolean
+}
+
 export type QuoteCollateralV3Payload = {
   pck_crl_issuer_chain?: string
   root_ca_crl?: ByteSource
@@ -32,6 +37,7 @@ export type VerifiedReportPayload = {
 export type QuoteVerificationMetadata = {
   generatedAt?: number
   testMode?: boolean
+  pccsUrl?: string | null
 }
 
 export type DcapVerificationResult = {
@@ -65,10 +71,18 @@ export function compareReportData(expected: string | null, fromVerifier: string 
     return false
   }
 
-  return verifierBody.startsWith(expectedBody)
+  if (verifierBody.startsWith(expectedBody)) {
+    return true
+  }
+
+  const asciiEncodedExpected = Array.from(expectedBody)
+    .map((char) => char.charCodeAt(0).toString(16).padStart(2, "0"))
+    .join("")
+
+  return verifierBody.startsWith(asciiEncodedExpected)
 }
 
-function optionalEnv(value?: string): string | null {
+function optionalEnv(value?: string | null): string | null {
   if (!value) return null
   const trimmed = value.trim()
   return trimmed.length > 0 ? trimmed : null
@@ -81,7 +95,11 @@ function isAttestationTestModeEnabled() {
 
 const DEFAULT_TDX_PCCS_URL = "https://api.trustedservices.intel.com/tdx/certification/v4/"
 
-function getConfiguredPccsUrl() {
+function getConfiguredPccsUrl(override?: string | null) {
+  const explicitOverride = optionalEnv(override)
+  if (explicitOverride) {
+    return explicitOverride
+  }
   const publicUrl = optionalEnv(process.env.NEXT_PUBLIC_PCCS_URL)
   return publicUrl ?? DEFAULT_TDX_PCCS_URL
 }
@@ -245,7 +263,7 @@ function describeError(error: unknown): string {
   return "Unknown verification error."
 }
 
-function createTestResult(): DcapVerificationResult {
+function createTestResult(pccsUrl: string): DcapVerificationResult {
   return {
     verifiedReport: {
       status: "TEST_MODE",
@@ -254,18 +272,24 @@ function createTestResult(): DcapVerificationResult {
     },
     quoteCollateral: null,
     reportDataHex: null,
-    metadata: { testMode: true, generatedAt: Date.now() },
+    metadata: { testMode: true, generatedAt: Date.now(), pccsUrl },
   }
 }
 
-async function verifyTdxQuoteLocally(quoteHex: string): Promise<DcapVerificationResult> {
+async function verifyTdxQuoteLocally(
+  quoteHex: string,
+  options: VerifyTdxQuoteOptions = {},
+): Promise<DcapVerificationResult> {
   const normalizedQuote = normalizeHex(quoteHex)
   if (!normalizedQuote) {
     throw new Error("quoteHex is required.")
   }
 
-  if (isAttestationTestModeEnabled()) {
-    return createTestResult()
+  const pccsUrl = getConfiguredPccsUrl(options.pccsUrl)
+  const testModeEnabled = options.forceTestMode === true || isAttestationTestModeEnabled()
+
+  if (testModeEnabled) {
+    return createTestResult(pccsUrl)
   }
 
   const rawQuote = hexStringToBytes(normalizedQuote)
@@ -277,7 +301,7 @@ async function verifyTdxQuoteLocally(quoteHex: string): Promise<DcapVerification
 
   let collateral: QuoteCollateralV3Payload
   try {
-    collateral = await bindings.js_get_collateral(getConfiguredPccsUrl(), rawQuote)
+    collateral = await bindings.js_get_collateral(pccsUrl, rawQuote)
   } catch (error) {
     throw new Error(`Failed to download quote collateral: ${describeError(error)}`)
   }
@@ -299,14 +323,20 @@ async function verifyTdxQuoteLocally(quoteHex: string): Promise<DcapVerification
     verifiedReport,
     quoteCollateral: collateral,
     reportDataHex,
-    metadata: { generatedAt: Date.now() },
+    metadata: { generatedAt: Date.now(), pccsUrl },
   }
 }
 
-export async function verifyTdxQuote(quoteHex: string): Promise<DcapVerificationResult> {
-  return verifyTdxQuoteLocally(quoteHex)
+export async function verifyTdxQuote(
+  quoteHex: string,
+  options?: VerifyTdxQuoteOptions,
+): Promise<DcapVerificationResult> {
+  return verifyTdxQuoteLocally(quoteHex, options)
 }
 
-export async function verifyTdxQuoteWithFallback(quoteHex: string): Promise<DcapVerificationResult> {
-  return verifyTdxQuote(quoteHex)
+export async function verifyTdxQuoteWithFallback(
+  quoteHex: string,
+  options?: VerifyTdxQuoteOptions,
+): Promise<DcapVerificationResult> {
+  return verifyTdxQuote(quoteHex, options)
 }

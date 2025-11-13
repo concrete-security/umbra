@@ -12,7 +12,7 @@ Umbra is Concrete Security’s marketing site and secure workspace for routing s
 ### Confidential AI workspace (`app/confidential-ai/page.tsx`)
 - Streaming chat client with reasoning panel, cache salt input, file uploads (text + PDFs via `public/pdfjs`/`workers/pdf.worker.ts`), and transcript controls.
 - Provider settings are kept entirely in the browser (localStorage for base/model/label, sessionStorage for bearer tokens) and proxied through `/api/chat/completions` so secrets never touch the server code.
-- Proof-of-confidentiality tab fetches quotes from the attestation service (`/tdx_quote`) and runs local DCAP verification via `@phala/dcap-qvl-web`. The UI blocks prompts until attestation succeeds.
+- Proof-of-confidentiality tab fetches quotes from the attestation service (`/tdx_quote`) and runs local DCAP verification via `@phala/dcap-qvl-web`. The “Refresh proof” button replays the checks, and the UI blocks prompts until verification succeeds.
 - Optional guest throttling (`NEXT_PUBLIC_CONFIDENTIAL_ENABLE_GUEST_LIMITS`) limits anonymous visitors to a single session before requiring Supabase auth.
 
 ### Authentication & waitlist flows
@@ -43,6 +43,7 @@ Umbra is Concrete Security’s marketing site and secure workspace for routing s
 | `hooks/` | Reusable hooks (currently `use-form-token`). |
 | `lib/` | Supabase helpers, chat proxy logic, attestation/verifier utilities, email templates, security helpers, waitlist types, and the Umbra system prompt. |
 | `public/` | Static assets (logos, pdf.js distribution, testimonial portraits). |
+| `scripts/` | Tooling helpers for local experiments and diagnostics. |
 | `supabase/` | SQL schema for `waitlist_requests`, indexes, enums, and policies. |
 | `tests/` | `tests/unit` (Vitest suites) and `tests/e2e` (Playwright). |
 | `workers/` | Standalone workers (pdf.js worker). |
@@ -120,7 +121,7 @@ pnpm build && pnpm start
 ### Attestation & verification
 | Name | Required | Description |
 | --- | --- | --- |
-| `NEXT_PUBLIC_ATTESTATION_BASE_URL` | Required for live quotes | Public attestation base URL exposing `/tdx_quote` with CORS. |
+| `NEXT_PUBLIC_ATTESTATION_BASE_URL` | Required for live quotes | Public attestation base URL exposing `/tdx_quote` with CORS enabled. |
 | `NEXT_PUBLIC_PCCS_URL` | Optional | Custom PCCS origin for collateral downloads (defaults to Intel PCS TDX endpoint). |
 | `NEXT_PUBLIC_ATTESTATION_TEST_MODE` | Optional | When `true`, skips real DCAP verification (used by Playwright). |
 
@@ -158,6 +159,7 @@ pnpm build && pnpm start
 
 ## Security posture highlights
 - CSP, Referrer Policy, HSTS (prod), Permissions Policy, and other headers are defined in `next.config.mjs` and applied to every route.
+- The Confidential AI UI blocks messaging until a quote is fetched and DCAP verification succeeds; failures appear in the Proof-of-Confidentiality tab and keep the send button disabled.
 - API routes call `ensureSameOrigin`, `assertJsonRequest`, and `verifyFormToken` to mitigate CSRF and automated abuse.
 - `lib/security/rate-limit.ts` enforces in-memory rate limits (5 waitlist requests/minute/IP, 3 feedback requests/2 minutes/IP).
 - `ChunkRecovery` listens for chunk load failures and reloads the app once, keeping the UX resilient when a CDN evicts bundles.
@@ -165,9 +167,9 @@ pnpm build && pnpm start
 
 ## Testing & QA
 - `pnpm lint` – Next.js lint rules with repo-specific overrides (`eslint.config.mjs`).
-- `pnpm test:unit` – Vitest suites targeting `lib/attestation` and related helpers (coverage in `test-results/unit`).
-- `pnpm test:e2e` – Playwright suite that covers hero hand-off, attestation, streaming chat, and transcript rendering. The config intercepts network calls so no real TEE is needed.
-- `make test` – Runs unit + e2e suites with the required env flags (`FORM_TOKEN_SECRET`, attestation test mode).
+- `pnpm test:unit` – Vitest suites for `lib/attestation` and the DCAP verifier wrapper (with the WASM module mocked).
+- `pnpm test:e2e` – Playwright suite that walks the landing page and confidential chat flow with mocked attestation + provider responses.
+- `make test` – Runs unit + e2e suites with the required env flags (`FORM_TOKEN_SECRET`, Supabase anon key, attestation URLs, etc.).
 
 ## Deployment checklist
 1. Set all required env vars (Supabase, form token, provider defaults, attestation/verifier, Resend) in the hosting provider.

@@ -26,10 +26,9 @@ import {
   Sun,
   Moon,
   Info,
+  Circle,
   UserCircle2,
   ChevronDown,
-  ExternalLink,
-  AlertTriangle,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion"
@@ -151,6 +150,11 @@ function truncateMiddle(str: string, maxLength: number = 40): string {
   const frontChars = Math.ceil(charsToShow / 2)
   const backChars = Math.floor(charsToShow / 2)
   return str.slice(0, frontChars) + ellipsis + str.slice(-backChars)
+}
+
+function formatIdentifierSnippet(value: string, maxLength = 40) {
+  if (!value) return "—"
+  return truncateMiddle(value, maxLength)
 }
 
 function normalizeAttestationOrigin(value?: string | null): string | null {
@@ -479,6 +483,7 @@ function ConfidentialAIContent() {
 
   const quoteVerified =
     verificationState.status === "success" && verificationState.quoteVerified && verificationState.reportDataMatches === true
+  const secureChannelReady = quoteVerified
 
   const applySupabaseSession = useCallback(
     (sessionUserEmail: string | null) => {
@@ -756,13 +761,13 @@ function ConfidentialAIContent() {
   }
 
   const runQuoteVerification = useCallback(
-    async (quote: TdxQuoteSuccessResponse, expectedReportData: string) => {
+    async (quote: TdxQuoteSuccessResponse, expectedReportData: string): Promise<boolean> => {
       const rawQuote = quote.quote as Record<string, unknown> | undefined
       const quoteHex = typeof rawQuote?.quote === "string" ? rawQuote.quote : null
       if (!quoteHex) {
         console.error("[Verification] Quote payload missing")
         setVerificationState({ status: "error", error: "Quote payload missing." })
-        return
+        return false
       }
 
       const attestedReportData =
@@ -776,7 +781,8 @@ function ConfidentialAIContent() {
       })
       setVerificationState({ status: "running" })
       try {
-        const result = await verifyTdxQuoteWithFallback(quoteHex)
+        const forceTestMode = quote.test_mode === true
+        const result = await verifyTdxQuoteWithFallback(quoteHex, { forceTestMode })
 
         console.log("[Verification] dcap-qvl result:", JSON.stringify(result, null, 2))
 
@@ -817,9 +823,11 @@ function ConfidentialAIContent() {
           advisoryIds,
           isOutOfDate,
         })
+        return verificationPassed && reportDataMatches === true
       } catch (error) {
         console.error("[Verification] Verification error", error)
         setVerificationState({ status: "error", error: getReadableError(error) })
+        return false
       }
     },
     []
@@ -867,7 +875,10 @@ function ConfidentialAIContent() {
         sourceBaseUrl: baseUrl 
       })
       setProofState({ status: "ready", reportData, payload: parsed, fetchedAt: Date.now(), sourceBaseUrl: baseUrl })
-      await runQuoteVerification(parsed, reportData)
+      const verified = await runQuoteVerification(parsed, reportData)
+      if (!verified) {
+        return
+      }
     } catch (error) {
       if ((error as Error)?.name === "AbortError") {
         console.log("[Attestation] Quote request aborted")
@@ -913,9 +924,11 @@ function ConfidentialAIContent() {
         : derivedAttestationOrigin
 
     const hostLabel = getHostLabelFromUrl(activeSourceBaseUrl) ?? "Umbra CVM attestation endpoint"
-    const connectionCopy = activeSourceBaseUrl
+
+    const baseConnectionCopy = activeSourceBaseUrl
       ? `Intel TDX quote fetched from ${hostLabel}.`
       : "Connect to your Umbra CVM origin to fetch attestation quotes."
+    const connectionCopy = baseConnectionCopy
 
     const refreshDisabled =
       proofState.status === "loading" || !derivedAttestationOrigin || verificationState.status === "running"
@@ -951,6 +964,50 @@ function ConfidentialAIContent() {
       }
     })()
 
+    type ChecklistState = "pending" | "running" | "ok" | "error"
+    const quoteState: ChecklistState =
+      proofState.status === "loading"
+        ? "running"
+        : proofState.status === "ready"
+          ? "ok"
+          : proofState.status === "error"
+            ? "error"
+            : "pending"
+    const machineSecureState: ChecklistState =
+      proofState.status === "loading"
+        ? "running"
+        : proofState.status === "ready" && verificationState.status === "success" && verificationState.quoteVerified && verificationState.reportDataMatches === true
+          ? "ok"
+          : proofState.status === "error" || verificationState.status === "error"
+            ? "error"
+            : "pending"
+
+    const checklistItems: Array<{ label: string; description: string; state: ChecklistState }> = [
+      {
+        label: "Quote fetched",
+        description: connectionCopy,
+        state: quoteState,
+      },
+      {
+        label: "Machine is secure",
+        description: "Attestation verified and secure",
+        state: machineSecureState,
+      },
+    ]
+
+    const renderChecklistIcon = (state: ChecklistState) => {
+      switch (state) {
+        case "ok":
+          return <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+        case "running":
+          return <Sparkles className="h-4 w-4 text-[#102A8C] animate-pulse" />
+        case "error":
+          return <X className="h-4 w-4 text-rose-600" />
+        default:
+          return <Circle className="h-4 w-4 text-muted-foreground" />
+      }
+    }
+
     const body = (() => {
       switch (proofState.status) {
         case "ready": {
@@ -958,35 +1015,8 @@ function ConfidentialAIContent() {
             verificationState.status === "success" &&
             verificationState.quoteVerified &&
             verificationState.reportDataMatches === true
-          const checksum = verificationState.status === "success" ? verificationState.checksum : null
           return (
             <div className={cn("space-y-2", isCompact ? "text-xs" : "text-sm")}>
-              <div className="relative rounded-2xl border border-border/40 bg-card/80 p-3 shadow-sm dark:border-border/60 dark:bg-card/20 space-y-2">
-                <div className="flex items-center justify-between gap-2 min-w-0">
-                  <span className="text-muted-foreground text-xs shrink-0">Fingerprint:</span>
-                  <span className="font-mono text-[#102A8C] text-xs truncate" title={proofState.reportData}>
-                    {formatReportDataPreview(proofState.reportData)}
-                  </span>
-                </div>
-                {checksum && (
-                  <div className="flex items-center justify-between gap-2 min-w-0 pt-2 border-t border-border/40 dark:border-border/60">
-                    <span className="text-muted-foreground text-xs shrink-0">Checksum:</span>
-                    <span className="font-mono text-[#102A8C] text-xs truncate" title={checksum}>
-                      {truncateMiddle(checksum, 32)}
-                    </span>
-                  </div>
-                )}
-                {onViewDetails && (
-                  <button
-                    type="button"
-                    onClick={onViewDetails}
-                    className="absolute -bottom-2 -right-2 h-6 w-6 rounded-full border border-border/40 bg-card/80 text-muted-foreground hover:bg-card/90 hover:text-foreground shadow-sm dark:border-border/60 dark:bg-card/40 dark:hover:bg-card/50 flex items-center justify-center transition z-10"
-                    title="View details"
-                  >
-                    <ChevronDown className="h-3.5 w-3.5" />
-                  </button>
-                )}
-              </div>
               <div
                 className={cn(
                   "flex items-center gap-2 rounded-2xl border px-3 py-2.5 shadow-sm",
@@ -1001,6 +1031,16 @@ function ConfidentialAIContent() {
                           : "border-border/40 bg-card/70 text-muted-foreground dark:border-border/60 dark:bg-card/10"
                 )}
               >
+                {onViewDetails && (
+                  <button
+                    type="button"
+                    onClick={onViewDetails}
+                    className="absolute -top-2 -right-2 h-6 w-6 rounded-full border border-border/40 bg-card/80 text-muted-foreground hover:bg-card/90 hover:text-foreground shadow-sm dark:border-border/60 dark:bg-card/40 dark:hover:bg-card/50 flex items-center justify-center transition z-10"
+                    title="View details"
+                  >
+                    <ChevronDown className="h-3.5 w-3.5" />
+                  </button>
+                )}
                 {verificationState.status === "idle" && (
                   <>
                     <Info className="h-4 w-4" />
@@ -1043,7 +1083,7 @@ function ConfidentialAIContent() {
             </div>
           )
         }
-        case "loading":
+        case "loading": {
           return (
             <div
               className={cn(
@@ -1052,10 +1092,13 @@ function ConfidentialAIContent() {
               )}
             >
               Requesting quote for
-              <span className="ml-1 font-mono text-foreground">{formatReportDataPreview(proofState.reportData)}</span>
+              <span className="ml-1 font-mono text-foreground">
+                {formatReportDataPreview(proofState.reportData)}
+              </span>
               …
             </div>
           )
+        }
         case "error":
           return (
             <div className={cn("space-y-2", isCompact ? "text-xs" : "text-sm")}> 
@@ -1109,6 +1152,22 @@ function ConfidentialAIContent() {
           </div>
           <p className={cn("text-muted-foreground w-full", isCompact ? "text-[11px]" : "text-sm")}>{connectionCopy}</p>
         </div>
+        <div className="rounded-2xl border border-border/40 bg-card/70 p-3 shadow-sm dark:border-border/60 dark:bg-card/15">
+          <p className="text-[10px] uppercase tracking-[0.32em] text-muted-foreground/80 mb-2">
+            Attestation checklist
+          </p>
+          <div className="space-y-2">
+            {checklistItems.map((item) => (
+              <div key={item.label} className="flex items-start gap-3">
+                <div className="mt-0.5">{renderChecklistIcon(item.state)}</div>
+                <div className="space-y-0.5">
+                  <p className="text-xs font-semibold text-foreground">{item.label}</p>
+                  <p className="text-[11px] text-muted-foreground">{item.description}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
         {body}
         <div className="flex flex-wrap gap-2">
           <Button
@@ -1146,40 +1205,42 @@ function ConfidentialAIContent() {
           </DialogHeader>
           <div className="space-y-4">
             <div className="space-y-3">
-              <h3 className="text-sm font-semibold text-foreground">Quote Information</h3>
+              <h3 className="text-sm font-semibold text-foreground">Attestation Information</h3>
               <div className="rounded-2xl border border-border/40 bg-card/80 p-3 shadow-sm dark:border-border/60 dark:bg-card/20">
                 <dl className="space-y-2 text-sm">
                   <div className="flex items-center justify-between">
-                    <dt className="text-muted-foreground">Quote type</dt>
-                    <dd className="font-mono text-foreground">{proofState.payload.quote_type}</dd>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <dt className="text-muted-foreground">Report data</dt>
+                    <dt className="text-muted-foreground">Challenge</dt>
                     <dd className="font-mono text-[#102A8C]">{formatReportDataPreview(proofState.reportData)}</dd>
                   </div>
                   <div className="flex items-center justify-between">
-                    <dt className="text-muted-foreground">Issued</dt>
+                    <dt className="text-muted-foreground">Attestation issued</dt>
                     <dd className="font-mono text-foreground/80">{issuedAt}</dd>
                   </div>
                   <div className="flex items-center justify-between">
-                    <dt className="text-muted-foreground">Refreshed</dt>
+                    <dt className="text-muted-foreground">Last refreshed</dt>
                     <dd className="font-mono text-foreground/80">{refreshedAt}</dd>
                   </div>
                   <div className="flex items-center justify-between">
-                    <dt className="text-muted-foreground">Source</dt>
+                    <dt className="text-muted-foreground">Machine endpoint</dt>
                     <dd className="font-mono text-foreground/80">{hostLabel}</dd>
                   </div>
                 </dl>
               </div>
             </div>
 
-            <div className="space-y-3">
-              <h3 className="text-sm font-semibold text-foreground">Quote Excerpt</h3>
-              <div className="rounded-2xl border border-border/40 bg-background/70 p-3 font-mono text-[11px] leading-relaxed text-foreground/90 shadow-inner dark:border-border/60 dark:bg-background/30 max-h-[200px] overflow-y-auto">
-                <p className="text-[10px] uppercase tracking-[0.28em] text-muted-foreground/70 mb-2">Quote excerpt</p>
-                <p className="break-all">{quotePreview}</p>
-              </div>
-            </div>
+            <Accordion type="single" collapsible className="w-full">
+              <AccordionItem value="technical-details" className="border-none">
+                <AccordionTrigger className="text-sm font-semibold text-foreground py-2 hover:no-underline">
+                  Technical Details
+                </AccordionTrigger>
+                <AccordionContent>
+                  <div className="rounded-2xl border border-border/40 bg-background/70 p-3 font-mono text-[11px] leading-relaxed text-foreground/90 shadow-inner dark:border-border/60 dark:bg-background/30 max-h-[200px] overflow-y-auto">
+                    <p className="text-[10px] uppercase tracking-[0.28em] text-muted-foreground/70 mb-2">Quote excerpt</p>
+                    <p className="break-all">{quotePreview}</p>
+                  </div>
+                </AccordionContent>
+              </AccordionItem>
+            </Accordion>
 
             {runtimeSignals.length > 0 && (
               <div className="space-y-3">
@@ -1203,20 +1264,19 @@ function ConfidentialAIContent() {
             )}
 
             <div className="space-y-3">
-              <h3 className="text-sm font-semibold text-foreground">External Verification</h3>
+              <h3 className="text-sm font-semibold text-foreground">Verification Status</h3>
               <div className="rounded-2xl border border-border/40 bg-card/70 p-3 shadow-sm dark:border-border/60 dark:bg-card/10">
-                <p className="text-[10px] uppercase tracking-[0.28em] text-muted-foreground/70 mb-2">Intel DCAP Verification</p>
                 {verificationState.status === "idle" && (
-                  <p className="mt-2 text-xs text-muted-foreground">Verification not yet performed.</p>
+                  <p className="text-xs text-muted-foreground">Verification not yet performed.</p>
                 )}
                 {verificationState.status === "running" && (
-                  <p className="mt-2 text-xs text-muted-foreground">Running quote verification via @phala/dcap-qvl-web…</p>
+                  <p className="text-xs text-muted-foreground">Verifying machine attestation…</p>
                 )}
                 {verificationState.status === "error" && (
-                  <p className="mt-2 text-xs text-rose-600">{verificationState.error}</p>
+                  <p className="text-xs text-rose-600">{verificationState.error}</p>
                 )}
                 {verificationState.status === "success" && (
-                  <div className="mt-2 space-y-2 text-xs">
+                  <div className="space-y-2 text-xs">
                     <p
                       className={cn(
                         "flex items-center gap-2",
@@ -1231,8 +1291,8 @@ function ConfidentialAIContent() {
                         <X className="h-3.5 w-3.5" />
                       )}
                       <span className="font-medium">
-                        Intel verdict:{" "}
-                        {verificationState.quoteVerified && verificationState.reportDataMatches === true ? "verified" : "rejected"}
+                        Status:{" "}
+                        {verificationState.quoteVerified && verificationState.reportDataMatches === true ? "Verified and secure" : "Verification failed"}
                       </span>
                     </p>
                     {verificationState.statusText && (
@@ -1254,16 +1314,16 @@ function ConfidentialAIContent() {
                       </div>
                     )}
                     {verificationState.testMode && (
-                      <p className="text-xs text-amber-600">Test mode enabled — DCAP verification simulated for automated checks.</p>
+                      <p className="text-xs text-amber-600">Test mode enabled — verification simulated for automated checks.</p>
                     )}
                     {verificationState.reportDataMatches !== null && (
                       <p className={cn("text-xs", verificationState.reportDataMatches ? "text-emerald-600" : "text-rose-600")}>
-                        Nonce binding: {verificationState.reportDataMatches ? "matches" : "mismatch"}
+                        Challenge Verification: {verificationState.reportDataMatches ? "matches" : "mismatch"}
                       </p>
                     )}
                     {verificationState.advisoryIds && verificationState.advisoryIds.length > 0 && (
                       <div className="pt-2 border-t border-border/40 dark:border-border/60 space-y-1">
-                        <p className="text-xs text-muted-foreground">Advisory IDs:</p>
+                        <p className="text-xs text-muted-foreground">Security Advisories:</p>
                         <div className="flex flex-wrap gap-1">
                           {verificationState.advisoryIds.map((advisory) => (
                             <span
@@ -1276,8 +1336,20 @@ function ConfidentialAIContent() {
                         </div>
                       </div>
                     )}
-                    {verificationState.checksum && (
-                      <div className="pt-2 border-t border-border/40 dark:border-border/60 space-y-2">
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {verificationState.status === "success" && verificationState.checksum && (
+              <Accordion type="single" collapsible className="w-full">
+                <AccordionItem value="advanced-details" className="border-none">
+                  <AccordionTrigger className="text-sm font-semibold text-foreground py-2 hover:no-underline">
+                    Advanced Details
+                  </AccordionTrigger>
+                  <AccordionContent>
+                    <div className="rounded-2xl border border-border/40 bg-card/70 p-3 shadow-sm dark:border-border/60 dark:bg-card/10 space-y-3">
+                      <div className="space-y-2">
                         <div className="flex items-center justify-between gap-2">
                           <span className="text-xs text-muted-foreground">SHA-256 checksum:</span>
                           <div className="flex items-center gap-2 flex-1 justify-end min-w-0">
@@ -1344,11 +1416,11 @@ function ConfidentialAIContent() {
                           )}
                         </div>
                       </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            </div>
+                    </div>
+                  </AccordionContent>
+                </AccordionItem>
+              </Accordion>
+            )}
           </div>
         </DialogContent>
       </Dialog>
@@ -1576,7 +1648,7 @@ function ConfidentialAIContent() {
 
   const sendMessage = async (override?: { text: string; files: UploadedFile[] }) => {
     if (isSending) return
-    if (!quoteVerified) {
+    if (!secureChannelReady) {
       return
     }
     if (guestRestrictionActive) {
@@ -1736,11 +1808,6 @@ function ConfidentialAIContent() {
 
   sendMessageRef.current = sendMessage
 
-  const attestationVerified =
-    verificationState.status === "success" &&
-    verificationState.quoteVerified &&
-    verificationState.reportDataMatches === true
-
   useEffect(() => {
     if (heroAutoSubmitAttemptedRef.current) {
       return
@@ -1748,7 +1815,7 @@ function ConfidentialAIContent() {
     if (!providerApiBase) {
       return
     }
-    if (!attestationVerified) {
+    if (!secureChannelReady) {
       return
     }
     const pendingSubmission = heroSubmissionRef.current
@@ -1788,7 +1855,7 @@ function ConfidentialAIContent() {
     return () => {
       window.clearTimeout(timeout)
     }
-  }, [providerApiBase, guestLimitsEnabled, guestUsageRestricted, uploadedFiles, attestationVerified, heroSubmissionVersion])
+  }, [providerApiBase, guestLimitsEnabled, guestUsageRestricted, uploadedFiles, secureChannelReady, heroSubmissionVersion])
 
   const onSubmit = (e: FormEvent) => {
     e.preventDefault()
@@ -2089,7 +2156,7 @@ function ConfidentialAIContent() {
               aria-live="polite"
               aria-label="Confidential space transcript"
             >
-              <div className="mx-auto flex w-full flex-col space-y-6">
+              <div className="mx-auto flex w-full max-w-4xl flex-col space-y-8">
                 {guestNotice ? (
                   <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-800 shadow-sm dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-200">
                     <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -2128,8 +2195,8 @@ function ConfidentialAIContent() {
                   const label = isUser ? "You" : assistantName
 
                   const bubbleClass = isUser
-                    ? "max-w-[min(100%,60ch)] self-end whitespace-pre-wrap break-words rounded-2xl bg-[linear-gradient(135deg,#102A8C,#0B1F66)] px-5 py-4 text-left text-sm leading-6 text-white shadow-[0_20px_45px_-40px_rgba(0,0,0,0.8)] dark:shadow-[0_24px_55px_-35px_rgba(3,2,20,0.9)]"
-                    : "max-w-full self-start whitespace-pre-wrap break-words rounded-2xl bg-white/80 dark:bg-card/80 px-5 py-4 text-left text-sm leading-7 text-foreground ring-1 ring-border/40 shadow-sm backdrop-blur"
+                    ? "max-w-[min(100%,60ch)] self-end whitespace-pre-wrap break-words rounded-2xl bg-[linear-gradient(135deg,#102A8C,#0B1F66)] px-6 py-5 text-left text-sm leading-7 text-white shadow-[0_20px_45px_-40px_rgba(0,0,0,0.8)] dark:shadow-[0_24px_55px_-35px_rgba(3,2,20,0.9)]"
+                    : "max-w-[min(100%,75ch)] self-start whitespace-pre-wrap break-words rounded-2xl bg-white/80 dark:bg-card/80 px-6 py-5 text-left text-sm leading-7 text-foreground ring-1 ring-border/40 shadow-sm backdrop-blur"
 
                   const bubbleStyle: CSSProperties | undefined = isUser
                     ? {
@@ -2293,11 +2360,11 @@ function ConfidentialAIContent() {
                   const isAttestationLoading = proofState.status === "loading"
                   const isVerificationRunning = verificationState.status === "running"
                   const isInProgress = isAttestationLoading || isVerificationRunning
-                  const isVerified = quoteVerified
-                  const hasFailed = 
-                    (proofState.status === "error") || 
-                    (verificationState.status === "error") || 
-                    (verificationState.status === "success" && !isVerified)
+                  const isVerified = secureChannelReady
+                  const hasFailed =
+                    proofState.status === "error" ||
+                    verificationState.status === "error" ||
+                    (verificationState.status === "success" && !quoteVerified)
                   
                   if (proofState.status === "unavailable" || proofState.status === "idle") {
                     return null
@@ -2323,7 +2390,7 @@ function ConfidentialAIContent() {
                       {isVerified && !isOutOfDate ? (
                         <>
                           <Lock className="h-4 w-4 shrink-0" />
-                          <span>Secure channel verified</span>
+                          <span>Attestation verified</span>
                         </>
                       ) : isVerified && isOutOfDate ? (
                         <>
@@ -2429,7 +2496,7 @@ function ConfidentialAIContent() {
                       isSending ||
                       (!input.trim() && uploadedFiles.length === 0) ||
                       !providerApiBase ||
-                      !quoteVerified
+                      !secureChannelReady
                     }
                   >
                     <Send className="h-5 w-5" />
