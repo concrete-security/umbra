@@ -97,7 +97,7 @@ export function FeedbackButton({ source, position = "bottom-right" }: FeedbackBu
       : "bottom-[calc(env(safe-area-inset-bottom,0)+20px)] right-4 sm:bottom-6 sm:right-6"
 
   return (
-    <div className={cn("fixed z-30 flex flex-col items-end gap-3 md:z-40", placementClass)}>
+    <div className={cn("fixed z-20 flex flex-col items-end gap-3 md:z-40", placementClass)}>
       <Button
         onClick={() => setOpen(true)}
         className="rounded-full bg-[#08070B] px-5 py-2 text-sm font-semibold text-white shadow-lg shadow-[#08070B]/30 hover:bg-[#1B0986]"
