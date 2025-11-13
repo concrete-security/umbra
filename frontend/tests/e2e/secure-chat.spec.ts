@@ -75,16 +75,20 @@ test("landing page contact link, hero hand-off, and confidential chat flow", asy
         success: true,
         quote_type: "tdx.quote.v1",
         timestamp: new Date().toISOString(),
+        test_mode: true,
         report_data: reportData,
         quote: {
           quote: "0x" + "11".repeat(64),
           report_data: reportData,
+          event_log: JSON.stringify([
+            { event: "system-preparing", digest: "0f".repeat(12) },
+            { event: "app-id", digest: "1a".repeat(12) },
+            { event: "system-ready", digest: "2b".repeat(12) },
+          ]),
         },
-        event_log: JSON.stringify([]),
       }),
     })
   })
-
 
   await page.addInitScript((providerBase) => {
     const key = "confidential-provider-settings-v1"
@@ -117,7 +121,7 @@ test("landing page contact link, hero hand-off, and confidential chat flow", asy
   await expect
     .poll(() => attestationRequests, { timeout: 15_000 })
     .toBeGreaterThan(0)
-  await expect(page.getByText("Secure channel verified")).toBeVisible({ timeout: 15_000 })
+  await expect(page.getByText("Attestation verified")).toBeVisible({ timeout: 15_000 })
 
   const transcript = page.getByRole("log", { name: "Confidential space transcript" })
   await expect(transcript).toContainText(HERO_PROMPT, { timeout: 15_000 })

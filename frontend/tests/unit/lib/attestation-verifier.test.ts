@@ -68,6 +68,7 @@ describe("verifyTdxQuote", () => {
     expect(result.verifiedReport.status).toBe("UpToDate")
     expect(result.reportDataHex).toBe("0xdead")
     expect(result.quoteCollateral).toEqual(baseCollateral)
+    expect(result.metadata?.pccsUrl).toBe("https://api.trustedservices.intel.com/tdx/certification/v4/")
   })
 
   it("throws when quoteHex is missing", async () => {
@@ -118,11 +119,32 @@ describe("verifyTdxQuote", () => {
     expect(getCollateralMock).toHaveBeenCalledWith("https://public-pccs.example.com/tdx", expect.any(Uint8Array))
   })
 
+  it("prefers explicit PCCS overrides over env configuration", async () => {
+    process.env.NEXT_PUBLIC_PCCS_URL = "https://public-pccs.example.com/tdx"
+    const { verifyTdxQuote } = await importModule()
+
+    const result = await verifyTdxQuote("0x1234", { pccsUrl: "https://override.example.com/tdx" })
+
+    expect(getCollateralMock).toHaveBeenCalledWith("https://override.example.com/tdx", expect.any(Uint8Array))
+    expect(result.metadata?.pccsUrl).toBe("https://override.example.com/tdx")
+  })
+
   it("short-circuits when attestation test mode flag is set", async () => {
     process.env.NEXT_PUBLIC_ATTESTATION_TEST_MODE = "true"
     const { verifyTdxQuote } = await importModule()
 
-    const result = await verifyTdxQuote("0x1234")
+    const result = await verifyTdxQuote("0x1234", { pccsUrl: "https://override.example.com/tdx" })
+
+    expect(getCollateralMock).not.toHaveBeenCalled()
+    expect(result.metadata?.testMode).toBe(true)
+    expect(result.verifiedReport.status).toBe("TEST_MODE")
+    expect(result.metadata?.pccsUrl).toBe("https://override.example.com/tdx")
+  })
+
+  it("respects forceTestMode override even when env flag is false", async () => {
+    const { verifyTdxQuote } = await importModule()
+
+    const result = await verifyTdxQuote("0x1234", { forceTestMode: true })
 
     expect(getCollateralMock).not.toHaveBeenCalled()
     expect(result.metadata?.testMode).toBe(true)
@@ -138,5 +160,13 @@ describe("verifyTdxQuoteWithFallback", () => {
 
     expect(getCollateralMock).toHaveBeenCalledTimes(1)
     expect(verifyMock).toHaveBeenCalledTimes(1)
+  })
+
+  it("passes through PCCS overrides", async () => {
+    const { verifyTdxQuoteWithFallback } = await importModule()
+
+    await verifyTdxQuoteWithFallback("0xfeed", { pccsUrl: "https://local-pccs/tdx" })
+
+    expect(getCollateralMock).toHaveBeenCalledWith("https://local-pccs/tdx", expect.any(Uint8Array))
   })
 })

@@ -31,6 +31,9 @@ export default defineConfig({
       FORM_TOKEN_SECRET: process.env.FORM_TOKEN_SECRET ?? "test-form-token",
       NEXT_PUBLIC_SUPABASE_URL: process.env.NEXT_PUBLIC_SUPABASE_URL ?? "https://dummy.supabase.co",
       NEXT_PUBLIC_SUPABASE_ANON_KEY: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? "dummy-anon-key",
+      NEXT_PUBLIC_ATTESTATION_TEST_MODE: process.env.NEXT_PUBLIC_ATTESTATION_TEST_MODE ?? "false",
+      NEXT_PUBLIC_ATTESTATION_BASE_URL: "https://attestation.umbra.test",
+      NEXT_PUBLIC_PCCS_URL: "https://pccs.phala.network/tdx/certification/v4",
     },
   },
 })

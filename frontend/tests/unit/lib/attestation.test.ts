@@ -145,6 +145,12 @@ describe("compareReportData", () => {
   it("fails when verifier data is shorter", () => {
     expect(compareReportData("deadbeef", "0xdead")).toBe(false)
   })
+
+  it("accepts verifier data encoded as ASCII", () => {
+    const nonce = "c348f494033ae00ff8d47bbdb1741626"
+    const asciiEncoded = Buffer.from(nonce, "utf8").toString("hex")
+    expect(compareReportData(nonce, `0x${asciiEncoded}0000`)).toBe(true)
+  })
 })
 
 describe("fetchTdxQuoteWithFallback", () => {
