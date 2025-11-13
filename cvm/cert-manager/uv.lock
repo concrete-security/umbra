@@ -60,6 +60,7 @@ dependencies = [
     { name = "cryptography" },
     { name = "dstack-sdk" },
     { name = "schedule" },
+    { name = "urllib3" },
 ]
 
 [package.dev-dependencies]
@@ -77,6 +78,7 @@ requires-dist = [
     { name = "cryptography", specifier = ">=43.0.0" },
     { name = "dstack-sdk", specifier = "==0.5.3" },
     { name = "schedule", specifier = "==1.2.0" },
+    { name = "urllib3", specifier = ">=2.5.0" },
 ]
 
 [package.metadata.requires-dev]

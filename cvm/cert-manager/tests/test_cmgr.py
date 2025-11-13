@@ -12,6 +12,7 @@ External dependencies such as Dstack and Let's Encrypt are mocked.
 import os
 import tempfile
 import subprocess
+import json
 import pytest
 from pathlib import Path
 from unittest.mock import Mock, patch, mock_open
@@ -25,6 +26,7 @@ from cryptography.hazmat.primitives.serialization import Encoding
 from cert_manager.cmgr import CertificateManager
 from cert_manager.supervisor import Supervisor
 from cert_manager.certbot import CertbotWrapper
+from cert_manager import crtsh
 
 
 # Test fixtures and helper functions
@@ -1440,6 +1442,518 @@ class TestCertificateManagerIntegration:
                     mock_emit.assert_not_called()
                     mock_setup_nginx.assert_not_called()
                     mock_manage.assert_called_once()
+
+
+# Certificate Revocation Tests
+class TestCertificateRevocation:
+    """Test suite for certificate revocation functionality."""
+
+    def test_get_valid_certs_from_crtsh_success(self, temp_dir):
+        """Test successful retrieval of valid certificates from crt.sh."""
+        manager = create_cert_manager(temp_dir, dev_mode=False, letsencrypt_staging=False)
+
+        # Mock crt.sh response (dates are timezone-naive as returned by actual crt.sh)
+        mock_response = Mock()
+        mock_response.status = 200
+        mock_response.data = b"""[
+            {
+                "id": "12345",
+                "serial_number": "abc123",
+                "not_after": "2026-01-01T00:00:00",
+                "issuer_name": "CN=Let's Encrypt Authority X3"
+            },
+            {
+                "id": "67890",
+                "serial_number": "def456",
+                "not_after": "2026-02-01T00:00:00",
+                "issuer_name": "CN=E8,O=Let's Encrypt"
+            },
+            {
+                "id": "11111",
+                "serial_number": "expired123",
+                "not_after": "2020-01-01T00:00:00",
+                "issuer_name": "CN=Let's Encrypt Authority X3"
+            },
+            {
+                "id": "22222",
+                "serial_number": "other789",
+                "not_after": "2026-03-01T00:00:00",
+                "issuer_name": "CN=DigiCert"
+            }
+        ]"""
+
+        # Mock the HTTP pool to return our response
+        mock_http = Mock()
+        mock_http.request.return_value = mock_response
+
+        with patch("cert_manager.crtsh.new_retrying_http_pool", return_value=mock_http):
+            certs = crtsh.get_valid_certs_from_crtsh(manager.domain)
+
+        # Should only return valid Let's Encrypt certs (not expired, not other CA)
+        # Returns certificate IDs, not serial numbers
+        assert len(certs) == 2
+        assert "12345" in certs
+        assert "67890" in certs
+        assert "11111" not in certs
+        assert "22222" not in certs
+
+    def test_get_valid_certs_from_crtsh_no_certs(self, temp_dir):
+        """Test crt.sh query when no certificates are found."""
+        manager = create_cert_manager(temp_dir, dev_mode=False, letsencrypt_staging=False)
+
+        mock_response = Mock()
+        mock_response.status = 200
+        mock_response.data = b"[]"
+
+        mock_http = Mock()
+        mock_http.request.return_value = mock_response
+
+        with patch("cert_manager.crtsh.new_retrying_http_pool", return_value=mock_http):
+            certs = crtsh.get_valid_certs_from_crtsh(manager.domain)
+
+        assert certs == []
+
+    def test_get_valid_certs_from_crtsh_http_error(self, temp_dir):
+        """Test crt.sh query with HTTP error."""
+        manager = create_cert_manager(temp_dir, dev_mode=False, letsencrypt_staging=False)
+
+        mock_response = Mock()
+        mock_response.status = 500
+
+        mock_http = Mock()
+        mock_http.request.return_value = mock_response
+
+        with patch("cert_manager.crtsh.new_retrying_http_pool", return_value=mock_http):
+            certs = crtsh.get_valid_certs_from_crtsh(manager.domain)
+
+        assert certs == []
+
+    def test_get_valid_certs_from_crtsh_network_error(self, temp_dir):
+        """Test crt.sh query with network error."""
+        import urllib3
+
+        manager = create_cert_manager(temp_dir, dev_mode=False, letsencrypt_staging=False)
+
+        mock_http = Mock()
+        mock_http.request.side_effect = urllib3.exceptions.HTTPError("Network error")
+
+        with patch("cert_manager.crtsh.new_retrying_http_pool", return_value=mock_http):
+            certs = crtsh.get_valid_certs_from_crtsh(manager.domain)
+
+        assert certs == []
+
+    def test_get_valid_certs_from_crtsh_json_error(self, temp_dir):
+        """Test crt.sh query with invalid JSON."""
+        manager = create_cert_manager(temp_dir, dev_mode=False, letsencrypt_staging=False)
+
+        mock_response = Mock()
+        mock_response.status = 200
+        mock_response.data = b"invalid json"
+
+        mock_http = Mock()
+        mock_http.request.return_value = mock_response
+
+        with patch("cert_manager.crtsh.new_retrying_http_pool", return_value=mock_http):
+            certs = crtsh.get_valid_certs_from_crtsh(manager.domain)
+
+        assert certs == []
+
+    def test_download_cert_from_crtsh_success(self, temp_dir, mock_certificate):
+        """Test successful certificate download from crt.sh."""
+        cert_pem = mock_certificate.public_bytes(Encoding.PEM)
+        mock_response = Mock()
+        mock_response.status = 200
+        mock_response.data = cert_pem
+
+        mock_http = Mock()
+        mock_http.request.return_value = mock_response
+
+        with patch("cert_manager.crtsh.new_retrying_http_pool", return_value=mock_http):
+            downloaded = crtsh.download_cert_from_crtsh("12345")
+
+        assert downloaded == cert_pem
+
+    def test_download_cert_from_crtsh_http_error(self, temp_dir):
+        """Test certificate download with HTTP error."""
+        mock_response = Mock()
+        mock_response.status = 404
+
+        mock_http = Mock()
+        mock_http.request.return_value = mock_response
+
+        with patch("cert_manager.crtsh.new_retrying_http_pool", return_value=mock_http):
+            with pytest.raises(Exception, match="crt.sh returned status 404"):
+                crtsh.download_cert_from_crtsh("12345")
+
+    def test_download_cert_from_crtsh_invalid_cert(self, temp_dir):
+        """Test certificate download with invalid certificate data."""
+        mock_response = Mock()
+        mock_response.status = 200
+        mock_response.data = b"not a valid certificate"
+
+        mock_http = Mock()
+        mock_http.request.return_value = mock_response
+
+        with patch("cert_manager.crtsh.new_retrying_http_pool", return_value=mock_http):
+            with pytest.raises(Exception, match="Invalid certificate data"):
+                crtsh.download_cert_from_crtsh("12345")
+
+    def test_revoke_valid_certificates_success(self, temp_dir, mock_certificate):
+        """Test successful revocation of multiple certificates."""
+        manager = create_cert_manager(temp_dir, dev_mode=False, letsencrypt_staging=False)
+
+        cert_pem = mock_certificate.public_bytes(Encoding.PEM)
+
+        # Mock get_valid_certs_from_crtsh to return some certificate IDs
+        with patch(
+            "cert_manager.crtsh.get_valid_certs_from_crtsh", return_value=["12345", "67890"]
+        ):
+            # Mock download_cert_from_crtsh
+            with patch("cert_manager.crtsh.download_cert_from_crtsh", return_value=cert_pem):
+                # Mock CertbotWrapper.revoke_certificate_by_domain
+                with patch("cert_manager.cmgr.CertbotWrapper") as mock_certbot_class:
+                    mock_certbot = Mock()
+                    mock_certbot_class.return_value = mock_certbot
+
+                    manager.revoke_other_valid_certificates()
+
+                    # Should have called revoke twice (once for each cert)
+                    assert mock_certbot.revoke_certificate_by_domain.call_count == 2
+
+                    # Check the calls were made with correct parameters
+                    calls = mock_certbot.revoke_certificate_by_domain.call_args_list
+                    for call in calls:
+                        assert call[1]["domain"] == "test.example.com"
+                        assert call[1]["cert_pem"] == cert_pem
+                        assert call[1]["email"] == "test@example.com"
+                        assert call[1]["reason"] == "superseded"
+
+    def test_revoke_valid_certificates_no_certs(self, temp_dir):
+        """Test revocation when no valid certificates are found."""
+        manager = create_cert_manager(temp_dir, dev_mode=False, letsencrypt_staging=False)
+
+        with patch("cert_manager.crtsh.get_valid_certs_from_crtsh", return_value=[]):
+            with patch("cert_manager.cmgr.CertbotWrapper") as mock_certbot_class:
+                mock_certbot = Mock()
+                mock_certbot_class.return_value = mock_certbot
+
+                manager.revoke_other_valid_certificates()
+
+                # Should not attempt any revocations
+                mock_certbot.revoke_certificate_by_domain.assert_not_called()
+
+    def test_revoke_valid_certificates_partial_failure(self, temp_dir, mock_certificate):
+        """Test revocation when some certificates fail to revoke."""
+        manager = create_cert_manager(temp_dir, dev_mode=False, letsencrypt_staging=False)
+
+        cert_pem = mock_certificate.public_bytes(Encoding.PEM)
+
+        with patch(
+            "cert_manager.crtsh.get_valid_certs_from_crtsh",
+            return_value=["12345", "67890", "99999"],
+        ):
+            with patch("cert_manager.crtsh.download_cert_from_crtsh", return_value=cert_pem):
+                with patch("cert_manager.cmgr.CertbotWrapper") as mock_certbot_class:
+                    mock_certbot = Mock()
+                    mock_certbot_class.return_value = mock_certbot
+
+                    # Make the second revocation fail
+                    mock_certbot.revoke_certificate_by_domain.side_effect = [
+                        None,  # First succeeds
+                        Exception("Revocation failed"),  # Second fails
+                        None,  # Third succeeds
+                    ]
+
+                    # Should not raise exception, continues with remaining certs
+                    manager.revoke_other_valid_certificates()
+
+                    # Should have attempted all three
+                    assert mock_certbot.revoke_certificate_by_domain.call_count == 3
+
+    def test_revoke_valid_certificates_download_failure(self, temp_dir):
+        """Test revocation when certificate download fails."""
+        manager = create_cert_manager(temp_dir, dev_mode=False, letsencrypt_staging=False)
+
+        with patch("cert_manager.crtsh.get_valid_certs_from_crtsh", return_value=["12345"]):
+            with patch(
+                "cert_manager.crtsh.download_cert_from_crtsh",
+                side_effect=Exception("Download failed"),
+            ):
+                with patch("cert_manager.cmgr.CertbotWrapper") as mock_certbot_class:
+                    mock_certbot = Mock()
+                    mock_certbot_class.return_value = mock_certbot
+
+                    # Should not raise exception
+                    manager.revoke_other_valid_certificates()
+
+                    # Should not attempt revocation if download failed
+                    mock_certbot.revoke_certificate_by_domain.assert_not_called()
+
+    def test_revoke_excludes_current_certificate(self, temp_dir, mock_private_key):
+        """Test that revocation excludes the current certificate by serial number."""
+        manager = create_cert_manager(temp_dir, dev_mode=False, letsencrypt_staging=False)
+
+        # Create a certificate with a specific serial number
+        current_serial = x509.random_serial_number()
+        subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "test.example.com")])
+
+        current_cert = (
+            x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(issuer)
+            .public_key(mock_private_key.public_key())
+            .serial_number(current_serial)
+            .not_valid_before(datetime.now(timezone.utc))
+            .not_valid_after(datetime.now(timezone.utc) + timedelta(days=90))
+            .add_extension(
+                x509.SubjectAlternativeName([x509.DNSName("test.example.com")]),
+                critical=False,
+            )
+            .sign(mock_private_key, hashes.SHA256())
+        )
+
+        # Save the current certificate
+        manager.save_certificate_and_key(current_cert, mock_private_key)
+
+        # Format serial number as hex string (lowercase) to match implementation
+        current_serial_hex = format(current_serial, "X").lower()
+
+        # Create mock crt.sh response that includes the current cert and others
+        mock_response = Mock()
+        mock_response.status = 200
+        mock_response.data = json.dumps(
+            [
+                {
+                    "id": "11111",
+                    # We add leading zeros to test that the format doesn't matter
+                    "serial_number": "00" + current_serial_hex,  # Current certificate
+                    "not_after": "2026-01-01T00:00:00",
+                    "issuer_name": "CN=Let's Encrypt Authority X3",
+                },
+                {
+                    "id": "22222",
+                    "serial_number": "fedcba987654",  # Different certificate
+                    "not_after": "2026-01-01T00:00:00",
+                    "issuer_name": "CN=Let's Encrypt Authority X3",
+                },
+                {
+                    "id": "33333",
+                    "serial_number": "111111111111",  # Another different certificate
+                    "not_after": "2026-01-01T00:00:00",
+                    "issuer_name": "CN=E8,O=Let's Encrypt",
+                },
+            ]
+        ).encode()
+
+        # Create a different cert PEM for the other certificates
+        other_cert = (
+            x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(issuer)
+            .public_key(mock_private_key.public_key())
+            .serial_number(0xFEDCBA987654)
+            .not_valid_before(datetime.now(timezone.utc))
+            .not_valid_after(datetime.now(timezone.utc) + timedelta(days=90))
+            .add_extension(
+                x509.SubjectAlternativeName([x509.DNSName("test.example.com")]),
+                critical=False,
+            )
+            .sign(mock_private_key, hashes.SHA256())
+        )
+        other_cert_pem = other_cert.public_bytes(Encoding.PEM)
+
+        # Mock the HTTP pool to return our response
+        mock_http = Mock()
+        mock_http.request.return_value = mock_response
+
+        with patch("cert_manager.crtsh.new_retrying_http_pool", return_value=mock_http):
+            with patch(
+                "cert_manager.crtsh.download_cert_from_crtsh", return_value=other_cert_pem
+            ) as mock_download:
+                with patch("cert_manager.cmgr.CertbotWrapper") as mock_certbot_class:
+                    mock_certbot = Mock()
+                    mock_certbot_class.return_value = mock_certbot
+
+                    manager.revoke_other_valid_certificates()
+
+                    # Should only revoke the 2 other certificates, not the current one
+                    assert mock_certbot.revoke_certificate_by_domain.call_count == 2
+
+                    # Verify the excluded certificate ID (11111) was not downloaded
+                    download_calls = mock_download.call_args_list
+                    downloaded_cert_ids = [call[0][0] for call in download_calls]
+
+                    # Should have downloaded only the non-current certificates
+                    assert "22222" in downloaded_cert_ids
+                    assert "33333" in downloaded_cert_ids
+                    assert "11111" not in downloaded_cert_ids  # Current cert excluded
+
+    @pytest.mark.xfail(reason="Depends on external service availability and data")
+    def test_real_crtsh_query_and_download(self, temp_dir):
+        """Query real crt.sh for vllm.concrete-security.com and download certificates."""
+
+        # Query crt.sh for valid certificates (real HTTP request)
+        cert_ids = crtsh.get_valid_certs_from_crtsh("vllm.concrete-security.com")
+
+        # We should get some certificate IDs
+        assert isinstance(cert_ids, list)
+
+        # Download and verify each certificate
+        for cert_id in cert_ids:
+            # Download certificate (real HTTP request)
+            cert_pem = crtsh.download_cert_from_crtsh(cert_id)
+
+            # Verify it's valid PEM data
+            assert cert_pem.startswith(b"-----BEGIN CERTIFICATE-----")
+            assert cert_pem.endswith(b"-----END CERTIFICATE-----\n")
+
+            # Parse the certificate to verify it's valid
+            _ = x509.load_pem_x509_certificates(cert_pem)
+
+
+class TestCertbotRevocation:
+    """Test suite for CertbotWrapper revocation methods."""
+
+    def test_revoke_certificate_by_domain_success(self, mock_certificate):
+        """Test successful certificate revocation using domain validation."""
+        certbot = CertbotWrapper(staging=False)
+        cert_pem = mock_certificate.public_bytes(Encoding.PEM)
+
+        mock_validate_result = Mock()
+        mock_validate_result.returncode = 1  # Expected to fail on nonexistent domain
+        mock_validate_result.stdout = "Validation succeeded for test.example.com"
+        mock_validate_result.stderr = "Failed for nonexistent domain"
+
+        mock_revoke_result = Mock()
+        mock_revoke_result.returncode = 0
+        mock_revoke_result.stdout = "Certificate revoked"
+        mock_revoke_result.stderr = ""
+
+        with patch("subprocess.run") as mock_run:
+            # First call is validation (returns non-zero), second is revocation (returns zero)
+            mock_run.side_effect = [mock_validate_result, mock_revoke_result]
+
+            certbot.revoke_certificate_by_domain(
+                domain="test.example.com",
+                cert_pem=cert_pem,
+                email="test@example.com",
+                webroot_path="/tmp/acme",
+                reason="superseded",
+            )
+
+            # Should have made two calls: validation then revocation
+            assert mock_run.call_count == 2
+
+            # Check validation call
+            validation_args = mock_run.call_args_list[0][0][0]
+            assert "certbot" in validation_args
+            assert "certonly" in validation_args
+            assert "--webroot" in validation_args
+            assert "-d" in validation_args
+            assert "test.example.com" in validation_args
+            # Should include a nonexistent domain
+            assert any("nonexistent" in arg for arg in validation_args)
+
+            # Check revocation call
+            revocation_args = mock_run.call_args_list[1][0][0]
+            assert "certbot" in revocation_args
+            assert "revoke" in revocation_args
+            assert "--reason" in revocation_args
+            assert "superseded" in revocation_args
+
+    def test_revoke_certificate_by_domain_validation_timeout(self, mock_certificate):
+        """Test revocation when domain validation times out."""
+        certbot = CertbotWrapper(staging=False)
+        cert_pem = mock_certificate.public_bytes(Encoding.PEM)
+
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("certbot", 300)):
+            with pytest.raises(Exception, match="timed out"):
+                certbot.revoke_certificate_by_domain(
+                    domain="test.example.com",
+                    cert_pem=cert_pem,
+                    email="test@example.com",
+                    webroot_path="/tmp/acme",
+                )
+
+    def test_revoke_certificate_by_domain_revocation_failure(self, mock_certificate):
+        """Test when validation succeeds but revocation fails."""
+        certbot = CertbotWrapper(staging=False)
+        cert_pem = mock_certificate.public_bytes(Encoding.PEM)
+
+        mock_validate_result = Mock()
+        mock_validate_result.returncode = 1
+        mock_validate_result.stdout = "Validation succeeded"
+        mock_validate_result.stderr = ""
+
+        with patch("subprocess.run") as mock_run:
+            # Validation succeeds, revocation fails
+            mock_run.side_effect = [
+                mock_validate_result,
+                subprocess.CalledProcessError(1, "certbot", stderr="Revocation failed"),
+            ]
+
+            with pytest.raises(Exception, match="Certbot revoke .* failed"):
+                certbot.revoke_certificate_by_domain(
+                    domain="test.example.com",
+                    cert_pem=cert_pem,
+                    email="test@example.com",
+                    webroot_path="/tmp/acme",
+                )
+
+    def test_revoke_certificate_by_domain_extracts_domain_from_san(self):
+        """Test that domain is correctly extracted from certificate SAN."""
+        certbot = CertbotWrapper(staging=False)
+
+        # Create cert with specific SAN
+        private_key = ec.generate_private_key(ec.SECP256R1())
+        subject = issuer = x509.Name(
+            [
+                x509.NameAttribute(NameOID.COMMON_NAME, "example.com"),
+            ]
+        )
+
+        cert = (
+            x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(issuer)
+            .public_key(private_key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(datetime.now(timezone.utc))
+            .not_valid_after(datetime.now(timezone.utc) + timedelta(days=90))
+            .add_extension(
+                x509.SubjectAlternativeName(
+                    [x509.DNSName("specific.example.com"), x509.DNSName("other.example.com")]
+                ),
+                critical=False,
+            )
+            .sign(private_key, hashes.SHA256())
+        )
+
+        cert_pem = cert.public_bytes(Encoding.PEM)
+
+        mock_validate_result = Mock()
+        mock_validate_result.returncode = 1
+        mock_validate_result.stdout = "OK"
+        mock_validate_result.stderr = ""
+
+        mock_revoke_result = Mock()
+        mock_revoke_result.returncode = 0
+        mock_revoke_result.stdout = "Revoked"
+        mock_revoke_result.stderr = ""
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.side_effect = [mock_validate_result, mock_revoke_result]
+
+            certbot.revoke_certificate_by_domain(
+                domain="specific.example.com",
+                cert_pem=cert_pem,
+                email="test@example.com",
+                webroot_path="/tmp/acme",
+            )
+
+            # Check that the first SAN domain was used
+            validation_args = mock_run.call_args_list[0][0][0]
+            assert "specific.example.com" in validation_args
 
 
 if __name__ == "__main__":

@@ -27,6 +27,7 @@ from dstack_sdk import DstackClient
 
 from cert_manager.supervisor import Supervisor
 from cert_manager.certbot import CertbotWrapper
+from cert_manager import crtsh
 
 logger = logging.getLogger("cert-manager")
 
@@ -111,6 +112,77 @@ class CertificateManager:
         # TODO: check if this can lead to any problems
         return ec.derive_private_key(int.from_bytes(key_material, "big"), ec.SECP256R1())
 
+    def revoke_other_valid_certificates(self):
+        """Revoke all valid certificates for the domain, except current one.
+
+        This queries crt.sh for valid certificates and revokes them using certbot.
+        It doesn't revoke the currently used certificate.
+
+        Only applies to production Let's Encrypt certificates.
+        """
+        logger.info(f"Checking for valid certificates to revoke for domain: {self.domain}")
+
+        # Get current certificate serial number to exclude it from revocation
+        current_cert_serial_number = None
+        cert_file = self.cert_path / self.CERT_FILENAME
+        if cert_file.exists():
+            try:
+                with open(cert_file, "rb") as f:
+                    certs = x509.load_pem_x509_certificates(f.read())
+                    # Get serial number from the leaf certificate
+                    leaf_cert: x509.Certificate = certs[0]  # should be first
+                    current_cert_serial_number = leaf_cert.serial_number
+                    logger.info(f"Current certificate serial number: {current_cert_serial_number}")
+            except Exception as e:
+                logger.warning(f"Failed to load current certificate serial number: {e}")
+        # Exclude current certificate from revocation
+        exclude_serial_numbers = [current_cert_serial_number] if current_cert_serial_number else []
+
+        # Get list of valid certificates from crt.sh
+        valid_cert_ids = crtsh.get_valid_certs_from_crtsh(
+            self.domain, exclude_serial_numbers=exclude_serial_numbers
+        )
+
+        if not valid_cert_ids:
+            logger.info("No valid certificates found to revoke")
+            return
+
+        logger.info(f"Found {len(valid_cert_ids)} valid certificates to revoke")
+
+        # Initialize certbot wrapper
+        assert not self.letsencrypt_staging
+        certbot = CertbotWrapper(staging=False)
+
+        revoked_count = 0
+        failed_count = 0
+
+        for cert_id in valid_cert_ids:
+            try:
+                # Download the certificate from crt.sh
+                cert_pem = crtsh.download_cert_from_crtsh(cert_id)
+
+                # Revoke the certificate using domain validation (ACME challenge)
+                # This allows revoking certificates issued by different accounts
+                logger.info(f"Revoking certificate using domain validation: id={cert_id}")
+                certbot.revoke_certificate_by_domain(
+                    domain=self.domain,
+                    cert_pem=cert_pem,
+                    email=self.cert_email,
+                    webroot_path=str(self.acme_path),
+                    reason="superseded",  # Using "superseded" as we're issuing a new cert
+                )
+                revoked_count += 1
+                logger.info(f"Successfully revoked certificate: id={cert_id}")
+
+            except Exception as e:
+                # Continue with other certificates even if one fails
+                failed_count += 1
+                logger.error(f"Failed to revoke certificate id={cert_id}: {e}")
+
+        logger.info(
+            f"Certificate revocation completed: {revoked_count} revoked, {failed_count} failed"
+        )
+
     def generate_deterministic_key(self, key_path: str) -> ec.EllipticCurvePrivateKey:
         """Generate deterministic EC key using Phala dstack SDK.
 
@@ -128,7 +200,12 @@ class CertificateManager:
     def create_lets_encrypt_cert(
         self, private_key: ec.EllipticCurvePrivateKey
     ) -> List[x509.Certificate]:
-        """Create Let's Encrypt certificate using certbot"""
+        """Create Let's Encrypt certificate using certbot.
+
+        In production mode (not staging), this will revoke all valid certificates
+        from crt.sh before issuing a new one, ensuring only one valid certificate
+        exists at a time.
+        """
         logger.info("Creating Let's Encrypt certificate using certbot")
 
         # Generate account key
@@ -498,6 +575,7 @@ class CertificateManager:
 
         Checks if the certificate is valid, and creates or renews it if necessary.
         This will also setup Nginx with HTTPS, and restart it (load new cert/key).
+        In production mode, it also revokes all valid certs except the one used.
         """
         if not self.is_cert_valid():
             try:
@@ -509,6 +587,14 @@ class CertificateManager:
                 self.supervisor.setup_nginx_https_config()
             except Exception as e:
                 logger.error(f"Failed to setup and restart Nginx: {e}")
+
+        # Check for valid certs to revoke in production mode
+        if not self.letsencrypt_staging and not self.dev_mode:
+            logger.info("Production mode: revoking all valid certificates except the one used")
+            try:
+                self.revoke_other_valid_certificates()
+            except Exception as e:
+                logger.warning(f"Certificate revocation failed: {e}")
 
     def startup_init(self):
         """Initialization tasks to run on startup."""

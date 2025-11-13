@@ -11,6 +11,7 @@ dependencies = [
     "schedule==1.2.0",
     "dstack-sdk==0.5.3",
     "certbot~=5.0",
+    "urllib3>=2.5.0",
 ]
 
 [dependency-groups]
