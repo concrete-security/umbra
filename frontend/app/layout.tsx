@@ -1,6 +1,7 @@
 import type React from "react"
 import "@/styles/globals.css"
 import type { Metadata } from "next"
+import { Analytics } from "@vercel/analytics/next"
 import { ChunkRecovery } from "@/components/chunk-recovery"
 import { ThemeProvider } from "@/components/theme-provider"
 import { SupabaseAuthListener } from "@/components/supabase-auth-listener"
@@ -30,6 +31,7 @@ export default function RootLayout({
           <SupabaseAuthListener />
           {children}
         </ThemeProvider>
+        <Analytics />
       </body>
     </html>
   )
