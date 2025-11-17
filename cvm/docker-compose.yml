@@ -20,7 +20,7 @@ services:
       --max-num-seqs 8
       --reasoning-parser openai_gptoss
       --async-scheduling
-      --allow-origins []
+      --allowed-origins []
     restart: unless-stopped
     healthcheck:
       start_interval: 1h30m # Allow up to 90 minutes for initial model loading
@@ -31,7 +31,7 @@ services:
 
   # Combined Nginx reverse proxy and Certificate Manager
   nginx-cert-manager:
-    image: ghcr.io/concrete-security/cert-manager@sha256:e04c33753fd1be19d82e07432eded1f2ccf242185e8d1f8e49c21c3173329f94
+    image: ghcr.io/concrete-security/cert-manager@sha256:b86ca2fef7d3669a619c3bf08f4c20ca8ff4d73974e1f7522fe6618635ef8175
     container_name: nginx-cert-manager
     ports:
       - "80:80"
@@ -45,6 +45,8 @@ services:
       - LETSENCRYPT_ACCOUNT_VERSION=v1
       # Force removal of existing certificate files on startup
       - FORCE_RM_CERT_FILES=false
+      # Set log level
+      - LOG_LEVEL=INFO
     volumes:
       - tls-certs-keys:/etc/nginx/ssl/
       - /var/run/dstack.sock:/var/run/dstack.sock
