@@ -29,6 +29,7 @@ import {
   UserCircle2,
   ChevronDown,
   ExternalLink,
+  AlertTriangle,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion"
@@ -89,6 +90,7 @@ type VerificationState =
       testMode?: boolean
       derivedReportData?: string | null
       advisoryIds?: string[]
+      isOutOfDate?: boolean
     }
   | { status: "error"; error: string }
 
@@ -787,7 +789,9 @@ function ConfidentialAIContent() {
           : []
         const derivedReportData = result?.reportDataHex ?? null
         const reportDataMatches = testMode ? true : compareReportData(attestedReportData, derivedReportData)
-        const verificationPassed = testMode ? true : Boolean(statusText && statusText.toLowerCase() === "uptodate")
+        const statusLower = statusText?.toLowerCase() ?? ""
+        const isOutOfDate = statusLower === "outofdate"
+        const verificationPassed = testMode ? true : Boolean(statusText && (statusLower === "uptodate" || isOutOfDate))
         const checksum = await deriveQuoteChecksum(quoteHex)
 
         console.log("[Verification] Verification completed", {
@@ -811,6 +815,7 @@ function ConfidentialAIContent() {
           testMode,
           derivedReportData,
           advisoryIds,
+          isOutOfDate,
         })
       } catch (error) {
         console.error("[Verification] Verification error", error)
@@ -985,13 +990,15 @@ function ConfidentialAIContent() {
               <div
                 className={cn(
                   "flex items-center gap-2 rounded-2xl border px-3 py-2.5 shadow-sm",
-                  isVerified
+                  isVerified && !verificationState.isOutOfDate
                     ? "border-emerald-400/60 bg-emerald-400/10 text-emerald-600 dark:border-emerald-400/40 dark:bg-emerald-400/5"
-                    : verificationState.status === "success"
-                      ? "border-rose-400/60 bg-rose-400/10 text-rose-600 dark:border-rose-400/40 dark:bg-rose-400/5"
-                      : verificationState.status === "running"
-                        ? "border-[#102A8C]/60 bg-[#102A8C]/10 text-[#102A8C] dark:border-[#102A8C]/40 dark:bg-[#102A8C]/5"
-                        : "border-border/40 bg-card/70 text-muted-foreground dark:border-border/60 dark:bg-card/10"
+                    : verificationState.status === "success" && verificationState.isOutOfDate
+                      ? "border-amber-400/60 bg-amber-400/10 text-amber-700 dark:border-amber-400/40 dark:bg-amber-400/5 dark:text-amber-300"
+                      : verificationState.status === "success"
+                        ? "border-rose-400/60 bg-rose-400/10 text-rose-600 dark:border-rose-400/40 dark:bg-rose-400/5"
+                        : verificationState.status === "running"
+                          ? "border-[#102A8C]/60 bg-[#102A8C]/10 text-[#102A8C] dark:border-[#102A8C]/40 dark:bg-[#102A8C]/5"
+                          : "border-border/40 bg-card/70 text-muted-foreground dark:border-border/60 dark:bg-card/10"
                 )}
               >
                 {verificationState.status === "idle" && (
@@ -1014,10 +1021,15 @@ function ConfidentialAIContent() {
                 )}
                 {verificationState.status === "success" && (
                   <>
-                    {isVerified ? (
+                    {isVerified && !verificationState.isOutOfDate ? (
                       <>
                         <Lock className="h-4 w-4" />
                         <span className="text-xs font-medium">Verified and secure</span>
+                      </>
+                    ) : isVerified && verificationState.isOutOfDate ? (
+                      <>
+                        <AlertTriangle className="h-4 w-4" />
+                        <span className="text-xs font-medium">Verified (update recommended)</span>
                       </>
                     ) : (
                       <>
@@ -1225,8 +1237,21 @@ function ConfidentialAIContent() {
                     </p>
                     {verificationState.statusText && (
                       <p className="text-xs text-muted-foreground">
-                        TCB status: <span className="font-semibold text-foreground">{verificationState.statusText}</span>
+                        Security status: <span className={cn("font-semibold", verificationState.isOutOfDate ? "text-amber-600" : "text-foreground")}>{verificationState.statusText === "OutOfDate" ? "Update recommended" : verificationState.statusText}</span>
                       </p>
+                    )}
+                    {verificationState.isOutOfDate && (
+                      <div className="rounded-lg border border-amber-400/60 bg-amber-400/10 p-2.5 space-y-1.5 dark:border-amber-400/40 dark:bg-amber-400/5">
+                        <div className="flex items-start gap-2">
+                          <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-amber-600 mt-0.5 dark:text-amber-400" />
+                          <div className="flex-1 space-y-1">
+                            <p className="text-xs font-medium text-amber-700 dark:text-amber-300">Security update recommended</p>
+                            <p className="text-[11px] text-amber-600 dark:text-amber-400 leading-relaxed">
+                              The service is working normally, but the provider should apply security updates.
+                            </p>
+                          </div>
+                        </div>
+                      </div>
                     )}
                     {verificationState.testMode && (
                       <p className="text-xs text-amber-600">Test mode enabled — DCAP verification simulated for automated checks.</p>
@@ -2234,6 +2259,36 @@ function ConfidentialAIContent() {
               className="shrink-0 border-t border-border/40 bg-white/95 px-4 py-4 shadow-inner dark:bg-card/25"
             >
                <div className="mx-auto w-full space-y-4">
+                {verificationState.status === "success" && verificationState.isOutOfDate && (
+                  <div className="flex items-start gap-2 rounded-xl border border-amber-400/60 bg-amber-400/10 px-3 py-2.5 text-xs text-amber-700 dark:border-amber-400/40 dark:bg-amber-400/5 dark:text-amber-300">
+                    <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+                    <div className="flex-1 space-y-1.5">
+                      <p className="font-medium">Security update recommended</p>
+                      <p className="text-[11px] leading-relaxed">
+                        The service is working normally, but the provider should apply security updates.
+                      </p>
+                      {verificationState.advisoryIds && verificationState.advisoryIds.length > 0 && (
+                        <div className="pt-1.5 space-y-1">
+                          <p className="text-[11px] font-medium">Security advisories:</p>
+                          <div className="flex flex-wrap gap-1">
+                            {verificationState.advisoryIds.map((advisory) => (
+                              <a
+                                key={advisory}
+                                href={`https://www.intel.com/content/www/us/en/security-center/advisory/${advisory.toLowerCase()}.html`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="inline-flex items-center gap-1 rounded-full border border-amber-500/40 px-2 py-0.5 text-[10px] text-amber-700 hover:bg-amber-500/20 dark:text-amber-300 dark:border-amber-400/40 dark:hover:bg-amber-400/10"
+                              >
+                                {advisory}
+                                <ExternalLink className="h-2.5 w-2.5" />
+                              </a>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
                 {(() => {
                   const isAttestationLoading = proofState.status === "loading"
                   const isVerificationRunning = verificationState.status === "running"
@@ -2248,23 +2303,32 @@ function ConfidentialAIContent() {
                     return null
                   }
 
+                  const isOutOfDate = verificationState.status === "success" && verificationState.isOutOfDate
+                  
                   return (
                     <div
                       className={cn(
                         "flex items-center gap-2 rounded-xl border px-3 py-2 text-xs font-medium",
-                        isVerified
+                        isVerified && !isOutOfDate
                           ? "border-emerald-400/60 bg-emerald-400/10 text-emerald-700 dark:border-emerald-400/40 dark:bg-emerald-400/5 dark:text-emerald-300"
-                          : isInProgress
-                            ? "border-[#102A8C]/60 bg-[#102A8C]/10 text-[#102A8C] dark:border-[#102A8C]/40 dark:bg-[#102A8C]/5"
-                            : hasFailed
-                              ? "border-rose-400/60 bg-rose-400/10 text-rose-700 dark:border-rose-400/40 dark:bg-rose-400/5 dark:text-rose-300"
-                              : "border-amber-400/60 bg-amber-400/10 text-amber-700 dark:border-amber-400/40 dark:bg-amber-400/5 dark:text-amber-300"
+                          : isVerified && isOutOfDate
+                            ? "border-amber-400/60 bg-amber-400/10 text-amber-700 dark:border-amber-400/40 dark:bg-amber-400/5 dark:text-amber-300"
+                            : isInProgress
+                              ? "border-[#102A8C]/60 bg-[#102A8C]/10 text-[#102A8C] dark:border-[#102A8C]/40 dark:bg-[#102A8C]/5"
+                              : hasFailed
+                                ? "border-rose-400/60 bg-rose-400/10 text-rose-700 dark:border-rose-400/40 dark:bg-rose-400/5 dark:text-rose-300"
+                                : "border-amber-400/60 bg-amber-400/10 text-amber-700 dark:border-amber-400/40 dark:bg-amber-400/5 dark:text-amber-300"
                       )}
                     >
-                      {isVerified ? (
+                      {isVerified && !isOutOfDate ? (
                         <>
                           <Lock className="h-4 w-4 shrink-0" />
                           <span>Secure channel verified</span>
+                        </>
+                      ) : isVerified && isOutOfDate ? (
+                        <>
+                          <AlertTriangle className="h-4 w-4 shrink-0" />
+                          <span>Secure channel verified (update recommended)</span>
                         </>
                       ) : isInProgress ? (
                         <>
