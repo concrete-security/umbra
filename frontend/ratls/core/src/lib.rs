@@ -9,6 +9,8 @@ use rustls::{Certificate as RustlsCertificate, ClientConfig, Error as RustlsErro
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_rustls::client::TlsStream;
 use tokio_rustls::TlsConnector;
+
+mod tdx;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -57,6 +59,10 @@ pub enum RatlsError {
     KeyBinding,
     #[error("clock error: {0}")]
     Clock(String),
+    #[error("vendor verification failed: {0}")]
+    Vendor(String),
+    #[error("unsupported tee type: {0}")]
+    TeeUnsupported(String),
 }
 
 /// Compute hash(subjectPublicKeyInfo) for the presented TLS key.
@@ -129,11 +135,11 @@ impl Default for TeeType {
     }
 }
 
-    /// Claims extracted from the evidence.
-    #[derive(Debug, serde::Deserialize, serde::Serialize, PartialEq, Clone)]
-    pub struct EvidenceClaims {
-        #[serde(rename = "pubkey_hash_alg")]
-        pub pubkey_hash_alg: String,
+/// Claims extracted from the evidence.
+#[derive(Debug, serde::Deserialize, serde::Serialize, PartialEq, Clone)]
+pub struct EvidenceClaims {
+    #[serde(rename = "pubkey_hash_alg")]
+    pub pubkey_hash_alg: String,
     #[serde(rename = "pubkey_hash", with = "serde_bytes")]
     pub pubkey_hash: Vec<u8>,
     #[serde(default)]
@@ -143,11 +149,13 @@ impl Default for TeeType {
     pub measurement: Option<serde_cbor::Value>,
     #[serde(default)]
     pub timestamp: Option<u64>,
-        #[serde(default, with = "serde_bytes_opt")]
-        pub nonce: Option<Vec<u8>>,
-        #[serde(flatten)]
-        pub extra: serde_cbor::Value,
-    }
+    #[serde(default, with = "serde_bytes_opt")]
+    pub nonce: Option<Vec<u8>>,
+    #[serde(default)]
+    pub tdx_tcb: Option<TdxTcbClaims>,
+    #[serde(flatten)]
+    pub extra: serde_cbor::Value,
+}
 
 /// Strongly-typed evidence view.
 #[derive(Debug, serde::Deserialize, serde::Serialize, PartialEq, Clone)]
@@ -163,6 +171,28 @@ pub struct DiceEvidenceTyped {
     pub claims: EvidenceClaims,
 }
 
+/// TDX TCB info carried alongside the quote for policy checks.
+#[derive(Debug, serde::Deserialize, serde::Serialize, PartialEq, Clone, Default)]
+pub struct TdxTcbClaims {
+    #[serde(default)]
+    pub mrseam: Option<Vec<u8>>,
+    #[serde(default)]
+    pub mrtmrs: Option<Vec<u8>>,
+    #[serde(default)]
+    pub tcb_svn: Option<u32>,
+}
+
+/// Minimum acceptable TDX TCB policy.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq, Default)]
+pub struct TdxTcbPolicy {
+    #[serde(default)]
+    pub mrseam: Option<Vec<u8>>,
+    #[serde(default)]
+    pub mrtmrs: Option<Vec<u8>>,
+    #[serde(default)]
+    pub min_tcb_svn: Option<u32>,
+}
+
 /// Policy controlling acceptance.
 #[derive(Debug, Clone, Default)]
 pub struct Policy {
@@ -170,7 +200,7 @@ pub struct Policy {
     pub workload_ids: Option<Vec<String>>,
     pub measurements: Option<Vec<String>>,
     pub max_quote_age_secs: Option<u64>,
-    pub min_tcb: Option<serde_json::Value>,
+    pub min_tdx_tcb: Option<TdxTcbPolicy>,
 }
 
 /// Decode CBOR evidence into typed structure.
@@ -215,10 +245,28 @@ pub fn enforce_policy(evidence: &DiceEvidenceTyped, policy: &Policy) -> Result<(
             return Err(RatlsError::Policy("measurement absent".into()));
         }
     }
-    if let Some(min_tcb) = &policy.min_tcb {
-        // Placeholder: vendor-specific TCB comparison would live here.
-        if min_tcb.is_object() {
-            // accept; real implementation will compare fields
+    if let Some(ref tdx_policy) = policy.min_tdx_tcb {
+        if let Some(ref tcb) = evidence.claims.tdx_tcb {
+            if let (Some(policy_svn), Some(actual_svn)) = (tdx_policy.min_tcb_svn, tcb.tcb_svn) {
+                if actual_svn < policy_svn {
+                    return Err(RatlsError::Policy(format!(
+                        "tdx tcb_svn {} below minimum {}",
+                        actual_svn, policy_svn
+                    )));
+                }
+            }
+            if let (Some(expected_mrseam), Some(ref actual_mrseam)) = (&tdx_policy.mrseam, &tcb.mrseam) {
+                if actual_mrseam != expected_mrseam {
+                    return Err(RatlsError::Policy("tdx mrseam mismatch".into()));
+                }
+            }
+            if let (Some(expected_mrtmrs), Some(ref actual_mrtmrs)) = (&tdx_policy.mrtmrs, &tcb.mrtmrs) {
+                if actual_mrtmrs != expected_mrtmrs {
+                    return Err(RatlsError::Policy("tdx mrtmrs mismatch".into()));
+                }
+            }
+        } else {
+            return Err(RatlsError::Policy("tdx_tcb absent".into()));
         }
     }
     Ok(())
@@ -289,6 +337,17 @@ pub fn decode_evidence(cbor: &[u8]) -> Result<DiceEvidence, RatlsError> {
     serde_cbor::from_slice(cbor).map_err(|e| RatlsError::Cbor(e.to_string()))
 }
 
+/// Placeholder vendor verification. Later this will dispatch by tee_type and parse the quote.
+fn verify_vendor_quote(evidence: &DiceEvidenceTyped, _policy: &Policy) -> Result<(), RatlsError> {
+    match evidence.tee_type.as_str() {
+        "tdx" => tdx::verify_tdx_quote(evidence, & _policy.min_tdx_tcb),
+        "snp" => Err(RatlsError::TeeUnsupported("snp not supported yet".into())),
+        other => Err(RatlsError::TeeUnsupported(other.into())),
+    }
+}
+
+
+
 /// Result of attestation verification exposed to callers.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AttestationResult {
@@ -338,6 +397,7 @@ impl RatlsVerifier {
         enforce_policy(&evidence, &self.policy)?;
         enforce_freshness(&evidence, &self.policy)?;
         verify_key_binding(end_entity, &evidence)?;
+        verify_vendor_quote(&evidence, &self.policy)?;
 
         let tee = TeeType::from_str(&evidence.tee_type)?;
         let measurement = evidence
@@ -488,6 +548,7 @@ mod tests {
                 measurement: None,
                 timestamp: None,
                 nonce: None,
+                tdx_tcb: None,
                 extra: serde_cbor::Value::Map(Default::default()),
             },
         };
@@ -521,6 +582,7 @@ mod tests {
                 measurement: Some(serde_cbor::Value::Bytes(vec![0x10, 0x20])),
                 timestamp: None,
                 nonce: None,
+                tdx_tcb: None,
                 extra: serde_cbor::Value::Map(Default::default()),
             },
         };
@@ -546,7 +608,7 @@ mod tests {
             workload_ids: Some(vec!["mock-ai".into()]),
             measurements: Some(vec!["1020".into()]),
             max_quote_age_secs: None,
-            min_tcb: None,
+            min_tdx_tcb: None,
         };
         enforce_policy(&evidence, &policy).expect("policy passes");
         verify_key_binding(&cert_der, &evidence).expect("key binding");
@@ -575,6 +637,7 @@ mod tests {
                 measurement: None,
                 timestamp: None,
                 nonce: None,
+                tdx_tcb: None,
                 extra: serde_cbor::Value::Map(Default::default()),
             },
         };
@@ -600,7 +663,7 @@ mod tests {
         let spki_hash = hash_spki_der(&spki_der, PubkeyHashAlg::Sha256);
         let evidence_struct = DiceEvidenceTyped {
             fmt: "dice-ratls-v1".into(),
-            tee_type: "snp".into(),
+            tee_type: "tdx".into(),
             quote: vec![1, 2],
             endorsements: None,
             claims: EvidenceClaims {
@@ -615,6 +678,11 @@ mod tests {
                         .as_secs(),
                 ),
                 nonce: None,
+                tdx_tcb: Some(TdxTcbClaims {
+                    mrseam: None,
+                    mrtmrs: None,
+                    tcb_svn: Some(10),
+                }),
                 extra: serde_cbor::Value::Map(Default::default()),
             },
         };
@@ -630,11 +698,11 @@ mod tests {
         let cert_der = cert.serialize_der().unwrap();
 
         let verifier = RatlsVerifier::new(Policy {
-            tee_type: TeeType::Snp,
+            tee_type: TeeType::Tdx,
             workload_ids: Some(vec!["mock-ai".into()]),
             measurements: Some(vec![hex::encode([0xab, 0xcd])]),
             max_quote_age_secs: Some(30),
-            min_tcb: None,
+            min_tdx_tcb: None,
         });
         let rustls_cert = RustlsCertificate(cert_der.clone());
         let res = verifier.verify_server_cert(
@@ -664,7 +732,7 @@ mod tests {
             - 3600;
         let evidence_struct = DiceEvidenceTyped {
             fmt: "dice-ratls-v1".into(),
-            tee_type: "snp".into(),
+            tee_type: "tdx".into(),
             quote: vec![],
             endorsements: None,
             claims: EvidenceClaims {
@@ -674,6 +742,7 @@ mod tests {
                 measurement: None,
                 timestamp: Some(old_ts),
                 nonce: None,
+                tdx_tcb: None,
                 extra: serde_cbor::Value::Map(Default::default()),
             },
         };
@@ -693,7 +762,7 @@ mod tests {
             workload_ids: None,
             measurements: None,
             max_quote_age_secs: Some(10),
-            min_tcb: None,
+            min_tdx_tcb: None,
         });
         let rustls_cert = RustlsCertificate(cert_der.clone());
         let res = verifier.verify_server_cert(
