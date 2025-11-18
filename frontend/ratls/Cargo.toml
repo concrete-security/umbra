@@ -19,3 +19,7 @@ sha2 = "0.10"
 thiserror = "1.0"
 x509-parser = { version = "0.16", features = ["verify"] }
 hex = "0.4"
+rustls = { version = "0.21", features = ["dangerous_configuration"] }
+tokio = { version = "1", features = ["rt", "net", "io-util"] }
+tokio-rustls = { version = "0.24", features = ["dangerous_configuration"] }
+tokio-tungstenite = "0.21"

@@ -4,6 +4,13 @@
 use sha2::{Digest, Sha256, Sha384};
 use thiserror::Error;
 use x509_parser::prelude::*;
+use rustls::client::{ServerCertVerified, ServerCertVerifier};
+use rustls::{Certificate as RustlsCertificate, ClientConfig, Error as RustlsError, ServerName};
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio_rustls::client::TlsStream;
+use tokio_rustls::TlsConnector;
+use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// DICE tagged evidence OID (TCG DICE 2.23.133.5.4.9).
 pub const DICE_OID: &[u64] = &[2, 23, 133, 5, 4, 9];
@@ -48,6 +55,8 @@ pub enum RatlsError {
     Policy(String),
     #[error("key binding mismatch")]
     KeyBinding,
+    #[error("clock error: {0}")]
+    Clock(String),
 }
 
 /// Compute hash(subjectPublicKeyInfo) for the presented TLS key.
@@ -116,15 +125,15 @@ impl TeeType {
 
 impl Default for TeeType {
     fn default() -> Self {
-        TeeType::Snp
+        TeeType::Tdx
     }
 }
 
-/// Claims extracted from the evidence.
-#[derive(Debug, serde::Deserialize, serde::Serialize, PartialEq, Clone)]
-pub struct EvidenceClaims {
-    #[serde(rename = "pubkey_hash_alg")]
-    pub pubkey_hash_alg: String,
+    /// Claims extracted from the evidence.
+    #[derive(Debug, serde::Deserialize, serde::Serialize, PartialEq, Clone)]
+    pub struct EvidenceClaims {
+        #[serde(rename = "pubkey_hash_alg")]
+        pub pubkey_hash_alg: String,
     #[serde(rename = "pubkey_hash", with = "serde_bytes")]
     pub pubkey_hash: Vec<u8>,
     #[serde(default)]
@@ -134,11 +143,11 @@ pub struct EvidenceClaims {
     pub measurement: Option<serde_cbor::Value>,
     #[serde(default)]
     pub timestamp: Option<u64>,
-    #[serde(default, with = "serde_bytes_opt")]
-    pub nonce: Option<Vec<u8>>,
-    #[serde(flatten)]
-    pub extra: serde_cbor::Value,
-}
+        #[serde(default, with = "serde_bytes_opt")]
+        pub nonce: Option<Vec<u8>>,
+        #[serde(flatten)]
+        pub extra: serde_cbor::Value,
+    }
 
 /// Strongly-typed evidence view.
 #[derive(Debug, serde::Deserialize, serde::Serialize, PartialEq, Clone)]
@@ -160,6 +169,8 @@ pub struct Policy {
     pub tee_type: TeeType,
     pub workload_ids: Option<Vec<String>>,
     pub measurements: Option<Vec<String>>,
+    pub max_quote_age_secs: Option<u64>,
+    pub min_tcb: Option<serde_json::Value>,
 }
 
 /// Decode CBOR evidence into typed structure.
@@ -202,6 +213,33 @@ pub fn enforce_policy(evidence: &DiceEvidenceTyped, policy: &Policy) -> Result<(
             }
         } else {
             return Err(RatlsError::Policy("measurement absent".into()));
+        }
+    }
+    if let Some(min_tcb) = &policy.min_tcb {
+        // Placeholder: vendor-specific TCB comparison would live here.
+        if min_tcb.is_object() {
+            // accept; real implementation will compare fields
+        }
+    }
+    Ok(())
+}
+
+/// Enforce timestamp freshness against policy.max_quote_age_secs using evidence.claims.timestamp.
+pub fn enforce_freshness(evidence: &DiceEvidenceTyped, policy: &Policy) -> Result<(), RatlsError> {
+    if let Some(max_age) = policy.max_quote_age_secs {
+        let ts = evidence
+            .claims
+            .timestamp
+            .ok_or_else(|| RatlsError::Policy("timestamp absent".into()))?;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| RatlsError::Clock(e.to_string()))?
+            .as_secs();
+        let age = now.saturating_sub(ts);
+        if age > max_age {
+            return Err(RatlsError::Policy(format!(
+                "quote too old: {age}s > {max_age}s"
+            )));
         }
     }
     Ok(())
@@ -249,6 +287,155 @@ mod serde_bytes_opt {
 /// Decode tagged CBOR evidence from the DICE extension into a generic JSON-like view.
 pub fn decode_evidence(cbor: &[u8]) -> Result<DiceEvidence, RatlsError> {
     serde_cbor::from_slice(cbor).map_err(|e| RatlsError::Cbor(e.to_string()))
+}
+
+/// Result of attestation verification exposed to callers.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AttestationResult {
+    pub trusted: bool,
+    pub tee_type: TeeType,
+    pub workload_id: Option<String>,
+    pub measurement: Option<String>,
+    pub not_after: Option<u64>,
+    pub reason: Option<String>,
+}
+
+/// rustls server certificate verifier wiring RA checks.
+pub struct RatlsVerifier {
+    pub policy: Policy,
+    latest: Mutex<Option<AttestationResult>>,
+}
+
+impl RatlsVerifier {
+    pub fn new(policy: Policy) -> Self {
+        Self {
+            policy,
+            latest: Mutex::new(None),
+        }
+    }
+
+    pub fn attestation(&self) -> Option<AttestationResult> {
+        self.latest
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+    }
+
+    fn make_result(&self, trusted: bool, tee: TeeType, workload: Option<String>, measurement: Option<String>, reason: Option<String>) -> AttestationResult {
+        AttestationResult {
+            trusted,
+            tee_type: tee,
+            workload_id: workload,
+            measurement,
+            not_after: None,
+            reason,
+        }
+    }
+
+    fn verify_internal(&self, end_entity: &[u8]) -> Result<AttestationResult, RatlsError> {
+        let evidence_bytes = extract_dice_extension(end_entity)?;
+        let evidence = decode_evidence_typed(&evidence_bytes)?;
+        enforce_policy(&evidence, &self.policy)?;
+        enforce_freshness(&evidence, &self.policy)?;
+        verify_key_binding(end_entity, &evidence)?;
+
+        let tee = TeeType::from_str(&evidence.tee_type)?;
+        let measurement = evidence
+            .claims
+            .measurement
+            .as_ref()
+            .and_then(|m| match m {
+                serde_cbor::Value::Bytes(b) => Some(hex::encode(b)),
+                serde_cbor::Value::Text(s) => Some(s.clone()),
+                _ => None,
+            });
+
+        let result = self.make_result(
+            true,
+            tee,
+            evidence.claims.workload_id.clone(),
+            measurement,
+            None,
+        );
+        if let Ok(mut guard) = self.latest.lock() {
+            *guard = Some(result.clone());
+        }
+        Ok(result)
+    }
+}
+
+impl ServerCertVerifier for RatlsVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &RustlsCertificate,
+        _intermediates: &[RustlsCertificate],
+        _server_name: &ServerName,
+        _scts: &mut dyn Iterator<Item = &[u8]>,
+        _ocsp_response: &[u8],
+        _now: SystemTime,
+    ) -> Result<ServerCertVerified, RustlsError> {
+        match self.verify_internal(&end_entity.0) {
+            Ok(_) => Ok(ServerCertVerified::assertion()),
+            Err(e) => Err(RustlsError::General(format!("{e}"))),
+        }
+    }
+}
+
+/// Pair of rustls client config and verifier handle to fetch attestation result post-handshake.
+pub struct ClientConfigWithVerifier {
+    pub config: Arc<ClientConfig>,
+    pub verifier: Arc<RatlsVerifier>,
+}
+
+/// Build a rustls ClientConfig with the custom RA verifier attached.
+pub fn build_client_config(policy: Policy, alpn: Option<Vec<String>>) -> ClientConfigWithVerifier {
+    let verifier = Arc::new(RatlsVerifier::new(policy));
+    let mut config = ClientConfig::builder()
+        .with_safe_defaults()
+        .with_custom_certificate_verifier(verifier.clone())
+        .with_no_client_auth();
+    if let Some(protocols) = alpn {
+        config.alpn_protocols = protocols
+            .into_iter()
+            .map(|s| s.into_bytes())
+            .collect();
+    }
+    ClientConfigWithVerifier {
+        config: Arc::new(config),
+        verifier,
+    }
+}
+
+/// Abstract async byte stream for transport adapters (direct TCP or tunneled).
+pub trait AsyncByteStream: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> AsyncByteStream for T {}
+
+/// Establish a TLS session over a provided byte stream using the RA verifier policy.
+pub async fn tls_connect<S>(
+    stream: S,
+    server_name: &str,
+    policy: Policy,
+    alpn: Option<Vec<String>>,
+) -> Result<(TlsStream<S>, AttestationResult), RatlsError>
+where
+    S: AsyncByteStream + 'static,
+{
+    let ClientConfigWithVerifier { config, verifier } = build_client_config(policy, alpn);
+    let connector = TlsConnector::from(config);
+    let server_name = ServerName::try_from(server_name).map_err(|e| RatlsError::Policy(e.to_string()))?;
+    let tls_stream = connector
+        .connect(server_name, stream)
+        .await
+        .map_err(|e| RatlsError::Policy(format!("tls connect: {e}")))?;
+    let att = verifier.attestation().unwrap_or_else(|| AttestationResult {
+        trusted: false,
+        tee_type: TeeType::Snp,
+        workload_id: None,
+        measurement: None,
+        not_after: None,
+        reason: Some("attestation result unavailable".into()),
+    });
+    Ok((tls_stream, att))
 }
 
 #[cfg(test)]
@@ -358,6 +545,8 @@ mod tests {
             tee_type: TeeType::Snp,
             workload_ids: Some(vec!["mock-ai".into()]),
             measurements: Some(vec!["1020".into()]),
+            max_quote_age_secs: None,
+            min_tcb: None,
         };
         enforce_policy(&evidence, &policy).expect("policy passes");
         verify_key_binding(&cert_der, &evidence).expect("key binding");
@@ -402,5 +591,119 @@ mod tests {
         let evidence = decode_evidence_typed(&extract_dice_extension(&cert_der).unwrap()).unwrap();
         let err = verify_key_binding(&cert_der, &evidence).unwrap_err();
         matches!(err, RatlsError::KeyBinding);
+    }
+
+    #[test]
+    fn ratls_verifier_accepts_matching_evidence() {
+        let key_pair = rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).expect("key");
+        let spki_der = key_pair.public_key_der();
+        let spki_hash = hash_spki_der(&spki_der, PubkeyHashAlg::Sha256);
+        let evidence_struct = DiceEvidenceTyped {
+            fmt: "dice-ratls-v1".into(),
+            tee_type: "snp".into(),
+            quote: vec![1, 2],
+            endorsements: None,
+            claims: EvidenceClaims {
+                pubkey_hash_alg: "sha-256".into(),
+                pubkey_hash: spki_hash,
+                workload_id: Some("mock-ai".into()),
+                measurement: Some(serde_cbor::Value::Bytes(vec![0xab, 0xcd])),
+                timestamp: Some(
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs(),
+                ),
+                nonce: None,
+                extra: serde_cbor::Value::Map(Default::default()),
+            },
+        };
+        let evidence_cbor = serde_cbor::to_vec(&evidence_struct).unwrap();
+
+        let mut params = CertificateParams::default();
+        params.alg = &rcgen::PKCS_ECDSA_P256_SHA256;
+        params.key_pair = Some(key_pair);
+        params
+            .custom_extensions
+            .push(CustomExtension::from_oid_content(DICE_OID, evidence_cbor.clone()));
+        let cert = rcgen::Certificate::from_params(params).unwrap();
+        let cert_der = cert.serialize_der().unwrap();
+
+        let verifier = RatlsVerifier::new(Policy {
+            tee_type: TeeType::Snp,
+            workload_ids: Some(vec!["mock-ai".into()]),
+            measurements: Some(vec![hex::encode([0xab, 0xcd])]),
+            max_quote_age_secs: Some(30),
+            min_tcb: None,
+        });
+        let rustls_cert = RustlsCertificate(cert_der.clone());
+        let res = verifier.verify_server_cert(
+            &rustls_cert,
+            &[],
+            &ServerName::try_from("example.com").unwrap(),
+            &mut std::iter::empty(),
+            &[],
+            SystemTime::now(),
+        );
+        assert!(res.is_ok());
+        let att = verifier.attestation();
+        assert!(att.is_some());
+        let att = att.unwrap();
+        assert!(att.trusted);
+        assert_eq!(att.workload_id.as_deref(), Some("mock-ai"));
+    }
+
+    #[test]
+    fn ratls_verifier_rejects_stale_quote() {
+        let key_pair = rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).expect("key");
+        let spki_hash = hash_spki_der(&key_pair.public_key_der(), PubkeyHashAlg::Sha256);
+        let old_ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            - 3600;
+        let evidence_struct = DiceEvidenceTyped {
+            fmt: "dice-ratls-v1".into(),
+            tee_type: "snp".into(),
+            quote: vec![],
+            endorsements: None,
+            claims: EvidenceClaims {
+                pubkey_hash_alg: "sha-256".into(),
+                pubkey_hash: spki_hash,
+                workload_id: None,
+                measurement: None,
+                timestamp: Some(old_ts),
+                nonce: None,
+                extra: serde_cbor::Value::Map(Default::default()),
+            },
+        };
+        let evidence_cbor = serde_cbor::to_vec(&evidence_struct).unwrap();
+
+        let mut params = CertificateParams::default();
+        params.alg = &rcgen::PKCS_ECDSA_P256_SHA256;
+        params.key_pair = Some(key_pair);
+        params
+            .custom_extensions
+            .push(CustomExtension::from_oid_content(DICE_OID, evidence_cbor.clone()));
+        let cert = rcgen::Certificate::from_params(params).unwrap();
+        let cert_der = cert.serialize_der().unwrap();
+
+        let verifier = RatlsVerifier::new(Policy {
+            tee_type: TeeType::Snp,
+            workload_ids: None,
+            measurements: None,
+            max_quote_age_secs: Some(10),
+            min_tcb: None,
+        });
+        let rustls_cert = RustlsCertificate(cert_der.clone());
+        let res = verifier.verify_server_cert(
+            &rustls_cert,
+            &[],
+            &ServerName::try_from("example.com").unwrap(),
+            &mut std::iter::empty(),
+            &[],
+            SystemTime::now(),
+        );
+        assert!(res.is_err());
     }
 }
