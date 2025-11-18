@@ -24,12 +24,15 @@ jobs:
           node-version: "18"
 
       - name: Install Phala CLI
-        run: npm install -g phala
+        run: |
+          # TODO: switch to latest
+          npm install -g phala@1.1.0-beta.10
+          phala --version
 
       - name: Deploy to Phala Cloud CVM
         env:
           PHALA_API_TOKEN: ${{ secrets.PHALA_API_TOKEN }}
-          PHALA_APP_ID: ${{ secrets.PHALA_DEV_APP_ID }}
+          PHALA_UUID: ${{ secrets.PHALA_DEV_VM_UUID }}
         run: |
           # Check if docker-compose.yml exists in the cvm directory
           if [ ! -f "cvm/docker-compose.yml" ]; then
@@ -40,10 +43,10 @@ jobs:
           echo "Preparing deployment to Phala Cloud CVM..."
 
           # Authenticate
-          phala auth login "$PHALA_API_TOKEN"
+          phala login "$PHALA_API_TOKEN"
 
           # Update Dev CVM
-          phala cvms upgrade --compose cvm/docker-compose.yml "$PHALA_APP_ID"
+          phala deploy --compose cvm/docker-compose.yml --uuid "$PHALA_UUID"
 
           echo "Deployment completed successfully!"
 
@@ -52,25 +55,25 @@ jobs:
           PHALA_APP_ID: ${{ secrets.PHALA_DEV_APP_ID }}
         run: |
           # Wait for deployment to complete
-          TIMEOUT=300  # 5 minutes timeout
-          INTERVAL=10  # Check every 10 seconds
+          TIMEOUT=600  # 10 minutes timeout
+          INTERVAL=15  # Check every 15 seconds
           ELAPSED=30  # Start after initial wait
 
-          echo "Waiting initially for 30 seconds before checking status..."
-          sleep 30
+          echo "Waiting initially for $ELAPSED seconds before checking status..."
+          sleep $ELAPSED
 
           echo "Now monitoring deployment status..."
 
           while [ $ELAPSED -lt $TIMEOUT ]; do
-            # Check deployment status using Phala CLI (grep is due to https://github.com/Phala-Network/phala-cloud-cli/issues/61)
-            DEPLOYMENT_STATUS=$(phala cvms get -j "$PHALA_APP_ID" | grep -A 100 "{" | jq -r '.status')
+            # Check deployment status using Phala CLI
+            DEPLOYMENT_STATUS=$(phala cvms get -j "$PHALA_APP_ID" | jq -r '.status')
 
             echo "Current status: $DEPLOYMENT_STATUS (elapsed: ${ELAPSED}s)"
 
             if [ "$DEPLOYMENT_STATUS" == "running" ]; then
               echo "✅ Deployment verified successfully!"
               exit 0
-            elif [ "$DEPLOYMENT_STATUS" != "starting" ]; then
+            elif [ "$DEPLOYMENT_STATUS" != "starting" ] && [ "$DEPLOYMENT_STATUS" != "stopping" ]; then
               echo "❌ Deployment failed with unexpected status: $DEPLOYMENT_STATUS"
               exit 1
             fi
