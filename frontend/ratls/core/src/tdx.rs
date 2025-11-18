@@ -1,6 +1,7 @@
 //! TDX quote verification using dcap-qvl.
 
 use crate::{DiceEvidenceTyped, RatlsError, TdxTcbPolicy};
+#[cfg(not(test))]
 use dcap_qvl::QuoteCollateralV3;
 
 /// Verify a TDX quote and TCB against policy. Currently a stub with basic guards.
@@ -18,15 +19,20 @@ pub fn verify_tdx_quote(
     // Verify quote cryptographically against collateral (skip during tests).
     #[cfg(not(test))]
     {
-        let collateral = evidence
-            .endorsements
-            .as_ref()
-            .ok_or_else(|| RatlsError::Vendor("tdx collateral missing".into()))
-            .and_then(|b| {
-                serde_json::from_slice::<QuoteCollateralV3>(b).map_err(|e| {
-                    RatlsError::Vendor(format!("tdx collateral decode failed: {e}"))
-                })
-            })?;
+        let collateral = if let Some(raw) = evidence.endorsements.as_ref() {
+            serde_json::from_slice::<QuoteCollateralV3>(raw).map_err(|e| {
+                RatlsError::Vendor(format!("tdx collateral decode failed: {e}"))
+            })?
+        } else {
+            // Auto-fetch collateral from Intel PCS using dcap-qvl helper.
+            let rt = tokio::runtime::Handle::try_current()
+                .map_err(|e| RatlsError::Vendor(format!("no runtime for collateral fetch: {e}")))?;
+            rt.block_on(async {
+                dcap_qvl::collateral::get_collateral_from_pcs(&evidence.quote)
+                    .await
+                    .map_err(|e| RatlsError::Vendor(format!("fetch collateral: {e}")))
+            })?
+        };
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
