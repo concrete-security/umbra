@@ -17,7 +17,9 @@ hex = { workspace = true }
 rustls = { workspace = true }
 tokio = { workspace = true }
 tokio-rustls = { workspace = true }
+dcap-qvl = { workspace = true }
 
 [dev-dependencies]
 rcgen = "0.12"
 ring = "0.17"
+mockall = "0.12"

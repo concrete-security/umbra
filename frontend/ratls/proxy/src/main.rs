@@ -13,7 +13,7 @@ async fn handle_ws(
     ws_stream: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
     target: String,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut ws = ws_stream;
+    let ws = ws_stream;
     let mut parts = target.split(':');
     let host = parts.next().unwrap_or("127.0.0.1");
     let port = parts.next().unwrap_or("443");
