@@ -1,0 +1,11 @@
+{
+  "fmt": "dice-ratls-v1",
+  "tee_type": "tdx",
+  "quote": "aa55",
+  "endorsements": null,
+  "claims": {
+    "pubkey_hash_alg": "sha-384",
+    "pubkey_hash": "0a0b0c",
+    "workload_id": "mock-ai-tdx"
+  }
+}

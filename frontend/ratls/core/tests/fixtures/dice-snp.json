@@ -1,0 +1,11 @@
+{
+  "fmt": "dice-ratls-v1",
+  "tee_type": "snp",
+  "quote": "0001",
+  "endorsements": null,
+  "claims": {
+    "pubkey_hash_alg": "sha-256",
+    "pubkey_hash": "010203",
+    "workload_id": "mock-ai"
+  }
+}

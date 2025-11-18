@@ -10,3 +10,4 @@ build/
 __pypackages__/
 .pytest_cache
 frontend/tsconfig.tsbuildinfo
+frontend/ratls/target/
