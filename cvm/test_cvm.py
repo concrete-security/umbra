@@ -538,7 +538,7 @@ class CVMTester:
                 'path': '/tdx_quote',
                 'name': 'TDX Quote (Attestation)',
                 'test_methods': ['OPTIONS', 'POST'],
-                'post_payload': {"report_data": "cors_test_data"}
+                'post_payload': {"report_data_hex": "1234567890abcdef"},
             },
             {
                 'path': '/v1/models',

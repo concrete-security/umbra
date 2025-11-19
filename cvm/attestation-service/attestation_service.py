@@ -9,6 +9,7 @@ import logging
 from typing import Optional, Union
 
 from fastapi import FastAPI, Request, HTTPException
+from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel
 from dstack_sdk import DstackClient, GetQuoteResponse
 
@@ -18,7 +19,8 @@ logger = logging.getLogger(__name__)
 
 
 class ReportDataRequest(BaseModel):
-    report_data: Union[str, bytes]
+    report_data: Optional[Union[str, bytes]] = None
+    report_data_hex: Optional[str] = None
 
 
 class HealthResponse(BaseModel):
@@ -55,9 +57,18 @@ async def post_tdx_quote(request: Request, data: ReportDataRequest):
     try:
         logger.info("TDX quote with report data requested")
 
+        if data.report_data_hex and data.report_data is None:
+            report_data = bytes.fromhex(data.report_data_hex)
+
+        elif data.report_data and data.report_data_hex is None:
+            report_data = data.report_data
+        else:
+            raise RequestValidationError(
+                "One and only one of report_data_hex or report_data must be provided"
+            )
         # Instantiate dstack client before use
         dstack_client = DstackClient()
-        quote = dstack_client.get_quote(data.report_data)
+        quote = dstack_client.get_quote(report_data)
 
         logger.info("Successfully obtained TDX quote")
 
