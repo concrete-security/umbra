@@ -1,0 +1,27 @@
+
+graph TB
+    %% Styling
+    classDef vmStyle fill:#ff6b6b,stroke:#c92a2a,stroke-width:3px,color:#fff
+    classDef userStyle fill:#4dabf7,stroke:#1c7ed6,stroke-width:2px,color:#fff
+    classDef frontendStyle fill:#69db7c,stroke:#2f9e44,stroke-width:2px,color:#fff
+    classDef serverStyle fill:#ffd43b,stroke:#fab005,stroke-width:2px,color:#000
+
+    %% Nodes
+    CVM[("🔒 Confidential VM")]:::vmStyle
+    BMU["👤 Admin User"]:::userStyle
+    FC["💻 Frontend Client<br/>User Interface"]:::frontendStyle
+    FS["🌐 Frontend Server<br/>User Data Relay"]:::serverStyle
+
+    %% Connections
+    FC <-->|"Model queries & responses<br/>(port 443)"| CVM
+    FC -->|"HTTP-01 challenge<br/>(port 80)"| CVM
+    FC -->|"User metadata only"| FS
+    FS <-->|"Service updates"| BMU
+    CVM -->|"User registration checks"| BMU
+
+    %% Additional styling for connections
+    linkStyle 0 stroke:#2f9e44,stroke-width:3px
+    linkStyle 1 stroke:#1971c2,stroke-width:2px
+    linkStyle 2 stroke:#ffd43b,stroke-width:2px
+    linkStyle 3 stroke:#868e96,stroke-width:1px
+    linkStyle 4 stroke:#e03131,stroke-width:2px

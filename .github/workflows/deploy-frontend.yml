@@ -1,0 +1,180 @@
+# Deploys frontend to Vercel:
+# - Production: on push to prod (after tests succeed) or manual trigger
+# - Preview: on PR to main (directly or after tests succeed via workflow_run)
+
+name: Vercel Deploy
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+on:
+  workflow_run:
+    workflows:
+      - Frontend Tests
+    types:
+      - completed
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to deploy to production'
+        required: true
+        type: string
+        default: 'main'
+      pr_number:
+        description: 'PR number to deploy (for testing)'
+        required: false
+        type: string
+
+jobs:
+  deploy:
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'pull_request' ||
+      (
+        github.event.workflow_run.conclusion == 'success' &&
+        (
+          (github.event.workflow_run.event == 'pull_request' &&
+           github.event.workflow_run.pull_requests[0].base.ref == 'main') ||
+          (github.event.workflow_run.event == 'push' &&
+           github.event.workflow_run.head_branch == 'prod')
+        )
+      )
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository and enable LFS
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.branch || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event.workflow_run.head_sha || github.ref }}
+
+      - name: Deploy to Vercel (Production)
+        id: vercel_production
+        if: >
+          github.event_name == 'workflow_dispatch' ||
+          (
+            github.event.workflow_run.event == 'push' &&
+            github.event.workflow_run.head_branch == 'prod'
+          )
+        uses: amondnet/vercel-action@v25
+        with:
+          vercel-token: ${{ secrets.VERCEL_TOKEN }}
+          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
+          vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
+          working-directory: ./frontend
+          vercel-args: '--prod'
+
+      - name: Deploy to Vercel (Preview)
+        id: vercel_preview
+        if: >
+          github.event_name == 'pull_request' ||
+          (github.event_name == 'workflow_run' &&
+           github.event.workflow_run.event == 'pull_request')
+        uses: amondnet/vercel-action@v25
+        with:
+          vercel-token: ${{ secrets.VERCEL_TOKEN }}
+          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
+          vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
+          working-directory: ./frontend
+
+      - name: Find Existing Preview Comment
+        if: >
+          always() &&
+          (github.event_name == 'pull_request' ||
+           (github.event_name == 'workflow_run' &&
+            github.event.workflow_run.event == 'pull_request'))
+        id: find_preview_comment
+        uses: peter-evans/find-comment@v3
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          issue-number: ${{ github.event_name == 'pull_request' && github.event.number || github.event.workflow_run.pull_requests[0].number }}
+          body-includes: '<!-- vercel-preview-url -->'
+
+      - name: Add Preview URL to Summary
+        if: >
+          (github.event_name == 'pull_request' ||
+           (github.event_name == 'workflow_run' &&
+            github.event.workflow_run.event == 'pull_request')) &&
+          steps.vercel_preview.outcome == 'success' &&
+          steps.vercel_preview.outputs['preview-url']
+        run: |
+          echo "Vercel Preview: ${{ steps.vercel_preview.outputs['preview-url'] }}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Add Production URL to Summary
+        if: >
+          github.event_name == 'workflow_dispatch' &&
+          steps.vercel_production.outcome == 'success' &&
+          steps.vercel_production.outputs['preview-url']
+        run: |
+          echo "Vercel Production: ${{ steps.vercel_production.outputs['preview-url'] }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Branch: \`${{ inputs.branch }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "Commit: \`${{ github.sha }}\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Share Preview URL on PR
+        if: >
+          (github.event_name == 'pull_request' ||
+           (github.event_name == 'workflow_run' &&
+            github.event.workflow_run.event == 'pull_request')) &&
+          steps.vercel_preview.outcome == 'success' &&
+          steps.vercel_preview.outputs['preview-url']
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          issue-number: ${{ github.event_name == 'pull_request' && github.event.number || github.event.workflow_run.pull_requests[0].number }}
+          comment-id: ${{ steps.find_preview_comment.outputs['comment-id'] }}
+          edit-mode: replace
+          body: |
+            <!-- vercel-preview-url -->
+            🚀 Vercel preview: ${{ steps.vercel_preview.outputs['preview-url'] }}
+
+      - name: Share Preview Failure on PR
+        if: >
+          (github.event_name == 'pull_request' ||
+           (github.event_name == 'workflow_run' &&
+            github.event.workflow_run.event == 'pull_request')) &&
+          failure() &&
+          steps.vercel_preview.outcome == 'failure'
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          issue-number: ${{ github.event_name == 'pull_request' && github.event.number || github.event.workflow_run.pull_requests[0].number }}
+          comment-id: ${{ steps.find_preview_comment.outputs['comment-id'] }}
+          edit-mode: replace
+          body: |
+            <!-- vercel-preview-url -->
+            ⚠️ Vercel preview deployment failed. Please check the workflow logs.
+
+      - name: Ensure Preview Deployment Succeeded
+        if: >
+          always() &&
+          (github.event_name == 'pull_request' ||
+           (github.event_name == 'workflow_run' &&
+            github.event.workflow_run.event == 'pull_request')) &&
+          steps.vercel_preview.outcome == 'failure'
+        run: |
+          echo "Preview deployment did not succeed. See logs above for details." >&2
+          exit 1
+
+      - name: Ensure Production Deployment Succeeded
+        if: >
+          always() &&
+          (
+            github.event_name == 'workflow_dispatch' ||
+            (
+              github.event.workflow_run.event == 'push' &&
+              github.event.workflow_run.head_branch == 'prod'
+            )
+          ) &&
+          steps.vercel_production.outcome != 'success'
+        run: |
+          echo "Production deployment did not succeed. See logs above for details." >&2
+          exit 1
