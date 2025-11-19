@@ -1,92 +1,115 @@
-//! TDX quote verification using dcap-qvl.
-
-use crate::{DiceEvidenceTyped, RatlsError, TdxTcbPolicy};
-#[cfg(not(test))]
+use crate::{platform::SystemTime, AttestationResult, Policy, RatlsError, TeeType};
+use dcap_qvl::quote::{Report, TDReport10, TDReport15};
 use dcap_qvl::QuoteCollateralV3;
+use hex::encode;
+use sha2::{Digest, Sha256};
 
-/// Verify a TDX quote and TCB against policy. Currently a stub with basic guards.
-pub fn verify_tdx_quote(
-    evidence: &DiceEvidenceTyped,
-    policy: &Option<TdxTcbPolicy>,
-) -> Result<(), RatlsError> {
-    if evidence.quote.is_empty() {
-        return Err(RatlsError::Vendor("tdx quote empty".into()));
-    }
-    if evidence.claims.tdx_tcb.is_none() {
-        return Err(RatlsError::Vendor("tdx_tcb missing in claims".into()));
+#[derive(Debug, Clone, Default)]
+pub struct TdxTcbPolicy {
+    pub mrseam: Option<Vec<u8>>,
+    pub mrtmrs: Option<Vec<u8>>,
+}
+
+pub async fn verify_attestation(
+    quote: &[u8],
+    collateral: &QuoteCollateralV3,
+    nonce: &[u8],
+    spki_der: &[u8],
+    policy: &Policy,
+) -> Result<AttestationResult, RatlsError> {
+    if policy.tee_type != TeeType::Tdx {
+        return Err(RatlsError::TeeUnsupported(
+            "only TDX attestation supported".into(),
+        ));
     }
 
-    // Verify quote cryptographically against collateral (skip during tests).
-    #[cfg(not(test))]
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_err(|e| RatlsError::Policy(e.to_string()))?
+        .as_secs();
+    let verified = dcap_qvl::verify::verify(quote, collateral, now)
+        .map_err(|e| RatlsError::Vendor(format!("tdx verify failed: {e}")))?;
+    let status = verified.status.clone();
+    if !policy
+        .allowed_tdx_status
+        .iter()
+        .any(|allowed| allowed.eq_ignore_ascii_case(&status))
     {
-        let collateral = if let Some(raw) = evidence.endorsements.as_ref() {
-            serde_json::from_slice::<QuoteCollateralV3>(raw).map_err(|e| {
-                RatlsError::Vendor(format!("tdx collateral decode failed: {e}"))
-            })?
-        } else {
-            // Auto-fetch collateral from Intel PCS using dcap-qvl helper.
-            let rt = tokio::runtime::Handle::try_current()
-                .map_err(|e| RatlsError::Vendor(format!("no runtime for collateral fetch: {e}")))?;
-            rt.block_on(async {
-                dcap_qvl::collateral::get_collateral_from_pcs(&evidence.quote)
-                    .await
-                    .map_err(|e| RatlsError::Vendor(format!("fetch collateral: {e}")))
-            })?
-        };
-
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|e| RatlsError::Clock(e.to_string()))?
-            .as_secs();
-        dcap_qvl::verify::verify(&evidence.quote, &collateral, now)
-            .map_err(|e| RatlsError::Vendor(format!("tdx verify failed: {e}")))?;
+        return Err(RatlsError::Policy(format!(
+            "tdx status {status} not allowed"
+        )));
     }
 
-    if let Some(policy) = policy {
-        // Basic comparison against MRSEAM/MRTMRS/TDCB_SVN if present.
-        if let Some(policy_mrseam) = &policy.mrseam {
-            if evidence
-                .claims
-                .tdx_tcb
-                .as_ref()
-                .and_then(|t| t.mrseam.clone())
-                .as_ref()
-                .map(|v| v != policy_mrseam)
-                .unwrap_or(false)
-            {
-                return Err(RatlsError::Vendor("tdx mrseam mismatch".into()));
-            }
+    let report = match &verified.report {
+        Report::TD10(report) => TdReportRef::Td10(&report),
+        Report::TD15(report) => TdReportRef::Td15(&report),
+        other => {
+            return Err(RatlsError::TeeUnsupported(format!(
+                "unsupported report type: {other:?}"
+            )));
         }
-        if let Some(policy_mrtmrs) = &policy.mrtmrs {
-            if evidence
-                .claims
-                .tdx_tcb
-                .as_ref()
-                .and_then(|t| t.mrtmrs.clone())
-                .as_ref()
-                .map(|v| v != policy_mrtmrs)
-                .unwrap_or(false)
-            {
-                return Err(RatlsError::Vendor("tdx mrtmrs mismatch".into()));
-            }
-        }
-        if let Some(min_svn) = policy.min_tcb_svn {
-            if let Some(actual_svn) = evidence
-                .claims
-                .tdx_tcb
-                .as_ref()
-                .and_then(|t| t.tcb_svn)
-            {
-                if actual_svn < min_svn {
-                    return Err(RatlsError::Vendor(format!(
-                        "tdx tcb_svn {} below minimum {}",
-                        actual_svn, min_svn
-                    )));
-                }
-            }
-        }
+    };
+
+    let binding: Vec<u8> = {
+        let mut hasher = Sha256::new();
+        hasher.update(spki_der);
+        hasher.update(nonce);
+        hasher.finalize().to_vec()
+    };
+
+    let report_data = report.report_data();
+    if report_data[..binding.len()] != binding[..] {
+        return Err(RatlsError::Policy(
+            "report data mismatch (nonce/pubkey binding)".into(),
+        ));
     }
 
-    // TODO: full cryptographic verification of quote signature and collateral.
+    if let Some(tcb_policy) = &policy.min_tdx_tcb {
+        enforce_tcb_policy(report.as_td10(), tcb_policy)?;
+    }
+
+    let measurement = encode(report.as_td10().mr_td);
+
+    Ok(AttestationResult {
+        trusted: true,
+        tee_type: TeeType::Tdx,
+        measurement: Some(measurement),
+        tcb_status: status,
+        advisory_ids: verified.advisory_ids,
+    })
+}
+
+fn enforce_tcb_policy(report: &TDReport10, policy: &TdxTcbPolicy) -> Result<(), RatlsError> {
+    if let Some(expected) = &policy.mrseam {
+        if report.mr_seam[..expected.len()] != expected[..] {
+            return Err(RatlsError::Policy("mr_seam mismatch".into()));
+        }
+    }
+    if let Some(expected) = &policy.mrtmrs {
+        if report.rt_mr0[..expected.len()] != expected[..] {
+            return Err(RatlsError::Policy("rt_mr0 mismatch".into()));
+        }
+    }
     Ok(())
+}
+
+enum TdReportRef<'a> {
+    Td10(&'a TDReport10),
+    Td15(&'a TDReport15),
+}
+
+impl<'a> TdReportRef<'a> {
+    fn as_td10(&self) -> &TDReport10 {
+        match self {
+            TdReportRef::Td10(r) => r,
+            TdReportRef::Td15(r) => &r.base,
+        }
+    }
+
+    fn report_data(&self) -> &[u8; 64] {
+        match self {
+            TdReportRef::Td10(r) => &r.report_data,
+            TdReportRef::Td15(r) => &r.base.report_data,
+        }
+    }
 }

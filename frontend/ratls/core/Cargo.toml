@@ -7,21 +7,29 @@ publish = false
 
 [dependencies]
 serde = { workspace = true }
-serde_cbor = { workspace = true }
-serde_bytes = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 x509-parser = { workspace = true }
 hex = { workspace = true }
-rustls = { workspace = true }
-tokio = { workspace = true }
-tokio-rustls = { workspace = true }
+rand = "0.8"
+rustls = { version = "0.23", default-features = false, features = ["logging", "std", "tls12", "ring"] }
+rustls-pki-types = { version = "1", features = ["std"] }
+futures = "0.3"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { version = "1", features = ["full"] }
+tokio-rustls = "0.26"
+webpki-roots = "0.26"
 dcap-qvl = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+futures-rustls = "0.26"
+getrandom = { version = "0.2", features = ["js"] }
+web-time = "1.1"
+dcap-qvl = { workspace = true, features = ["js"] }
 
 [dev-dependencies]
 rcgen = "0.12"
-ring = "0.17"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
-mockall = "0.12"

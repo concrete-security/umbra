@@ -2,6 +2,7 @@
 members = [
   "core",
   "proxy",
+  "wasm",
 ]
 resolver = "2"
 
@@ -19,8 +20,8 @@ sha2 = "0.10"
 thiserror = "1.0"
 x509-parser = { version = "0.16", features = ["verify"] }
 hex = "0.4"
-rustls = { version = "0.21", features = ["dangerous_configuration"] }
+rustls = { version = "0.23", default-features = false, features = ["logging", "std", "tls12", "ring"] }
 tokio = { version = "1", features = ["rt", "net", "io-util"] }
-tokio-rustls = { version = "0.24", features = ["dangerous_configuration"] }
+tokio-rustls = { version = "0.26" }
 tokio-tungstenite = "0.21"
 dcap-qvl = "0.3.4"
