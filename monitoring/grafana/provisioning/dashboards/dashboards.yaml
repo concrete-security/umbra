@@ -1,0 +1,13 @@
+# Version of the Grafana provisioning API (keep as 1)
+apiVersion: 1
+
+providers:
+  - name: 'SecureChat Dashboards'
+    orgId: 1
+    folder: ''  # '' = root
+    type: file  # Dashboards are loaded from local JSON files
+    allowUiUpdates: true  # Enables saving/updating dashboards directly from the UI
+    options:
+      path: /etc/grafana/provisioning/dashboards
+      foldersFromFilesStructure: true
+      updateIntervalSeconds: 2  # Reloads dashboards every 2s without restarting Grafana

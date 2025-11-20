@@ -1,0 +1,11 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: "base_vllm"
+    scheme: "${SCHEME}"
+    metrics_path: /metrics
+
+    static_configs:
+      - targets: ["${VLLM_TARGET}"]

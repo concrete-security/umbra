@@ -1,0 +1,29 @@
+[project]
+name = "monitoring"
+version = "0.1.0"
+description = ""
+readme = "README.md"
+requires-python = ">=3.12"
+
+dependencies = [
+    "prometheus-client>=0.23,<1.0",
+    "httpx>=0.27,<1.0",
+    "fastapi[standard]>=0.115,<1.0",
+]
+
+[dependency-groups]
+bench = [
+    "vllm[bench]>=0.6",
+]
+
+test = [
+    "pytest>=8.4,<9.0",
+    "requests>=2.32,<3.0",
+]
+
+[tool.uv]
+package = false
+
+[build-system]
+requires = ["uv_build"]
+build-backend = "uv_build"
