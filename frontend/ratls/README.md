@@ -19,3 +19,8 @@ A portable RA-TLS client/proxy toolkit intended for browser (WASM), Node.js, and
 
 ## Usage notes
 This scaffold is self-contained and does not alter the existing Next.js app. Add code and build tooling inside this directory. Keep secrets out of the tree; rely on local `.env` per the repository guidelines when introducing test fixtures or endorsement fetchers.
+
+## Build helpers
+- `make test` / `make test-wasm` – run the native Rust tests or the wasm32 check build.
+- `make proxy`, `make web-check`, `make demo` – start the tunnel, serve the static harness, or run both (demo defaults to `ws://127.0.0.1:9000` with the wasm app on `http://localhost:8080/web-check/`).
+- `./build-wasm.sh` – runs `wasm-pack build --target web --out-dir pkg` inside `wasm/`. Set `WASM_TARGET` or `WASM_OUT_DIR` env vars to tweak the output, or pass extra args (e.g. `--release`).

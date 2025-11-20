@@ -1,6 +1,7 @@
 use crate::platform::{AsyncReadExt, AsyncWriteExt, TlsStream};
 use crate::tdx::{self, TcgEvent};
-use crate::{spki_from_cert, AsyncByteStream, AttestationResult, Policy, RatlsError};
+use crate::{AsyncByteStream, AttestationResult, Policy, RatlsError};
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use dcap_qvl::QuoteCollateralV3;
 use rand::rngs::OsRng;
 use rand::RngCore;
@@ -46,7 +47,7 @@ where
     let nonce_hex = hex::encode(nonce);
 
     let body_json = serde_json::to_string(&AttestationRequest {
-        report_data: nonce_hex,
+        report_data: nonce_hex.clone(),
     })
     .map_err(|e| RatlsError::Io(e.to_string()))?;
     let request = format!(
@@ -143,11 +144,11 @@ where
 
     let attestation = tdx::verify_attestation(&quote_bytes, &collateral, policy).await?;
 
-    tdx::verify_quote_freshness(&quote_bytes, &nonce)?;
+    tdx::verify_quote_freshness(&quote_bytes, nonce_hex.as_bytes())?;
     tdx::verify_event_log_integrity(&quote_bytes, &event_log)?;
 
-    let spki = spki_from_cert(server_cert)?;
-    tdx::verify_tls_certificate_in_log(&event_log, &spki)?;
+    let cert_pem = der_to_pem(server_cert);
+    tdx::verify_tls_certificate_in_log(&event_log, &cert_pem)?;
 
     Ok(attestation)
 }
@@ -156,17 +157,44 @@ fn parse_event_log(value: Value) -> Result<Vec<TcgEvent>, RatlsError> {
     match value {
         Value::Null => Ok(vec![]),
         Value::Array(_) => serde_json::from_value(value)
-            .map_err(|e| RatlsError::Vendor(format!("Invalid event log: {e}"))),
+            .map_err(|e| RatlsError::Vendor(format!("Invalid event log array: {e}"))),
         Value::String(s) => {
             if s.trim().is_empty() {
                 Ok(vec![])
             } else {
-                serde_json::from_str(&s)
-                    .map_err(|e| RatlsError::Vendor(format!("Invalid event log string: {e}")))
+                let preview = event_log_preview(&s);
+                serde_json::from_str::<Vec<TcgEvent>>(&s).map_err(|e| {
+                    RatlsError::Vendor(format!(
+                        "Invalid event log string (len {}, preview {}): {e}",
+                        s.len(),
+                        preview
+                    ))
+                })
             }
         }
         other => Err(RatlsError::Vendor(format!(
             "Unsupported event log format: {other}"
         ))),
     }
+}
+
+fn der_to_pem(der: &[u8]) -> Vec<u8> {
+    let b64 = STANDARD.encode(der);
+    let mut pem = Vec::new();
+    pem.extend_from_slice(b"-----BEGIN CERTIFICATE-----\n");
+    for chunk in b64.as_bytes().chunks(64) {
+        pem.extend_from_slice(chunk);
+        pem.push(b'\n');
+    }
+    pem.extend_from_slice(b"-----END CERTIFICATE-----\n");
+    pem
+}
+
+fn event_log_preview(s: &str) -> String {
+    let trimmed = s.trim();
+    let mut snippet: String = trimmed.chars().take(120).collect();
+    if trimmed.len() > snippet.len() {
+        snippet.push('…');
+    }
+    snippet.replace('\n', "\\n")
 }

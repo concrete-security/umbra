@@ -1491,6 +1491,7 @@ dependencies = [
 name = "ratls-core"
 version = "0.0.1"
 dependencies = [
+ "base64",
  "dcap-qvl",
  "futures",
  "futures-rustls",
@@ -1519,6 +1520,7 @@ dependencies = [
  "futures-util",
  "tokio",
  "tokio-tungstenite",
+ "url",
 ]
 
 [[package]]
@@ -1528,6 +1530,8 @@ dependencies = [
  "futures",
  "js-sys",
  "ratls-core",
+ "serde",
+ "serde-wasm-bindgen",
  "thiserror 1.0.69",
  "wasm-bindgen",
  "wasm-bindgen-futures",

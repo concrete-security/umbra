@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RA-TLS Web Check</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="container">
+      <section class="panel">
+        <h1>RA-TLS Web Check</h1>
+        <p class="muted">
+          This demo loads the <code>ratls-wasm</code> bindings, connects to your WebSocket tunnel, and reports the
+          attestation result from the remote TDX platform.
+        </p>
+        <form id="check-form">
+          <label>
+            <span>Proxy WebSocket URL</span>
+            <input id="proxy-url" type="url" value="ws://127.0.0.1:9000" required />
+          </label>
+          <label>
+            <span>Target host:port</span>
+            <input id="target-host" type="text" value="vllm.concrete-security.com:443" required />
+          </label>
+          <label>
+            <span>Server name (SNI)</span>
+            <input id="server-name" type="text" placeholder="vllm.concrete-security.com" required />
+          </label>
+          <button id="run-check" type="submit">Run attestation check</button>
+        </form>
+        <div id="status" class="status">Awaiting input…</div>
+      </section>
+
+      <section class="panel">
+        <h2>Result</h2>
+        <pre id="output" class="output">// attestation result appears here</pre>
+      </section>
+    </main>
+
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

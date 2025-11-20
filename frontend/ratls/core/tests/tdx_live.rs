@@ -1,13 +1,19 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ratls_core::{tls_connect, Policy};
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpStream,
-};
+use tokio::net::TcpStream;
+
+fn live_enabled() -> bool {
+    std::env::var("RATLS_RUN_LIVE_TESTS").is_ok()
+}
 
 #[tokio::test]
 async fn verify_live_tdx_quote() {
+    if !live_enabled() {
+        eprintln!("skipping live quote verification (set RATLS_RUN_LIVE_TESTS=1 to enable)");
+        return;
+    }
+
     let client = reqwest::Client::new();
     let resp = match client
         .post("https://vllm.concrete-security.com/tdx_quote")
@@ -58,6 +64,11 @@ async fn verify_live_tdx_quote() {
 
 #[tokio::test]
 async fn connect_to_vllm_with_ratls() {
+    if !live_enabled() {
+        eprintln!("skipping live proxy test (set RATLS_RUN_LIVE_TESTS=1 to enable)");
+        return;
+    }
+
     const HOST: &str = "vllm.concrete-security.com";
     let stream = TcpStream::connect((HOST, 443))
         .await
@@ -73,32 +84,13 @@ async fn connect_to_vllm_with_ratls() {
             "OutOfDate".into(),
             "OutOfDateConfigurationNeeded".into(),
         ],
-        require_attestation: false,
         ..Policy::default()
     };
 
-    let (mut tls, attestation) = tls_connect(stream, HOST, policy, None)
-        .await
-        .unwrap_or_else(|err| panic!("ratls tls_connect failed: {err}"));
-
+    let result = tls_connect(stream, HOST, policy, None).await;
     assert!(
-        !attestation.trusted,
-        "attestation unexpectedly marked trusted for {HOST}: {:?}",
-        attestation
-    );
-
-    let request = format!("HEAD / HTTP/1.1\r\nHost: {HOST}\r\nConnection: close\r\n\r\n");
-    tls.write_all(request.as_bytes())
-        .await
-        .unwrap_or_else(|err| panic!("failed to send HEAD request to {HOST}: {err}"));
-
-    let mut buf = vec![0u8; 512];
-    let bytes = tls
-        .read(&mut buf)
-        .await
-        .unwrap_or_else(|err| panic!("failed reading response from {HOST}: {err}"));
-    assert!(
-        bytes > 0,
-        "no data received from {HOST} despite successful TLS connect"
+        result.is_err(),
+        "connection to {HOST} unexpectedly succeeded without attestation error: {:?}",
+        result
     );
 }

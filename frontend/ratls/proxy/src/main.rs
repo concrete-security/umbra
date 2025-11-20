@@ -2,19 +2,21 @@
 //! Accepts binary WebSocket connections and pipes bytes to a configured TCP target.
 
 use futures_util::{SinkExt, StreamExt};
-use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
-use tokio_tungstenite::accept_async;
+use tokio_tungstenite::accept_hdr_async;
+use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 use tokio_tungstenite::tungstenite::Message;
+use url::form_urlencoded;
 
 async fn handle_ws(
     ws_stream: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
-    target: SocketAddr,
+    target: String,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let ws = ws_stream;
-    let tcp = TcpStream::connect(target).await?;
+    let tcp = TcpStream::connect(target.as_str()).await?;
 
     let (mut ws_sink, mut ws_stream) = ws.split();
     let (tcp_reader, tcp_writer) = tcp.into_split();
@@ -61,26 +63,48 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         std::env::var("RATLS_PROXY_LISTEN").unwrap_or_else(|_| "127.0.0.1:9000".to_string());
     let target =
         std::env::var("RATLS_PROXY_TARGET").unwrap_or_else(|_| "127.0.0.1:8443".to_string());
-    let target: SocketAddr = target
-        .parse()
-        .map_err(|e| format!("invalid RATLS_PROXY_TARGET: {e}"))?;
     let listener = TcpListener::bind(&listen_addr).await?;
     eprintln!("ratls-proxy listening on {listen_addr}, forwarding to {target}");
 
     loop {
         let (stream, peer) = listener.accept().await?;
-        let target_addr = target;
+        let default_target = target.clone();
         tokio::spawn(async move {
-            let ws_stream = match accept_async(stream).await {
-                Ok(ws) => ws,
-                Err(e) => {
-                    eprintln!("handshake error from {peer}: {e}");
-                    return;
-                }
-            };
-            if let Err(e) = handle_ws(ws_stream, target_addr).await {
+            let shared_target = Arc::new(Mutex::new(default_target.clone()));
+            let capture = shared_target.clone();
+            let ws_stream =
+                match accept_hdr_async(stream, move |req: &Request, response: Response| {
+                    if let Some(tgt) = extract_target(req) {
+                        if let Ok(mut guard) = capture.lock() {
+                            *guard = tgt;
+                        }
+                    }
+                    Ok(response)
+                })
+                .await
+                {
+                    Ok(ws) => ws,
+                    Err(e) => {
+                        eprintln!("handshake error from {peer}: {e}");
+                        return;
+                    }
+                };
+
+            let final_target = shared_target
+                .lock()
+                .map(|guard| guard.clone())
+                .unwrap_or(default_target);
+            if let Err(e) = handle_ws(ws_stream, final_target).await {
                 eprintln!("pipe error from {peer}: {e}");
             }
         });
     }
+}
+
+fn extract_target(req: &Request) -> Option<String> {
+    req.uri().query().and_then(|query| {
+        form_urlencoded::parse(query.as_bytes())
+            .find(|(key, _)| key == "target")
+            .map(|(_, value)| value.into_owned())
+    })
 }

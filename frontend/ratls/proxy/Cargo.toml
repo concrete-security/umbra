@@ -9,3 +9,4 @@ publish = false
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util"] }
 tokio-tungstenite = "0.21"
 futures-util = "0.3"
+url = "2.5"
