@@ -64,7 +64,11 @@ pub struct Policy {
     pub tee_type: TeeType,
     pub min_tdx_tcb: Option<TdxTcbPolicy>,
     pub allowed_tdx_status: Vec<String>,
+    pub require_attestation: bool,
+    pub pccs_url: Option<String>,
 }
+
+const DEFAULT_PCCS_URL: &str = "https://pccs.phala.network/tdx/certification/v4";
 
 impl Default for Policy {
     fn default() -> Self {
@@ -72,6 +76,8 @@ impl Default for Policy {
             tee_type: TeeType::Tdx,
             min_tdx_tcb: None,
             allowed_tdx_status: vec!["UpToDate".to_string()],
+            require_attestation: true,
+            pccs_url: Some(DEFAULT_PCCS_URL.to_string()),
         }
     }
 }
@@ -199,7 +205,17 @@ where
         .take_cert()
         .ok_or_else(|| RatlsError::Policy("missing server certificate".into()))?;
 
-    let attestation = protocol::verify_attestation_stream(&mut tls_stream, &cert, &policy).await?;
+    let attestation = if policy.require_attestation {
+        protocol::verify_attestation_stream(&mut tls_stream, &cert, &policy).await?
+    } else {
+        AttestationResult {
+            trusted: false,
+            tee_type: policy.tee_type,
+            measurement: None,
+            tcb_status: "attestation_skipped".into(),
+            advisory_ids: vec![],
+        }
+    };
 
     Ok((tls_stream, attestation))
 }
