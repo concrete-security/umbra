@@ -33,8 +33,11 @@ impl WasmWsStream {
         ws.set_binary_type(BinaryType::Arraybuffer);
 
         let (open_tx, open_rx) = oneshot::channel();
+        let mut open_tx = Some(open_tx);
         let open_cb = Closure::wrap(Box::new(move |_event: web_sys::Event| {
-            let _ = open_tx.send(());
+            if let Some(tx) = open_tx.take() {
+                let _ = tx.send(());
+            }
         }) as Box<dyn FnMut(_)>);
         ws.set_onopen(Some(open_cb.as_ref().unchecked_ref()));
         open_cb.forget();
@@ -56,7 +59,7 @@ impl WasmWsStream {
         ws.set_onmessage(Some(message_cb.as_ref().unchecked_ref()));
         message_cb.forget();
 
-        let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded();
+        let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded::<Vec<u8>>();
         let ws_clone = ws.clone();
         spawn_local(async move {
             while let Some(payload) = outgoing_rx.next().await {
@@ -66,9 +69,12 @@ impl WasmWsStream {
             }
         });
 
-        let (error_tx, mut error_rx) = oneshot::channel::<String>();
+        let (error_tx, error_rx) = oneshot::channel::<String>();
+        let mut error_tx = Some(error_tx);
         let err_cb = Closure::wrap(Box::new(move |event: ErrorEvent| {
-            let _ = error_tx.send(event.message());
+            if let Some(tx) = error_tx.take() {
+                let _ = tx.send(event.message());
+            }
         }) as Box<dyn FnMut(_)>);
         ws.set_onerror(Some(err_cb.as_ref().unchecked_ref()));
         err_cb.forget();
@@ -140,15 +146,9 @@ impl AsyncWrite for WasmWsStream {
         Poll::Ready(Ok(()))
     }
 
-    fn poll_shutdown(
-        mut self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
-    ) -> Poll<Result<(), io::Error>> {
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
+        let _ = cx;
         self.ws.close().map_err(js_error)?;
         Poll::Ready(Ok(()))
-    }
-
-    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
-        self.poll_shutdown(cx)
     }
 }

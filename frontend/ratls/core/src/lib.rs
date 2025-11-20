@@ -1,12 +1,20 @@
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::client::ClientConfig;
-use rustls::crypto::aws_lc_rs::default_provider;
+use rustls::crypto::CryptoProvider;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, Error as RustlsError, SignatureScheme};
 use thiserror::Error;
-use x509_parser::prelude::*;
 
 use std::sync::{Arc, Mutex};
+
+#[cfg(test)]
+use x509_parser::prelude::{FromDer, X509Certificate};
+
+#[cfg(not(target_arch = "wasm32"))]
+use rustls::crypto::aws_lc_rs;
+
+#[cfg(target_arch = "wasm32")]
+use rustls::crypto::ring;
 
 mod protocol;
 mod tdx;
@@ -64,7 +72,6 @@ pub struct Policy {
     pub tee_type: TeeType,
     pub min_tdx_tcb: Option<TdxTcbPolicy>,
     pub allowed_tdx_status: Vec<String>,
-    pub require_attestation: bool,
     pub pccs_url: Option<String>,
 }
 
@@ -76,7 +83,6 @@ impl Default for Policy {
             tee_type: TeeType::Tdx,
             min_tdx_tcb: None,
             allowed_tdx_status: vec!["UpToDate".to_string()],
-            require_attestation: true,
             pccs_url: Some(DEFAULT_PCCS_URL.to_string()),
         }
     }
@@ -164,11 +170,21 @@ impl ServerCertVerifier for PromiscuousVerifier {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn get_crypto_provider() -> Arc<CryptoProvider> {
+    Arc::new(aws_lc_rs::default_provider())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn get_crypto_provider() -> Arc<CryptoProvider> {
+    Arc::new(ring::default_provider())
+}
+
 fn build_client_config(
     verifier: Arc<PromiscuousVerifier>,
     alpn: Option<Vec<String>>,
 ) -> Arc<ClientConfig> {
-    let provider = Arc::new(default_provider());
+    let provider = get_crypto_provider();
     let mut config = ClientConfig::builder_with_provider(provider.clone())
         .with_safe_default_protocol_versions()
         .expect("protocol versions")
@@ -205,21 +221,12 @@ where
         .take_cert()
         .ok_or_else(|| RatlsError::Policy("missing server certificate".into()))?;
 
-    let attestation = if policy.require_attestation {
-        protocol::verify_attestation_stream(&mut tls_stream, &cert, &policy).await?
-    } else {
-        AttestationResult {
-            trusted: false,
-            tee_type: policy.tee_type,
-            measurement: None,
-            tcb_status: "attestation_skipped".into(),
-            advisory_ids: vec![],
-        }
-    };
+    let attestation = protocol::verify_attestation_stream(&mut tls_stream, &cert, &policy).await?;
 
     Ok((tls_stream, attestation))
 }
 
+#[cfg(test)]
 pub(crate) fn spki_from_cert(cert_der: &[u8]) -> Result<Vec<u8>, RatlsError> {
     let (_, cert) =
         X509Certificate::from_der(cert_der).map_err(|e| RatlsError::X509(format!("{e:?}")))?;
@@ -251,7 +258,7 @@ mod tests {
     #[ignore]
     async fn promiscuous_verifier_records_cert() {
         let verifier = Arc::new(PromiscuousVerifier::new());
-        let provider = Arc::new(default_provider());
+        let provider = get_crypto_provider();
         let mut config = ClientConfig::builder_with_provider(provider.clone())
             .with_safe_default_protocol_versions()
             .expect("protocol versions")

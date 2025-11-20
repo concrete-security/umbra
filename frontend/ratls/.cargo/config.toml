@@ -1,0 +1,14 @@
+[target.wasm32-unknown-unknown]
+linker = "/opt/homebrew/Cellar/emscripten/4.0.19/libexec/llvm/bin/wasm-ld"
+ar = "/opt/homebrew/opt/llvm/bin/llvm-ar"
+
+[env]
+CC_wasm32-unknown-unknown = "/opt/homebrew/opt/llvm/bin/clang"
+CXX_wasm32-unknown-unknown = "/opt/homebrew/opt/llvm/bin/clang++"
+AR_wasm32-unknown-unknown = "/opt/homebrew/opt/llvm/bin/llvm-ar"
+RANLIB_wasm32-unknown-unknown = "/opt/homebrew/opt/llvm/bin/llvm-ranlib"
+CFLAGS_wasm32-unknown-unknown = "--target=wasm32-unknown-unknown"
+CXXFLAGS_wasm32-unknown-unknown = "--target=wasm32-unknown-unknown"
+CMAKE_SYSTEM_NAME = "Generic"
+CMAKE_SYSTEM_PROCESSOR = "wasm32"
+
