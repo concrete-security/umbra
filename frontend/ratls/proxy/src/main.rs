@@ -16,10 +16,20 @@ async fn handle_ws(
     target: String,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let ws = ws_stream;
-    let tcp = TcpStream::connect(target.as_str()).await?;
+    println!("Proxy: connecting to target {}", target);
+    let tcp = match TcpStream::connect(target.as_str()).await {
+        Ok(stream) => stream,
+        Err(e) => {
+            eprintln!("Proxy: failed to connect to target {}: {}", target, e);
+            return Err(Box::new(e));
+        }
+    };
+    println!("Proxy: connected to target {}", target);
 
     let (mut ws_sink, mut ws_stream) = ws.split();
     let (tcp_reader, tcp_writer) = tcp.into_split();
+
+    eprintln!("Established connection to target: {}", target);
 
     // WS -> TCP
     let mut tcp_writer: OwnedWriteHalf = tcp_writer;
@@ -43,6 +53,8 @@ async fn handle_ws(
         loop {
             let n = tcp_reader.read(&mut buf).await?;
             if n == 0 {
+                // TCP EOF: send a WebSocket close to avoid abrupt client errors.
+                let _ = ws_sink.send(Message::Close(None)).await;
                 break;
             }
             ws_sink.send(Message::Binary(buf[..n].to_vec())).await?;
@@ -64,7 +76,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let target =
         std::env::var("RATLS_PROXY_TARGET").unwrap_or_else(|_| "127.0.0.1:8443".to_string());
     let listener = TcpListener::bind(&listen_addr).await?;
-    eprintln!("ratls-proxy listening on {listen_addr}, forwarding to {target}");
+    eprintln!("ratls-proxy listening on {listen_addr}, default target {target}");
 
     loop {
         let (stream, peer) = listener.accept().await?;
@@ -75,9 +87,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             let ws_stream =
                 match accept_hdr_async(stream, move |req: &Request, response: Response| {
                     if let Some(tgt) = extract_target(req) {
+                        eprintln!("Connection from {} requested target: {}", peer, tgt);
                         if let Ok(mut guard) = capture.lock() {
                             *guard = tgt;
                         }
+                    } else {
+                        eprintln!("Connection from {} using default target", peer);
                     }
                     Ok(response)
                 })
@@ -94,8 +109,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 .lock()
                 .map(|guard| guard.clone())
                 .unwrap_or(default_target);
-            if let Err(e) = handle_ws(ws_stream, final_target).await {
-                eprintln!("pipe error from {peer}: {e}");
+            if let Err(e) = handle_ws(ws_stream, final_target.clone()).await {
+                eprintln!(
+                    "pipe error for target {} from {}: {}",
+                    final_target, peer, e
+                );
             }
         });
     }

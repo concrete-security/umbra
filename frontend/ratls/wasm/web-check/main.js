@@ -66,7 +66,7 @@ serverField.addEventListener("input", () => {
   serverField.dataset.userEdited = "true"
 })
 
-targetField.addEventListener("input", () => {
+  targetField.addEventListener("input", () => {
   syncServerName(targetField.value)
 })
 
@@ -76,10 +76,15 @@ form.addEventListener("submit", async (event) => {
   event.preventDefault()
   const proxyUrl = proxyField.value.trim()
   const targetHost = normalizeTarget(targetField.value.trim())
-  const serverName = serverField.value.trim()
+  const serverNameRaw = serverField.value.trim()
+  const serverName = serverNameRaw || extractHost(targetHost)
 
-  if (!proxyUrl || !targetHost || !serverName) {
-    setStatus("Proxy URL, target host, and server name are all required.")
+  if (!proxyUrl || !targetHost) {
+    setStatus("Proxy URL and target host are required.")
+    return
+  }
+  if (!serverName) {
+    setStatus("Server name (SNI) is required; it was not inferred from the target.")
     return
   }
 

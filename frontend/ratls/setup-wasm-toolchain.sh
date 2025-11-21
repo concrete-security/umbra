@@ -30,3 +30,4 @@ echo ""
 echo "Or add it to your shell profile:"
 echo "  echo 'export PATH=\"$LLVM_PATH/bin:\$PATH\"' >> ~/.zshrc"
 
+

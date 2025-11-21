@@ -1,0 +1,199 @@
+@import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap");
+
+:root {
+  font-family: "Space Grotesk", "Inter", system-ui, -apple-system, sans-serif;
+  background: #060910;
+  color: #eef5ff;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: radial-gradient(circle 80% at 20% 20%, rgba(88, 241, 197, 0.1), transparent),
+    radial-gradient(circle 60% at 80% 0%, rgba(255, 153, 102, 0.14), transparent),
+    radial-gradient(circle 70% at 50% 60%, rgba(67, 120, 255, 0.12), transparent),
+    #060910;
+}
+
+.canvas {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 2.5rem 1.25rem 4rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.card {
+  background: linear-gradient(145deg, rgba(16, 22, 35, 0.85), rgba(10, 14, 24, 0.9));
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 16px;
+  padding: 1.75rem;
+  box-shadow: 0 30px 80px rgba(0, 0, 0, 0.55);
+}
+
+.intro h1 {
+  margin: 0.2rem 0 0.5rem;
+  letter-spacing: -0.01em;
+}
+
+.intro p {
+  margin: 0.25rem 0 0;
+  color: rgba(238, 245, 255, 0.85);
+  line-height: 1.6;
+}
+
+.eyebrow {
+  display: inline-flex;
+  padding: 0.35rem 0.75rem;
+  border-radius: 999px;
+  background: rgba(88, 241, 197, 0.08);
+  color: #7ef4ce;
+  font-size: 0.8rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.layout {
+  display: grid;
+  gap: 1.25rem;
+  grid-template-columns: 1fr 1.2fr;
+}
+
+.form-card {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.field label {
+  font-weight: 600;
+  color: rgba(238, 245, 255, 0.8);
+}
+
+.field input,
+.field textarea {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  padding: 0.75rem 0.8rem;
+  color: inherit;
+  font-size: 0.95rem;
+}
+
+.field textarea {
+  resize: vertical;
+  min-height: 120px;
+}
+
+button {
+  align-self: flex-start;
+  border: none;
+  border-radius: 12px;
+  padding: 0.85rem 1.3rem;
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: #051320;
+  background: linear-gradient(135deg, #4bc2ff, #76f2c4);
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.15s ease, opacity 0.2s ease;
+}
+
+button:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
+button:not(:disabled):hover {
+  transform: translateY(-1px);
+  box-shadow: 0 12px 30px rgba(76, 201, 255, 0.3);
+}
+
+.pill {
+  display: inline-flex;
+  padding: 0.35rem 0.75rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(238, 245, 255, 0.9);
+  font-size: 0.85rem;
+}
+
+.status {
+  margin-top: 0.6rem;
+  color: rgba(238, 245, 255, 0.9);
+}
+
+.output-card {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.stack {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 12px;
+  padding: 1rem 1.2rem;
+}
+
+.stack-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.75rem;
+  margin-bottom: 0.6rem;
+}
+
+.stack-header h3,
+.stack-header h4 {
+  margin: 0;
+}
+
+.hint {
+  color: rgba(238, 245, 255, 0.6);
+  font-size: 0.9rem;
+}
+
+.model-output {
+  background: rgba(8, 14, 24, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  padding: 1rem;
+  min-height: 90px;
+  line-height: 1.5;
+}
+
+.columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 0.75rem;
+}
+
+.code-block {
+  background: rgba(7, 11, 18, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 12px;
+  padding: 0.85rem;
+  font-family: "JetBrains Mono", "SFMono-Regular", Consolas, Menlo, monospace;
+  font-size: 0.88rem;
+  color: #c7e5ff;
+  min-height: 160px;
+  overflow: auto;
+}
+
+@media (max-width: 960px) {
+  .layout {
+    grid-template-columns: 1fr;
+  }
+
+  button {
+    width: 100%;
+    text-align: center;
+  }
+}

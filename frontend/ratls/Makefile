@@ -31,11 +31,18 @@ proxy:
 
 web-check:
 	cd wasm && $(PYTHON) -m http.server $(WEB_PORT)
+	@echo "Serving wasm demos on http://localhost:$(WEB_PORT)/web-check/ and /vllm-chat/ (default proxy ws://localhost:9000)"
 
 demo:
 	@set -euo pipefail; \
 	trap 'kill 0' INT TERM EXIT; \
-	( cd proxy && RATLS_PROXY_LISTEN=$(PROXY_LISTEN) RATLS_PROXY_TARGET=$(PROXY_TARGET) $(CARGO) run ) & \
-	PROXY_PID=$$!; \
-	( cd wasm && $(PYTHON) -m http.server $(WEB_PORT) ) & \
+	( cd proxy && RATLS_PROXY_LISTEN=$(PROXY_LISTEN) RATLS_PROXY_TARGET=$(PROXY_TARGET) $(CARGO) run ) & PROXY_PID=$$!; \
+	sleep 1; \
+	if ! kill -0 $$PROXY_PID 2>/dev/null; then \
+	  echo "Proxy failed to start (is $(PROXY_LISTEN) already in use?). Aborting demo."; \
+	  exit 1; \
+	fi; \
+	( cd wasm && $(PYTHON) -m http.server $(WEB_PORT) ) & SERVER_PID=$$!; \
+	echo "Proxy: ws://$(shell echo $(PROXY_LISTEN) | sed 's/127\.0\.0\.1/localhost/g') (target $(PROXY_TARGET))"; \
+	echo "Web demos: http://localhost:$(WEB_PORT)/web-check/ and /vllm-chat/"; \
 	wait
