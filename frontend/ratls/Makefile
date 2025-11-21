@@ -11,7 +11,8 @@ WEB_PORT ?= 8080
 help:
 	@echo "Available targets:"
 	@echo "  make test         # run all native Rust tests (workspace, excluding wasm crate)"
-	@echo "  make test-wasm    # cargo check ratls-wasm against wasm32-unknown-unknown"
+	@echo "  make test-node    # build ratls-node and run the AI SDK smoke test (requires deps + network)"
+	@echo "  make test-wasm    # cargo check ratls-wasm; optional wasm build + AI SDK smoke via RUN_WASM_AI_SDK=1"
 	@echo "  make build-wasm   # run wasm-pack build (see build-wasm.sh for overrides)"
 	@echo "  make proxy        # run the local WebSocket->TCP proxy"
 	@echo "  make web-check    # serve the wasm/web-check demo via python http.server"
@@ -20,8 +21,33 @@ help:
 test:
 	$(CARGO) test --workspace --exclude ratls-wasm
 
+test-node:
+	@rustc_v=$$(rustc -V | awk '{print $$2}'); \
+	if [ "$${rustc_v}" \< "1.88.0" ]; then \
+	  echo "Skipping node native build: rustc $$rustc_v is < 1.88; upgrade rustc to build ratls-node and run the AI SDK smoke test."; \
+	  exit 0; \
+	fi; \
+	if ! command -v pnpm >/dev/null 2>&1; then \
+	  echo "pnpm is required for the AI SDK compatibility smoke test. Install pnpm first."; \
+	  exit 1; \
+	fi; \
+	echo "Installing Node dev deps (@ai-sdk/openai ai ws zod@^4) if missing..."; \
+	pnpm add -D @ai-sdk/openai ai ws zod@^4; \
+	echo "Building ratls-node native addon..."; \
+	$(CARGO) build -p ratls-node --release; \
+	echo "Running ai-sdk smoke test against vllm.concrete-security.com (requires network)..."; \
+	cd wasm && node examples/ai-sdk-openai-demo.mjs "AI SDK RA-TLS smoke test from make test-node"
+
 test-wasm:
 	$(CARGO) check -p ratls-wasm --target wasm32-unknown-unknown
+	@if [ -n "$$RUN_WASM_AI_SDK" ]; then \
+	  echo "Building wasm bindings..."; \
+	  ./build-wasm.sh; \
+	  echo "Running ai-sdk WASM smoke test (requires proxy + network; start 'make demo' in another shell)..."; \
+	  cd wasm && node examples/ai-sdk-openai-demo.mjs "WASM AI SDK smoke test"; \
+	else \
+	  echo "Skipping wasm AI SDK smoke test (set RUN_WASM_AI_SDK=1 to enable; requires proxy + network)"; \
+	fi
 
 build-wasm:
 	./build-wasm.sh $(WASM_ARGS)

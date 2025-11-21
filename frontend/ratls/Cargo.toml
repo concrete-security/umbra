@@ -3,6 +3,7 @@ members = [
   "core",
   "proxy",
   "wasm",
+  "node",
 ]
 resolver = "2"
 

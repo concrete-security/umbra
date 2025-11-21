@@ -188,9 +188,6 @@ importers:
       vaul:
         specifier: ^0.9.6
         version: 0.9.6(@types/react-dom@18.0.0)(@types/react@18.0.0)(react-dom@19.1.1(react@19.1.1))(react@19.1.1)
-      zod:
-        specifier: ^4.1.12
-        version: 4.1.12
     devDependencies:
       '@ai-sdk/openai':
         specifier: ^2.0.71
@@ -234,6 +231,9 @@ importers:
       ws:
         specifier: ^8.18.3
         version: 8.18.3
+      zod:
+        specifier: ^4
+        version: 4.1.12
 
 packages:
 
