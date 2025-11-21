@@ -73,26 +73,34 @@ graph LR
 
 ## `wasm/`
 - `WasmWsStream`: Wraps browser `WebSocket` into `AsyncRead + AsyncWrite` for `rustls`.
-- `connect_websocket(target, sni, policy, extra)`: Returns an attested TLS stream plus attestation metadata.
 - `run_attestation_check(...)`: Diagnostics helper.
+- `httpRequest(...)`: HTTP/1.1 over RA-TLS with streaming bodies.
+- `ratls-fetch.js`: Fetch-compatible shim you can hand to AI SDKs for chat streaming.
 
 Example:
 ```javascript
-import init, { connect_websocket } from "./pkg/ratls_wasm.js";
+import init, { httpRequest } from "ratls-wasm";
+import { createRatlsFetch } from "ratls-wasm/ratls-fetch.js";
 
 await init();
 
-const policy = {
-  tee_type: "Tdx",
-  allowed_tdx_status: ["UpToDate", "SWHardeningNeeded"]
-};
-
-const [stream, attestation] = await connect_websocket(
+const ratlsResponse = await httpRequest(
   "ws://localhost:9000?target=secure-enclave.com:443",
   "secure-enclave.com",
-  policy,
-  null
+  "secure-enclave.com",
+  "GET",
+  "/health",
+  [],
+  undefined
 );
+// Stream the body with await ratlsResponse.readChunk() until empty
+// ratlsResponse.attestation() returns the attestation result
+
+const ratlsFetch = createRatlsFetch({
+  proxyUrl: "ws://localhost:9000",
+  targetHost: "secure-enclave.com:443",
+});
+// pass ratlsFetch where a standard fetch is expected
 ```
 
 ## `proxy/`

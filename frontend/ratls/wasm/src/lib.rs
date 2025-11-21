@@ -8,9 +8,8 @@ use ratls_core::{
     platform::{AsyncReadExt, AsyncWriteExt, TlsStream},
     tls_connect, AttestationResult, Policy, RatlsError, TeeType,
 };
-use serde::Serialize;
-use serde_json::{json, Value};
-use serde_wasm_bindgen::to_value;
+use serde::{Deserialize, Serialize};
+use serde_wasm_bindgen::{from_value, to_value};
 use wasm_bindgen::prelude::*;
 
 /// Establish a TLS + attestation session over a browser WebSocket.
@@ -73,80 +72,11 @@ fn to_js_error(err: RatlsError) -> JsValue {
     JsValue::from_str(&err.to_string())
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct HeaderEntry {
     name: String,
     value: String,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ChatDemoResult {
-    attestation: JsAttestationResult,
-    status: u16,
-    status_text: String,
-    headers: Vec<HeaderEntry>,
-    completion: Option<String>,
-    body: Value,
-}
-
-struct ParsedHttpResponse {
-    status: u16,
-    reason: String,
-    headers: Vec<(String, String)>,
-    body: Vec<u8>,
-}
-
-const DEFAULT_MODEL: &str = "openai/gpt-oss-120b";
-
-#[wasm_bindgen]
-pub async fn run_vllm_chat_completion(
-    websocket_url: String,
-    server_name: String,
-    host_header: Option<String>,
-    api_key: Option<String>,
-    prompt: String,
-    model: Option<String>,
-) -> Result<JsValue, JsValue> {
-    let host = pick_host(host_header, &server_name);
-    let model_name = model
-        .as_deref()
-        .map(str::trim)
-        .filter(|m| !m.is_empty())
-        .unwrap_or(DEFAULT_MODEL)
-        .to_string();
-
-    let policy = chat_policy();
-    let (mut stream, attestation) =
-        connect_websocket(&websocket_url, &server_name, policy, Some(vec!["http/1.1".into()]))
-            .await
-            .map_err(to_js_error)?;
-
-    let request =
-        build_chat_request(&host, api_key.as_deref(), &model_name, &prompt).map_err(to_js_error)?;
-    let response = send_http_request(&mut stream, &request)
-        .await
-        .map_err(to_js_error)?;
-
-    let body_value: Value = serde_json::from_slice(&response.body)
-        .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&response.body).into_owned()));
-    let completion = extract_completion(&body_value);
-
-    let result = ChatDemoResult {
-        attestation: JsAttestationResult::from(attestation),
-        status: response.status,
-        status_text: response.reason,
-        headers: response
-            .headers
-            .into_iter()
-            .map(|(name, value)| HeaderEntry { name, value })
-            .collect(),
-        completion,
-        body: body_value,
-    };
-
-    to_value(&result).map_err(|err| JsValue::from_str(&err.to_string()))
 }
 
 fn pick_host(host_header: Option<String>, server_name: &str) -> String {
@@ -156,103 +86,314 @@ fn pick_host(host_header: Option<String>, server_name: &str) -> String {
         .unwrap_or_else(|| server_name.to_string())
 }
 
-fn chat_policy() -> Policy {
-    Policy {
-        allowed_tdx_status: vec![
-            "UpToDate".into(),
-            "UpToDateWithWarnings".into(),
-            "ConfigurationNeeded".into(),
-            "SWHardeningNeeded".into(),
-            "ConfigurationAndSWHardeningNeeded".into(),
-            "OutOfDate".into(),
-            "OutOfDateConfigurationNeeded".into(),
-        ],
-        ..Policy::default()
-    }
+const DEFAULT_BODY_CHUNK: usize = 8192;
+
+enum BodyMode {
+    ContentLength(usize),
+    Chunked { remaining_in_chunk: usize },
+    Close,
+    Finished,
 }
 
-fn build_chat_request(
-    host: &str,
-    api_key: Option<&str>,
-    model: &str,
-    prompt: &str,
-) -> Result<String, RatlsError> {
-    let payload = json!({
-        "model": model,
-        "messages": [
-            {
-                "role": "user",
-                "content": prompt,
+#[wasm_bindgen]
+pub struct RatlsResponse {
+    attestation: JsAttestationResult,
+    status: u16,
+    status_text: String,
+    headers: Vec<HeaderEntry>,
+    stream: Option<TlsStream<WasmWsStream>>,
+    body_mode: BodyMode,
+}
+
+#[wasm_bindgen]
+impl RatlsResponse {
+    #[wasm_bindgen(getter)]
+    pub fn status(&self) -> u16 {
+        self.status
+    }
+
+    #[wasm_bindgen(getter, js_name = statusText)]
+    pub fn status_text(&self) -> String {
+        self.status_text.clone()
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn headers(&self) -> Result<JsValue, JsValue> {
+        to_value(&self.headers).map_err(|err| JsValue::from_str(&err.to_string()))
+    }
+
+    #[wasm_bindgen(js_name = attestation)]
+    pub fn attestation(&self) -> Result<JsValue, JsValue> {
+        to_value(&self.attestation).map_err(|err| JsValue::from_str(&err.to_string()))
+    }
+
+    /// Read the next chunk of the HTTP response body.
+    /// Returns an empty Uint8Array when the body is fully consumed.
+    #[wasm_bindgen(js_name = readChunk)]
+    pub async fn read_chunk(&mut self, max_bytes: Option<usize>) -> Result<Box<[u8]>, JsValue> {
+        let limit = max_bytes.unwrap_or(DEFAULT_BODY_CHUNK).max(1);
+        let stream = self
+            .stream
+            .as_mut()
+            .ok_or_else(|| JsValue::from_str("response body already dropped"))?;
+
+        let chunk = match self.body_mode {
+            BodyMode::Finished => Vec::new(),
+            BodyMode::ContentLength(remaining) => {
+                if remaining == 0 {
+                    self.body_mode = BodyMode::Finished;
+                    Vec::new()
+                } else {
+                    let to_read = remaining.min(limit);
+                    let data = read_limited(stream, to_read)
+                        .await
+                        .map_err(to_js_error)?;
+                    if data.is_empty() {
+                        self.body_mode = BodyMode::Finished;
+                        self.stream = None;
+                        return Err(JsValue::from_str(
+                            "unexpected EOF while reading response body",
+                        ));
+                    }
+                    let left = remaining.saturating_sub(data.len());
+                    if left == 0 {
+                        self.body_mode = BodyMode::Finished;
+                        self.stream = None;
+                    } else {
+                        self.body_mode = BodyMode::ContentLength(left);
+                    }
+                    data
+                }
             }
-        ],
-        "stream": false,
-    });
-    let body = serde_json::to_string(&payload).map_err(|err| RatlsError::Io(err.to_string()))?;
+            BodyMode::Chunked {
+                mut remaining_in_chunk,
+            } => loop {
+                if remaining_in_chunk == 0 {
+                    let size_line = read_line(stream).await.map_err(to_js_error)?;
+                    let size_str = size_line
+                        .split(';')
+                        .next()
+                        .map(str::trim)
+                        .unwrap_or_default();
+                    let chunk_size = usize::from_str_radix(size_str, 16)
+                        .map_err(|_| RatlsError::Vendor("invalid chunk size in response".into()))
+                        .map_err(to_js_error)?;
+                    if chunk_size == 0 {
+                        loop {
+                            let trailer = read_line(stream).await.map_err(to_js_error)?;
+                            if trailer.is_empty() {
+                                break;
+                            }
+                        }
+                        self.body_mode = BodyMode::Finished;
+                        self.stream = None;
+                        break Vec::new();
+                    }
+                    remaining_in_chunk = chunk_size;
+                }
 
-    let mut request = format!(
-        "POST /v1/chat/completions HTTP/1.1\r\n\
-         Host: {host}\r\n\
-         Content-Type: application/json\r\n\
-         Accept: application/json\r\n\
-         Content-Length: {}\r\n\
-         Connection: close\r\n",
-        body.len()
+                let to_read = remaining_in_chunk.min(limit);
+                let data = read_limited(stream, to_read)
+                    .await
+                    .map_err(to_js_error)?;
+                if data.is_empty() {
+                    self.body_mode = BodyMode::Finished;
+                    self.stream = None;
+                    return Err(JsValue::from_str(
+                        "unexpected EOF while reading chunked response",
+                    ));
+                }
+
+                remaining_in_chunk = remaining_in_chunk.saturating_sub(data.len());
+                if remaining_in_chunk == 0 {
+                    let mut crlf = [0u8; 2];
+                    stream
+                        .read_exact(&mut crlf)
+                        .await
+                        .map_err(|err| RatlsError::Io(err.to_string()))
+                        .map_err(to_js_error)?;
+                }
+
+                self.body_mode = BodyMode::Chunked {
+                    remaining_in_chunk,
+                };
+                break data;
+            },
+            BodyMode::Close => {
+                let data = read_limited(stream, limit)
+                    .await
+                    .map_err(to_js_error)?;
+                if data.is_empty() {
+                    self.body_mode = BodyMode::Finished;
+                    self.stream = None;
+                }
+                data
+            }
+        };
+
+        Ok(chunk.into_boxed_slice())
+    }
+
+    /// Close the underlying TLS stream.
+    pub async fn close(&mut self) -> Result<(), JsValue> {
+        if let Some(mut stream) = self.stream.take() {
+            stream
+                .close()
+                .await
+                .map_err(|err| JsValue::from_str(&err.to_string()))?;
+        }
+        self.body_mode = BodyMode::Finished;
+        Ok(())
+    }
+}
+
+#[wasm_bindgen(js_name = httpRequest)]
+pub async fn ratls_http_request(
+    websocket_url: String,
+    server_name: String,
+    host_header: Option<String>,
+    method: String,
+    path_and_query: String,
+    headers: JsValue,
+    body: Option<Vec<u8>>,
+) -> Result<RatlsResponse, JsValue> {
+    let mut header_entries = parse_header_entries(headers)?;
+    let body_bytes = body.unwrap_or_default();
+    let host = pick_host(host_header, &server_name);
+
+    ensure_header(&mut header_entries, "host", host.clone());
+    let has_transfer_encoding = header_entries
+        .iter()
+        .any(|h| h.name.eq_ignore_ascii_case("transfer-encoding"));
+    if !body_bytes.is_empty()
+        && !has_transfer_encoding
+        && !has_header(&header_entries, "content-length")
+    {
+        header_entries.push(HeaderEntry {
+            name: "Content-Length".into(),
+            value: body_bytes.len().to_string(),
+        });
+    }
+    if !has_header(&header_entries, "connection") {
+        header_entries.push(HeaderEntry {
+            name: "Connection".into(),
+            value: "close".into(),
+        });
+    }
+
+    let request_line = format!(
+        "{} {} HTTP/1.1\r\n",
+        method.trim().to_uppercase(),
+        normalize_path(path_and_query)
     );
-    if let Some(token) = api_key
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        request.push_str(&format!("Authorization: Bearer {token}\r\n"));
+    let mut request = request_line.into_bytes();
+    for HeaderEntry { name, value } in &header_entries {
+        request.extend_from_slice(name.as_bytes());
+        request.extend_from_slice(b": ");
+        request.extend_from_slice(value.as_bytes());
+        request.extend_from_slice(b"\r\n");
     }
-    request.push_str("\r\n");
-    request.push_str(&body);
-    Ok(request)
-}
-
-fn extract_completion(body: &Value) -> Option<String> {
-    let choices = body.get("choices")?.as_array()?;
-    let choice = choices.first()?;
-    if let Some(content) = choice
-        .get("message")
-        .and_then(|msg| msg.get("content"))
-        .and_then(|v| v.as_str())
-    {
-        return Some(content.to_string());
+    request.extend_from_slice(b"\r\n");
+    if !body_bytes.is_empty() {
+        request.extend_from_slice(&body_bytes);
     }
-    choice
-        .get("text")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-}
 
-async fn send_http_request(
-    stream: &mut TlsStream<WasmWsStream>,
-    request: &str,
-) -> Result<ParsedHttpResponse, RatlsError> {
+    let (mut stream, attestation) = connect_websocket(
+        &websocket_url,
+        &server_name,
+        Policy::default(),
+        Some(vec!["http/1.1".into()]),
+    )
+    .await
+    .map_err(to_js_error)?;
+
     stream
-        .write_all(request.as_bytes())
+        .write_all(&request)
         .await
-        .map_err(|err| RatlsError::Io(err.to_string()))?;
+        .map_err(|err| JsValue::from_str(&err.to_string()))?;
     stream
         .flush()
         .await
-        .map_err(|err| RatlsError::Io(err.to_string()))?;
-    read_http_response(stream).await
+        .map_err(|err| JsValue::from_str(&err.to_string()))?;
+
+    let raw_headers = read_raw_headers(&mut stream).await.map_err(to_js_error)?;
+    let (status, status_text, parsed_headers) =
+        parse_headers(&raw_headers).map_err(|err| JsValue::from_str(&err.to_string()))?;
+
+    let headers_for_js = parsed_headers
+        .iter()
+        .map(|(name, value)| HeaderEntry {
+            name: name.clone(),
+            value: value.clone(),
+        })
+        .collect::<Vec<_>>();
+
+    let body_mode = if let Some(len) = find_content_length(&parsed_headers) {
+        if len == 0 {
+            BodyMode::Finished
+        } else {
+            BodyMode::ContentLength(len)
+        }
+    } else if is_chunked(&parsed_headers) {
+        BodyMode::Chunked {
+            remaining_in_chunk: 0,
+        }
+    } else {
+        BodyMode::Close
+    };
+
+    Ok(RatlsResponse {
+        attestation: JsAttestationResult::from(attestation),
+        status,
+        status_text,
+        headers: headers_for_js,
+        stream: Some(stream),
+        body_mode,
+    })
 }
 
-async fn read_http_response(
-    stream: &mut TlsStream<WasmWsStream>,
-) -> Result<ParsedHttpResponse, RatlsError> {
-    let raw_headers = read_raw_headers(stream).await?;
-    let (status, reason, headers) = parse_headers(&raw_headers)?;
-    let body = read_body(stream, &headers).await?;
+fn normalize_path(path_and_query: String) -> String {
+    let trimmed = path_and_query.trim();
+    if trimmed.is_empty() {
+        "/".into()
+    } else if trimmed.starts_with('/') {
+        trimmed.into()
+    } else {
+        format!("/{}", trimmed)
+    }
+}
 
-    Ok(ParsedHttpResponse {
-        status,
-        reason,
-        headers,
-        body,
-    })
+fn ensure_header(entries: &mut Vec<HeaderEntry>, name: &str, value: String) {
+    if !has_header(entries, name) {
+        entries.push(HeaderEntry {
+            name: name
+                .chars()
+                .enumerate()
+                .map(|(idx, c)| {
+                    if idx == 0 {
+                        c.to_ascii_uppercase()
+                    } else {
+                        c
+                    }
+                })
+                .collect(),
+            value,
+        });
+    }
+}
+
+fn has_header(entries: &[HeaderEntry], name: &str) -> bool {
+    entries
+        .iter()
+        .any(|h| h.name.eq_ignore_ascii_case(name))
+}
+
+fn parse_header_entries(headers: JsValue) -> Result<Vec<HeaderEntry>, JsValue> {
+    if headers.is_undefined() || headers.is_null() {
+        return Ok(Vec::new());
+    }
+    from_value::<Vec<HeaderEntry>>(headers)
+        .map_err(|err| JsValue::from_str(&format!("invalid headers: {err}")))
 }
 
 async fn read_raw_headers(stream: &mut TlsStream<WasmWsStream>) -> Result<Vec<u8>, RatlsError> {
@@ -297,36 +438,17 @@ fn parse_headers(raw: &[u8]) -> Result<(u16, String, Vec<(String, String)>), Rat
     Ok((status_code, reason, headers))
 }
 
-async fn read_body(
+async fn read_limited(
     stream: &mut TlsStream<WasmWsStream>,
-    headers: &[(String, String)],
+    limit: usize,
 ) -> Result<Vec<u8>, RatlsError> {
-    if let Some(len) = find_content_length(headers) {
-        let mut body = vec![0u8; len];
-        stream
-            .read_exact(&mut body)
-            .await
-            .map_err(|err| RatlsError::Io(err.to_string()))?;
-        return Ok(body);
-    }
-
-    if is_chunked(headers) {
-        return read_chunked_body(stream).await;
-    }
-
-    let mut body = Vec::new();
-    let mut buf = [0u8; 1024];
-    loop {
-        let read = stream
-            .read(&mut buf)
-            .await
-            .map_err(|err| RatlsError::Io(err.to_string()))?;
-        if read == 0 {
-            break;
-        }
-        body.extend_from_slice(&buf[..read]);
-    }
-    Ok(body)
+    let mut buf = vec![0u8; limit];
+    let read = stream
+        .read(&mut buf)
+        .await
+        .map_err(|err| RatlsError::Io(err.to_string()))?;
+    buf.truncate(read);
+    Ok(buf)
 }
 
 fn find_content_length(headers: &[(String, String)]) -> Option<usize> {
@@ -341,48 +463,6 @@ fn is_chunked(headers: &[(String, String)]) -> bool {
         name.eq_ignore_ascii_case("transfer-encoding")
             && value.to_ascii_lowercase().contains("chunked")
     })
-}
-
-async fn read_chunked_body(
-    stream: &mut TlsStream<WasmWsStream>,
-) -> Result<Vec<u8>, RatlsError> {
-    let mut body = Vec::new();
-    loop {
-        let size_line = read_line(stream).await?;
-        let size_str = size_line
-            .split(';')
-            .next()
-            .map(str::trim)
-            .unwrap_or_default();
-        let chunk_size =
-            usize::from_str_radix(size_str, 16).map_err(|_| RatlsError::Vendor("invalid chunk size in response".into()))?;
-
-        if chunk_size == 0 {
-            // Consume trailer lines until the terminating CRLF.
-            loop {
-                let trailer = read_line(stream).await?;
-                if trailer.is_empty() {
-                    break;
-                }
-            }
-            break;
-        }
-
-        let mut chunk = vec![0u8; chunk_size];
-        stream
-            .read_exact(&mut chunk)
-            .await
-            .map_err(|err| RatlsError::Io(err.to_string()))?;
-        body.extend_from_slice(&chunk);
-
-        // Discard trailing CRLF after each chunk.
-        let mut crlf = [0u8; 2];
-        stream
-            .read_exact(&mut crlf)
-            .await
-            .map_err(|err| RatlsError::Io(err.to_string()))?;
-    }
-    Ok(body)
 }
 
 async fn read_line(stream: &mut TlsStream<WasmWsStream>) -> Result<String, RatlsError> {
