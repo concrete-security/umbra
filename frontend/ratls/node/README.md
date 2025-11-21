@@ -3,14 +3,18 @@
 Planned Node bindings for `ratls-core`. The Node flavor connects **directly over TCP to the RA-TLS server** (no proxy needed) and exposes a fetch-compatible adapter so AI SDKs (e.g. `@ai-sdk/openai`) can stream through an attested TLS channel.
 
 ## Current API surface (native N-API module)
-- `http_request(targetHost, serverName, method, path, headers, body?) -> Promise<{ status, statusText, headers, body, attestation }>` (direct TCP, no proxy).
-- Shared attestation JSON shape matches the WASM client (available on `response.attestation` and echoed in `x-ratls-attestation`).
+- `http_request(targetHost, serverName, method, path, headers, body?) -> Promise<{ status, statusText, headers, body, attestation }>` (direct TCP, buffered body).
+- `http_stream_request(...) -> { status, status_text, headers, attestation, stream_id }` plus `stream_read(stream_id, max_bytes?)` and `stream_close(stream_id)` for true streaming bodies.
+- `ratls-fetch.js` exports `createRatlsFetch` (Node fetch shim) that prefers the streaming API when available; attaches attestation to `response.ratlsAttestation` and `x-ratls-attestation`.
+- Shared attestation JSON shape matches the WASM client.
 
-## Building the native module
+## Building the native module + running the AI SDK smoke test
 
 ```sh
-cargo build -p ratls-node --release   # requires rustc >= 1.88
-node -e "require('./node')"
+rustup override set 1.88.0   # or newer
+cargo build -p ratls-node --release
+pnpm add -D @ai-sdk/openai ai ws zod@^4
+node examples/ai-sdk-openai-demo.mjs "Hello from RA-TLS"
 ```
 
 The loader at `node/index.js` defaults to `target/release/ratls_node.node` (falls back to debug); override via `RATLS_NODE_BINARY=/path/to/ratls_node.node`.
@@ -22,42 +26,13 @@ import { http_request } from "ratls-node"
 import { createOpenAI } from "@ai-sdk/openai"
 import { streamText } from "ai"
 
-async function ratlsFetch(input: RequestInfo, init?: RequestInit) {
-  const req = new Request(input, init)
-  const targetHost = "vllm.concrete-security.com:443"
-  const url = new URL(req.url, `https://${targetHost}`)
-  const hostHeader = req.headers.get("host") || url.host || targetHost
+import { createRatlsFetch } from "ratls-node/ratls-fetch.js"
 
-  const headers = Array.from(req.headers.entries()).map(([name, value]) => ({
-    name,
-    value,
-  }))
-  const body = req.body ? Buffer.from(await req.arrayBuffer()) : undefined
-
-  const resp = await http_request(
-    targetHost,
-    hostHeader,
-    req.method || "GET",
-    `${url.pathname}${url.search}`,
-    headers,
-    body
-  )
-
-  const nodeHeaders = new Headers()
-  resp.headers.forEach(({ name, value }) => nodeHeaders.append(name, value))
-  nodeHeaders.set("x-ratls-attestation", JSON.stringify(resp.attestation))
-
-  const res = new Response(resp.body, {
-    status: resp.status,
-    statusText: resp.status_text,
-    headers: nodeHeaders,
-  })
-  Object.defineProperty(res, "ratlsAttestation", {
-    value: resp.attestation,
-    enumerable: false,
-  })
-  return res
-}
+const ratlsFetch = await createRatlsFetch({
+  targetHost: "vllm.concrete-security.com:443",
+  serverName: "vllm.concrete-security.com",
+  defaultHeaders: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
+})
 
 const openai = createOpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -76,8 +51,8 @@ console.log("\nattestation:", response.ratlsAttestation)
 
 Notes:
 - No proxy required; RA-TLS runs directly over TCP from Node to the TEE endpoint.
-- Streaming works via the custom fetch; attestation is available on `response.ratlsAttestation` and also in an `x-ratls-attestation` header for clones.
+- Streaming is supported via the `http_stream_request` path in the fetch shim; tokens should flow incrementally. Attestation is available on `response.ratlsAttestation` and also in an `x-ratls-attestation` header for clones.
 
 ## Tests
-- Rust unit test exercises request path normalization (`cargo test -p ratls-node --lib`).
-  Live RA-TLS tests require a real attested endpoint and are not enabled by default.
+- `make test-node` (requires rustc >= 1.88 + network): builds the native addon and runs `node/examples/ai-sdk-openai-demo.mjs` against `vllm.concrete-security.com` using the RA-TLS fetch shim.
+- Rust unit test exercises request path normalization (`cargo test -p ratls-node --lib`). Live RA-TLS tests require a real attested endpoint and are not enabled by default.
