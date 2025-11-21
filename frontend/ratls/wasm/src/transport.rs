@@ -11,7 +11,7 @@ use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::spawn_local;
-use web_sys::{BinaryType, ErrorEvent, MessageEvent, WebSocket};
+use web_sys::{BinaryType, MessageEvent, WebSocket};
 
 use ratls_core::RatlsError;
 
@@ -71,9 +71,9 @@ impl WasmWsStream {
 
         let (error_tx, error_rx) = oneshot::channel::<String>();
         let mut error_tx = Some(error_tx);
-        let err_cb = Closure::wrap(Box::new(move |event: ErrorEvent| {
+        let err_cb = Closure::wrap(Box::new(move |_event: web_sys::Event| {
             if let Some(tx) = error_tx.take() {
-                let _ = tx.send(event.message());
+                let _ = tx.send("WebSocket connection failed".to_string());
             }
         }) as Box<dyn FnMut(_)>);
         ws.set_onerror(Some(err_cb.as_ref().unchecked_ref()));
