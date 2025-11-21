@@ -31,7 +31,7 @@ proxy:
 
 web-check:
 	cd wasm && $(PYTHON) -m http.server $(WEB_PORT)
-	@echo "Serving wasm demos on http://localhost:$(WEB_PORT)/web-check/ and /vllm-chat/ (default proxy ws://localhost:9000)"
+	@echo "Serving wasm demo on http://localhost:$(WEB_PORT)/web-check/ (default proxy ws://localhost:9000)"
 
 demo:
 	@set -euo pipefail; \
@@ -44,5 +44,5 @@ demo:
 	fi; \
 	( cd wasm && $(PYTHON) -m http.server $(WEB_PORT) ) & SERVER_PID=$$!; \
 	echo "Proxy: ws://$(shell echo $(PROXY_LISTEN) | sed 's/127\.0\.0\.1/localhost/g') (target $(PROXY_TARGET))"; \
-	echo "Web demos: http://localhost:$(WEB_PORT)/web-check/ and /vllm-chat/"; \
+	echo "Web demo: http://localhost:$(WEB_PORT)/web-check/"; \
 	wait
