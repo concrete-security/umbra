@@ -1,0 +1,57 @@
+services:
+  prometheus:
+    image: prom/prometheus@sha256:49214755b6153f90a597adcbff0252cc61069f8ab69ce8411285cd4a560e8038
+    container_name: prometheus
+    networks:
+      - monitoring
+    expose:
+      - "${PROMETHEUS_PORT}"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ${PERSISTANT_PROMETHEUS_DATA}:/prometheus
+    environment:
+      VLLM_TARGET: ${VLLM_TARGET}
+      CONFIG_FILE: ${CONFIG_FILE}
+      STORAGE_TSDB_PATH: ${STORAGE_TSDB_PATH}
+      STORAGE_TSDB_RETENTION_TIME: ${STORAGE_TSDB_RETENTION_TIME}
+      LOG_LEVEL: ${LOG_LEVEL}
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:${PROMETHEUS_PORT}/-/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana@sha256:f83f232953e417edb9a450a82462386de014631a31d5be402d9029b09f93408d
+    container_name: grafana
+    networks:
+      - monitoring
+    depends_on:
+      - prometheus
+    ports:
+      - "${GRAFANA_PORT}:${GRAFANA_PORT}"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${ADMIN_USER}
+      GF_SECURITY_ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      GF_SERVER_HTTP_PORT: ${GRAFANA_PORT}
+      GF_SERVER_HTTP_ADDR: 0.0.0.0
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/provisioning/dashboards/user_metrics_overview.json
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:${GRAFANA_PORT}/api/health"]
+      interval: 30s
+      timeout: 3s
+      start_period: 45s
+      retries: 5
+
+networks:
+  monitoring:
+    name: monitoring
+    driver: bridge
+
+volumes:
+  prometheus_data:
