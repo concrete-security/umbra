@@ -76,6 +76,7 @@ graph LR
 - `run_attestation_check(...)`: Diagnostics helper.
 - `httpRequest(...)`: HTTP/1.1 over RA-TLS with streaming bodies.
 - `ratls-fetch.js`: Fetch-compatible shim you can hand to AI SDKs for chat streaming.
+- `wasm/examples/ai-sdk-openai-demo.mjs`: Simple streaming test against `vllm.concrete-security.com` using `@ai-sdk/openai` + the RA-TLS fetch (requires `@ai-sdk/openai`, `ai`, `ws`, and `zod@^4`).
 
 Example:
 ```javascript

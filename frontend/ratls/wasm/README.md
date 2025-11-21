@@ -61,6 +61,19 @@ const ratlsFetch = createRatlsFetch({
 `run_attestation_check` is ideal for diagnostics (fetch quote → verify → close). `httpRequest` returns a `RatlsResponse` that exposes `status`, `statusText`, `headers()`, `readChunk()`, and `close()` for streaming use cases. `createRatlsFetch` wraps that lower-level API in a drop-in `fetch` replacement, including streaming bodies for chat completions.
 Hand `ratlsFetch` to any SDK that accepts a custom `fetch` (for example `createOpenAI({ fetch: ratlsFetch })`) to keep AI streaming responses inside the attested TLS channel.
 
+## AI SDK + RA-TLS smoke test (Node)
+
+You can stream from `@ai-sdk/openai` through the proxy using the included shim:
+
+```sh
+pnpm add -D @ai-sdk/openai ai ws zod@^4
+make build-wasm           # produces wasm/pkg/*
+make demo                 # starts proxy -> vllm.concrete-security.com:443
+node wasm/examples/ai-sdk-openai-demo.mjs "Send a short attested hello from RA-TLS"
+```
+
+Environment knobs (all optional): `RATLS_PROXY_URL` (default `ws://127.0.0.1:9000`), `RATLS_TARGET` (default `vllm.concrete-security.com:443`), `RATLS_SNI` (default `vllm.concrete-security.com`), `OPENAI_API_KEY`, and `OPENAI_MODEL`. The script prints the streaming reply and the attestation payload from the response (`response.ratlsAttestation`).
+
 ## Web check demo
 
 `web-check/` is a static harness that loads the wasm bindings and connects to a WebSocket tunnel for a one-off RA-TLS check.
