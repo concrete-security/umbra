@@ -35,8 +35,14 @@ test-node:
 	pnpm add -D @ai-sdk/openai ai ws zod@^4; \
 	echo "Building ratls-node native addon..."; \
 	$(CARGO) build -p ratls-node --release; \
-	echo "Running ai-sdk smoke test against vllm.concrete-security.com (requires network)..."; \
-	cd wasm && node examples/ai-sdk-openai-demo.mjs "AI SDK RA-TLS smoke test from make test-node"
+	echo "Ensuring ratls_node.node exists..."; \
+	( cd target/release && \
+	  rm -f ratls_node.node; \
+	  if [ -f libratls_node.dylib ]; then cp -f libratls_node.dylib ratls_node.node; fi; \
+	  if [ ! -f ratls_node.node ] && [ -f libratls_node.so ]; then cp -f libratls_node.so ratls_node.node; fi; \
+	  if [ ! -f ratls_node.node ] && [ -f ratls_node.dll ]; then cp -f ratls_node.dll ratls_node.node; fi ) || true; \
+	echo "Running ai-sdk smoke test against vllm.concrete-security.com (direct TCP RA-TLS)..."; \
+	cd node && node examples/ai-sdk-openai-demo.mjs "AI SDK RA-TLS smoke test from make test-node"
 
 test-wasm:
 	$(CARGO) check -p ratls-wasm --target wasm32-unknown-unknown
