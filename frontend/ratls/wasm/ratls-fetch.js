@@ -1,4 +1,22 @@
-import init, { httpRequest } from "./pkg/ratls_wasm.js"
+import init, { httpRequest } from "./ratls_wasm.js"
+
+const ATTESTATION_HEADER = "x-ratls-attestation"
+
+function ensurePrototypeGetter() {
+  if (typeof Response !== "undefined" && !Object.getOwnPropertyDescriptor(Response.prototype, "ratlsAttestation")) {
+    Object.defineProperty(Response.prototype, "ratlsAttestation", {
+      get() {
+        const header = this.headers?.get?.(ATTESTATION_HEADER)
+        if (!header) return undefined
+        try {
+          return JSON.parse(header)
+        } catch (_err) {
+          return undefined
+        }
+      },
+    })
+  }
+}
 
 let wasmReady
 
@@ -63,6 +81,7 @@ export function createRatlsFetch(options) {
   if (!proxyUrl || !targetHost) {
     throw new Error("proxyUrl and targetHost are required for RA-TLS fetch")
   }
+  ensurePrototypeGetter()
   const normalizedTarget = normalizeTarget(targetHost)
   const sni = serverName || normalizedTarget.split(":")[0]
   const base = new URL(`https://${normalizedTarget}`)
@@ -94,6 +113,15 @@ export function createRatlsFetch(options) {
     const rawHeaders = ratlsResponse.headers || []
     const responseHeaders = new Headers()
     rawHeaders.forEach(({ name, value }) => responseHeaders.append(name, value))
+    if (attestation) {
+      try {
+        responseHeaders.set(ATTESTATION_HEADER, JSON.stringify(attestation))
+      } catch (error) {
+        // ignore serialization errors; attestation still attached below
+      }
+    } else if (process?.env?.DEBUG_RATLS_FETCH) {
+      console.warn("ratls-fetch: attestation missing from RA-TLS response")
+    }
 
     const bodyStream = readBodyStream(ratlsResponse)
     const response = new Response(bodyStream, {
