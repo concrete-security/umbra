@@ -3,6 +3,7 @@ export interface RatlsFetchOptions {
   targetHost: string;
   serverName?: string;
   defaultHeaders?: Record<string, string>;
+  onAttestation?: (attestation: RatlsAttestation) => void;
 }
 
 export interface RatlsAttestation {

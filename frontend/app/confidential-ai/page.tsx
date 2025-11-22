@@ -5,6 +5,7 @@ import { useState, FormEvent, KeyboardEvent, useMemo, useRef, useEffect, useCall
 import Link from "next/link"
 import Image from "next/image"
 import { useTheme } from "next-themes"
+import { streamText } from "ai"
 import {
   ArrowDown,
   Send,
@@ -38,7 +39,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { FeedbackButton } from "@/components/feedback-button"
 import {
-  streamConfidentialChat,
+  createConfidentialModel,
   confidentialChatConfig,
   getRatlsConfig,
   buildRatlsProxyUrl,
@@ -686,6 +687,76 @@ function ConfidentialAIContent() {
       return false
     }
   }, [ratlsConfig])
+
+  const extractReasoningFromRaw = useCallback((raw: unknown): string => {
+    if (!raw) return ""
+    let value: any = raw
+    if (typeof raw === "string") {
+      try {
+        value = JSON.parse(raw)
+      } catch {
+        return ""
+      }
+    }
+
+    const collect = (input: unknown): string => {
+      if (!input) return ""
+      if (typeof input === "string") return input
+      if (Array.isArray(input)) {
+        return input
+          .map((entry) => {
+            if (!entry) return ""
+            if (typeof entry === "string") return entry
+            if (typeof entry === "object" && typeof (entry as { text?: string }).text === "string") {
+              return (entry as { text: string }).text
+            }
+            return ""
+          })
+          .join("")
+      }
+      if (typeof input === "object" && typeof (input as { text?: string }).text === "string") {
+        return (input as { text: string }).text
+      }
+      return ""
+    }
+
+    const choices = Array.isArray(value?.choices) ? value.choices : []
+    const parts: string[] = []
+    for (const choice of choices) {
+      const deltaReasoning = collect(choice?.delta?.reasoning_content ?? choice?.delta?.reasoning)
+      if (deltaReasoning) {
+        parts.push(deltaReasoning)
+      }
+      const messageReasoning = collect(choice?.message?.reasoning_content ?? choice?.message?.reasoning)
+      if (messageReasoning) {
+        parts.push(messageReasoning)
+      }
+    }
+    return parts.join("")
+  }, [])
+
+  const handleTransportAttestation = useCallback(
+    (attestation: RatlsAttestation) => {
+      const source = ratlsConfig ? buildRatlsProxyUrl(ratlsConfig) : derivedAttestationOrigin ?? undefined
+      const statusText = attestation.tcbStatus || null
+      const advisoryIds = Array.isArray(attestation.advisoryIds) ? attestation.advisoryIds : []
+      const isOutOfDate = Boolean(statusText && statusText.toLowerCase().includes("outofdate"))
+
+      setProofState({ status: "ready", attestation, fetchedAt: Date.now(), source })
+      setVerificationState({
+        status: "success",
+        quoteVerified: Boolean(attestation.trusted),
+        reportDataMatches: true,
+        checksum: attestation.measurement ?? null,
+        quoteHex: null,
+        statusText,
+        advisoryIds,
+        isOutOfDate,
+        attestation,
+      })
+    },
+    [derivedAttestationOrigin, ratlsConfig]
+  )
 
   const handleProofRefresh = useCallback(async () => {
     await refreshProof()
@@ -1470,65 +1541,89 @@ function ConfidentialAIContent() {
     }
 
     try {
+      const modelContext = await createConfidentialModel({
+        model: providerModel ?? undefined,
+        cacheSalt,
+        provider: {
+          baseUrl: providerApiBase,
+          apiKey: trimmedToken || undefined,
+        },
+        onAttestation: handleTransportAttestation,
+      })
+
       let streamedContent = ""
       let streamedReasoning = ""
       let finishReason: string | undefined
 
-      for await (const chunk of streamConfidentialChat(
-        {
-          messages: sanitizedHistory,
-          ...(providerModel ? { model: providerModel } : {}),
-          reasoning_effort: reasoningEffort,
-          ...(cacheSalt ? { cache_salt: cacheSalt } : {}),
-        },
-        {
-          provider: {
-            baseUrl: providerApiBase,
-            apiKey: trimmedToken || undefined,
+      const result = await streamText({
+        model: modelContext.model,
+        system: modelContext.systemPrompt,
+        messages: sanitizedHistory,
+        temperature: modelContext.temperature,
+        maxOutputTokens: modelContext.maxOutputTokens,
+        providerOptions: {
+          openai: {
+            reasoningEffort: reasoningEffort,
           },
-        }
-      )) {
-        if (chunk.type === "delta" && chunk.content) {
-          streamedContent += chunk.content
+        },
+        includeRawChunks: true,
+      })
+
+      for await (const part of result.fullStream) {
+        if (part.type === "text-delta" && part.text) {
+          streamedContent += part.text
           updateAssistantMessage({ content: streamedContent })
           handleStreamingFollow()
         }
 
-        if (chunk.type === "reasoning_delta" && chunk.reasoning_content) {
-          streamedReasoning += chunk.reasoning_content
+        if (part.type === "reasoning-delta" && part.text) {
+          streamedReasoning += part.text
           updateAssistantMessage({ reasoning_content: streamedReasoning })
         }
 
-        if (chunk.type === "error") {
-          throw new Error(chunk.error)
+        if (part.type === "raw") {
+          const parsedReasoning = extractReasoningFromRaw(part.rawValue)
+          if (parsedReasoning) {
+            streamedReasoning += parsedReasoning
+            updateAssistantMessage({ reasoning_content: streamedReasoning })
+          }
         }
 
-        if (chunk.type === "done") {
-          if (chunk.content) {
-            streamedContent = chunk.content
-          }
-          if (chunk.reasoning_content) {
-            streamedReasoning = chunk.reasoning_content
-          }
-          if (chunk.finish_reason) {
-            finishReason = chunk.finish_reason
-          }
+        if (part.type === "finish") {
+          finishReason = part.finishReason
+        }
+
+        if (part.type === "error") {
+          throw new Error(getReadableError(part.error))
+        }
+
+        if (part.type === "abort") {
+          throw new Error("Request aborted.")
         }
       }
 
       const finalContent = streamedContent.trim()
-      const finalReasoning = streamedReasoning.trim()
+      const resolvedReasoning = streamedReasoning.trim()
+      let reasonedText = resolvedReasoning
+      if (!reasonedText) {
+        try {
+          const fallbackReasoning = await result.reasoningText
+          reasonedText = (fallbackReasoning ?? "").trim()
+        } catch {
+          reasonedText = ""
+        }
+      }
 
       updateAssistantMessage({
         content: finalContent || "No response received from the confidential service.",
-        reasoning_content: finalReasoning || undefined,
+        reasoning_content: reasonedText || undefined,
         streaming: false,
         finishReason,
       })
       handleStreamingFollow("smooth")
     } catch (error) {
       console.warn("Confidential chat request failed", error)
-      const errorMessage = error instanceof Error && error.message ? error.message : "An unexpected error occurred. Please try again later."
+      const errorMessage = getReadableError(error)
       updateAssistantMessage({
         content: errorMessage,
         streaming: false,
@@ -1916,7 +2011,8 @@ function ConfidentialAIContent() {
                   const isReasoningOpen = reasoningOpen[i] ?? false
                   const reasoningAvailable =
                     typeof m.reasoning_content === "string" && m.reasoning_content.trim().length > 0
-                  const showReasoningPanel = isAssistant && (m.streaming || reasoningAvailable)
+                  const hasReasoningActivity = m.streaming || reasoningAvailable
+                  const showReasoningPanel = isAssistant
                   const truncatedByLength = isAssistant && m.finishReason === "length"
 
                   const bubbleText =
@@ -1957,18 +2053,16 @@ function ConfidentialAIContent() {
                           <div className="relative">
                             <button
                               type="button"
-                              onClick={showReasoningPanel ? toggleReasoningPanel : undefined}
-                              disabled={!showReasoningPanel}
+                              onClick={toggleReasoningPanel}
                               className={cn(
                                 "mt-1 flex size-8 items-center justify-center rounded-full border border-border/40 bg-card/80 text-foreground transition-all dark:border-border/60 dark:bg-card/30",
-                                showReasoningPanel && "cursor-pointer hover:brightness-110 hover:text-white",
-                                isReasoningOpen && "text-white bg-[linear-gradient(130deg,#102A8C,#0B1F66)]",
-                                !showReasoningPanel && "cursor-default opacity-50"
+                                "cursor-pointer hover:brightness-110 hover:text-white",
+                                isReasoningOpen && "text-white bg-[linear-gradient(130deg,#102A8C,#0B1F66)]"
                               )}
-                              title={showReasoningPanel ? (isReasoningOpen ? "Hide reasoning" : "Show reasoning") : undefined}
+                              title={isReasoningOpen ? "Hide reasoning" : "Show reasoning"}
                             >
                               <Bot className={cn("h-5 w-5", isReasoningOpen ? "text-white" : "text-muted-foreground")} />
-                              {showReasoningPanel && (
+                              {hasReasoningActivity && (
                                 <div className="absolute -right-0.5 -top-0.5 flex size-3.5 items-center justify-center rounded-full bg-[#102A8C] text-white">
                                   <Sparkles className="h-2.5 w-2.5" />
                                 </div>
