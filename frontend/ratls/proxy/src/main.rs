@@ -94,19 +94,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         std::env::var("RATLS_PROXY_LISTEN").unwrap_or_else(|_| "127.0.0.1:9000".to_string());
     let target =
         std::env::var("RATLS_PROXY_TARGET").unwrap_or_else(|_| "127.0.0.1:8443".to_string());
-    
+
     let allowlist = Arc::new(parse_allowlist("RATLS_PROXY_ALLOWLIST"));
     if allowlist.is_empty() {
-        eprintln!("WARNING: RATLS_PROXY_ALLOWLIST is empty or not set. All targets will be rejected.");
+        eprintln!(
+            "WARNING: RATLS_PROXY_ALLOWLIST is empty or not set. All targets will be rejected."
+        );
     } else {
-        eprintln!("Allowlist contains {} authorized target(s)", allowlist.len());
+        eprintln!(
+            "Allowlist contains {} authorized target(s)",
+            allowlist.len()
+        );
     }
-    
+
     if !is_target_allowed(&target, &allowlist) {
         eprintln!("ERROR: Default target {} is not in allowlist", target);
         return Err(format!("Default target {} is not authorized", target).into());
     }
-    
+
     let listener = TcpListener::bind(&listen_addr).await?;
     eprintln!("ratls-proxy listening on {listen_addr}, default target {target}");
 
@@ -142,13 +147,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 .lock()
                 .map(|guard| guard.clone())
                 .unwrap_or(default_target);
-            
+
             if !is_target_allowed(&final_target, &allowlist_clone) {
-                eprintln!("Connection from {} rejected: target {} is not authorized", peer, final_target);
+                eprintln!(
+                    "Connection from {} rejected: target {} is not authorized",
+                    peer, final_target
+                );
                 let _ = ws_stream.close(None).await;
                 return;
             }
-            
+
             if let Err(e) = handle_ws(ws_stream, final_target.clone(), allowlist_clone).await {
                 eprintln!(
                     "pipe error for target {} from {}: {}",

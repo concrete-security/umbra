@@ -138,7 +138,10 @@ impl RatlsClient {
         Ok((stream, attestation))
     }
 
-    async fn release_on_error(&self, stream: Option<TlsStream<WasmWsStream>>) -> Result<(), JsValue> {
+    async fn release_on_error(
+        &self,
+        stream: Option<TlsStream<WasmWsStream>>,
+    ) -> Result<(), JsValue> {
         {
             let mut state = self.state.borrow_mut();
             state.in_flight = false;
@@ -155,7 +158,11 @@ impl RatlsClient {
 #[wasm_bindgen]
 impl RatlsClient {
     #[wasm_bindgen(constructor)]
-    pub fn new(websocket_url: String, server_name: String, host_header: Option<String>) -> RatlsClient {
+    pub fn new(
+        websocket_url: String,
+        server_name: String,
+        host_header: Option<String>,
+    ) -> RatlsClient {
         RatlsClient {
             websocket_url,
             server_name,
@@ -357,9 +364,7 @@ impl RatlsResponse {
                         Vec::new()
                     } else {
                         let to_read = remaining.min(limit);
-                        let data = read_limited(stream, to_read)
-                            .await
-                            .map_err(to_js_error)?;
+                        let data = read_limited(stream, to_read).await.map_err(to_js_error)?;
                         if data.is_empty() {
                             self.body_mode = BodyMode::Finished;
                             return Err(JsValue::from_str(
@@ -386,7 +391,9 @@ impl RatlsResponse {
                             .map(str::trim)
                             .unwrap_or_default();
                         let chunk_size = usize::from_str_radix(size_str, 16)
-                            .map_err(|_| RatlsError::Vendor("invalid chunk size in response".into()))
+                            .map_err(|_| {
+                                RatlsError::Vendor("invalid chunk size in response".into())
+                            })
                             .map_err(to_js_error)?;
                         if chunk_size == 0 {
                             loop {
@@ -402,9 +409,7 @@ impl RatlsResponse {
                     }
 
                     let to_read = remaining_in_chunk.min(limit);
-                    let data = read_limited(stream, to_read)
-                        .await
-                        .map_err(to_js_error)?;
+                    let data = read_limited(stream, to_read).await.map_err(to_js_error)?;
                     if data.is_empty() {
                         self.body_mode = BodyMode::Finished;
                         return Err(JsValue::from_str(
@@ -422,15 +427,11 @@ impl RatlsResponse {
                             .map_err(to_js_error)?;
                     }
 
-                    self.body_mode = BodyMode::Chunked {
-                        remaining_in_chunk,
-                    };
+                    self.body_mode = BodyMode::Chunked { remaining_in_chunk };
                     break data;
                 },
                 BodyMode::Close => {
-                    let data = read_limited(stream, limit)
-                        .await
-                        .map_err(to_js_error)?;
+                    let data = read_limited(stream, limit).await.map_err(to_js_error)?;
                     if data.is_empty() {
                         self.body_mode = BodyMode::Finished;
                     }
@@ -529,13 +530,7 @@ fn ensure_header(entries: &mut Vec<HeaderEntry>, name: &str, value: String) {
             name: name
                 .chars()
                 .enumerate()
-                .map(|(idx, c)| {
-                    if idx == 0 {
-                        c.to_ascii_uppercase()
-                    } else {
-                        c
-                    }
-                })
+                .map(|(idx, c)| if idx == 0 { c.to_ascii_uppercase() } else { c })
                 .collect(),
             value,
         });
@@ -543,9 +538,7 @@ fn ensure_header(entries: &mut Vec<HeaderEntry>, name: &str, value: String) {
 }
 
 fn has_header(entries: &[HeaderEntry], name: &str) -> bool {
-    entries
-        .iter()
-        .any(|h| h.name.eq_ignore_ascii_case(name))
+    entries.iter().any(|h| h.name.eq_ignore_ascii_case(name))
 }
 
 fn parse_header_entries(headers: JsValue) -> Result<Vec<HeaderEntry>, JsValue> {
@@ -640,7 +633,9 @@ async fn read_line(stream: &mut TlsStream<WasmWsStream>) -> Result<String, Ratls
             buf.push(byte[0]);
         }
         if buf.len() > 8192 {
-            return Err(RatlsError::Io("line too long while reading response".into()));
+            return Err(RatlsError::Io(
+                "line too long while reading response".into(),
+            ));
         }
     }
     String::from_utf8(buf)

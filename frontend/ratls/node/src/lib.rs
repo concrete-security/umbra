@@ -1,17 +1,17 @@
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
+use once_cell::sync::Lazy;
 use ratls_core::{
     platform::{AsyncWriteExt, TlsStream},
     tls_connect, AttestationResult, Policy,
 };
-use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::net::ToSocketAddrs;
 use std::sync::atomic::{AtomicU32, Ordering};
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
-use tokio::task;
 use tokio::sync::Mutex;
+use tokio::task;
 
 #[napi(object)]
 pub struct HeaderEntry {
@@ -141,10 +141,14 @@ pub async fn http_request(
         request.extend_from_slice(&body_bytes);
     }
 
-    let (mut tls, attestation) =
-        tls_connect(tcp, &server_name, Policy::default(), Some(vec!["http/1.1".into()]))
-            .await
-            .map_err(|err| Error::from_reason(format!("ratls handshake failed: {err}")))?;
+    let (mut tls, attestation) = tls_connect(
+        tcp,
+        &server_name,
+        Policy::default(),
+        Some(vec!["http/1.1".into()]),
+    )
+    .await
+    .map_err(|err| Error::from_reason(format!("ratls handshake failed: {err}")))?;
 
     tls.write_all(&request)
         .await
@@ -261,10 +265,14 @@ pub async fn http_stream_request(
         request.extend_from_slice(&body_bytes);
     }
 
-    let (mut tls, attestation) =
-        tls_connect(tcp, &server_name, Policy::default(), Some(vec!["http/1.1".into()]))
-            .await
-            .map_err(|err| Error::from_reason(format!("ratls handshake failed: {err}")))?;
+    let (mut tls, attestation) = tls_connect(
+        tcp,
+        &server_name,
+        Policy::default(),
+        Some(vec!["http/1.1".into()]),
+    )
+    .await
+    .map_err(|err| Error::from_reason(format!("ratls handshake failed: {err}")))?;
 
     tls.write_all(&request)
         .await
@@ -405,16 +413,12 @@ async fn read_chunk(state: &mut StreamState, limit: usize) -> napi::Result<Vec<u
             remaining_in_chunk = remaining_in_chunk.saturating_sub(data.len());
             if remaining_in_chunk == 0 {
                 let mut crlf = [0u8; 2];
-                state
-                    .tls
-                    .read_exact(&mut crlf)
-                    .await
-                    .map_err(|err| Error::from_reason(format!("read chunk trailer failed: {err}")))?;
+                state.tls.read_exact(&mut crlf).await.map_err(|err| {
+                    Error::from_reason(format!("read chunk trailer failed: {err}"))
+                })?;
             }
 
-            state.body_mode = BodyMode::Chunked {
-                remaining_in_chunk,
-            };
+            state.body_mode = BodyMode::Chunked { remaining_in_chunk };
             break Ok(data);
         },
         BodyMode::Close => {
