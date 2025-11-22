@@ -12,7 +12,7 @@ Umbra is Concrete Security’s marketing site and secure workspace for routing s
 ### Confidential AI workspace (`app/confidential-ai/page.tsx`)
 - Streaming chat client with reasoning panel, cache salt input, file uploads (text + PDFs via `public/pdfjs`/`workers/pdf.worker.ts`), and transcript controls.
 - Provider settings are kept entirely in the browser (localStorage for base/model/label, sessionStorage for bearer tokens) and proxied through `/api/chat/completions` so secrets never touch the server code.
-- Proof-of-confidentiality tab fetches quotes from the attestation service (`/tdx_quote`) and runs local DCAP verification via `@phala/dcap-qvl-web`. The “Refresh proof” button replays the checks, and the UI blocks prompts until verification succeeds.
+- Proof-of-confidentiality tab performs a RA-TLS attestation check via the WebSocket proxy (`ratls-wasm`). The “Refresh proof” button replays the check, and the UI blocks prompts until the secure channel is verified.
 - Optional guest throttling (`NEXT_PUBLIC_CONFIDENTIAL_ENABLE_GUEST_LIMITS`) limits anonymous visitors to a single session before requiring Supabase auth.
 
 ### Authentication & waitlist flows
@@ -23,7 +23,7 @@ Umbra is Concrete Security’s marketing site and secure workspace for routing s
 ### API routes & helpers
 - `/api/chat/completions` proxies OpenAI-compatible streaming requests to the configured provider while enforcing HTTPS/loopback hosts.
 - `/api/waitlist`, `/api/feedback`, and `/api/form-token` provide intake and signed form tokens with strict origin/content-type checks, rate limiting, and signed HMAC tokens.
-- Attestation proofs are verified entirely in-browser via `@phala/dcap-qvl-web`; there is no server-side verification pathway.
+- Attestation proofs are verified in-browser via RA-TLS (`ratls-wasm`) during the handshake with the TEE; there is no server-side verification pathway.
 - `/api/admin/waitlist/*` exposes admin-only CRUD + activation flows using the Supabase service-role client.
 
 ## Stack & tooling
@@ -121,9 +121,13 @@ pnpm build && pnpm start
 ### Attestation & verification
 | Name | Required | Description |
 | --- | --- | --- |
-| `NEXT_PUBLIC_ATTESTATION_BASE_URL` | Required for live quotes | Public attestation base URL exposing `/tdx_quote` with CORS enabled. |
-| `NEXT_PUBLIC_PCCS_URL` | Optional | Custom PCCS origin for collateral downloads (defaults to Intel PCS TDX endpoint). |
-| `NEXT_PUBLIC_ATTESTATION_TEST_MODE` | Optional | When `true`, skips real DCAP verification (used by Playwright). |
+| `NEXT_PUBLIC_RATLS_PROXY_URL` | ✅ for RA-TLS | WebSocket proxy URL for RA-TLS (e.g., `wss://ratls-proxy.example.com`). |
+| `NEXT_PUBLIC_RATLS_TARGET` | ✅ for RA-TLS | Target host:port forwarded by the proxy (defaults to the provider base URL host). |
+| `NEXT_PUBLIC_RATLS_SERVER_NAME` | Optional | SNI override for RA-TLS (defaults to the target host). |
+| `NEXT_PUBLIC_CONFIDENTIAL_PROVIDER_TOKEN` | Optional | Default bearer token injected into the Provider settings input. |
+| `NEXT_PUBLIC_DEBUG_RATLS_FETCH` | Optional (dev) | Set to `true` to log RA-TLS fetch requests/responses in the browser console. |
+
+> The RA-TLS proxy must be running alongside your deployment (Vercel serverless cannot host long-lived TCP/WSS proxies). Deploy the proxy as a separate container/VM and point the env vars at it. For local dev, run `cargo run -p ratls-proxy -- --listen 0.0.0.0:4050 --target 127.0.0.1:4000 --server-name 127.0.0.1` and export `NEXT_PUBLIC_RATLS_PROXY_URL=ws://127.0.0.1:4050` + `NEXT_PUBLIC_RATLS_TARGET=127.0.0.1:4000`.
 
 ### Email & feedback
 | Name | Required | Description |
@@ -145,12 +149,12 @@ pnpm build && pnpm start
 - Waitlist forms rely on `useFormToken` + honeypot fields. Tokens expire in 10 minutes (`lib/security/form-token.ts`).
 
 ## Confidential provider, chat, and attestation
-- `lib/confidential-chat.ts` normalizes provider URLs, forces HTTPS/loopback hosts, injects the Umbra system prompt, and streams SSE responses through `/api/chat/completions`.
+- `lib/confidential-chat.ts` normalizes provider URLs, forces HTTPS/loopback hosts, injects the Umbra system prompt, and streams via RA-TLS using the `ratls-wasm` fetch shim against the OpenAI-compatible `/v1/chat/completions` endpoint.
+- Setting `NEXT_PUBLIC_RATLS_PROXY_URL`/`NEXT_PUBLIC_RATLS_TARGET`/`NEXT_PUBLIC_RATLS_SERVER_NAME` routes confidential chat traffic through the bundled `ratls-wasm` fetch shim, establishing an attested TLS tunnel to the TEE via the WebSocket proxy. RA-TLS SDK demos using `@ai-sdk/openai` remain available under `ratls/wasm/examples`.
 - Provider metadata lives entirely in the browser (`localStorage` key `confidential-provider-settings-v1`, `sessionStorage` key `confidential-provider-token`). Clearing storage resets them.
 - `app/confidential-ai/page.tsx` supports reasoning streams (`reasoning_effort`), cache salts, per-message reasoning accordions, and a hex “cipher preview” before sending content.
 - Attachments (≤100 MB) are appended to the message content before dispatch, and PDFs are converted to text with pdf.js (loaded from `/pdfjs/*`).
 - Model output renders through `components/markdown.tsx`, which uses `remark-gfm` and `rehype-sanitize` plus custom copy buttons for code blocks.
-- `lib/attestation.ts` fetches quotes from `${NEXT_PUBLIC_ATTESTATION_BASE_URL}/tdx_quote`, while `lib/attestation-verifier.ts` uses `@phala/dcap-qvl-web` to fetch collateral and run Intel’s DCAP QVL locally in the browser.
 
 ## Email, waitlist, and feedback flows
 - `/api/waitlist` and `/api/feedback` sanitize payloads, enforce same-origin requests, validate emails, rate limit by IP, and require signed form tokens.
@@ -159,7 +163,7 @@ pnpm build && pnpm start
 
 ## Security posture highlights
 - CSP, Referrer Policy, HSTS (prod), Permissions Policy, and other headers are defined in `next.config.mjs` and applied to every route.
-- The Confidential AI UI blocks messaging until a quote is fetched and DCAP verification succeeds; failures appear in the Proof-of-Confidentiality tab and keep the send button disabled.
+- The Confidential AI UI blocks messaging until RA-TLS attestation succeeds; failures surface in the Proof-of-Confidentiality tab and keep the send button disabled.
 - API routes call `ensureSameOrigin`, `assertJsonRequest`, and `verifyFormToken` to mitigate CSRF and automated abuse.
 - `lib/security/rate-limit.ts` enforces in-memory rate limits (5 waitlist requests/minute/IP, 3 feedback requests/2 minutes/IP).
 - `ChunkRecovery` listens for chunk load failures and reloads the app once, keeping the UX resilient when a CDN evicts bundles.
@@ -167,14 +171,14 @@ pnpm build && pnpm start
 
 ## Testing & QA
 - `pnpm lint` – Next.js lint rules with repo-specific overrides (`eslint.config.mjs`).
-- `pnpm test:unit` – Vitest suites for `lib/attestation` and the DCAP verifier wrapper (with the WASM module mocked).
-- `pnpm test:e2e` – Playwright suite that walks the landing page and confidential chat flow with mocked attestation + provider responses.
-- `make test` – Runs unit + e2e suites with the required env flags (`FORM_TOKEN_SECRET`, Supabase anon key, attestation URLs, etc.).
+- `pnpm test:unit` – Placeholder hook for future unit coverage (no suites today).
+- `pnpm test:e2e` – Playwright suite that walks the landing page and confidential chat flow with RA-TLS + mocked provider responses (requires a running RA-TLS proxy at `NEXT_PUBLIC_RATLS_PROXY_URL`).
+- `make test` – Runs the Playwright suite with the required env flags (`FORM_TOKEN_SECRET`, Supabase anon key, RA-TLS proxy config); ensure the proxy is listening before running.
 
 ## Deployment checklist
-1. Set all required env vars (Supabase, form token, provider defaults, attestation/verifier, Resend) in the hosting provider.
+1. Set all required env vars (Supabase, form token, provider defaults, RA-TLS proxy/target, Resend) in the hosting provider.
 2. Ensure `NEXT_PUBLIC_APP_URL` matches the production origin so CSRF checks pass and magic links point to the correct domain.
-3. Confirm the attestation + verifier endpoints permit browser CORS from the production origin.
+3. Confirm the RA-TLS proxy origin accepts WebSocket connections from the production origin with a valid cert/SNI.
 4. Populate provider defaults so first-time visitors see sane values.
 5. Run `pnpm build` during CI and deploy the `.next` output (`pnpm start` in Node or Vercel’s build pipeline).
 6. Reset local `.env.local` when switching between staging/prod credentials to keep Playwright and Supabase sessions deterministic.

@@ -17,4 +17,22 @@ export interface RatlsResponse extends Response {
   readonly ratlsAttestation?: RatlsAttestation;
 }
 
+export interface RatlsHeaderEntry {
+  name: string;
+  value: string;
+}
+
+export class RatlsClient {
+  constructor(websocketUrl: string, serverName: string, hostHeader?: string);
+  handshake(): Promise<RatlsAttestation>;
+  attestation(): RatlsAttestation;
+  httpRequest(
+    method: string,
+    pathAndQuery: string,
+    headers: RatlsHeaderEntry[] | undefined,
+    body?: Uint8Array
+  ): Promise<RatlsResponse>;
+  close(): Promise<void>;
+}
+
 export function createRatlsFetch(options: RatlsFetchOptions): (input: RequestInfo | URL, init?: RequestInit) => Promise<RatlsResponse>;

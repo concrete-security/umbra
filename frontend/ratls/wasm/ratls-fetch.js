@@ -1,4 +1,4 @@
-import init, { httpRequest } from "./ratls_wasm.js"
+import init, { RatlsClient } from "./ratls_wasm.js"
 
 const ATTESTATION_HEADER = "x-ratls-attestation"
 
@@ -27,10 +27,27 @@ async function ensureWasm() {
   return wasmReady
 }
 
+function isLoopbackHostname(host) {
+  const value = host?.toLowerCase?.() || ""
+  return value === "localhost" || value === "0.0.0.0" || value === "::1" || value.startsWith("127.")
+}
+
 function normalizeProxyUrl(raw) {
   if (!raw) return ""
-  if (/^wss?:\/\//i.test(raw)) return raw
-  return `ws://${raw.replace(/^\/+/, "")}`
+  const candidate = /^wss?:\/\//i.test(raw) ? raw : `ws://${raw.replace(/^\/+/, "")}`
+  try {
+    const url = new URL(candidate)
+    const isProd = typeof process !== "undefined" && process?.env?.NODE_ENV === "production"
+    if (isProd && url.protocol !== "wss:" && !isLoopbackHostname(url.hostname)) {
+      throw new Error("RA-TLS proxy URL must use wss:// in production")
+    }
+    return url.toString()
+  } catch (error) {
+    if (error instanceof Error && /must use wss/i.test(error.message || "")) {
+      throw error
+    }
+    return candidate
+  }
 }
 
 function normalizeTarget(value) {
@@ -52,6 +69,18 @@ function buildProxyUrl(base, target) {
     url.searchParams.set("target", target)
   }
   return url.toString()
+}
+
+function debugEnabled() {
+  try {
+    if (typeof process !== "undefined" && (process?.env?.DEBUG_RATLS_FETCH === "true" || process?.env?.NEXT_PUBLIC_DEBUG_RATLS_FETCH === "true")) return true
+    if (typeof globalThis !== "undefined" && globalThis?.NEXT_PUBLIC_DEBUG_RATLS_FETCH === true) return true
+    if (typeof localStorage !== "undefined" && localStorage.getItem("DEBUG_RATLS_FETCH") === "1") return true
+    if (typeof window !== "undefined" && window.DEBUG_RATLS_FETCH === true) return true
+  } catch {
+    // ignore
+  }
+  return false
 }
 
 function readBodyStream(ratlsResponse) {
@@ -85,9 +114,30 @@ export function createRatlsFetch(options) {
   const normalizedTarget = normalizeTarget(targetHost)
   const sni = serverName || normalizedTarget.split(":")[0]
   const base = new URL(`https://${normalizedTarget}`)
+  const websocketUrl = buildProxyUrl(proxyUrl, normalizedTarget)
+  const hostHeader = hostHeaderFor(normalizedTarget)
+
+  let clientPromise
+
+  async function getClient() {
+    await ensureWasm()
+    if (!clientPromise) {
+      clientPromise = (async () => {
+        const client = new RatlsClient(websocketUrl, sni, hostHeader)
+        await client.handshake()
+        return client
+      })().catch((error) => {
+        clientPromise = undefined
+        throw error
+      })
+    }
+    return clientPromise
+  }
+
+  const clientReady = getClient()
 
   return async function ratlsFetch(input, init = {}) {
-    await ensureWasm()
+    const client = await clientReady.catch(() => getClient())
 
     const request = new Request(input, init)
     const resolved = new URL(request.url, base)
@@ -99,15 +149,29 @@ export function createRatlsFetch(options) {
     }))
     const body = request.body ? new Uint8Array(await request.arrayBuffer()) : undefined
 
-    const ratlsResponse = await httpRequest(
-      buildProxyUrl(proxyUrl, normalizedTarget),
-      sni,
-      hostHeaderFor(normalizedTarget),
-      request.method || "GET",
-      `${resolved.pathname}${resolved.search}`,
-      headerEntries,
-      body && body.length ? body : undefined
-    )
+    const path = `${resolved.pathname}${resolved.search}`
+    if (debugEnabled()) {
+      console.debug("[ratls-fetch] request", {
+        url: resolved.toString(),
+        method: request.method || "GET",
+        target: normalizedTarget,
+        sni,
+        proxy: websocketUrl,
+        headers: headerEntries,
+      })
+    }
+
+    const ratlsResponse = await client.httpRequest(request.method || "GET", path, headerEntries, body && body.length ? body : undefined)
+    if (debugEnabled()) {
+      console.debug("[ratls-fetch] response", {
+        target: normalizedTarget,
+        sni,
+        status: ratlsResponse.status,
+        statusText: ratlsResponse.statusText,
+        headers: ratlsResponse.headers,
+        attestation: ratlsResponse.attestation?.(),
+      })
+    }
 
     const attestation = ratlsResponse.attestation()
     const rawHeaders = ratlsResponse.headers || []
@@ -138,3 +202,5 @@ export function createRatlsFetch(options) {
     return response
   }
 }
+
+export { RatlsClient } from "./ratls_wasm.js"

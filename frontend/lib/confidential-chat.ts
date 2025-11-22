@@ -40,21 +40,6 @@ type Message = {
   reasoning_content?: ReasoningPayload
 }
 
-type ProviderResponseChoice = {
-  message?: Message & { content: string; reasoning_content?: ReasoningPayload }
-  delta?: Partial<Message> & { content?: string; reasoning_content?: ReasoningPayload }
-  text?: string
-  finish_reason?: string | null
-}
-
-type ProviderResponse = {
-  id?: string
-  choices?: ProviderResponseChoice[]
-  message?: string
-  reply?: string
-  content?: string
-}
-
 type ProviderErrorInfo = {
   status: number
   message: string
@@ -69,12 +54,27 @@ type ResolvedProviderConfig = {
   maxTokens: number
 }
 
+export type RatlsConfig = {
+  proxyUrl: string
+  targetHost: string
+  serverName: string
+}
+
+type AiMessage = {
+  role: "system" | "user" | "assistant"
+  content: string
+}
+
 const defaultProviderApiBase = optionalEnv(process.env.NEXT_PUBLIC_VLLM_BASE_URL)
 const defaultModel = optionalEnv(process.env.NEXT_PUBLIC_VLLM_MODEL)
 const defaultProviderName = optionalEnv(process.env.NEXT_PUBLIC_VLLM_PROVIDER_NAME)
 const defaultSystemPrompt = optionalEnv(process.env.NEXT_PUBLIC_DEFAULT_SYSTEM_PROMPT) ?? systemPrompt
 const defaultMaxTokens = parseNumber(process.env.NEXT_PUBLIC_DEFAULT_MAX_TOKENS, 4098)
 const defaultTemperature = parseNumber(process.env.NEXT_PUBLIC_DEFAULT_TEMPERATURE, 0.7)
+const ratlsProxyUrl = optionalEnv(process.env.NEXT_PUBLIC_RATLS_PROXY_URL)
+const ratlsTarget = optionalEnv(process.env.NEXT_PUBLIC_RATLS_TARGET)
+const ratlsServerName = optionalEnv(process.env.NEXT_PUBLIC_RATLS_SERVER_NAME)
+const defaultProviderToken = optionalEnv(process.env.NEXT_PUBLIC_CONFIDENTIAL_PROVIDER_TOKEN)
 
 export const confidentialChatConfig = {
   providerApiBase: defaultProviderApiBase,
@@ -124,36 +124,120 @@ export async function* streamConfidentialChat(
   const maxTokens = typeof payload.max_tokens === "number" ? payload.max_tokens : resolved.maxTokens
   const stream = payload.stream !== false
 
-  const requestBody: Record<string, unknown> = {
+  const ratlsConfig = resolveRatlsConfig(resolved.baseUrl)
+  if (!ratlsConfig) {
+    yield {
+      type: "error",
+      error:
+        "RA-TLS proxy configuration is missing or insecure. Set NEXT_PUBLIC_RATLS_PROXY_URL (wss:// in production) and NEXT_PUBLIC_RATLS_TARGET (or provide a provider URL that includes host:port).",
+    }
+    return
+  }
+
+  const aiMessages = sanitizedMessages.map((message) => ({ role: message.role, content: message.content }))
+  for await (const chunk of streamWithRatlsAiSdk({
+    messages: aiMessages,
     model,
-    messages: sanitizedMessages,
     temperature,
-    max_tokens: maxTokens,
+    maxTokens,
     stream,
+    cacheSalt: payload.cache_salt,
+    reasoningEffort: payload.reasoning_effort,
+    providerApiKey: resolved.apiKey,
+    providerBaseUrl: resolved.baseUrl,
+    ratlsConfig,
+    signal: options.signal,
+  })) {
+    yield chunk
   }
+}
 
-  if (payload.reasoning_effort) {
-    requestBody.reasoning_effort = payload.reasoning_effort
-  }
-  if (payload.cache_salt) {
-    requestBody.cache_salt = payload.cache_salt
-  }
+export function getRatlsConfig(providerBaseUrl?: string | null): RatlsConfig | null {
+  return resolveRatlsConfig(providerBaseUrl)
+}
 
-  const endpoint = `${resolved.baseUrl}/v1/chat/completions`
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-  }
-  if (resolved.apiKey) {
-    headers.Authorization = `Bearer ${resolved.apiKey}`
-  }
+export function buildRatlsProxyUrl(config: RatlsConfig): string {
+  const url = new URL(config.proxyUrl)
+  url.searchParams.set("target", config.targetHost)
+  return url.toString()
+}
 
+type RatlsStreamOptions = {
+  messages: AiMessage[]
+  model: string
+  temperature: number
+  maxTokens: number
+  stream: boolean
+  cacheSalt?: string
+  reasoningEffort?: ConfidentialChatPayload["reasoning_effort"]
+  providerApiKey?: string
+  providerBaseUrl?: string
+  ratlsConfig: RatlsConfig
+  signal?: AbortSignal
+}
+
+async function* streamWithRatlsAiSdk({
+  messages,
+  model,
+  temperature,
+  maxTokens,
+  stream,
+  cacheSalt,
+  reasoningEffort,
+  providerApiKey,
+  providerBaseUrl,
+  ratlsConfig,
+  signal,
+}: RatlsStreamOptions): AsyncGenerator<ConfidentialChatStreamChunk, void, unknown> {
   try {
-    const response = await fetch(endpoint, {
+    const [{ createRatlsFetch }] = await Promise.all([
+      import("../ratls/wasm/pkg/ratls-fetch.js"),
+    ])
+
+    const baseFetch = createRatlsFetch({
+      proxyUrl: ratlsConfig.proxyUrl,
+      targetHost: ratlsConfig.targetHost,
+      serverName: ratlsConfig.serverName,
+      defaultHeaders: providerApiKey ? { Authorization: `Bearer ${providerApiKey}` } : undefined,
+    })
+    const ratlsFetch = wrapFetchWithMiddleware(baseFetch, cacheSalt)
+
+    const apiBase = appendDefaultApiPath(providerBaseUrl ?? `https://${ratlsConfig.serverName}`)
+    if (process.env.NEXT_PUBLIC_DEBUG_RATLS_FETCH === "true") {
+      console.debug("[confidential-chat] streaming via RA-TLS", {
+        baseURL: apiBase,
+        model,
+        target: ratlsConfig.targetHost,
+        proxy: ratlsConfig.proxyUrl,
+        sni: ratlsConfig.serverName,
+        hasApiKey: Boolean(providerApiKey),
+      })
+    }
+
+    const endpoint = `${apiBase}/chat/completions`
+    const body: Record<string, unknown> = {
+      model,
+      messages,
+      temperature,
+      max_tokens: maxTokens,
+      stream,
+    }
+    if (cacheSalt) {
+      body.cache_salt = cacheSalt
+    }
+    if (reasoningEffort) {
+      body.reasoning_effort = reasoningEffort
+    }
+
+    const response = await ratlsFetch(endpoint, {
       method: "POST",
-      headers,
-      body: JSON.stringify(requestBody),
+      headers: {
+        "Content-Type": "application/json",
+        ...(providerApiKey ? { Authorization: `Bearer ${providerApiKey}` } : {}),
+      },
+      body: JSON.stringify(body),
       cache: "no-store",
-      signal: options.signal,
+      signal,
     })
 
     if (!response.ok) {
@@ -163,13 +247,15 @@ export async function* streamConfidentialChat(
     }
 
     if (!stream) {
-      const payloadJson = (await response.json()) as ProviderResponse
-      const result = parseNonStreamingResponse(payloadJson)
+      const payloadJson = (await response.json()) as any
+      const choice = payloadJson?.choices?.[0]
+      const content = extractText(choice?.message?.content) ?? ""
+      const finishReason = choice?.finish_reason ?? undefined
       yield {
         type: "done",
-        content: result.message,
-        reasoning_content: result.reasoning_content,
-        finish_reason: result.finish_reason,
+        content,
+        reasoning_content: extractReasoning(choice?.message?.reasoning_content ?? choice?.message?.reasoning) || undefined,
+        finish_reason: finishReason,
       }
       return
     }
@@ -180,28 +266,15 @@ export async function* streamConfidentialChat(
       return
     }
 
-    for await (const chunk of readStreamingResponse(reader)) {
-      yield chunk
-    }
-  } catch (error) {
-    const rawMessage = extractErrorMessage(error)
-    const interpreted = interpretProviderError(rawMessage)
-    yield { type: "error", error: interpreted?.message ?? rawMessage }
-  }
-}
+    let accumulatedContent = ""
+    let accumulatedReasoning = ""
+    let finishReason: string | undefined
 
-async function* readStreamingResponse(
-  reader: ReadableStreamDefaultReader<Uint8Array>
-): AsyncGenerator<ConfidentialChatStreamChunk, void, unknown> {
-  const decoder = new TextDecoder()
-  let buffer = ""
-  let accumulatedContent = ""
-  let accumulatedReasoning = ""
-  let finishReason: string | undefined
+    const decoder = new TextDecoder()
+    let buffer = ""
 
-  try {
     while (true) {
-      const { value, done } = await reader.read()
+      const { done, value } = await reader.read()
       buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done })
 
       let newlineIndex = buffer.indexOf("\n")
@@ -209,67 +282,38 @@ async function* readStreamingResponse(
         const rawLine = buffer.slice(0, newlineIndex).trim()
         buffer = buffer.slice(newlineIndex + 1)
 
-        if (!rawLine || rawLine.startsWith(":")) {
-          newlineIndex = buffer.indexOf("\n")
-          continue
-        }
-
-        if (!rawLine.startsWith("data:")) {
-          newlineIndex = buffer.indexOf("\n")
-          continue
-        }
-
-        const data = rawLine.slice(5).trim()
-        if (!data) {
-          newlineIndex = buffer.indexOf("\n")
-          continue
-        }
-
-        if (data === "[DONE]") {
-          yield {
-            type: "done",
-            content: accumulatedContent,
-            reasoning_content: accumulatedReasoning || undefined,
-            finish_reason: finishReason,
+        if (rawLine.startsWith("data:")) {
+          const data = rawLine.slice(5).trim()
+          if (data === "[DONE]") {
+            yield {
+              type: "done",
+              content: accumulatedContent,
+              finish_reason: finishReason,
+            }
+            return
           }
-          return
-        }
-
-        try {
-          const parsed = JSON.parse(data) as ProviderResponse
-          const choice = parsed.choices?.[0]
-          if (!choice) {
-            newlineIndex = buffer.indexOf("\n")
-            continue
+          try {
+            const parsed = JSON.parse(data) as any
+            const choice = parsed?.choices?.[0]
+            if (choice?.finish_reason && !finishReason) {
+              finishReason = choice.finish_reason
+            }
+            const delta = extractText(choice?.delta?.content)
+            const reasoningDelta = extractReasoning(choice?.delta?.reasoning_content ?? choice?.delta?.reasoning)
+            if (delta) {
+              accumulatedContent += delta
+              yield { type: "delta", content: delta }
+            }
+            if (reasoningDelta) {
+              accumulatedReasoning += reasoningDelta
+              yield { type: "reasoning_delta", reasoning_content: reasoningDelta }
+            }
+          } catch (err) {
+            const rawMessage = extractErrorMessage(err)
+            const interpreted = interpretProviderError(rawMessage)
+            yield { type: "error", error: interpreted?.message ?? rawMessage }
+            return
           }
-
-          if (choice.finish_reason && !finishReason) {
-            finishReason = choice.finish_reason
-          }
-
-          const deltaContent = extractContentDelta(choice.delta?.content)
-          const messageContent = extractContentDelta(choice.message?.content)
-          const reasoningDelta = extractReasoningDelta(choice.delta)
-          const reasoningMessageFull = normalizeReasoning(choice.message?.reasoning_content)
-
-          const contentPiece = deltaContent || computeRemainder(messageContent, accumulatedContent)
-          const reasoningPiece = reasoningDelta || computeRemainder(reasoningMessageFull, accumulatedReasoning)
-
-          if (contentPiece) {
-            accumulatedContent += contentPiece
-            yield { type: "delta", content: contentPiece }
-          }
-
-          if (reasoningPiece) {
-            accumulatedReasoning += reasoningPiece
-            yield { type: "reasoning_delta", reasoning_content: reasoningPiece }
-          }
-        } catch (error) {
-          console.error("Failed to parse stream line", data, error)
-          const rawMessage = extractErrorMessage(error)
-          const interpreted = interpretProviderError(rawMessage)
-          yield { type: "error", error: interpreted?.message ?? rawMessage }
-          return
         }
 
         newlineIndex = buffer.indexOf("\n")
@@ -280,68 +324,214 @@ async function* readStreamingResponse(
       }
     }
 
-    const remaining = buffer.trim()
-    if (remaining.startsWith("data:")) {
-      const data = remaining.slice(5).trim()
-      if (data === "[DONE]") {
-        yield {
-          type: "done",
-          content: accumulatedContent,
-          reasoning_content: accumulatedReasoning || undefined,
-          finish_reason: finishReason,
-        }
-        return
-      }
-
-      try {
-        const parsed = JSON.parse(data) as ProviderResponse
-        const choice = parsed.choices?.[0]
-        if (choice) {
-          if (choice.finish_reason && !finishReason) {
-            finishReason = choice.finish_reason
-          }
-
-          const deltaContent = extractContentDelta(choice.delta?.content)
-          const messageContent = extractContentDelta(choice.message?.content)
-          const reasoningDelta = extractReasoningDelta(choice.delta)
-          const reasoningMessageFull = normalizeReasoning(choice.message?.reasoning_content)
-
-          const contentPiece = deltaContent || computeRemainder(messageContent, accumulatedContent)
-          const reasoningPiece = reasoningDelta || computeRemainder(reasoningMessageFull, accumulatedReasoning)
-
-          if (contentPiece) {
-            accumulatedContent += contentPiece
-            yield { type: "delta", content: contentPiece }
-          }
-
-          if (reasoningPiece) {
-            accumulatedReasoning += reasoningPiece
-            yield { type: "reasoning_delta", reasoning_content: reasoningPiece }
-          }
-        }
-      } catch (error) {
-        console.error("Failed to parse trailing stream line", data, error)
-        const rawMessage = extractErrorMessage(error)
-        const interpreted = interpretProviderError(rawMessage)
-        yield { type: "error", error: interpreted?.message ?? rawMessage }
-        return
-      }
-    }
-
     yield {
       type: "done",
       content: accumulatedContent,
       reasoning_content: accumulatedReasoning || undefined,
       finish_reason: finishReason,
     }
-  } finally {
-    reader.releaseLock()
+  } catch (error) {
+    if (process.env.NEXT_PUBLIC_DEBUG_RATLS_FETCH === "true") {
+      console.error("[confidential-chat] RA-TLS stream failed", {
+        target: ratlsConfig.targetHost,
+        proxy: ratlsConfig.proxyUrl,
+        sni: ratlsConfig.serverName,
+        baseURL: providerBaseUrl ?? `https://${ratlsConfig.serverName}`,
+        error,
+      })
+    }
+    const rawMessage = extractErrorMessage(error)
+    const interpreted = interpretProviderError(rawMessage)
+    yield { type: "error", error: interpreted?.message ?? rawMessage }
+  }
+}
+
+function resolveRatlsConfig(providerBaseUrl?: string | null): RatlsConfig | null {
+  const proxyUrl = normalizeRatlsProxy(ratlsProxyUrl)
+  if (!proxyUrl) {
+    return null
+  }
+
+  const targetHost = normalizeRatlsTarget(ratlsTarget ?? providerBaseUrl)
+  if (!targetHost) {
+    return null
+  }
+
+  const serverName = ratlsServerName ?? hostFromTarget(targetHost)
+  return {
+    proxyUrl,
+    targetHost,
+    serverName,
+  }
+}
+
+function normalizeRatlsProxy(raw?: string | null): string | null {
+  if (!raw) return null
+  const trimmed = raw.trim()
+  if (!trimmed) return null
+  const candidate = /^wss?:\/\//i.test(trimmed) ? trimmed : `ws://${trimmed.replace(/^\/+/, "")}`
+
+  try {
+    const url = new URL(candidate)
+    const isProd = process.env.NODE_ENV === "production"
+    if (isProd && url.protocol !== "wss:" && !isLoopbackHostname(url.hostname)) {
+      return null
+    }
+    return url.toString()
+  } catch {
+    return null
+  }
+}
+
+function normalizeRatlsTarget(raw?: string | null): string | null {
+  if (!raw) return null
+  const trimmed = raw.trim()
+  if (!trimmed) return null
+
+  const hasProtocol = /^[a-zA-Z][a-zA-Z\d+\-.]*:\/\//.test(trimmed)
+  if (hasProtocol) {
+    try {
+      const url = new URL(trimmed)
+      const port = url.port || "443"
+      return `${url.hostname}:${port}`
+    } catch {
+      return null
+    }
+  }
+
+  const withoutPrefix = trimmed.replace(/^\/+/, "")
+  const hostPort = withoutPrefix.split(/[/?#]/)[0] ?? ""
+  if (!hostPort) return null
+  const [host, port] = hostPort.split(":")
+  const normalizedHost = host?.trim()
+  if (!normalizedHost) return null
+  const normalizedPort = (port && port.trim()) || "443"
+  return `${normalizedHost}:${normalizedPort}`
+}
+
+function hostFromTarget(target: string): string {
+  const [host] = target.split(":")
+  return host || target
+}
+
+function isDebugEnabled(): boolean {
+  try {
+    if (process?.env?.NEXT_PUBLIC_DEBUG_RATLS_FETCH === "true") return true
+    if (typeof localStorage !== "undefined" && localStorage.getItem("DEBUG_RATLS_FETCH") === "1") return true
+    if (typeof window !== "undefined" && (window as unknown as Record<string, unknown>).DEBUG_RATLS_FETCH === true) return true
+  } catch {
+    // ignore
+  }
+  return false
+}
+
+/**
+ * Wraps the RA-TLS fetch with a middleware layer to sanitise requests.
+ * - Maps 'developer' role back to 'system'.
+ * - Flattens structured assistant content arrays into plain strings.
+ * - Injects cache_salt if provided.
+ * - Handles both URL strings and Request objects (cloning bodies safely).
+ */
+function wrapFetchWithMiddleware(fetchImpl: typeof fetch, cacheSalt?: string): typeof fetch {
+  return async (input: RequestInfo | URL, init?: RequestInit) => {
+    let request: Request
+    try {
+      request = input instanceof Request ? input.clone() : new Request(input, init)
+    } catch {
+      return fetchImpl(input, init)
+    }
+
+    // No body to sanitize
+    if (!request.body && !init?.body) {
+      return fetchImpl(input, init)
+    }
+
+    let bodyText: string
+    try {
+      bodyText = await request.text()
+    } catch {
+      return fetchImpl(input, init)
+    }
+
+    if (!bodyText) {
+      return fetchImpl(input, init)
+    }
+
+    let parsed: any
+    try {
+      parsed = JSON.parse(bodyText)
+    } catch {
+      return fetchImpl(input, init)
+    }
+
+    let modified = false
+    const debug = isDebugEnabled()
+
+    if (parsed && typeof parsed === "object" && Array.isArray(parsed.messages)) {
+      parsed.messages = parsed.messages.map((msg: any) => {
+        let nextMsg = msg
+        if (nextMsg?.role === "developer") {
+          nextMsg = { ...nextMsg, role: "system" }
+          modified = true
+        }
+        if (nextMsg?.role === "assistant" && Array.isArray(nextMsg.content)) {
+          const textParts = nextMsg.content.filter((p: any) => p?.type === "output_text" || p?.type === "text")
+          if (textParts.length > 0) {
+            const flattened = textParts.map((p: any) => (typeof p.text === "string" ? p.text : "")).join("")
+            nextMsg = { ...nextMsg, content: flattened }
+            modified = true
+          }
+        }
+        return nextMsg
+      })
+    }
+
+    if (cacheSalt && parsed && typeof parsed === "object" && !("cache_salt" in parsed)) {
+        parsed = { ...parsed, cache_salt: cacheSalt }
+        modified = true
+    }
+
+    if (!modified) {
+      if (debug) {
+        console.debug("[ratls-middleware] passthrough request", { url: request.url })
+      }
+      return fetchImpl(input, init)
+    }
+
+    const newHeaders = new Headers(request.headers)
+    if (init?.headers) {
+      new Headers(init.headers).forEach((value, key) => newHeaders.set(key, value))
+    }
+    if (!newHeaders.has("Content-Type")) {
+      newHeaders.set("Content-Type", "application/json")
+    }
+
+    const nextInit: RequestInit = {
+      ...(init || {}),
+      method: request.method,
+      headers: newHeaders,
+      body: JSON.stringify(parsed),
+      signal: request.signal || init?.signal,
+    }
+
+    if (debug) {
+      try {
+        console.debug("[ratls-middleware] sanitized request", {
+          url: request.url,
+          body: parsed,
+        })
+      } catch {
+        // ignore logging errors
+      }
+    }
+
+    return fetchImpl(request.url, nextInit)
   }
 }
 
 function resolveProviderConfig(provider?: ConfidentialChatProviderConfig): ResolvedProviderConfig {
   const baseUrl = normalizeBaseUrl(provider?.baseUrl ?? defaultProviderApiBase)
-  const apiKey = optionalEnv(provider?.apiKey)
+  const apiKey = optionalEnv(provider?.apiKey) ?? defaultProviderToken ?? "placeholder-token"
   const model = defaultModel
   const resolvedSystemPrompt = optionalEnv(provider?.systemPrompt) ?? defaultSystemPrompt
   const temperature = defaultTemperature
@@ -354,51 +544,6 @@ function resolveProviderConfig(provider?: ConfidentialChatProviderConfig): Resol
     systemPrompt: resolvedSystemPrompt,
     temperature,
     maxTokens,
-  }
-}
-
-function parseNonStreamingResponse(payload: ProviderResponse) {
-  const first = payload.choices?.[0]
-  const message =
-    first?.message?.content ??
-    getProviderResponseText(payload) ??
-    JSON.stringify(payload)
-  const reasoningContent = extractReasoningFromChoice(first) ?? undefined
-  const finishReason = first?.finish_reason ?? undefined
-
-  return {
-    message,
-    reasoning_content: reasoningContent,
-    finish_reason: finishReason,
-  }
-}
-
-async function readProviderError(response: Response): Promise<string> {
-  let text = ""
-  try {
-    text = await response.text()
-  } catch (error) {
-    console.error("Failed to read provider error response", error)
-  }
-
-  const fallback = response.statusText || `Provider returned ${response.status}`
-
-  if (!text) {
-    return fallback
-  }
-
-  try {
-    const parsed = JSON.parse(text) as unknown
-    const rawMessage = extractErrorMessage(parsed)
-    const interpreted = interpretProviderError(rawMessage)
-    return interpreted?.message ?? rawMessage
-  } catch {
-    const trimmed = text.trim()
-    if (!trimmed) {
-      return fallback
-    }
-    const interpreted = interpretProviderError(trimmed)
-    return interpreted?.message ?? trimmed
   }
 }
 
@@ -427,102 +572,6 @@ function ensureSystemMessage(messages: Message[], providedPrompt: string): Messa
     return messages
   }
   return [{ role: "system", content: providedPrompt }, ...messages]
-}
-
-function getProviderResponseText(payload: ProviderResponse): string | null {
-  if (!payload) {
-    return null
-  }
-
-  if (typeof payload.message === "string" && payload.message.trim().length > 0) {
-    return payload.message.trim()
-  }
-
-  if (typeof payload.reply === "string" && payload.reply.trim().length > 0) {
-    return payload.reply.trim()
-  }
-
-  if (typeof payload.content === "string" && payload.content.trim().length > 0) {
-    return payload.content.trim()
-  }
-
-  const firstChoice = payload.choices?.[0]
-  if (firstChoice?.message?.content) {
-    return firstChoice.message.content.trim()
-  }
-
-  if (firstChoice?.text) {
-    return firstChoice.text.trim()
-  }
-
-  if (firstChoice?.delta?.content) {
-    return firstChoice.delta.content.trim()
-  }
-
-  return null
-}
-
-function extractContentDelta(content: unknown): string {
-  if (!content) return ""
-  if (typeof content === "string") return content
-  if (Array.isArray(content)) {
-    return content
-      .map((part) => {
-        if (!part) return ""
-        if (typeof part === "string") return part
-        if (typeof part === "object" && typeof (part as { text?: string }).text === "string") {
-          return (part as { text: string }).text
-        }
-        return ""
-      })
-      .join("")
-  }
-  if (typeof content === "object" && typeof (content as { text?: string }).text === "string") {
-    return (content as { text: string }).text
-  }
-  return ""
-}
-
-function normalizeReasoning(value: unknown): string {
-  if (!value) return ""
-  if (typeof value === "string") return value
-  if (Array.isArray(value)) {
-    return value.map((item) => normalizeReasoning(item)).join("")
-  }
-  if (typeof value === "object") {
-    const typed = value as Record<string, unknown>
-    if (typeof typed.text === "string") return typed.text
-    if (typeof typed.reasoning === "string") return typed.reasoning
-    if (Array.isArray(typed.content)) return typed.content.map((item) => normalizeReasoning(item)).join("")
-    if (typeof typed.content === "string") return typed.content
-    if (typeof typed.output_text === "string") return typed.output_text
-  }
-  return ""
-}
-
-function extractReasoningDelta(delta: unknown): string {
-  if (!delta || typeof delta !== "object") return ""
-  const typed = delta as Record<string, unknown>
-  const reasoningSource = typed.reasoning_content ?? typed.reasoning
-  return normalizeReasoning(reasoningSource)
-}
-
-function computeRemainder(full: string, seen: string): string {
-  if (!full) return ""
-  if (!seen) return full
-  if (full.startsWith(seen)) {
-    return full.slice(seen.length)
-  }
-  return full
-}
-
-function extractReasoningFromChoice(choice?: ProviderResponseChoice): string | null {
-  if (!choice) return null
-  const fromMessage = normalizeReasoning(choice.message?.reasoning_content)
-  if (fromMessage) return fromMessage
-  const fromChoice = normalizeReasoning((choice as unknown as Record<string, unknown>)?.reasoning_content)
-  if (fromChoice) return fromChoice
-  return null
 }
 
 function extractErrorMessage(error: unknown): string {
@@ -661,6 +710,19 @@ function isLoopbackHostname(host: string) {
   return h === 'localhost' || h === '::1' || h === '0.0.0.0' || h.startsWith('127.')
 }
 
+function appendDefaultApiPath(baseUrl: string): string {
+  try {
+    const url = new URL(baseUrl)
+    if (url.pathname === "/" || url.pathname === "") {
+      url.pathname = "/v1"
+    }
+    url.hash = ""
+    return stripTrailingSlash(url.toString())
+  } catch {
+    return stripTrailingSlash(baseUrl.endsWith("/v1") ? baseUrl : `${stripTrailingSlash(baseUrl)}/v1`)
+  }
+}
+
 function isSecureProviderUrl(value: string): boolean {
   try {
     const url = new URL(value)
@@ -670,4 +732,49 @@ function isSecureProviderUrl(value: string): boolean {
   } catch {
     return false
   }
+}
+
+function extractText(content: unknown): string {
+  if (!content) return ""
+  if (typeof content === "string") return content
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => {
+        if (!part) return ""
+        if (typeof part === "string") return part
+        if (typeof part === "object" && typeof (part as { text?: string }).text === "string") {
+          return (part as { text: string }).text
+        }
+        return ""
+      })
+      .join("")
+  }
+  if (typeof content === "object" && typeof (content as { text?: string }).text === "string") {
+    return (content as { text: string }).text
+  }
+  return ""
+}
+
+function extractReasoning(value: unknown): string {
+  if (!value) return ""
+  if (typeof value === "string") return value
+  if (Array.isArray(value)) {
+    return value
+      .map((part) => {
+        if (!part) return ""
+        if (typeof part === "string") return part
+        if (typeof part === "object" && typeof (part as { text?: string }).text === "string") {
+          return (part as { text: string }).text
+        }
+        return ""
+      })
+      .join("")
+  }
+  if (typeof value === "object") {
+    const typed = value as Record<string, unknown>
+    if (typeof typed.text === "string") return typed.text
+    if (Array.isArray(typed.content)) return extractReasoning(typed.content)
+    if (typeof typed.content === "string") return typed.content
+  }
+  return ""
 }

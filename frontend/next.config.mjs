@@ -18,14 +18,60 @@ const nextConfig = {
   },
   async headers() {
     const isProd = process.env.NODE_ENV === 'production'
+    const ratlsProxyOrigin = deriveConnectOrigin(process.env.NEXT_PUBLIC_RATLS_PROXY_URL)
 
     // Content-Security-Policy
-    // - In dev we allow inline/eval + localhost for Next.js tooling.
-    // - In prod we disallow eval but allow wasm-unsafe-eval for WebAssembly (required by @phala/dcap-qvl-web)
+    // - In dev we allow inline/eval + localhost for Next.js tooling and add the RA-TLS proxy origin if set.
+    // - In prod we disallow eval but allow wasm-unsafe-eval for WebAssembly (required by ratls-wasm)
     //   and only allow HTTPS/WSS connects (plus Supabase) to reduce exfil paths.
     // - Allow Vercel Live for preview deployments and Next.js inline scripts
-    const devCsp = "default-src 'self'; script-src 'self' 'unsafe-eval' 'unsafe-inline'; connect-src 'self' https://*.supabase.co wss://*.supabase.co http://localhost:3000 ws://localhost:3000 https: wss:; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; font-src 'self'; frame-ancestors 'self'; base-uri 'self'; form-action 'self'; object-src 'none';";
-    const prodCsp = "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' https://vercel.live; connect-src 'self' https://*.supabase.co wss://*.supabase.co https://*.trustedservices.intel.com https://*.intel.com https://pccs.phala.network https://*.concrete-security.com wss://*.concrete-security.com https://vercel.live wss://vercel.live; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'; upgrade-insecure-requests";
+    const devConnectSrc = [
+      "'self'",
+      "https://*.supabase.co",
+      "wss://*.supabase.co",
+      "http://localhost:3000",
+      "ws://localhost:3000",
+      "http://127.0.0.1:3000",
+      "ws://127.0.0.1:3000",
+      "https:",
+      "wss:",
+      ...(ratlsProxyOrigin ? [ratlsProxyOrigin] : []),
+    ].join(" ")
+    const devCsp = [
+      "default-src 'self'",
+      "script-src 'self' 'unsafe-eval' 'unsafe-inline'",
+      `connect-src ${devConnectSrc}`,
+      "img-src 'self' blob: data:",
+      "style-src 'self' 'unsafe-inline'",
+      "font-src 'self'",
+      "frame-ancestors 'self'",
+      "base-uri 'self'",
+      "form-action 'self'",
+      "object-src 'none'",
+    ].join("; ") + ";"
+    const prodConnectSrc = [
+      "'self'",
+      "https://*.supabase.co",
+      "wss://*.supabase.co",
+      "https://*.concrete-security.com",
+      "wss://*.concrete-security.com",
+      "https://vercel.live",
+      "wss://vercel.live",
+      ...(ratlsProxyOrigin ? [ratlsProxyOrigin] : []),
+    ].join(" ")
+    const prodCsp = [
+      "default-src 'self'",
+      "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' https://vercel.live",
+      `connect-src ${prodConnectSrc}`,
+      "img-src 'self' blob: data:",
+      "style-src 'self' 'unsafe-inline'",
+      "font-src 'self'",
+      "frame-ancestors 'none'",
+      "base-uri 'self'",
+      "form-action 'self'",
+      "object-src 'none'",
+      "upgrade-insecure-requests",
+    ].join("; ") + ";"
 
     // Common security headers
     const commonSecurityHeaders = [
@@ -57,3 +103,16 @@ const nextConfig = {
 }
 
 export default nextConfig
+
+function deriveConnectOrigin(rawUrl) {
+  if (!rawUrl) return null
+  const trimmed = rawUrl.trim()
+  if (!trimmed) return null
+  const candidate = /^[a-zA-Z][a-zA-Z\d+\-.]*:\/\//.test(trimmed) ? trimmed : `wss://${trimmed.replace(/^\/+/, "")}`
+  try {
+    const url = new URL(candidate)
+    return `${url.protocol}//${url.host}`
+  } catch {
+    return null
+  }
+}
