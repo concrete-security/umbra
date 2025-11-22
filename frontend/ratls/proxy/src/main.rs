@@ -2,6 +2,7 @@
 //! Accepts binary WebSocket connections and pipes bytes to a configured TCP target.
 
 use futures_util::{SinkExt, StreamExt};
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -11,10 +12,28 @@ use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 use tokio_tungstenite::tungstenite::Message;
 use url::form_urlencoded;
 
+fn parse_allowlist(env_var: &str) -> HashSet<String> {
+    std::env::var(env_var)
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+fn is_target_allowed(target: &str, allowlist: &HashSet<String>) -> bool {
+    allowlist.contains(target)
+}
+
 async fn handle_ws(
     ws_stream: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
     target: String,
+    allowlist: Arc<HashSet<String>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if !is_target_allowed(&target, &allowlist) {
+        eprintln!("Proxy: target {} is not in allowlist", target);
+        return Err(format!("Target {} is not authorized", target).into());
+    }
     let ws = ws_stream;
     println!("Proxy: connecting to target {}", target);
     let tcp = match TcpStream::connect(target.as_str()).await {
@@ -75,16 +94,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         std::env::var("RATLS_PROXY_LISTEN").unwrap_or_else(|_| "127.0.0.1:9000".to_string());
     let target =
         std::env::var("RATLS_PROXY_TARGET").unwrap_or_else(|_| "127.0.0.1:8443".to_string());
+    
+    let allowlist = Arc::new(parse_allowlist("RATLS_PROXY_ALLOWLIST"));
+    if allowlist.is_empty() {
+        eprintln!("WARNING: RATLS_PROXY_ALLOWLIST is empty or not set. All targets will be rejected.");
+    } else {
+        eprintln!("Allowlist contains {} authorized target(s)", allowlist.len());
+    }
+    
+    if !is_target_allowed(&target, &allowlist) {
+        eprintln!("ERROR: Default target {} is not in allowlist", target);
+        return Err(format!("Default target {} is not authorized", target).into());
+    }
+    
     let listener = TcpListener::bind(&listen_addr).await?;
     eprintln!("ratls-proxy listening on {listen_addr}, default target {target}");
 
     loop {
         let (stream, peer) = listener.accept().await?;
         let default_target = target.clone();
+        let allowlist_clone = allowlist.clone();
         tokio::spawn(async move {
             let shared_target = Arc::new(Mutex::new(default_target.clone()));
             let capture = shared_target.clone();
-            let ws_stream =
+            let mut ws_stream =
                 match accept_hdr_async(stream, move |req: &Request, response: Response| {
                     if let Some(tgt) = extract_target(req) {
                         eprintln!("Connection from {} requested target: {}", peer, tgt);
@@ -109,7 +142,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 .lock()
                 .map(|guard| guard.clone())
                 .unwrap_or(default_target);
-            if let Err(e) = handle_ws(ws_stream, final_target.clone()).await {
+            
+            if !is_target_allowed(&final_target, &allowlist_clone) {
+                eprintln!("Connection from {} rejected: target {} is not authorized", peer, final_target);
+                let _ = ws_stream.close(None).await;
+                return;
+            }
+            
+            if let Err(e) = handle_ws(ws_stream, final_target.clone(), allowlist_clone).await {
                 eprintln!(
                     "pipe error for target {} from {}: {}",
                     final_target, peer, e
