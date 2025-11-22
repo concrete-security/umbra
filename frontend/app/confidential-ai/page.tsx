@@ -17,6 +17,7 @@ import {
   Paperclip,
   FileText,
   X,
+  AlertTriangle,
   Sparkles,
   Save,
   MessageSquarePlus,
@@ -29,15 +30,20 @@ import {
   Circle,
   UserCircle2,
   ChevronDown,
+  ExternalLink,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion"
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { FeedbackButton } from "@/components/feedback-button"
-import { streamConfidentialChat, confidentialChatConfig } from "@/lib/confidential-chat"
-import { getAttestationServiceBaseUrl, isTdxQuoteSuccess, fetchTdxQuoteWithFallback, type TdxQuoteSuccessResponse } from "@/lib/attestation"
-import { compareReportData, normalizeHex, verifyTdxQuoteWithFallback } from "@/lib/attestation-verifier"
+import {
+  streamConfidentialChat,
+  confidentialChatConfig,
+  getRatlsConfig,
+  buildRatlsProxyUrl,
+  type RatlsConfig,
+} from "@/lib/confidential-chat"
 import { Markdown } from "@/components/markdown"
 import { cn } from "@/lib/utils"
 import { createSupabaseBrowserClient } from "@/lib/supabase/client"
@@ -63,18 +69,20 @@ type StoredProviderSettings = {
   baseUrl?: string
 }
 
+type RatlsAttestation = {
+  trusted: boolean
+  teeType: string
+  measurement?: string | null
+  tcbStatus: string
+  advisoryIds: string[]
+}
+
 type ProofState =
   | { status: "idle" }
-  | { status: "loading"; reportData: string; sourceBaseUrl: string }
-  | { status: "ready"; reportData: string; payload: TdxQuoteSuccessResponse; fetchedAt: number; sourceBaseUrl: string }
-  | { status: "error"; reportData: string; error: string; sourceBaseUrl: string }
+  | { status: "loading"; source?: string }
+  | { status: "ready"; attestation: RatlsAttestation; fetchedAt: number; source: string }
+  | { status: "error"; error: string }
   | { status: "unavailable"; reason?: string }
-
-type RuntimeSignal = {
-  label: string
-  value: string
-  description?: string
-}
 
 type VerificationState =
   | { status: "idle" }
@@ -82,14 +90,13 @@ type VerificationState =
   | {
       status: "success"
       quoteVerified: boolean
-      reportDataMatches: boolean | null
+      reportDataMatches: boolean
       checksum?: string | null
       quoteHex?: string | null
       statusText?: string | null
-      testMode?: boolean
-      derivedReportData?: string | null
       advisoryIds?: string[]
       isOutOfDate?: boolean
+      attestation?: RatlsAttestation
     }
   | { status: "error"; error: string }
 
@@ -157,28 +164,6 @@ function formatIdentifierSnippet(value: string, maxLength = 40) {
   return truncateMiddle(value, maxLength)
 }
 
-function normalizeAttestationOrigin(value?: string | null): string | null {
-  if (!value) return null
-  const trimmed = value.trim()
-  if (!trimmed) return null
-
-  const candidate = trimmed.includes("://") ? trimmed : `https://${trimmed}`
-
-  try {
-    const url = new URL(candidate)
-    if (url.protocol !== "https:" && !(url.protocol === "http:" && isLoopbackHostname(url.hostname))) {
-      return null
-    }
-    return `${url.protocol}//${url.host}`
-  } catch {
-    return null
-  }
-}
-
-function deriveAttestationOrigin(primary?: string | null, fallback?: string | null) {
-  return normalizeAttestationOrigin(primary) ?? normalizeAttestationOrigin(fallback) ?? null
-}
-
 function getHostLabelFromUrl(value: string | null) {
   if (!value) return null
   try {
@@ -205,15 +190,6 @@ function getReadableError(error: unknown): string {
   return "Unknown error"
 }
 
-function generateReportData(bytes = 32) {
-  if (typeof crypto === "undefined" || typeof crypto.getRandomValues !== "function") {
-    throw new Error("Secure randomness is unavailable in this environment.")
-  }
-  const buffer = new Uint8Array(Math.max(1, bytes))
-  crypto.getRandomValues(buffer)
-  return Array.from(buffer, (value) => value.toString(16).padStart(2, "0")).join("")
-}
-
 function hexStringToUint8Array(value: string): Uint8Array | null {
   if (!value) return null
   const stripped = value.trim().toLowerCase().replace(/^0x/, "")
@@ -233,26 +209,6 @@ function hexStringToUint8Array(value: string): Uint8Array | null {
 
 function bytesToHex(value: Uint8Array) {
   return `0x${Array.from(value, (byte) => byte.toString(16).padStart(2, "0")).join("")}`
-}
-
-async function deriveQuoteChecksum(quoteHex: string): Promise<string | null> {
-  const normalized = normalizeHex(quoteHex)
-  if (!normalized) {
-    return null
-  }
-  const bytes = hexStringToUint8Array(normalized)
-  if (!bytes) {
-    return normalized
-  }
-  try {
-    if (typeof crypto !== "undefined" && typeof crypto.subtle?.digest === "function") {
-      const digest = await crypto.subtle.digest("SHA-256", bytes)
-      return bytesToHex(new Uint8Array(digest))
-    }
-  } catch (error) {
-    console.warn("[Verification] Failed to derive checksum", error)
-  }
-  return normalized
 }
 
 function generateUUID(): string {
@@ -295,24 +251,6 @@ function formatLocalTime(value: number) {
   }
 }
 
-function summarizeQuote(value: unknown, maxLength = 84) {
-  if (value == null) return "—"
-  if (typeof value === "string") {
-    return truncateMiddle(value, maxLength)
-  }
-  try {
-    return truncateMiddle(JSON.stringify(value), maxLength)
-  } catch {
-    return "[unserializable quote payload]"
-  }
-}
-
-function formatReportDataPreview(reportData: string) {
-  if (!reportData) return "—"
-  const candidate = reportData.startsWith("0x") ? reportData : `0x${reportData}`
-  return truncateMiddle(candidate, 56)
-}
-
 function formatHexSnippet(value: string, max = 20) {
   const normalized = value.startsWith("0x") ? value.slice(2) : value
   if (!normalized) return "—"
@@ -323,66 +261,14 @@ function formatHexSnippet(value: string, max = 20) {
   return `0x${normalized.slice(0, slice)}…${normalized.slice(-slice)}`
 }
 
-const runtimeEventDescriptors: Array<{ key: string; label: string; description?: string }> = [
-  { key: "system-preparing", label: "System preparing" },
-  { key: "app-id", label: "App ID", description: "Umbra workload identifier." },
-  { key: "compose-hash", label: "Compose hash", description: "Container stack measurement." },
-  { key: "instance-id", label: "Instance ID", description: "Unique CVM launch identifier." },
-  { key: "mr-kms", label: "KMS measurement", description: "Key provider measurement." },
-  { key: "os-image-hash", label: "OS image hash", description: "Measured OS image." },
-  { key: "system-ready", label: "System ready" },
-]
-
-function extractRuntimeSignalsFromQuote(quote: unknown): RuntimeSignal[] {
-  if (!quote || typeof quote !== "object") {
-    return []
-  }
-  const typed = quote as Record<string, unknown>
-  const rawLog = typed.event_log
-  if (typeof rawLog !== "string" || rawLog.trim().length === 0) {
-    return []
-  }
-
-  try {
-    const parsed = JSON.parse(rawLog)
-    if (!Array.isArray(parsed)) return []
-    const lookup = new Map<string, Record<string, unknown>>()
-    for (const item of parsed) {
-      if (!item || typeof item !== "object") continue
-      const entry = item as Record<string, unknown>
-      const eventName = entry.event
-      if (typeof eventName === "string" && eventName.trim().length > 0) {
-        lookup.set(eventName.toLowerCase(), entry)
-      }
-    }
-
-    const signals: RuntimeSignal[] = []
-    for (const descriptor of runtimeEventDescriptors) {
-      const entry = lookup.get(descriptor.key)
-      if (!entry) continue
-      const payload = typeof entry.event_payload === "string" && entry.event_payload.trim().length > 0 ? entry.event_payload : null
-      const digest = typeof entry.digest === "string" && entry.digest.trim().length > 0 ? entry.digest : null
-      const value = payload ?? digest
-      signals.push({
-        label: descriptor.label,
-        value: value ? formatHexSnippet(value) : "Present",
-        description: descriptor.description,
-      })
-    }
-    return signals
-  } catch {
-    return []
-  }
-}
-
 function ConfidentialAIContent() {
   const envProviderApiBase = normalize(confidentialChatConfig.providerApiBase)
   const envProviderModel = normalize(confidentialChatConfig.providerModel)
   const envProviderName = normalize(confidentialChatConfig.providerName)
-  const attestationBaseUrl = getAttestationServiceBaseUrl()
+  const envProviderToken = process.env.NEXT_PUBLIC_CONFIDENTIAL_PROVIDER_TOKEN ?? ""
 
   const [providerBaseUrlInput, setProviderBaseUrlInput] = useState(() => envProviderApiBase ?? "")
-  const [providerApiKeyInput, setProviderApiKeyInput] = useState("")
+  const [providerApiKeyInput, setProviderApiKeyInput] = useState(envProviderToken)
   const [configError, setConfigError] = useState<string | null>(null)
   const [showAdvancedSettings, setShowAdvancedSettings] = useState(false)
   const [sessionDialogOpen, setSessionDialogOpen] = useState(false)
@@ -404,13 +290,12 @@ function ConfidentialAIContent() {
   const [proofState, setProofState] = useState<ProofState>({ status: "idle" })
   const [verificationState, setVerificationState] = useState<VerificationState>({ status: "idle" })
   const [proofDetailsModalOpen, setProofDetailsModalOpen] = useState(false)
-  const proofAbortRef = useRef<AbortController | null>(null)
 
   const providerApiBase = normalize(providerBaseUrlInput)
-  const derivedAttestationOrigin = useMemo(
-    () => deriveAttestationOrigin(providerApiBase, attestationBaseUrl),
-    [providerApiBase, attestationBaseUrl]
-  )
+  const ratlsConfig = useMemo(() => getRatlsConfig(providerApiBase), [providerApiBase])
+  const derivedAttestationOrigin = useMemo(() => (ratlsConfig ? buildRatlsProxyUrl(ratlsConfig) : null), [ratlsConfig])
+  const ratlsConfigMissingMessage =
+    "RA-TLS is required: set NEXT_PUBLIC_RATLS_PROXY_URL and NEXT_PUBLIC_RATLS_TARGET (optionally NEXT_PUBLIC_RATLS_SERVER_NAME)."
   const providerModel = envProviderModel
   const sanitizedEnvDisplayName = sanitizeDisplayName(envProviderName)
   const sanitizedModelDisplayName = sanitizeDisplayName(providerModel)
@@ -475,11 +360,6 @@ function ConfidentialAIContent() {
       content: buildGreeting(providerModel, assistantName, providerHost),
     },
   ])
-
-  const runtimeSignals = useMemo(() => {
-    if (proofState.status !== "ready") return []
-    return extractRuntimeSignalsFromQuote(proofState.payload.quote)
-  }, [proofState])
 
   const quoteVerified =
     verificationState.status === "success" && verificationState.quoteVerified && verificationState.reportDataMatches === true
@@ -760,174 +640,84 @@ function ConfidentialAIContent() {
     }
   }
 
-  const runQuoteVerification = useCallback(
-    async (quote: TdxQuoteSuccessResponse, expectedReportData: string): Promise<boolean> => {
-      const rawQuote = quote.quote as Record<string, unknown> | undefined
-      const quoteHex = typeof rawQuote?.quote === "string" ? rawQuote.quote : null
-      if (!quoteHex) {
-        console.error("[Verification] Quote payload missing")
-        setVerificationState({ status: "error", error: "Quote payload missing." })
-        return false
-      }
-
-      const attestedReportData =
-        typeof rawQuote?.report_data === "string" && rawQuote.report_data.trim().length > 0
-          ? rawQuote.report_data
-          : expectedReportData
-
-      console.log("[Verification] Starting DCAP verification", {
-        reportData: formatReportDataPreview(attestedReportData),
-        quoteLength: quoteHex.length,
-      })
-      setVerificationState({ status: "running" })
-      try {
-        const forceTestMode = quote.test_mode === true
-        const result = await verifyTdxQuoteWithFallback(quoteHex, { forceTestMode })
-
-        console.log("[Verification] dcap-qvl result:", JSON.stringify(result, null, 2))
-
-        const statusTextRaw =
-          typeof result?.verifiedReport?.status === "string" ? result.verifiedReport.status.trim() : null
-        const statusText = statusTextRaw && statusTextRaw.length > 0 ? statusTextRaw : null
-        const testMode = result?.metadata?.testMode === true
-        const advisoryIds = Array.isArray(result?.verifiedReport?.advisory_ids)
-          ? result.verifiedReport.advisory_ids.filter((id): id is string => typeof id === "string" && id.trim().length > 0)
-          : []
-        const derivedReportData = result?.reportDataHex ?? null
-        const reportDataMatches = testMode ? true : compareReportData(attestedReportData, derivedReportData)
-        const statusLower = statusText?.toLowerCase() ?? ""
-        const isOutOfDate = statusLower === "outofdate"
-        const verificationPassed = testMode ? true : Boolean(statusText && (statusLower === "uptodate" || isOutOfDate))
-        const checksum = await deriveQuoteChecksum(quoteHex)
-
-        console.log("[Verification] Verification completed", {
-          statusText,
-          quoteVerified: verificationPassed,
-          reportDataMatches,
-          checksum: checksum ? formatHexSnippet(checksum) : null,
-          checksumRaw: checksum,
-          testMode,
-          advisoryCount: advisoryIds.length,
-          quoteHexLength: quoteHex.length,
-        })
-
-        setVerificationState({
-          status: "success",
-          quoteVerified: verificationPassed,
-          reportDataMatches,
-          checksum,
-          quoteHex,
-          statusText,
-          testMode,
-          derivedReportData,
-          advisoryIds,
-          isOutOfDate,
-        })
-        return verificationPassed && reportDataMatches === true
-      } catch (error) {
-        console.error("[Verification] Verification error", error)
-        setVerificationState({ status: "error", error: getReadableError(error) })
-        return false
-      }
-    },
-    []
-  )
-
   const refreshProof = useCallback(async () => {
-    const baseUrl = deriveAttestationOrigin(providerApiBase, attestationBaseUrl)
-    if (!baseUrl) {
-      console.warn("[Attestation] Cannot fetch quote: no attestation origin configured")
+    if (!ratlsConfig) {
       setProofState({
         status: "unavailable",
-        reason: "Provide a confidential provider base URL or set NEXT_PUBLIC_ATTESTATION_BASE_URL to fetch quotes.",
+        reason: ratlsConfigMissingMessage,
       })
       setVerificationState({ status: "idle" })
-      return
+      return false
     }
 
-    proofAbortRef.current?.abort()
-    const controller = new AbortController()
-    proofAbortRef.current = controller
+    const proxyUrl = buildRatlsProxyUrl(ratlsConfig)
+    console.log("[Attestation] Running RA-TLS attestation check", { proxyUrl, sni: ratlsConfig.serverName })
+    setProofState({ status: "loading", source: proxyUrl })
+    setVerificationState({ status: "running" })
 
-    let reportData: string
     try {
-      reportData = generateReportData()
+      const [{ default: init, run_attestation_check }] = await Promise.all([
+        import("@/ratls/wasm/pkg/ratls_wasm.js"),
+      ])
+      await init()
+      const attestation = (await run_attestation_check(proxyUrl, ratlsConfig.serverName)) as RatlsAttestation
+      const statusText = attestation.tcbStatus || null
+      const advisoryIds = Array.isArray(attestation.advisoryIds) ? attestation.advisoryIds : []
+      const isOutOfDate = Boolean(statusText && statusText.toLowerCase().includes("outofdate"))
+
+      setProofState({ status: "ready", attestation, fetchedAt: Date.now(), source: proxyUrl })
+      setVerificationState({
+        status: "success",
+        quoteVerified: Boolean(attestation.trusted),
+        reportDataMatches: true,
+        checksum: attestation.measurement ?? null,
+        quoteHex: null,
+        statusText,
+        advisoryIds,
+        isOutOfDate,
+        attestation,
+      })
+      return attestation.trusted
     } catch (error) {
       const readable = getReadableError(error)
-      console.error("[Attestation] Unable to generate report data", error)
-      setProofState({ status: "error", reportData: "", error: readable, sourceBaseUrl: baseUrl })
-      setVerificationState({ status: "idle" })
-      return
+      console.error("[Attestation] RA-TLS attestation failed", error)
+      setProofState({ status: "error", error: readable })
+      setVerificationState({ status: "error", error: readable })
+      return false
     }
-
-    console.log("[Attestation] Starting attestation request", { baseUrl, reportData: formatReportDataPreview(reportData) })
-    setProofState({ status: "loading", reportData, sourceBaseUrl: baseUrl })
-    setVerificationState({ status: "idle" })
-
-    try {
-      const parsed = await fetchTdxQuoteWithFallback(baseUrl, reportData, {
-        signal: controller.signal,
-      })
-
-      console.log("[Attestation] Quote fetched successfully", { 
-        quoteType: parsed.quote_type, 
-        timestamp: parsed.timestamp,
-        sourceBaseUrl: baseUrl 
-      })
-      setProofState({ status: "ready", reportData, payload: parsed, fetchedAt: Date.now(), sourceBaseUrl: baseUrl })
-      const verified = await runQuoteVerification(parsed, reportData)
-      if (!verified) {
-        return
-      }
-    } catch (error) {
-      if ((error as Error)?.name === "AbortError") {
-        console.log("[Attestation] Quote request aborted")
-        return
-      }
-      console.error("[Attestation] Error fetching quote", error)
-      setProofState({ status: "error", reportData, error: getReadableError(error), sourceBaseUrl: baseUrl })
-    }
-  }, [providerApiBase, attestationBaseUrl, runQuoteVerification])
+  }, [ratlsConfig])
 
   const handleProofRefresh = useCallback(async () => {
     await refreshProof()
   }, [refreshProof])
 
-
-    useEffect(() => {
+  useEffect(() => {
     void refreshProof()
-    return () => {
-      proofAbortRef.current?.abort()
-    }
   }, [refreshProof])
 
   const ProofContent = ({
     variant,
     verificationState,
-    runtimeSignals,
     onViewDetails,
   }: {
     variant: "sidebar" | "dialog"
     verificationState: VerificationState
-    runtimeSignals: RuntimeSignal[]
     onViewDetails?: () => void
   }) => {
     const isCompact = variant === "sidebar"
     const badgeBase =
       "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.24em]"
-    const runtimePreview = runtimeSignals.slice(0, 4)
-    const runtimeOverflow = runtimeSignals.length - runtimePreview.length
 
     const activeSourceBaseUrl =
       proofState.status === "ready" || proofState.status === "loading" || proofState.status === "error"
-        ? proofState.sourceBaseUrl
+        ? proofState.source ?? derivedAttestationOrigin
         : derivedAttestationOrigin
 
     const hostLabel = getHostLabelFromUrl(activeSourceBaseUrl) ?? "Umbra CVM attestation endpoint"
 
     const baseConnectionCopy = activeSourceBaseUrl
-      ? `Intel TDX quote fetched from ${hostLabel}.`
-      : "Connect to your Umbra CVM origin to fetch attestation quotes."
+      ? `RA-TLS attestation established via ${hostLabel}.`
+      : "Configure RA-TLS proxy + target to fetch attestation."
     const connectionCopy = baseConnectionCopy
 
     const refreshDisabled =
@@ -984,7 +774,7 @@ function ConfidentialAIContent() {
 
     const checklistItems: Array<{ label: string; description: string; state: ChecklistState }> = [
       {
-        label: "Quote fetched",
+        label: "Attestation check",
         description: connectionCopy,
         state: quoteState,
       },
@@ -1091,11 +881,7 @@ function ConfidentialAIContent() {
                 isCompact ? "text-xs" : "text-sm"
               )}
             >
-              Requesting quote for
-              <span className="ml-1 font-mono text-foreground">
-                {formatReportDataPreview(proofState.reportData)}
-              </span>
-              …
+              Running RA-TLS attestation check…
             </div>
           )
         }
@@ -1105,9 +891,6 @@ function ConfidentialAIContent() {
               <div className="rounded-2xl border border-destructive/40 bg-destructive/10 px-3 py-2 text-destructive">
                 {proofState.error}
               </div>
-              <p className="text-muted-foreground">
-                Challenge: <span className="font-mono text-foreground">{formatReportDataPreview(proofState.reportData)}</span>
-              </p>
             </div>
           )
         case "unavailable":
@@ -1118,7 +901,7 @@ function ConfidentialAIContent() {
                 isCompact ? "text-xs" : "text-sm"
               )}
             >
-              {proofState.reason ?? "Configure NEXT_PUBLIC_ATTESTATION_BASE_URL to enable live quotes."}
+              {proofState.reason ?? ratlsConfigMissingMessage}
             </div>
           )
         case "idle":
@@ -1130,7 +913,7 @@ function ConfidentialAIContent() {
                 isCompact ? "text-xs" : "text-sm"
               )}
             >
-              Preparing attestation challenge…
+              Preparing attestation check…
             </div>
           )
       }
@@ -1145,7 +928,7 @@ function ConfidentialAIContent() {
                 <Cpu className={cn("text-[#102A8C]", isCompact ? "h-4 w-4" : "h-5 w-5")} />
               </div>
               <div className="space-y-1">
-                <p className={cn("font-semibold text-foreground", isCompact ? "text-sm" : "text-base")}>Intel TDX Quote</p>
+                <p className={cn("font-semibold text-foreground", isCompact ? "text-sm" : "text-base")}>RA-TLS Attestation</p>
               </div>
             </div>
             {statusBadge}
@@ -1188,11 +971,9 @@ function ConfidentialAIContent() {
   const ProofDetailsModal = () => {
     if (proofState.status !== "ready") return null
 
-    const issuedAt = formatTimestampLabel(proofState.payload.timestamp)
     const refreshedAt = formatLocalTime(proofState.fetchedAt)
-    const quotePreview = summarizeQuote(proofState.payload.quote)
-    const activeSourceBaseUrl = proofState.sourceBaseUrl ?? derivedAttestationOrigin
-    const hostLabel = getHostLabelFromUrl(activeSourceBaseUrl) ?? "Umbra CVM attestation endpoint"
+    const activeSourceBaseUrl = proofState.source ?? derivedAttestationOrigin
+    const hostLabel = getHostLabelFromUrl(activeSourceBaseUrl) ?? "RA-TLS proxy"
 
     return (
       <Dialog open={proofDetailsModalOpen} onOpenChange={setProofDetailsModalOpen}>
@@ -1209,59 +990,45 @@ function ConfidentialAIContent() {
               <div className="rounded-2xl border border-border/40 bg-card/80 p-3 shadow-sm dark:border-border/60 dark:bg-card/20">
                 <dl className="space-y-2 text-sm">
                   <div className="flex items-center justify-between">
-                    <dt className="text-muted-foreground">Challenge</dt>
-                    <dd className="font-mono text-[#102A8C]">{formatReportDataPreview(proofState.reportData)}</dd>
+                    <dt className="text-muted-foreground">Trust</dt>
+                    <dd className="font-mono text-foreground/80">{proofState.attestation.trusted ? "Trusted" : "Untrusted"}</dd>
                   </div>
                   <div className="flex items-center justify-between">
-                    <dt className="text-muted-foreground">Attestation issued</dt>
-                    <dd className="font-mono text-foreground/80">{issuedAt}</dd>
+                    <dt className="text-muted-foreground">TEE</dt>
+                    <dd className="font-mono text-foreground/80 uppercase">{proofState.attestation.teeType || "tdx"}</dd>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <dt className="text-muted-foreground">TCB status</dt>
+                    <dd className="font-mono text-foreground/80">{proofState.attestation.tcbStatus || "Unknown"}</dd>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <dt className="text-muted-foreground">Measurement</dt>
+                    <dd className="font-mono text-[#102A8C]">{formatIdentifierSnippet(proofState.attestation.measurement ?? "—")}</dd>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <dt className="text-muted-foreground">Advisories</dt>
+                    <dd className="font-mono text-foreground/80">{proofState.attestation.advisoryIds?.length ?? 0}</dd>
                   </div>
                   <div className="flex items-center justify-between">
                     <dt className="text-muted-foreground">Last refreshed</dt>
                     <dd className="font-mono text-foreground/80">{refreshedAt}</dd>
                   </div>
                   <div className="flex items-center justify-between">
-                    <dt className="text-muted-foreground">Machine endpoint</dt>
+                    <dt className="text-muted-foreground">Proxy</dt>
                     <dd className="font-mono text-foreground/80">{hostLabel}</dd>
                   </div>
                 </dl>
               </div>
             </div>
 
-            <Accordion type="single" collapsible className="w-full">
-              <AccordionItem value="technical-details" className="border-none">
-                <AccordionTrigger className="text-sm font-semibold text-foreground py-2 hover:no-underline">
-                  Technical Details
-                </AccordionTrigger>
-                <AccordionContent>
-                  <div className="rounded-2xl border border-border/40 bg-background/70 p-3 font-mono text-[11px] leading-relaxed text-foreground/90 shadow-inner dark:border-border/60 dark:bg-background/30 max-h-[200px] overflow-y-auto">
-                    <p className="text-[10px] uppercase tracking-[0.28em] text-muted-foreground/70 mb-2">Quote excerpt</p>
-                    <p className="break-all">{quotePreview}</p>
-                  </div>
-                </AccordionContent>
-              </AccordionItem>
-            </Accordion>
-
-            {runtimeSignals.length > 0 && (
-              <div className="space-y-3">
-                <h3 className="text-sm font-semibold text-foreground">Runtime Attestations</h3>
-                <div className="rounded-2xl border border-border/40 bg-card/80 p-3 shadow-sm dark:border-border/60 dark:bg-card/15 max-h-[300px] overflow-y-auto">
-                  <div className="space-y-2">
-                    {runtimeSignals.map((signal) => (
-                      <div key={signal.label} className="flex items-start justify-between gap-3">
-                        <div className="space-y-0.5">
-                          <p className="text-xs font-medium text-foreground">{signal.label}</p>
-                          {signal.description && (
-                            <p className="text-[11px] text-muted-foreground">{signal.description}</p>
-                          )}
-                        </div>
-                        <span className="font-mono text-[11px] text-[#102A8C]">{signal.value}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
+            <div className="space-y-3">
+              <h3 className="text-sm font-semibold text-foreground">Notes</h3>
+              <div className="rounded-2xl border border-border/40 bg-card/80 p-3 shadow-sm dark:border-border/60 dark:bg-card/20">
+                <p className="text-sm text-foreground">
+                  RA-TLS attestation is provided during the TLS handshake over the WebSocket tunnel. Measurements reflect the enclave that owns the negotiated TLS key.
+                </p>
               </div>
-            )}
+            </div>
 
             <div className="space-y-3">
               <h3 className="text-sm font-semibold text-foreground">Verification Status</h3>
@@ -1313,12 +1080,12 @@ function ConfidentialAIContent() {
                         </div>
                       </div>
                     )}
-                    {verificationState.testMode && (
-                      <p className="text-xs text-amber-600">Test mode enabled — verification simulated for automated checks.</p>
-                    )}
-                    {verificationState.reportDataMatches !== null && (
-                      <p className={cn("text-xs", verificationState.reportDataMatches ? "text-emerald-600" : "text-rose-600")}>
-                        Challenge Verification: {verificationState.reportDataMatches ? "matches" : "mismatch"}
+                    {verificationState.attestation?.measurement && (
+                      <p className="text-[11px] text-muted-foreground">
+                        Measurement:{" "}
+                        <span className="font-mono text-foreground">
+                          {formatIdentifierSnippet(verificationState.attestation.measurement)}
+                        </span>
                       </p>
                     )}
                     {verificationState.advisoryIds && verificationState.advisoryIds.length > 0 && (
@@ -1338,6 +1105,15 @@ function ConfidentialAIContent() {
                     )}
                   </div>
                 )}
+              </div>
+            </div>
+
+            <div className="space-y-3">
+              <h3 className="text-sm font-semibold text-foreground">Notes</h3>
+              <div className="rounded-2xl border border-border/40 bg-card/80 p-3 shadow-sm dark:border-border/60 dark:bg-card/20">
+                <p className="text-sm text-foreground">
+                  RA-TLS attestation is provided during the TLS handshake over the WebSocket tunnel. Measurements reflect the enclave that owns the negotiated TLS key.
+                </p>
               </div>
             </div>
 
@@ -1375,45 +1151,6 @@ function ConfidentialAIContent() {
                               <Save className="h-3 w-3" />
                             </Button>
                           </div>
-                        </div>
-                        <div className="space-y-2">
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="sm"
-                            onClick={() => {
-                              const quoteHex = verificationState.quoteHex || ""
-                              console.log("[Quote] Copying raw quote hex, length:", quoteHex.length)
-                              navigator.clipboard.writeText(quoteHex).then(() => {
-                                console.log("[Quote] Successfully copied quote hex to clipboard")
-                                alert("Quote hex copied! Paste it into the TEE Attestation Explorer.")
-                              }).catch((err) => {
-                                console.error("[Quote] Failed to copy:", err)
-                              })
-                            }}
-                            className="w-full rounded-full text-xs"
-                            disabled={!verificationState.quoteHex}
-                          >
-                            <Save className="h-3 w-3 mr-2" />
-                            Copy raw quote hex (for TEE Explorer)
-                          </Button>
-                          {verificationState.checksum && (
-                            <Button
-                              type="button"
-                              variant="outline"
-                              size="sm"
-                              onClick={() => {
-                                const checksumForUrl = verificationState.checksum || ""
-                                console.log("[Checksum] Opening TEE Explorer with checksum:", checksumForUrl, "Length:", checksumForUrl.length)
-                                console.log("[Checksum] Full URL:", `https://proof.t16z.com/reports/${checksumForUrl}`)
-                                window.open(`https://proof.t16z.com/reports/${checksumForUrl}`, '_blank')
-                              }}
-                              className="w-full rounded-full text-xs"
-                            >
-                              <Globe className="h-3 w-3 mr-2" />
-                              View on TEE Attestation Explorer (if already uploaded)
-                            </Button>
-                          )}
                         </div>
                       </div>
                     </div>
@@ -2058,7 +1795,6 @@ function ConfidentialAIContent() {
                       <ProofContent
                         variant="sidebar"
                         verificationState={verificationState}
-                        runtimeSignals={runtimeSignals}
                         onViewDetails={() => setProofDetailsModalOpen(true)}
                       />
                     </AccordionContent>
@@ -2640,13 +2376,12 @@ function ConfidentialAIContent() {
             <TabsContent value="proof" className="space-y-4 mt-4">
               <p className="text-sm text-muted-foreground">
                 {derivedAttestationOrigin
-                  ? `Each refresh requests a fresh Intel TDX quote from ${getHostLabelFromUrl(derivedAttestationOrigin) ?? derivedAttestationOrigin}.`
-                  : "Point NEXT_PUBLIC_ATTESTATION_BASE_URL at your Umbra CVM to surface the attestation origin."}
+                  ? `Each refresh runs an RA-TLS attestation check via ${getHostLabelFromUrl(derivedAttestationOrigin) ?? derivedAttestationOrigin}.`
+                  : ratlsConfigMissingMessage}
               </p>
               <ProofContent
                 variant="dialog"
                 verificationState={verificationState}
-                runtimeSignals={runtimeSignals}
                 onViewDetails={() => setProofDetailsModalOpen(true)}
               />
             </TabsContent>
