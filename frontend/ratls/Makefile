@@ -59,7 +59,7 @@ build-wasm:
 	./build-wasm.sh $(WASM_ARGS)
 
 proxy:
-	cd proxy && RATLS_PROXY_LISTEN=$(PROXY_LISTEN) RATLS_PROXY_TARGET=$(PROXY_TARGET) $(CARGO) run
+	cd proxy && RATLS_PROXY_LISTEN=$(PROXY_LISTEN) RATLS_PROXY_TARGET=$(PROXY_TARGET) RATLS_PROXY_ALLOWLIST=$(PROXY_TARGET) $(CARGO) run
 
 web-check:
 	cd wasm && $(PYTHON) -m http.server $(WEB_PORT)
@@ -68,7 +68,7 @@ web-check:
 demo:
 	@set -euo pipefail; \
 	trap 'kill 0' INT TERM EXIT; \
-	( cd proxy && RATLS_PROXY_LISTEN=$(PROXY_LISTEN) RATLS_PROXY_TARGET=$(PROXY_TARGET) $(CARGO) run ) & PROXY_PID=$$!; \
+	( cd proxy && RATLS_PROXY_LISTEN=$(PROXY_LISTEN) RATLS_PROXY_TARGET=$(PROXY_TARGET) RATLS_PROXY_ALLOWLIST=$(PROXY_TARGET) $(CARGO) run ) & PROXY_PID=$$!; \
 	sleep 1; \
 	if ! kill -0 $$PROXY_PID 2>/dev/null; then \
 	  echo "Proxy failed to start (is $(PROXY_LISTEN) already in use?). Aborting demo."; \
