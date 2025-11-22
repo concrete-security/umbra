@@ -106,7 +106,7 @@ function readBodyStream(ratlsResponse) {
 }
 
 export function createRatlsFetch(options) {
-  const { proxyUrl, targetHost, serverName, defaultHeaders } = options
+  const { proxyUrl, targetHost, serverName, defaultHeaders, onAttestation } = options
   if (!proxyUrl || !targetHost) {
     throw new Error("proxyUrl and targetHost are required for RA-TLS fetch")
   }
@@ -174,6 +174,15 @@ export function createRatlsFetch(options) {
     }
 
     const attestation = ratlsResponse.attestation()
+    if (attestation && typeof onAttestation === "function") {
+      try {
+        onAttestation(attestation)
+      } catch (error) {
+        if (debugEnabled()) {
+          console.warn("[ratls-fetch] onAttestation callback failed", error)
+        }
+      }
+    }
     const rawHeaders = ratlsResponse.headers || []
     const responseHeaders = new Headers()
     rawHeaders.forEach(({ name, value }) => responseHeaders.append(name, value))
