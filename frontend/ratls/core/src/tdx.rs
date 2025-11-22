@@ -2,12 +2,22 @@ use crate::{platform::SystemTime, AttestationResult, Policy, RatlsError, TeeType
 use dcap_qvl::quote::{Quote, Report, TDReport10, TDReport15};
 use dcap_qvl::QuoteCollateralV3;
 use hex::{decode, encode};
-use serde::Deserialize;
+use serde::{de::Error as DeError, Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256, Sha384};
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TdxTcbPolicy {
+    #[serde(
+        default,
+        serialize_with = "serialize_hex_opt",
+        deserialize_with = "deserialize_hex_opt"
+    )]
     pub mrseam: Option<Vec<u8>>,
+    #[serde(
+        default,
+        serialize_with = "serialize_hex_opt",
+        deserialize_with = "deserialize_hex_opt"
+    )]
     pub mrtmrs: Option<Vec<u8>>,
 }
 
@@ -260,4 +270,26 @@ fn normalize_hex(value: &str) -> String {
     }
     cleaned.make_ascii_lowercase();
     cleaned
+}
+
+fn serialize_hex_opt<S>(value: &Option<Vec<u8>>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match value {
+        Some(bytes) => serializer.serialize_some(&encode(bytes)),
+        None => serializer.serialize_none(),
+    }
+}
+
+fn deserialize_hex_opt<'de, D>(deserializer: D) -> Result<Option<Vec<u8>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let opt = Option::<String>::deserialize(deserializer)?;
+    opt.map(|s| {
+        let normalized = normalize_hex(&s);
+        decode(&normalized).map_err(DeError::custom)
+    })
+    .transpose()
 }

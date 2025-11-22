@@ -1,6 +1,6 @@
 use crate::platform::{AsyncReadExt, AsyncWriteExt, TlsStream};
 use crate::tdx::{self, TcgEvent};
-use crate::{AsyncByteStream, AttestationResult, Policy, RatlsError};
+use crate::{AsyncByteStream, AttestationEndpoint, AttestationResult, Policy, RatlsError};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use dcap_qvl::QuoteCollateralV3;
 use rand::rngs::OsRng;
@@ -38,6 +38,7 @@ pub async fn verify_attestation_stream<S>(
     stream: &mut TlsStream<S>,
     server_cert: &[u8],
     policy: &Policy,
+    endpoint: &AttestationEndpoint,
 ) -> Result<AttestationResult, RatlsError>
 where
     S: AsyncByteStream,
@@ -51,14 +52,21 @@ where
     })
     .map_err(|e| RatlsError::Io(e.to_string()))?;
     let request = format!(
-        "POST /tdx_quote HTTP/1.1\r\n\
-         Host: localhost\r\n\
+        "POST {} HTTP/1.1\r\n\
+         Host: {}\r\n\
          Content-Type: application/json\r\n\
          Content-Length: {}\r\n\
-         Connection: keep-alive\r\n\
+         Connection: {}\r\n\
          \r\n\
          {}",
+        endpoint.path,
+        endpoint.host,
         body_json.len(),
+        if endpoint.use_keep_alive {
+            "keep-alive"
+        } else {
+            "close"
+        },
         body_json
     );
 

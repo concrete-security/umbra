@@ -3,6 +3,7 @@ use rustls::client::ClientConfig;
 use rustls::crypto::CryptoProvider;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, Error as RustlsError, SignatureScheme};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use std::sync::{Arc, Mutex};
@@ -55,7 +56,8 @@ pub enum RatlsError {
 }
 
 /// Supported TEE types.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
 pub enum TeeType {
     Tdx,
 }
@@ -67,23 +69,78 @@ impl Default for TeeType {
 }
 
 /// Attestation policy describing acceptable TEEs.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Policy {
+    #[serde(default = "default_tee_type")]
     pub tee_type: TeeType,
+    #[serde(default)]
     pub min_tdx_tcb: Option<TdxTcbPolicy>,
+    #[serde(default = "default_allowed_tdx_status")]
     pub allowed_tdx_status: Vec<String>,
+    #[serde(default = "default_pccs_url")]
     pub pccs_url: Option<String>,
 }
 
 const DEFAULT_PCCS_URL: &str = "https://pccs.phala.network/tdx/certification/v4";
+const fn default_tee_type() -> TeeType {
+    TeeType::Tdx
+}
+
+fn default_allowed_tdx_status() -> Vec<String> {
+    vec!["UpToDate".to_string()]
+}
+
+fn default_pccs_url() -> Option<String> {
+    Some(DEFAULT_PCCS_URL.to_string())
+}
 
 impl Default for Policy {
     fn default() -> Self {
         Self {
-            tee_type: TeeType::Tdx,
+            tee_type: default_tee_type(),
             min_tdx_tcb: None,
-            allowed_tdx_status: vec!["UpToDate".to_string()],
-            pccs_url: Some(DEFAULT_PCCS_URL.to_string()),
+            allowed_tdx_status: default_allowed_tdx_status(),
+            pccs_url: default_pccs_url(),
+        }
+    }
+}
+
+impl Policy {
+    /// Relaxed defaults for local development where PCCS or platform status may be noisy.
+    pub fn dev_tdx() -> Self {
+        let mut policy = Policy::default();
+        policy.allowed_tdx_status = vec![
+            "UpToDate".into(),
+            "UpToDateWithWarnings".into(),
+            "OutOfDate".into(),
+            "OutOfDateConfigurationNeeded".into(),
+            "ConfigurationNeeded".into(),
+            "SWHardeningNeeded".into(),
+            "ConfigurationAndSWHardeningNeeded".into(),
+        ];
+        policy
+    }
+
+    /// Strict attestation policy intended for production use.
+    pub fn strict_tdx() -> Self {
+        Policy::default()
+    }
+}
+
+/// Configure where and how the attestation request is sent after TLS is established.
+#[derive(Debug, Clone)]
+pub struct AttestationEndpoint {
+    pub path: String,
+    pub host: String,
+    pub use_keep_alive: bool,
+}
+
+impl Default for AttestationEndpoint {
+    fn default() -> Self {
+        Self {
+            path: "/tdx_quote".into(),
+            host: "localhost".into(),
+            use_keep_alive: true,
         }
     }
 }
@@ -197,6 +254,45 @@ fn build_client_config(
     Arc::new(config)
 }
 
+/// Establish a TLS session with a promiscuous verifier and return the server's leaf certificate.
+pub async fn tls_handshake<S>(
+    stream: S,
+    server_name: &str,
+    alpn: Option<Vec<String>>,
+) -> Result<(TlsStream<S>, Vec<u8>), RatlsError>
+where
+    S: AsyncByteStream + 'static,
+{
+    let verifier = Arc::new(PromiscuousVerifier::new());
+    let config = build_client_config(verifier.clone(), alpn);
+    let connector = TlsConnector::from(config);
+    let server_name = ServerName::try_from(server_name.to_owned())
+        .map_err(|e| RatlsError::Policy(e.to_string()))?;
+    let tls_stream = connector
+        .connect(server_name, stream)
+        .await
+        .map_err(|e| RatlsError::Io(e.to_string()))?;
+
+    let cert = verifier
+        .take_cert()
+        .ok_or_else(|| RatlsError::Policy("missing server certificate".into()))?;
+
+    Ok((tls_stream, cert))
+}
+
+/// Verify attestation data over an existing TLS stream using the captured server certificate.
+pub async fn verify_attestation_over_stream<S>(
+    tls_stream: &mut TlsStream<S>,
+    server_cert: &[u8],
+    policy: &Policy,
+    endpoint: &AttestationEndpoint,
+) -> Result<AttestationResult, RatlsError>
+where
+    S: AsyncByteStream,
+{
+    protocol::verify_attestation_stream(tls_stream, server_cert, policy, endpoint).await
+}
+
 /// Establishes a TLS session, performs the attestation protocol, and returns a verified stream.
 pub async fn tls_connect<S>(
     stream: S,
@@ -207,21 +303,15 @@ pub async fn tls_connect<S>(
 where
     S: AsyncByteStream + 'static,
 {
-    let verifier = Arc::new(PromiscuousVerifier::new());
-    let config = build_client_config(verifier.clone(), alpn);
-    let connector = TlsConnector::from(config);
-    let server_name = ServerName::try_from(server_name.to_owned())
-        .map_err(|e| RatlsError::Policy(e.to_string()))?;
-    let mut tls_stream = connector
-        .connect(server_name, stream)
-        .await
-        .map_err(|e| RatlsError::Io(e.to_string()))?;
+    let (mut tls_stream, cert) = tls_handshake(stream, server_name, alpn).await?;
 
-    let cert = verifier
-        .take_cert()
-        .ok_or_else(|| RatlsError::Policy("missing server certificate".into()))?;
-
-    let attestation = protocol::verify_attestation_stream(&mut tls_stream, &cert, &policy).await?;
+    let attestation = verify_attestation_over_stream(
+        &mut tls_stream,
+        &cert,
+        &policy,
+        &AttestationEndpoint::default(),
+    )
+    .await?;
 
     Ok((tls_stream, attestation))
 }
