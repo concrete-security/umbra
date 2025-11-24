@@ -175,20 +175,52 @@ function getHostLabelFromUrl(value: string | null) {
 }
 
 function getReadableError(error: unknown): string {
-  if (!error) return "Unknown error"
-  if (typeof error === "string" && error.trim().length > 0) {
-    return error.trim()
-  }
-  if (error instanceof Error && typeof error.message === "string" && error.message.trim().length > 0) {
-    return error.message.trim()
-  }
-  if (typeof error === "object" && error !== null) {
-    const message = (error as Record<string, unknown>).message
-    if (typeof message === "string" && message.trim().length > 0) {
-      return message.trim()
+  const fallback = "Unknown error"
+  const visited = new Set<unknown>()
+  const extract = (value: unknown, depth: number): string | null => {
+    if (!value || depth > 5 || visited.has(value)) return null
+    visited.add(value)
+    if (typeof value === "string" && value.trim().length > 0) {
+      return value.trim()
     }
+    if (value instanceof Error) {
+      const message = typeof value.message === "string" ? value.message.trim() : ""
+      const cause = (value as Error & { cause?: unknown }).cause
+      if (cause) {
+        const nested = extract(cause, depth + 1)
+        if (nested && (!message || nested !== message)) {
+          return nested
+        }
+      }
+      if (message) {
+        return message
+      }
+    }
+    if (typeof value === "object") {
+      const obj = value as Record<string, unknown>
+      const message = typeof obj.message === "string" ? obj.message.trim() : ""
+      if (message) {
+        return message
+      }
+      if (obj.cause) {
+        const nested = extract(obj.cause, depth + 1)
+        if (nested) {
+          return nested
+        }
+      }
+    }
+    return null
   }
-  return "Unknown error"
+  return extract(error, 0) ?? fallback
+}
+
+function resolveRatlsProxyFailureMessage(message: string | null, proxyUrl?: string): string | null {
+  if (!message || !proxyUrl) return null
+  const normalized = message.toLowerCase()
+  if (normalized.includes("websocket") && (normalized.includes("failed") || normalized.includes("error"))) {
+    return `Failed to reach RA-TLS proxy at ${proxyUrl}. Ensure the proxy is running and reachable.`
+  }
+  return null
 }
 
 function hexStringToUint8Array(value: string): Uint8Array | null {
@@ -681,9 +713,10 @@ function ConfidentialAIContent() {
       return attestation.trusted
     } catch (error) {
       const readable = getReadableError(error)
+      const friendly = resolveRatlsProxyFailureMessage(readable, proxyUrl) ?? readable
       console.error("[Attestation] RA-TLS attestation failed", error)
-      setProofState({ status: "error", error: readable })
-      setVerificationState({ status: "error", error: readable })
+      setProofState({ status: "error", error: friendly })
+      setVerificationState({ status: "error", error: friendly })
       return false
     }
   }, [ratlsConfig])
@@ -737,7 +770,8 @@ function ConfidentialAIContent() {
 
   const handleTransportAttestation = useCallback(
     (attestation: RatlsAttestation) => {
-      const source = ratlsConfig ? buildRatlsProxyUrl(ratlsConfig) : derivedAttestationOrigin ?? undefined
+      const fallbackSource = derivedAttestationOrigin ?? ""
+      const source = ratlsConfig ? buildRatlsProxyUrl(ratlsConfig) : fallbackSource
       const statusText = attestation.tcbStatus || null
       const advisoryIds = Array.isArray(attestation.advisoryIds) ? attestation.advisoryIds : []
       const isOutOfDate = Boolean(statusText && statusText.toLowerCase().includes("outofdate"))
@@ -780,7 +814,7 @@ function ConfidentialAIContent() {
       "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.24em]"
 
     const activeSourceBaseUrl =
-      proofState.status === "ready" || proofState.status === "loading" || proofState.status === "error"
+      proofState.status === "ready" || proofState.status === "loading"
         ? proofState.source ?? derivedAttestationOrigin
         : derivedAttestationOrigin
 
@@ -789,7 +823,12 @@ function ConfidentialAIContent() {
     const baseConnectionCopy = activeSourceBaseUrl
       ? `RA-TLS attestation established via ${hostLabel}.`
       : "Configure RA-TLS proxy + target to fetch attestation."
-    const connectionCopy = baseConnectionCopy
+    const connectionCopy =
+      proofState.status === "error"
+        ? proofState.error ?? "Failed to fetch attestation. Refresh to retry."
+        : proofState.status === "unavailable" && proofState.reason
+          ? proofState.reason
+          : baseConnectionCopy
 
     const refreshDisabled =
       proofState.status === "loading" || !derivedAttestationOrigin || verificationState.status === "running"
@@ -1623,7 +1662,9 @@ function ConfidentialAIContent() {
       handleStreamingFollow("smooth")
     } catch (error) {
       console.warn("Confidential chat request failed", error)
-      const errorMessage = getReadableError(error)
+      const proxySource = ratlsConfig ? buildRatlsProxyUrl(ratlsConfig) : undefined
+      const readableError = getReadableError(error)
+      const errorMessage = resolveRatlsProxyFailureMessage(readableError, proxySource) ?? readableError
       updateAssistantMessage({
         content: errorMessage,
         streaming: false,
@@ -2030,11 +2071,11 @@ function ConfidentialAIContent() {
                     ? "max-w-[min(100%,60ch)] self-end whitespace-pre-wrap break-words rounded-2xl bg-[linear-gradient(135deg,#102A8C,#0B1F66)] px-6 py-5 text-left text-sm leading-7 text-white shadow-[0_20px_45px_-40px_rgba(0,0,0,0.8)] dark:shadow-[0_24px_55px_-35px_rgba(3,2,20,0.9)]"
                     : "max-w-[min(100%,75ch)] self-start whitespace-pre-wrap break-words rounded-2xl bg-white/80 dark:bg-card/80 px-6 py-5 text-left text-sm leading-7 text-foreground ring-1 ring-border/40 shadow-sm backdrop-blur"
 
-                  const bubbleStyle: CSSProperties | undefined = isUser
-                    ? {
+                  const bubbleStyle = isUser
+                    ? ({
                         "--foreground": "0 0% 100%",
                         "--muted-foreground": "0 0% 85%",
-                      }
+                      } as CSSProperties)
                     : undefined
 
                   const attachmentsContainerClass = cn(
