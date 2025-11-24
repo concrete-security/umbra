@@ -109,12 +109,34 @@ const ratlsFetch = createRatlsFetch({
 - Reads `?target=host:port`.
 - Opens TCP and shuttles bytes bi-directionally.
 - Must enforce allowlists/ACLs in production to guard against SSRF.
+- Configuration is driven via environment variables (see `proxy/README.md` for detail):
+  - `RATLS_PROXY_LISTEN` (default `127.0.0.1:9000`)
+  - `RATLS_PROXY_TARGET` (default `127.0.0.1:8443`)
+  - `RATLS_PROXY_ALLOWLIST` (required, comma-separated host:port list; the proxy refuses to start when empty). Set this to cover both the default target and any values you expect to pass via `?target=...`.
+- Always run the proxy with an allowlist that matches the enclave endpoints you plan to reach; otherwise requests will be rejected before the TLS tunnel is established.
+
+## Node bindings (direct TCP)
+- `node/` contains the napi-rs binding that talks RA-TLS over TCP without the WebSocket proxy.
+- Two public entry points exist today: `http_request(...)` (buffered body) and `http_stream_request(...)` (true streaming) along with the `createRatlsFetch` shim that attaches attestation to `response.ratlsAttestation` and an `x-ratls-attestation` header.
+- Build and exercise the binding locally:
+  ```bash
+  rustup override set 1.88.0   # or newer toolchain
+  cargo build -p ratls-node --release
+  pnpm add -D @ai-sdk/openai ai ws zod@^4
+  node node/examples/ai-sdk-openai-demo.mjs "Hello from RA-TLS"
+  ```
+- When the native module is built, `node/index.js` loads `target/release/ratls_node.node` automatically (override via `RATLS_NODE_BINARY` if you stash the binary elsewhere). See `node/README.md` for API docs and the AI SDK integration walkthrough.
 
 ## Additional Directories
 - `node/`: NAPI bindings that talk TCP directly with optional tunnel fallback.
 - `python/`: PyO3 bindings with async helpers.
 - `server-examples/`: Reference RA-TLS servers for TDX/SNP (coming soon).
 - `docs/`: Design notes, specs, and task tracking.
+
+## Binding status
+- WASM: functional; provides `RatlsClient`, `httpRequest`, and the fetch shim used by the browser demo plus `wasm/examples/ai-sdk-openai-demo.mjs`.
+- Node: functional; direct TCP plus fetch shim, see section above.
+- Python: scaffolding in progress (`python/README.md`) with planned async API parity once the core pieces stabilize.
 
 ---
 
@@ -210,11 +232,14 @@ Server responds:
 | Command | Description |
 | --- | --- |
 | `make test` | Run Rust unit tests for core and proxy. |
+| `make test-node` | Build `ratls-node`, install AI SDK deps via pnpm, and run the streaming smoke test against `vllm.concrete-security.com`. |
 | `make test-wasm` | Check build for the `wasm32` target. |
 | `make build-wasm` | Compile the WASM package into `pkg/`. |
 | `make proxy` | Run the proxy server standalone. |
 | `make web-check` | Serve the static WASM test harness. |
 | `make demo` | Build WASM and run proxy + web harness together. |
+
+Set `RUN_WASM_AI_SDK=1` when invoking `make test-wasm` to build the bindings and launch the WASM AI SDK smoke test (requires the proxy to be running in another shell).
 
 ## Troubleshooting WASM Builds
 - Errors like `rust-lld: error: unknown file type` typically mean LLVM/Clang lacks `wasm32` support.
