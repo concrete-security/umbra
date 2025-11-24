@@ -50,6 +50,18 @@ function normalizeProxyUrl(raw) {
   }
 }
 
+function enhanceProxyError(error, proxyUrl) {
+  if (!error || typeof proxyUrl !== "string") return error
+  const message = typeof error.message === "string" ? error.message.toLowerCase() : ""
+  if (!message) return error
+  if (message.includes("websocket") && (message.includes("failed") || message.includes("error"))) {
+    const friendly = new Error(`Failed to reach RA-TLS proxy at ${proxyUrl}. Ensure the proxy is running and reachable.`)
+    friendly.cause = error
+    return friendly
+  }
+  return error
+}
+
 function normalizeTarget(value) {
   if (!value) return ""
   return value.includes(":") ? value : `${value}:443`
@@ -124,7 +136,14 @@ export function createRatlsFetch(options) {
     if (!clientPromise) {
       clientPromise = (async () => {
         const client = new RatlsClient(websocketUrl, sni, hostHeader)
-        await client.handshake()
+        try {
+          await client.handshake()
+        } catch (error) {
+          try {
+            await client.close()
+          } catch {}
+          throw enhanceProxyError(error, websocketUrl)
+        }
         return client
       })().catch((error) => {
         clientPromise = undefined
@@ -161,7 +180,12 @@ export function createRatlsFetch(options) {
       })
     }
 
-    const ratlsResponse = await client.httpRequest(request.method || "GET", path, headerEntries, body && body.length ? body : undefined)
+    let ratlsResponse
+    try {
+      ratlsResponse = await client.httpRequest(request.method || "GET", path, headerEntries, body && body.length ? body : undefined)
+    } catch (error) {
+      throw enhanceProxyError(error, websocketUrl)
+    }
     if (debugEnabled()) {
       console.debug("[ratls-fetch] response", {
         target: normalizedTarget,
