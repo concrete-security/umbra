@@ -1,7 +1,6 @@
 use crate::platform::{AsyncReadExt, AsyncWriteExt, TlsStream};
 use crate::tdx::{self, TcgEvent};
 use crate::{AsyncByteStream, AttestationEndpoint, AttestationResult, Policy, RatlsError};
-use base64::{engine::general_purpose::STANDARD, Engine as _};
 use dcap_qvl::QuoteCollateralV3;
 use rand::rngs::OsRng;
 use rand::RngCore;
@@ -155,8 +154,7 @@ where
     tdx::verify_quote_freshness(&quote_bytes, nonce_hex.as_bytes())?;
     tdx::verify_event_log_integrity(&quote_bytes, &event_log)?;
 
-    let cert_pem = der_to_pem(server_cert);
-    tdx::verify_tls_certificate_in_log(&event_log, &cert_pem)?;
+    tdx::verify_tls_certificate_in_log(&event_log, server_cert)?;
 
     Ok(attestation)
 }
@@ -184,18 +182,6 @@ fn parse_event_log(value: Value) -> Result<Vec<TcgEvent>, RatlsError> {
             "Unsupported event log format: {other}"
         ))),
     }
-}
-
-fn der_to_pem(der: &[u8]) -> Vec<u8> {
-    let b64 = STANDARD.encode(der);
-    let mut pem = Vec::new();
-    pem.extend_from_slice(b"-----BEGIN CERTIFICATE-----\n");
-    for chunk in b64.as_bytes().chunks(64) {
-        pem.extend_from_slice(chunk);
-        pem.push(b'\n');
-    }
-    pem.extend_from_slice(b"-----END CERTIFICATE-----\n");
-    pem
 }
 
 fn event_log_preview(s: &str) -> String {
