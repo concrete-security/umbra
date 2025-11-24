@@ -5,7 +5,6 @@ use futures_util::{SinkExt, StreamExt};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::accept_hdr_async;
 use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
@@ -45,46 +44,41 @@ async fn handle_ws(
     };
     println!("Proxy: connected to target {}", target);
 
-    let (mut ws_sink, mut ws_stream) = ws.split();
-    let (tcp_reader, tcp_writer) = tcp.into_split();
-
+    let (mut ws_sink, mut ws_source) = ws.split();
+    let (mut tcp_reader, mut tcp_writer) = tcp.into_split();
+    let mut buf = [0u8; 8192];
     eprintln!("Established connection to target: {}", target);
-
-    // WS -> TCP
-    let mut tcp_writer: OwnedWriteHalf = tcp_writer;
-    let ws_to_tcp = async move {
-        while let Some(msg) = ws_stream.next().await {
-            let msg = msg?;
-            if msg.is_binary() || msg.is_text() {
-                let data = msg.into_data();
-                tcp_writer.write_all(&data).await?;
-            } else if msg.is_close() {
-                break;
+    loop {
+        tokio::select! {
+            msg = ws_source.next() => {
+                match msg {
+                    Some(Ok(msg)) => {
+                        if msg.is_binary() || msg.is_text() {
+                            tcp_writer.write_all(&msg.into_data()).await?;
+                        } else if msg.is_close() {
+                            let _ = ws_sink.send(Message::Close(None)).await;
+                            break;
+                        }
+                    }
+                    Some(Err(e)) => return Err(Box::new(e)),
+                    None => break,
+                }
+            }
+            res = tcp_reader.read(&mut buf) => {
+                match res {
+                    Ok(0) => {
+                        let _ = ws_sink.send(Message::Close(None)).await;
+                        break;
+                    }
+                    Ok(n) => {
+                        ws_sink.send(Message::Binary(buf[..n].to_vec())).await?;
+                    }
+                    Err(e) => return Err(Box::new(e)),
+                }
             }
         }
-        Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
-    };
-
-    // TCP -> WS
-    let mut tcp_reader: OwnedReadHalf = tcp_reader;
-    let tcp_to_ws = async move {
-        let mut buf = [0u8; 4096];
-        loop {
-            let n = tcp_reader.read(&mut buf).await?;
-            if n == 0 {
-                // TCP EOF: send a WebSocket close to avoid abrupt client errors.
-                let _ = ws_sink.send(Message::Close(None)).await;
-                break;
-            }
-            ws_sink.send(Message::Binary(buf[..n].to_vec())).await?;
-        }
-        Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
-    };
-
-    tokio::select! {
-        res = ws_to_tcp => res?,
-        res = tcp_to_ws => res?,
     }
+    let _ = ws_sink.close().await;
     Ok(())
 }
 
