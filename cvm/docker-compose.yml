@@ -31,7 +31,7 @@ services:
 
   # Combined Nginx reverse proxy and Certificate Manager
   nginx-cert-manager:
-    image: ghcr.io/concrete-security/cert-manager@sha256:b86ca2fef7d3669a619c3bf08f4c20ca8ff4d73974e1f7522fe6618635ef8175
+    image: ghcr.io/concrete-security/cert-manager@sha256:5351fee71ab903712adb7ad6255b809486549678bb53ff03c875692c5d040e0c
     container_name: nginx-cert-manager
     ports:
       - "80:80"
