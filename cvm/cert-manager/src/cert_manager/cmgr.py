@@ -439,8 +439,8 @@ class CertificateManager:
 
         # Use the first certificate (leaf certificate) for the event
         leaf_cert = certs[0]
-        cert_pem = leaf_cert.public_bytes(Encoding.PEM)
-        cert_hash = sha256(cert_pem).hexdigest()
+        cert_der = leaf_cert.public_bytes(Encoding.DER)
+        cert_hash = sha256(cert_der).hexdigest()
 
         if self.dev_mode:  # only log cert hash
             logger.info(f"New TLS Certificate: {cert_hash}")
