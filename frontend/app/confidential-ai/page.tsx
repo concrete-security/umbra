@@ -51,6 +51,8 @@ type Message = {
   reasoning_content?: string
   streaming?: boolean
   finishReason?: string
+  reasoningStartTime?: number
+  reasoningEndTime?: number
 }
 type UploadedFile = { name: string; content: string; size: number; type: string }
 
@@ -943,7 +945,7 @@ function ConfidentialAIContent() {
           )
         case "loading":
           return (
-            <div className={cn(badgeBase, "border-[#102A8C]/40 bg-[#102A8C]/10 text-[#102A8C]")}>
+            <div className={cn(badgeBase, "border-brand-primary/40 bg-brand-primary/10 text-brand-primary")}>
               <Sparkles className="h-3.5 w-3.5" /> Fetching
             </div>
           )
@@ -1000,7 +1002,7 @@ function ConfidentialAIContent() {
         case "ok":
           return <CheckCircle2 className="h-4 w-4 text-emerald-600" />
         case "running":
-          return <Sparkles className="h-4 w-4 text-[#102A8C] animate-pulse" />
+          return <Sparkles className="h-4 w-4 text-brand-primary animate-pulse" />
         case "error":
           return <X className="h-4 w-4 text-rose-600" />
         default:
@@ -1027,7 +1029,7 @@ function ConfidentialAIContent() {
                       : verificationState.status === "success"
                         ? "border-rose-400/60 bg-rose-400/10 text-rose-600 dark:border-rose-400/40 dark:bg-rose-400/5"
                         : verificationState.status === "running"
-                          ? "border-[#102A8C]/60 bg-[#102A8C]/10 text-[#102A8C] dark:border-[#102A8C]/40 dark:bg-[#102A8C]/5"
+                          ? "border-brand-primary/60 bg-brand-primary/10 text-brand-primary dark:border-brand-primary/40 dark:bg-brand-primary/5"
                           : "border-border/40 bg-card/70 text-muted-foreground dark:border-border/60 dark:bg-card/10"
                 )}
               >
@@ -1141,8 +1143,8 @@ function ConfidentialAIContent() {
         <div className="space-y-2">
           <div className={cn("flex items-start justify-between gap-3", !isCompact && "gap-4")}>
             <div className="flex items-start gap-3">
-              <div className={cn("rounded-full border border-[#102A8C]/40 bg-[#102A8C]/10 text-[#102A8C]", isCompact ? "p-2" : "p-3")}> 
-                <Cpu className={cn("text-[#102A8C]", isCompact ? "h-4 w-4" : "h-5 w-5")} />
+              <div className={cn("rounded-full border border-brand-primary/40 bg-brand-primary/10 text-brand-primary", isCompact ? "p-2" : "p-3")}> 
+                <Cpu className={cn("text-brand-primary", isCompact ? "h-4 w-4" : "h-5 w-5")} />
               </div>
               <div className="space-y-1">
                 <p className={cn("font-semibold text-foreground", isCompact ? "text-sm" : "text-base")}>Intel TDX Quote</p>
@@ -1199,7 +1201,7 @@ function ConfidentialAIContent() {
         <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto border border-border/50 bg-background/95 backdrop-blur dark:border-border/60 dark:bg-background/80">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2 text-lg font-semibold">
-              <ShieldCheck className="h-5 w-5 text-[#102A8C]" />
+              <ShieldCheck className="h-5 w-5 text-brand-primary" />
               Proof of Confidentiality Details
             </DialogTitle>
           </DialogHeader>
@@ -1213,8 +1215,20 @@ function ConfidentialAIContent() {
                     <dd className="font-mono text-[#102A8C]">{formatReportDataPreview(proofState.reportData)}</dd>
                   </div>
                   <div className="flex items-center justify-between">
-                    <dt className="text-muted-foreground">Attestation issued</dt>
-                    <dd className="font-mono text-foreground/80">{issuedAt}</dd>
+                    <dt className="text-muted-foreground">TEE</dt>
+                    <dd className="font-mono text-foreground/80 uppercase">{proofState.attestation.teeType || "tdx"}</dd>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <dt className="text-muted-foreground">TCB status</dt>
+                    <dd className="font-mono text-foreground/80">{proofState.attestation.tcbStatus || "Unknown"}</dd>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <dt className="text-muted-foreground">Measurement</dt>
+                    <dd className="font-mono text-brand-primary">{formatIdentifierSnippet(proofState.attestation.measurement ?? "—")}</dd>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <dt className="text-muted-foreground">Advisories</dt>
+                    <dd className="font-mono text-foreground/80">{proofState.attestation.advisoryIds?.length ?? 0}</dd>
                   </div>
                   <div className="flex items-center justify-between">
                     <dt className="text-muted-foreground">Last refreshed</dt>
@@ -1353,7 +1367,7 @@ function ConfidentialAIContent() {
                         <div className="flex items-center justify-between gap-2">
                           <span className="text-xs text-muted-foreground">SHA-256 checksum:</span>
                           <div className="flex items-center gap-2 flex-1 justify-end min-w-0">
-                            <code className="font-mono text-[10px] text-[#102A8C] break-all text-right truncate max-w-[200px]" title={verificationState.checksum}>
+                            <code className="font-mono text-[10px] text-brand-primary break-all text-right truncate max-w-[200px]" title={verificationState.checksum}>
                               {verificationState.checksum}
                             </code>
                             <Button
@@ -1700,10 +1714,11 @@ function ConfidentialAIContent() {
     }
 
     const conversationBeforeAssistant: Message[] = [...messages, userMessage]
-    const assistantPlaceholder: Message = {
+      const assistantPlaceholder: Message = {
       role: "assistant",
       content: "",
       streaming: true,
+      reasoningStartTime: Date.now(),
     }
 
     const conversationWithAssistant: Message[] = [...conversationBeforeAssistant, assistantPlaceholder]
@@ -1787,6 +1802,7 @@ function ConfidentialAIContent() {
         reasoning_content: finalReasoning || undefined,
         streaming: false,
         finishReason,
+        reasoningEndTime: Date.now(),
       })
       handleStreamingFollow("smooth")
     } catch (error) {
@@ -1945,116 +1961,101 @@ function ConfidentialAIContent() {
           >
             {sidebarOpen ? (
               <>
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex flex-col gap-1">
-                    <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
-                      <Lock className="h-3.5 w-3.5 text-[#1B18D4]" />
-                      <span className="tracking-tight">Confidential space</span>
+                <div className="space-y-6">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex flex-col gap-2">
+                      <div className="flex items-center gap-2 text-sm font-bold text-foreground">
+                        <Lock className="h-4 w-4 text-brand-accent" />
+                        <span className="tracking-tight">Confidential Space</span>
+                      </div>
                     </div>
-                    <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
-                      <span
-                        className={cn(
-                          "inline-flex h-2.5 w-2.5 rounded-full transition",
-                          {
-                            "bg-emerald-500 shadow-[0_0_0_4px_rgba(16,185,129,0.25)]": connectionState === "connected",
-                            "bg-rose-500 shadow-[0_0_0_4px_rgba(244,63,94,0.2)]": connectionState === "disconnected",
-                          }
-                        )}
-                        aria-hidden
-                      />
-                      <span>{connectionLabel}</span>
-                    </div>
-                    <div className="flex items-center gap-2 text-xs font-medium">
-                      <UserCircle2
-                        className={cn(
-                          "h-3.5 w-3.5",
-                          authState === "signed-in"
-                            ? "text-[#1B18D4]"
-                            : guestRestrictionActive
-                              ? "text-rose-500"
-                              : "text-muted-foreground"
-                        )}
-                      />
-                      <span
-                        className={cn(
-                          "truncate",
-                          authState === "signed-in"
-                            ? "text-foreground"
-                            : guestRestrictionActive
-                              ? "text-rose-600 dark:text-rose-300"
-                              : "text-muted-foreground"
-                        )}
-                      >
-                        {authStatusLabel}
-                      </span>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    {themeReady && (
+                    <div className="flex items-center gap-1">
+                      {themeReady && (
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => setTheme(activeTheme === "dark" ? "light" : "dark")}
+                          className="h-7 w-7 rounded-full text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+                          title={`Switch to ${activeTheme === "dark" ? "light" : "dark"} theme`}
+                        >
+                          {activeTheme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+                        </Button>
+                      )}
                       <Button
                         type="button"
                         variant="ghost"
                         size="icon"
-                        onClick={() => setTheme(activeTheme === "dark" ? "light" : "dark")}
-                        className="h-8 w-8 rounded-full border border-border/40 bg-card/70 text-muted-foreground transition hover:bg-card/80 dark:border-border/60 dark:bg-card/20 dark:hover:bg-card/30"
-                        title={`Switch to ${activeTheme === "dark" ? "light" : "dark"} theme`}
+                        onClick={() => setSidebarOpen(false)}
+                        className="h-7 w-7 rounded-full text-muted-foreground hover:bg-muted/50 hover:text-foreground"
                       >
-                        {activeTheme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+                        <PanelLeftClose className="h-4 w-4" />
+                        <span className="sr-only">Collapse panel</span>
                       </Button>
-                    )}
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      onClick={() => setSidebarOpen(false)}
-                      className="rounded-full border border-border/40 bg-card/80 text-muted-foreground transition hover:bg-card/90 dark:border-border/60 dark:bg-card/20 dark:text-foreground dark:hover:bg-card/30"
-                    >
-                      <PanelLeftClose className="h-4 w-4" />
-                      <span className="sr-only">Collapse panel</span>
-                    </Button>
+                    </div>
                   </div>
-                </div>
 
-                <div className="space-y-2">
-                  <h3 className="text-[11px] font-semibold uppercase tracking-[0.28em] text-muted-foreground">Secure conversation</h3>
-                  <div className="flex flex-col gap-2">
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      className="gap-2 rounded-full border border-border/40 bg-card/70 px-4 py-2 text-[11px] font-semibold uppercase tracking-[0.24em] text-foreground shadow-sm transition hover:bg-card/80 dark:border-border/60 dark:bg-card/20 dark:text-foreground dark:hover:bg-card/30"
-                      onClick={handleSaveConversation}
-                      disabled={!hasConversationHistory}
-                      title={hasConversationHistory ? "Download this conversation as JSON" : "No messages to save yet"}
-                    >
-                      <Save className="h-4 w-4 text-[#102A8C]" />
-                      <span>Save</span>
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      className="gap-2 rounded-full border border-border/40 bg-card/70 px-4 py-2 text-[11px] font-semibold uppercase tracking-[0.24em] text-foreground shadow-sm transition hover:bg-card/80 dark:border-border/60 dark:bg-card/20 dark:text-foreground dark:hover:bg-card/30"
-                      onClick={handleStartNewConversation}
-                      disabled={isSending || isStreaming}
-                    >
-                      <MessageSquarePlus className="h-4 w-4 text-[#102A8C]" />
-                      <span>New conversation</span>
-                    </Button>
+                  <div className={cn(
+                    "rounded-xl border p-3 transition-colors",
+                    secureChannelReady 
+                      ? "border-emerald-500/20 bg-emerald-500/5 dark:border-emerald-500/30 dark:bg-emerald-500/10"
+                      : "border-amber-500/20 bg-amber-500/5"
+                  )}>
+                    <div className="flex items-center gap-2">
+                      <div className={cn("h-2 w-2 rounded-full animate-pulse", secureChannelReady ? "bg-emerald-500" : "bg-amber-500")} />
+                      <span className={cn("text-xs font-medium", secureChannelReady ? "text-emerald-700 dark:text-emerald-400" : "text-amber-700 dark:text-amber-400")}>
+                        {secureChannelReady ? "Secure Channel Active" : "Establishing Security..."}
+                      </span>
+                    </div>
+                    <div className="mt-2 flex flex-col gap-1 border-t border-border/50 pt-2">
+                       <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                          <UserCircle2 className="h-3.5 w-3.5 text-brand-accent" />
+                          <span className="truncate max-w-[180px]">{authState === "signed-in" ? authUserEmail : "Guest User"}</span>
+                       </div>
+                    </div>
+                  </div>
+
+                  <div className="space-y-2">
+                    <h3 className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/70">Session</h3>
+                    <div className="grid grid-cols-2 gap-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="gap-2 border-border/50 bg-card/50 hover:bg-card/80"
+                        onClick={handleSaveConversation}
+                        disabled={!hasConversationHistory}
+                        title="Download JSON"
+                      >
+                        <Save className="h-3.5 w-3.5 text-brand-primary" />
+                        <span className="text-xs">Save</span>
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="gap-2 border-border/50 bg-card/50 hover:bg-card/80"
+                        onClick={handleStartNewConversation}
+                        disabled={isSending || isStreaming}
+                      >
+                        <MessageSquarePlus className="h-3.5 w-3.5 text-brand-primary" />
+                        <span className="text-xs">New</span>
+                      </Button>
+                    </div>
                   </div>
                 </div>
 
                 <Accordion type="single" collapsible>
                   <AccordionItem value="proof" className="border-none">
                     <AccordionTrigger
-                      className="flex w-full items-center justify-between gap-3 rounded-2xl border border-[#102A8C]/60 bg-[linear-gradient(130deg,rgba(16,42,140,0.18),rgba(11,31,102,0.42))] px-4 py-3 text-left text-sm font-semibold uppercase tracking-[0.24em] text-white shadow-[0_18px_35px_-24px_rgba(16,42,140,0.9)] transition hover:brightness-110 data-[state=open]:brightness-110 dark:border-[#102A8C] dark:bg-[linear-gradient(130deg,rgba(16,42,140,0.32),rgba(11,31,102,0.45))]"
+                      className="flex w-full items-center justify-between gap-3 rounded-2xl border border-brand-primary/60 bg-[linear-gradient(130deg,hsl(var(--brand-primary)/0.18),hsl(var(--brand-secondary)/0.42))] px-4 py-3 text-left text-sm font-semibold uppercase tracking-[0.24em] text-white shadow-[0_18px_35px_-24px_rgba(16,42,140,0.9)] transition hover:brightness-110 data-[state=open]:brightness-110 dark:border-brand-primary dark:bg-[linear-gradient(130deg,rgba(16,42,140,0.32),rgba(11,31,102,0.45))]"
                     >
                       <span className="inline-flex items-center gap-2 text-[11px]">
                         <ShieldCheck className="h-4 w-4" />
                         Proof of Confidentiality
                       </span>
                     </AccordionTrigger>
-                    <AccordionContent className="mt-3 space-y-3 rounded-2xl border border-[#102A8C]/30 bg-[linear-gradient(135deg,rgba(16,42,140,0.08),rgba(11,31,102,0.12))] p-4 shadow-sm dark:border-[#102A8C]/40 dark:bg-[linear-gradient(135deg,rgba(16,42,140,0.18),rgba(11,31,102,0.28))]">
+                    <AccordionContent className="mt-3 space-y-3 rounded-2xl border border-brand-primary/30 bg-[linear-gradient(135deg,hsl(var(--brand-primary)/0.08),hsl(var(--brand-secondary)/0.12))] p-4 shadow-sm dark:border-brand-primary/40 dark:bg-[linear-gradient(135deg,rgba(16,42,140,0.18),rgba(11,31,102,0.28))]">
                       <ProofContent
                         variant="sidebar"
                         verificationState={verificationState}
@@ -2077,7 +2078,7 @@ function ConfidentialAIContent() {
                         className={cn(
                           "h-8 rounded-full border px-4 text-[11px] uppercase tracking-[0.24em]",
                           reasoningEffort === effort
-                            ? "border-[#102A8C] bg-[linear-gradient(130deg,#102A8C,#0B1F66)] text-white hover:brightness-110"
+                            ? "border-brand-primary bg-brand-gradient text-white hover:brightness-110"
                             : "border-border/40 bg-card/70 text-muted-foreground hover:bg-card/80 dark:border-border/60 dark:bg-card/20 dark:text-muted-foreground dark:hover:bg-card/30"
                         )}
                         onClick={() => setReasoningEffort(effort as "low" | "medium" | "high")}
@@ -2111,7 +2112,7 @@ function ConfidentialAIContent() {
                   <span className="sr-only">Expand panel</span>
                 </Button>
                 <div className="flex flex-col items-center gap-3 text-muted-foreground">
-                  <Lock className="h-5 w-5 text-[#1B18D4]" />
+                  <Lock className="h-5 w-5 text-brand-accent" />
                   <span className="text-[10px] font-semibold uppercase tracking-[0.4em] [writing-mode:vertical-rl] [text-orientation:mixed]">
                     Confidential
                   </span>
@@ -2157,6 +2158,26 @@ function ConfidentialAIContent() {
               aria-label="Confidential space transcript"
             >
               <div className="mx-auto flex w-full max-w-4xl flex-col space-y-8">
+                {/* Onboarding Banner */}
+                {messages.length <= 1 && !guestNotice && (
+                  <div className="relative overflow-hidden rounded-2xl bg-gradient-to-br from-brand-primary/10 via-brand-secondary/5 to-transparent p-6 border border-brand-primary/20 dark:border-brand-primary/30">
+                     <div className="relative z-10 flex gap-4">
+                        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-brand-primary/10 text-brand-primary dark:text-brand-accent dark:bg-brand-accent/10">
+                           <ShieldCheck className="h-5 w-5" />
+                        </div>
+                        <div className="space-y-2">
+                           <h3 className="font-semibold text-foreground">Welcome to Confidential AI</h3>
+                           <p className="text-sm text-muted-foreground leading-relaxed max-w-lg">
+                              This chat session is end-to-end encrypted and processed inside a secure enclave (TEE). 
+                              Your data remains confidential even from the cloud provider. 
+                              Verify the "Attestation" status in the sidebar to ensure system integrity.
+                           </p>
+                        </div>
+                     </div>
+                     {/* Background decoration */}
+                     <div className="absolute -top-12 -right-12 h-48 w-48 rounded-full bg-brand-primary/5 blur-3xl" />
+                  </div>
+                )}
                 {guestNotice ? (
                   <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-800 shadow-sm dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-200">
                     <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -2195,8 +2216,8 @@ function ConfidentialAIContent() {
                   const label = isUser ? "You" : assistantName
 
                   const bubbleClass = isUser
-                    ? "max-w-[min(100%,60ch)] self-end whitespace-pre-wrap break-words rounded-2xl bg-[linear-gradient(135deg,#102A8C,#0B1F66)] px-6 py-5 text-left text-sm leading-7 text-white shadow-[0_20px_45px_-40px_rgba(0,0,0,0.8)] dark:shadow-[0_24px_55px_-35px_rgba(3,2,20,0.9)]"
-                    : "max-w-[min(100%,75ch)] self-start whitespace-pre-wrap break-words rounded-2xl bg-white/80 dark:bg-card/80 px-6 py-5 text-left text-sm leading-7 text-foreground ring-1 ring-border/40 shadow-sm backdrop-blur"
+                    ? "max-w-[85%] md:max-w-3xl self-end whitespace-pre-wrap break-words rounded-3xl bg-brand-gradient px-6 py-4 text-left text-white shadow-md dark:shadow-none"
+                    : "max-w-[85%] md:max-w-4xl self-start whitespace-pre-wrap break-words rounded-none bg-transparent px-0 py-0 text-left text-foreground leading-7"
 
                   const bubbleStyle: CSSProperties | undefined = isUser
                     ? {
@@ -2216,49 +2237,61 @@ function ConfidentialAIContent() {
 
                   return (
                     <div key={i} className={cn("flex w-full", isUser ? "justify-end" : "justify-start")}>
-                      <div className={cn("flex w-full gap-3", isUser ? "justify-end" : "justify-start")}>
+                      <div className={cn("flex w-full gap-4", isUser ? "justify-end" : "justify-start")}>
                         {isAssistant && (
-                          <div className="relative">
+                          <div className="relative mt-1">
                             <button
                               type="button"
                               onClick={showReasoningPanel ? toggleReasoningPanel : undefined}
                               disabled={!showReasoningPanel}
                               className={cn(
-                                "mt-1 flex size-8 items-center justify-center rounded-full border border-border/40 bg-card/80 text-foreground transition-all dark:border-border/60 dark:bg-card/30",
-                                showReasoningPanel && "cursor-pointer hover:brightness-110 hover:text-white",
-                                isReasoningOpen && "text-white bg-[linear-gradient(130deg,#102A8C,#0B1F66)]",
-                                !showReasoningPanel && "cursor-default opacity-50"
+                                "flex size-8 items-center justify-center rounded-full border border-border/40 bg-card/80 text-brand-primary transition-all dark:border-border/60 dark:bg-card/30",
+                                "cursor-pointer hover:brightness-110 hover:bg-brand-primary/10",
+                                isReasoningOpen && "text-brand-primary ring-2 ring-brand-primary/20"
                               )}
                               title={showReasoningPanel ? (isReasoningOpen ? "Hide reasoning" : "Show reasoning") : undefined}
                             >
-                              <Bot className={cn("h-5 w-5", isReasoningOpen ? "text-white" : "text-muted-foreground")} />
-                              {showReasoningPanel && (
-                                <div className="absolute -right-0.5 -top-0.5 flex size-3.5 items-center justify-center rounded-full bg-[#102A8C] text-white">
-                                  <Sparkles className="h-2.5 w-2.5" />
+                              <Bot className="h-5 w-5" />
+                              {hasReasoningActivity && !isReasoningOpen && (
+                                <div className="absolute -right-0.5 -top-0.5 flex size-3 items-center justify-center rounded-full bg-brand-primary text-white ring-2 ring-background">
+                                  <Sparkles className="h-2 w-2" />
                                 </div>
                               )}
                             </button>
                           </div>
                         )}
-                        <div className={cn("flex w-full flex-col gap-2", isUser ? "items-end text-right" : "items-start text-left")}> 
-                          <div className="w-full text-[11px] font-semibold uppercase tracking-[0.24em] text-muted-foreground">
-                            {label}
-                            {m.streaming && " · streaming"}
-                            {truncatedByLength && " · truncated"}
-                          </div>
+                        <div className={cn("flex max-w-[85%] flex-col gap-1", isUser ? "items-end text-right" : "items-start text-left")}> 
+                          {isAssistant && hasReasoningActivity && isReasoningOpen && (
+                            <div className="w-full overflow-hidden border-l-2 border-brand-primary/30 pl-4 ml-1 mb-4 mt-1 animate-in fade-in slide-in-from-top-1 duration-200">
+                              <div className="text-sm text-muted-foreground/90 leading-relaxed">
+                                <Markdown
+                                  content={
+                                    reasoningAvailable
+                                      ? m.reasoning_content?.trim() ?? ""
+                                      : m.streaming
+                                        ? "Thinking..."
+                                        : "No reasoning shared."
+                                  }
+                                  className="markdown-body text-sm !text-muted-foreground"
+                                />
+                              </div>
+                            </div>
+                          )}
                           {m.attachments && m.attachments.length > 0 && (
-                            <div className={cn(attachmentsContainerClass, "w-full")}> 
+                            <div className={cn(attachmentsContainerClass, "w-full mb-2")}> 
                               {m.attachments.map((file, fileIndex) => (
                                 <div
                                   key={fileIndex}
                                   className={cn(
-                                    "flex max-w-full items-center gap-2 rounded-xl border border-border/40 bg-card/80 p-2 dark:border-border/60 dark:bg-card/25",
-                                    isUser ? "self-end" : "self-start w-full"
+                                    "flex max-w-full items-center gap-2 rounded-xl border p-2",
+                                    isUser 
+                                      ? "border-white/20 bg-white/10 text-white self-end" 
+                                      : "border-border/40 bg-card/50 text-foreground self-start w-full"
                                   )}
                                 >
-                                  <FileText className="size-3 text-muted-foreground" />
-                                  <span className="font-medium text-foreground">{file.name}</span>
-                                  <span className="text-muted-foreground">
+                                  <FileText className={cn("size-3", isUser ? "text-white/80" : "text-muted-foreground")} />
+                                  <span className="font-medium">{file.name}</span>
+                                  <span className={cn("text-xs", isUser ? "text-white/70" : "text-muted-foreground")}>
                                     ({formatFileSize(file.size)}, {formatWordCount(countWords(file.content))})
                                   </span>
                                 </div>
@@ -2266,28 +2299,11 @@ function ConfidentialAIContent() {
                             </div>
                           )}
                           <div className={bubbleClass} style={bubbleStyle}>
-                            <Markdown content={bubbleText} className="markdown-body text-sm" />
+                            <Markdown
+                              content={bubbleText}
+                              className={cn("markdown-body", isUser ? "text-white" : "text-foreground")}
+                            />
                           </div>
-                          {showReasoningPanel && isReasoningOpen && (
-                            <div className="w-full overflow-hidden rounded-2xl border border-border/40 bg-white shadow-sm animate-in fade-in slide-in-from-top-2 duration-300 dark:border-border/60 dark:bg-card/20">
-                              <div className="flex items-center gap-2 border-b border-border/40 px-3 py-2 text-xs font-medium uppercase tracking-[0.2em] text-muted-foreground dark:border-border/60">
-                                <Sparkles className="h-3.5 w-3.5 text-[#102A8C]" />
-                                <span>{m.streaming ? "Thinking..." : "Reasoning"}</span>
-                              </div>
-                              <div className="px-3 py-3 text-xs text-muted-foreground">
-                                <Markdown
-                                  content={
-                                    reasoningAvailable
-                                      ? m.reasoning_content?.trim() ?? ""
-                                      : m.streaming
-                                        ? "Gathering confidential reasoning..."
-                                        : "No reasoning shared for this turn."
-                                  }
-                                  className="markdown-body text-xs"
-                                />
-                              </div>
-                            </div>
-                          )}
                           {truncatedByLength && (
                             <div className="w-full text-[11px] text-muted-foreground">
                               Umbra paused because the API token limit was reached. Ask to continue for more detail.
@@ -2310,7 +2326,7 @@ function ConfidentialAIContent() {
                   className={cn(
                     "pointer-events-auto gap-1 rounded-full border border-border/40 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.2em] shadow-sm backdrop-blur transition dark:border-border/60",
                     hasNewMessages
-                      ? "bg-[linear-gradient(130deg,#102A8C,#0B1F66)] text-white hover:brightness-110"
+                      ? "bg-brand-gradient text-white hover:brightness-110"
                       : "bg-white/95 text-foreground hover:bg-white dark:bg-card/30 dark:text-foreground dark:hover:bg-card/40"
                   )}
                   onClick={() => scrollToBottom()}
@@ -2381,7 +2397,7 @@ function ConfidentialAIContent() {
                           : isVerified && isOutOfDate
                             ? "border-amber-400/60 bg-amber-400/10 text-amber-700 dark:border-amber-400/40 dark:bg-amber-400/5 dark:text-amber-300"
                             : isInProgress
-                              ? "border-[#102A8C]/60 bg-[#102A8C]/10 text-[#102A8C] dark:border-[#102A8C]/40 dark:bg-[#102A8C]/5"
+                              ? "border-brand-primary/60 bg-brand-primary/10 text-brand-primary dark:border-brand-primary/40 dark:bg-brand-primary/5"
                               : hasFailed
                                 ? "border-rose-400/60 bg-rose-400/10 text-rose-700 dark:border-rose-400/40 dark:bg-rose-400/5 dark:text-rose-300"
                                 : "border-amber-400/60 bg-amber-400/10 text-amber-700 dark:border-amber-400/40 dark:bg-amber-400/5 dark:text-amber-300"
@@ -2430,7 +2446,7 @@ function ConfidentialAIContent() {
                         className="flex items-center justify-between rounded-xl border border-border/40 bg-white p-3 text-xs text-muted-foreground dark:border-border/60 dark:bg-card/25"
                       >
                         <div className="flex items-center gap-2">
-                          <FileText className="size-3 text-[#102A8C]" />
+                          <FileText className="size-3 text-brand-primary" />
                           <span className="font-medium text-foreground">{file.name}</span>
                           <span className="text-muted-foreground">
                             ({formatFileSize(file.size)}, {formatWordCount(countWords(file.content))})
@@ -2485,12 +2501,12 @@ function ConfidentialAIContent() {
                     className="h-[56px] w-[56px] shrink-0 rounded-xl border border-border/40 bg-white text-foreground transition hover:bg-white/90 dark:border-border/60 dark:bg-card/20 dark:hover:bg-card/30"
                     title="Upload files"
                   >
-                    <Paperclip className="h-5 w-5 text-[#102A8C] dark:text-foreground" />
+                    <Paperclip className="h-5 w-5 text-brand-primary dark:text-foreground" />
                   </Button>
                   <Button
                     type="submit"
                     size="icon"
-                    className="h-[56px] w-[56px] shrink-0 rounded-xl bg-[linear-gradient(135deg,#102A8C,#0B1F66)] text-white transition hover:brightness-110 dark:bg-white dark:text-foreground"
+                    className="h-[56px] w-[56px] shrink-0 rounded-xl bg-brand-gradient text-white transition hover:brightness-110 dark:bg-white dark:text-foreground"
                     disabled={
                       guestRestrictionActive ||
                       isSending ||
@@ -2512,7 +2528,7 @@ function ConfidentialAIContent() {
         <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto border border-border/50 bg-background/95 backdrop-blur dark:border-border/60 dark:bg-background/80">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2 text-lg font-semibold">
-              <Lock className="h-5 w-5 text-[#102A8C]" />
+              <Lock className="h-5 w-5 text-brand-primary" />
               Secure Session
             </DialogTitle>
           </DialogHeader>
@@ -2537,7 +2553,7 @@ function ConfidentialAIContent() {
                 <div className="space-y-3 text-xs">
                   {modelDisplayLabel && (
                     <div className="flex items-center gap-2">
-                      <Bot className="size-4 text-[#102A8C]" />
+                      <Bot className="size-4 text-brand-primary" />
                       <span className="text-muted-foreground">
                         <span className="font-medium">Model:</span>{" "}
                         <span title={modelDisplayTitle}>{modelDisplayLabel}</span>
@@ -2545,7 +2561,7 @@ function ConfidentialAIContent() {
                     </div>
                   )}
                   <div className="flex items-center gap-2">
-                    <Bot className="size-4 text-[#102A8C]" />
+                    <Bot className="size-4 text-brand-primary" />
                     <span className="text-muted-foreground">
                       <span className="font-medium">Assistant:</span> {assistantName}
                     </span>
@@ -2664,7 +2680,7 @@ export default function ConfidentialAIPage() {
     <Suspense fallback={
       <div className="flex h-[100dvh] items-center justify-center">
         <div className="text-center">
-          <div className="h-8 w-8 animate-spin rounded-full border-4 border-[#102A8C] border-t-transparent mx-auto mb-4"></div>
+          <div className="h-8 w-8 animate-spin rounded-full border-4 border-brand-primary border-t-transparent mx-auto mb-4"></div>
           <p className="text-sm text-muted-foreground">Loading confidential space...</p>
         </div>
       </div>

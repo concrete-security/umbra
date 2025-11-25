@@ -5,7 +5,7 @@
 @layer base {
   :root {
     /* Light Mode: Confidential AI October 2025 palette */
-    --background: 247 23% 92%;
+    --background: 240 5% 96%;
     --foreground: 255 22% 4%;
     --card: 0 0% 100%;
     --card-foreground: 255 22% 6%;
@@ -25,6 +25,10 @@
     --destructive-foreground: 0 0% 98%;
     --success: 145 72% 29%;
     --success-foreground: 0 0% 100%;
+    /* Brand colors for replacements */
+    --brand-primary: 227 80% 30%;
+    --brand-secondary: 227 80% 22%;
+    --brand-accent: 241 77% 47%;
     /* UI chrome */
     --border: 249 20% 78%;
     --input: 249 20% 78%;
@@ -36,7 +40,7 @@
   .dark {
     /* Dark Mode: Secure midnight treatment */
     --background: 250 65% 10%;
-    --foreground: 0 0% 100%;
+    --foreground: 210 20% 98%;
     --card: 249 55% 16%;
     --card-foreground: 0 0% 100%;
     --popover: 250 58% 12%;
@@ -44,6 +48,10 @@
     /* Brand highlight */
     --primary: 0 0% 100%;
     --primary-foreground: 250 65% 10%;
+    /* Brand colors for replacements (keep consistent with light theme) */
+    --brand-primary: 227 80% 30%;
+    --brand-secondary: 227 80% 22%;
+    --brand-accent: 241 77% 47%;
     /* Subtle tinted surfaces */
     --secondary: 250 45% 18%;
     --secondary-foreground: 0 0% 96%;
@@ -92,53 +100,43 @@
 
 @layer components {
   .markdown-body {
-    @apply break-words w-full;
+    @apply break-words w-full text-base leading-relaxed;
   }
 
   .markdown-body > * {
-    @apply m-0 mb-0;
+    @apply m-0 mb-4;
   }
 
-  .markdown-body > * + * {
-    @apply mt-0;
-  }
-
-  .markdown-body * {
-    margin-top: 0;
-    margin-bottom: 0;
-  }
-
-  .markdown-body * + * {
-    margin-top: 0;
+  .markdown-body > *:last-child {
+    @apply mb-0;
   }
 
   .markdown-body p {
-    @apply m-0 text-[0.95rem] leading-[1.4] mb-0;
+    @apply m-0 mb-4;
   }
 
-  .markdown-body p + p {
-    @apply mt-0;
+  .markdown-body p:last-child {
+    @apply mb-0;
   }
-
 
   .markdown-body a {
     @apply text-primary underline decoration-dashed decoration-primary/40 hover:decoration-primary;
   }
 
   .markdown-body ul {
-    @apply list-disc list-outside ml-4 pl-0 my-0 leading-[1.4];
+    @apply list-disc list-outside ml-4 pl-0 mb-4;
   }
 
   .markdown-body ol {
-    @apply list-decimal list-outside ml-4 pl-0 my-0 leading-[1.4];
+    @apply list-decimal list-outside ml-4 pl-0 mb-4;
   }
 
   .markdown-body li {
-    @apply mb-0 leading-[1.4];
+    @apply mb-1;
   }
 
   .markdown-body li > p {
-    @apply m-0 mb-0 leading-[1.4];
+    @apply m-0 mb-2;
   }
 
   .markdown-body li > p:last-child {
@@ -147,20 +145,15 @@
 
   .markdown-body li > ul,
   .markdown-body li > ol {
-    @apply mt-0 mb-0 ps-4;
-  }
-
-  .markdown-body ul > li + li,
-  .markdown-body ol > li + li {
-    @apply mt-0;
+    @apply mt-2 mb-0 ps-4;
   }
 
   .markdown-body code {
-    @apply rounded bg-muted px-1.5 py-0.5 text-xs font-mono;
+    @apply rounded bg-muted px-1.5 py-0.5 text-sm font-mono;
   }
 
   .markdown-body pre {
-    @apply m-0 bg-muted/60 px-3 py-2 text-xs font-mono leading-5 rounded-md overflow-x-auto;
+    @apply m-0 mb-4 bg-muted/60 px-4 py-3 text-sm font-mono leading-relaxed rounded-lg overflow-x-auto;
   }
 
   .markdown-body h1,
@@ -169,43 +162,20 @@
   .markdown-body h4,
   .markdown-body h5,
   .markdown-body h6 {
-    @apply m-0 font-semibold mb-0 mt-0;
+    @apply m-0 font-semibold mt-6 mb-3;
   }
 
-  .markdown-body h1 + *,
-  .markdown-body h2 + *,
-  .markdown-body h3 + *,
-  .markdown-body h4 + *,
-  .markdown-body h5 + *,
-  .markdown-body h6 + * {
-    @apply mt-0;
-  }
-
-  .markdown-body * + h1,
-  .markdown-body * + h2,
-  .markdown-body * + h3,
-  .markdown-body * + h4,
-  .markdown-body * + h5,
-  .markdown-body * + h6 {
-    @apply mt-0;
-  }
-
-  .markdown-body * + ul,
-  .markdown-body * + ol {
-    @apply mt-0;
-  }
-
-  .markdown-body ul + *,
-  .markdown-body ol + * {
-    @apply mt-0;
-  }
-
-  .markdown-body * + p {
+  .markdown-body h1:first-child,
+  .markdown-body h2:first-child,
+  .markdown-body h3:first-child,
+  .markdown-body h4:first-child,
+  .markdown-body h5:first-child,
+  .markdown-body h6:first-child {
     @apply mt-0;
   }
 
   .markdown-table-wrapper {
-    @apply block max-w-full overflow-x-auto;
+    @apply block max-w-full overflow-x-auto mb-4;
   }
 
   .markdown-table {
@@ -218,7 +188,7 @@
 
   .markdown-table th,
   .markdown-table td {
-    @apply border border-border px-3 py-2 align-top break-words whitespace-normal;
+    @apply border border-border px-4 py-2 align-top break-words whitespace-normal;
   }
 
   .markdown-table .align-left {
@@ -297,5 +267,9 @@
   .section-divider {
     height: 140px;
     background: radial-gradient(120% 60% at 50% 0%, rgba(205, 199, 247, 0.32) 0%, rgba(205, 199, 247, 0) 80%);
+  }
+
+  .bg-brand-gradient {
+    background: linear-gradient(135deg, hsl(var(--brand-primary)), hsl(var(--brand-secondary)));
   }
 }

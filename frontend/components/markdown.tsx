@@ -291,7 +291,7 @@ export const Markdown = memo(function Markdown({
   }
 
   return (
-    <div className={clsx("markdown-root flex flex-col gap-2.5 whitespace-normal text-foreground", className)}>
+    <div className={clsx("markdown-root flex flex-col gap-2.5 whitespace-normal", className)}>
       <ReactMarkdown remarkPlugins={MARKDOWN_PLUGINS} rehypePlugins={[SANITIZE_PLUGIN]} components={components}>
         {trimmed}
       </ReactMarkdown>
