@@ -19,6 +19,8 @@ services:
       --max-model-len 131072
       --max-num-seqs 8
       --reasoning-parser openai_gptoss
+      --enable-auto-tool-choice
+      --dyn-tool-call-parser=openai
       --async-scheduling
       --allowed-origins []
     restart: unless-stopped
