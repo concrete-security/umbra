@@ -1,6 +1,6 @@
 services:
   vllm:
-    image: vllm/vllm-openai:latest
+    image: vllm/vllm-openai:gptoss
     container_name: vllm
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
