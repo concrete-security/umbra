@@ -3,6 +3,7 @@ Test script for the attestation service endpoints
 """
 
 import argparse
+
 import requests
 
 
@@ -27,6 +28,7 @@ def test_tdx_quote_post(base_url, no_tdx=False):
             data = response.json()
             print(f"  Success: {data.get('success')}")
             print(f"  Quote type: {data.get('quote_type')}")
+            print(f"  TCBInfo type: {data.get('tcb_info')}")
             return True
         elif response.status_code == 500 and no_tdx:
             expected = {
