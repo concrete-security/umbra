@@ -4,14 +4,15 @@ Attestation Service
 Provides TDX attestation endpoints using the dstack_sdk.
 """
 
-import time
 import logging
+import time
 from typing import Optional, Union
 
-from fastapi import FastAPI, Request, HTTPException
+from dstack_sdk import DstackClient, GetQuoteResponse
+from dstack_sdk.dstack_client import TcbInfoV05x
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel
-from dstack_sdk import DstackClient, GetQuoteResponse
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -31,6 +32,7 @@ class HealthResponse(BaseModel):
 class QuoteResponse(BaseModel):
     success: bool
     quote: Optional[GetQuoteResponse] = None
+    tcb_info: Optional[TcbInfoV05x] = None
     timestamp: str
     quote_type: str
     error: Optional[str] = None
@@ -69,11 +71,16 @@ async def post_tdx_quote(request: Request, data: ReportDataRequest):
         # Instantiate dstack client before use
         dstack_client = DstackClient()
         quote = dstack_client.get_quote(report_data)
+        tcb_info = dstack_client.info().tcb_info
 
         logger.info("Successfully obtained TDX quote")
 
         return QuoteResponse(
-            success=True, quote=quote, timestamp=str(int(time.time())), quote_type="tdx"
+            success=True,
+            quote=quote,
+            tcb_info=tcb_info,
+            timestamp=str(int(time.time())),
+            quote_type="tdx",
         )
 
     except Exception as e:
