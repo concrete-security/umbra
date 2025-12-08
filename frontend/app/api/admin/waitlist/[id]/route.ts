@@ -44,7 +44,7 @@ function sanitizePriority(value: unknown): number | null | undefined {
   return Math.min(Math.max(Math.round(numeric), 0), 10)
 }
 
-export async function PATCH(request: Request, { params }: { params: { id: string } }) {
+export async function PATCH(request: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
     ensureSameOrigin(request)
     assertJsonRequest(request)
@@ -69,7 +69,7 @@ export async function PATCH(request: Request, { params }: { params: { id: string
     throw error
   }
 
-  const requestId = params.id
+  const { id: requestId } = await params
   if (!requestId) {
     return NextResponse.json({ error: "Waitlist id is required" }, { status: 400 })
   }
