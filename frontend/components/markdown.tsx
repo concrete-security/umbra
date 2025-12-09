@@ -11,6 +11,7 @@ import remarkGfm from "remark-gfm"
 
 type HastElement = { properties?: Record<string, unknown> }
 type Schema = Record<string, unknown>
+type HeadingTag = "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
 
 const SUSPICIOUS_CONTENT_PATTERN = /<(?:script|iframe|object|embed)|javascript:|data:text\/html|on[a-z]+\s*=|style=/i
 
@@ -100,7 +101,7 @@ function createHeading(level: number) {
   const base = "font-semibold tracking-tight text-foreground"
   const spacing = level === 1 ? "mt-7 mb-4 text-xl" : level === 2 ? "mt-6 mb-3.5 text-lg" : "mt-5 mb-3 text-base"
   return function Heading({ children }: { children: ReactNode }) {
-    const Tag = `h${level}` as keyof JSX.IntrinsicElements
+    const Tag = `h${level}` as HeadingTag
     return <Tag className={clsx(base, spacing)}>{children}</Tag>
   }
 }
