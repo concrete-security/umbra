@@ -1,24 +1,20 @@
-let pdfjsPromise: Promise<typeof import("pdfjs-dist")> | null = null
-let pdfWorker: Worker | null = null
+let pdfjsPromise: Promise<any> | null = null
 
-async function ensureWorker(pdfjs: typeof import("pdfjs-dist")) {
+async function ensureWorker(pdfjs: any) {
   if (typeof window === "undefined") {
     return
   }
-  if (pdfWorker) {
-    return
-  }
 
-  pdfWorker = new Worker(new URL("../workers/pdf.worker.ts", import.meta.url), {
-    type: "module",
-    name: "pdfjs-worker",
-  })
-  pdfjs.GlobalWorkerOptions.workerPort = pdfWorker
+  const workerUrl = `${window.location.origin}/pdfjs/pdf.worker.mjs`
+  if (pdfjs?.GlobalWorkerOptions) {
+    pdfjs.GlobalWorkerOptions.workerSrc = workerUrl
+  }
 }
 
 export async function loadPdfjs() {
   if (!pdfjsPromise) {
-    pdfjsPromise = import("pdfjs-dist")
+    const moduleUrl = `${window.location.origin}/pdfjs/pdf.mjs`
+    pdfjsPromise = import(/* webpackIgnore: true */ moduleUrl)
   }
   const pdfjs = await pdfjsPromise
   await ensureWorker(pdfjs)
