@@ -49,7 +49,8 @@ async function digestBytes(
   data: ArrayBuffer | ArrayBufferView | Uint8Array
 ): Promise<Uint8Array> {
   const provider = getCrypto()
-  const digest = await provider.subtle.digest(algorithm, ensureUint8Array(data))
+  const bytes = ensureUint8Array(data)
+  const digest = await provider.subtle.digest(algorithm, bytes.slice().buffer)
   return new Uint8Array(digest)
 }
 

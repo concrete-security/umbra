@@ -1,6 +1,6 @@
 "use client"
 
-import type { ReactNode } from "react"
+import type { ReactElement, ReactNode } from "react"
 import clsx from "clsx"
 import { memo, useCallback, useEffect, useMemo, useState, isValidElement } from "react"
 import { Check, Copy, ExternalLink } from "lucide-react"
@@ -100,7 +100,7 @@ function alignClass(node?: HastElement) {
 function createHeading(level: number) {
   const base = "font-semibold tracking-tight text-foreground"
   const spacing = level === 1 ? "mt-7 mb-4 text-xl" : level === 2 ? "mt-6 mb-3.5 text-lg" : "mt-5 mb-3 text-base"
-  return function Heading({ children }: { children: ReactNode }) {
+  return function Heading({ children }: { children?: ReactNode }) {
     const Tag = `h${level}` as HeadingTag
     return <Tag className={clsx(base, spacing)}>{children}</Tag>
   }
@@ -117,7 +117,9 @@ function extractText(node: ReactNode): string {
     return node.map(extractText).join("")
   }
   if (isValidElement(node)) {
-    return extractText(node.props.children)
+    const element = node as ReactElement
+    const child = (element.props as { children?: ReactNode }).children
+    return extractText(child ?? "")
   }
   return ""
 }
@@ -242,7 +244,7 @@ const components: Components = {
       </a>
     )
   },
-  code: ({ inline, className, children }) =>
+  code: ({ inline = false, className, children }: { inline?: boolean; className?: string; children?: ReactNode }) =>
     inline ? (
       <code className={clsx("rounded bg-muted/60 px-1.5 py-1 font-mono text-xs text-foreground", className)}>
         {children}
