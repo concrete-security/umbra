@@ -264,7 +264,7 @@ async function deriveQuoteChecksum(quoteHex: string): Promise<string | null> {
   }
   try {
     if (typeof crypto !== "undefined" && typeof crypto.subtle?.digest === "function") {
-      const digest = await crypto.subtle.digest("SHA-256", bytes)
+      const digest = await crypto.subtle.digest("SHA-256", bytes.slice().buffer)
       return bytesToHex(new Uint8Array(digest))
     }
   } catch (error) {
