@@ -7,3 +7,5 @@ export const WAITLIST_STATUSES: WaitlistStatus[] = ["requested", "contacted", "i
 export function isWaitlistStatus(value: string): value is WaitlistStatus {
   return WAITLIST_STATUSES.includes(value as WaitlistStatus)
 }
+
+export type { WaitlistStatus } from "@/lib/supabase/types"

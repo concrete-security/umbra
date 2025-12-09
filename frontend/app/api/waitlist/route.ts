@@ -101,7 +101,7 @@ export async function POST(request: Request) {
           company,
           use_case: useCase,
           metadata,
-        },
+        } as never,
         {
           onConflict: "email",
         }

@@ -1,14 +1,16 @@
 "use client"
 
-import type { Element } from "hast"
 import type { ReactNode } from "react"
 import clsx from "clsx"
 import { memo, useCallback, useEffect, useMemo, useState, isValidElement } from "react"
 import { Check, Copy, ExternalLink } from "lucide-react"
 import ReactMarkdown from "react-markdown"
 import type { Components } from "react-markdown"
-import rehypeSanitize, { defaultSchema, type Schema } from "rehype-sanitize"
+import rehypeSanitize, { defaultSchema } from "rehype-sanitize"
 import remarkGfm from "remark-gfm"
+
+type HastElement = { properties?: Record<string, unknown> }
+type Schema = Record<string, unknown>
 
 const SUSPICIOUS_CONTENT_PATTERN = /<(?:script|iframe|object|embed)|javascript:|data:text\/html|on[a-z]+\s*=|style=/i
 
@@ -86,7 +88,7 @@ const SANITIZE_SCHEMA: Schema = {
   },
 }
 
-function alignClass(node?: Element) {
+function alignClass(node?: HastElement) {
   const align = (node?.properties?.align as string | undefined)?.toLowerCase()
   if (align === "center" || align === "right") {
     return `text-${align}`
@@ -98,7 +100,7 @@ function createHeading(level: number) {
   const base = "font-semibold tracking-tight text-foreground"
   const spacing = level === 1 ? "mt-7 mb-4 text-xl" : level === 2 ? "mt-6 mb-3.5 text-lg" : "mt-5 mb-3 text-base"
   return function Heading({ children }: { children: ReactNode }) {
-    const Tag = `h${level}` as const
+    const Tag = `h${level}` as keyof JSX.IntrinsicElements
     return <Tag className={clsx(base, spacing)}>{children}</Tag>
   }
 }
@@ -267,7 +269,7 @@ const components: Components = {
 }
 
 const MARKDOWN_PLUGINS = [remarkGfm]
-const SANITIZE_PLUGIN = [rehypeSanitize, SANITIZE_SCHEMA] as const
+const SANITIZE_PLUGIN: [typeof rehypeSanitize, Schema] = [rehypeSanitize, SANITIZE_SCHEMA]
 
 export const Markdown = memo(function Markdown({
   content,

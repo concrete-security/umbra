@@ -105,7 +105,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   const serviceRole = createSupabaseServiceRoleClient()
   const { data, error } = await serviceRole
     .from("waitlist_requests")
-    .update(updates)
+    .update(updates as never)
     .eq("id", requestId)
     .select("*")
     .maybeSingle()

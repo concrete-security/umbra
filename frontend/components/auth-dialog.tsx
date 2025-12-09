@@ -58,16 +58,18 @@ export function AuthDialog({ open, onOpenChange }: AuthDialogProps) {
   const [activeTab, setActiveTab] = useState("signin")
 
   useEffect(() => {
-    if (!open || !supabase) {
+    const client = supabase
+    if (!open || !client) {
       setAuthState("unauthenticated")
       return
     }
 
+    const authClient = client as NonNullable<typeof client>
     let mounted = true
 
     async function checkAuth() {
       try {
-        const { data, error } = await supabase.auth.getUser()
+        const { data, error } = await authClient.auth.getUser()
         if (!mounted) return
         if (error) {
           if (isAuthSessionMissingError(error)) {
@@ -96,7 +98,7 @@ export function AuthDialog({ open, onOpenChange }: AuthDialogProps) {
 
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event: string, session: { user: unknown } | null) => {
+    } = authClient.auth.onAuthStateChange((_event: string, session: { user: unknown } | null) => {
       if (!mounted) return
       if (session?.user) {
         setAuthState("authenticated")

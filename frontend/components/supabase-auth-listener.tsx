@@ -31,7 +31,7 @@ export function SupabaseAuthListener() {
 
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((event, session) => {
+    } = supabase.auth.onAuthStateChange((event: AuthChangeEvent, session: Session | null) => {
       // Only sync session state when there's an actual session change to persist
       if (event === "SIGNED_IN" || event === "TOKEN_REFRESHED" || event === "SIGNED_OUT") {
         const payload: SupabaseAuthListenerPayload = { event, session }

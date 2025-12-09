@@ -40,19 +40,20 @@ export function NavAuthButton() {
     if (isInitializedRef.current) {
       return
     }
-    
-    if (!supabase) {
+    const client = supabase
+    if (!client) {
       isInitializedRef.current = true
       setAuthState("signed-out")
       return
     }
 
+    const authClient = client as NonNullable<typeof client>
     let mounted = true
     isInitializedRef.current = true
 
     async function resolveInitialState() {
       try {
-        const { data, error } = await supabase.auth.getUser()
+        const { data, error } = await authClient.auth.getUser()
         if (!mounted) {
           return
         }
@@ -79,7 +80,7 @@ export function NavAuthButton() {
 
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event: string, session: { user: unknown } | null) => {
+    } = authClient.auth.onAuthStateChange((_event: string, session: { user: unknown } | null) => {
       if (!mounted) {
         return
       }

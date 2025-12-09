@@ -29,6 +29,8 @@ import {
   Circle,
   UserCircle2,
   ChevronDown,
+  AlertTriangle,
+  ExternalLink,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion"
@@ -65,10 +67,24 @@ type StoredProviderSettings = {
   baseUrl?: string
 }
 
+type AttestationSummary = {
+  teeType?: string | null
+  tcbStatus?: string | null
+  measurement?: string | null
+  advisoryIds?: string[]
+}
+
 type ProofState =
   | { status: "idle" }
   | { status: "loading"; reportData: string; sourceBaseUrl: string }
-  | { status: "ready"; reportData: string; payload: TdxQuoteSuccessResponse; fetchedAt: number; sourceBaseUrl: string }
+  | {
+      status: "ready"
+      reportData: string
+      payload: TdxQuoteSuccessResponse
+      fetchedAt: number
+      sourceBaseUrl: string
+      attestation?: AttestationSummary
+    }
   | { status: "error"; reportData: string; error: string; sourceBaseUrl: string }
   | { status: "unavailable"; reason?: string }
 
@@ -499,16 +515,18 @@ function ConfidentialAIContent() {
   )
 
   useEffect(() => {
-    if (!supabase) {
+    const client = supabase
+    if (!client) {
       applySupabaseSession(null)
       return
     }
+    const authClient = client as NonNullable<typeof client>
 
     let mounted = true
 
     async function resolveInitialUser() {
       try {
-        const { data, error } = await supabase.auth.getUser()
+        const { data, error } = await authClient.auth.getUser()
         if (!mounted) return
         if (error) {
           if (isAuthSessionMissingError(error)) {
@@ -532,7 +550,7 @@ function ConfidentialAIContent() {
 
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event: string, session: { user?: { email?: string | null } } | null) => {
+    } = authClient.auth.onAuthStateChange((_event: string, session: { user?: { email?: string | null } } | null) => {
       if (!mounted) return
       applySupabaseSession(session?.user?.email ?? null)
     })
@@ -1216,19 +1234,25 @@ function ConfidentialAIContent() {
                   </div>
                   <div className="flex items-center justify-between">
                     <dt className="text-muted-foreground">TEE</dt>
-                    <dd className="font-mono text-foreground/80 uppercase">{proofState.attestation.teeType || "tdx"}</dd>
+                    <dd className="font-mono text-foreground/80 uppercase">
+                      {proofState.attestation?.teeType || proofState.payload.quote_type || "tdx"}
+                    </dd>
                   </div>
                   <div className="flex items-center justify-between">
                     <dt className="text-muted-foreground">TCB status</dt>
-                    <dd className="font-mono text-foreground/80">{proofState.attestation.tcbStatus || "Unknown"}</dd>
+                    <dd className="font-mono text-foreground/80">
+                      {proofState.attestation?.tcbStatus || "Unknown"}
+                    </dd>
                   </div>
                   <div className="flex items-center justify-between">
                     <dt className="text-muted-foreground">Measurement</dt>
-                    <dd className="font-mono text-brand-primary">{formatIdentifierSnippet(proofState.attestation.measurement ?? "—")}</dd>
+                    <dd className="font-mono text-brand-primary">
+                      {formatIdentifierSnippet(proofState.attestation?.measurement ?? "—")}
+                    </dd>
                   </div>
                   <div className="flex items-center justify-between">
                     <dt className="text-muted-foreground">Advisories</dt>
-                    <dd className="font-mono text-foreground/80">{proofState.attestation.advisoryIds?.length ?? 0}</dd>
+                    <dd className="font-mono text-foreground/80">{proofState.attestation?.advisoryIds?.length ?? 0}</dd>
                   </div>
                   <div className="flex items-center justify-between">
                     <dt className="text-muted-foreground">Last refreshed</dt>
@@ -1512,11 +1536,12 @@ function ConfidentialAIContent() {
   // Extract only text
   const extractTextFromPDF = async (file: File): Promise<string> => {
     try {
-
-      const pdfjsLibModule = await import(/* webpackIgnore: true */ "/pdfjs/pdf.mjs")
+      const pdfModuleUrl = `${window.location.origin}/pdfjs/pdf.mjs`
+      const pdfWorkerUrl = `${window.location.origin}/pdfjs/pdf.worker.mjs`
+      const pdfjsLibModule = await import(/* webpackIgnore: true */ pdfModuleUrl)
       const pdfjsLib = (pdfjsLibModule as unknown as { default?: any }).default ?? (window as any).pdfjsLib ?? pdfjsLibModule
 
-      pdfjsLib.GlobalWorkerOptions.workerSrc = "/pdfjs/pdf.worker.mjs"
+      pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl
 
       const arrayBuffer = await file.arrayBuffer()
       const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise
@@ -2201,6 +2226,7 @@ function ConfidentialAIContent() {
                   const isReasoningOpen = reasoningOpen[i] ?? false
                   const reasoningAvailable =
                     typeof m.reasoning_content === "string" && m.reasoning_content.trim().length > 0
+                  const hasReasoningActivity = m.streaming || reasoningAvailable
                   const showReasoningPanel = isAssistant && (m.streaming || reasoningAvailable)
                   const truncatedByLength = isAssistant && m.finishReason === "length"
 
@@ -2220,10 +2246,10 @@ function ConfidentialAIContent() {
                     : "max-w-[85%] md:max-w-4xl self-start whitespace-pre-wrap break-words rounded-none bg-transparent px-0 py-0 text-left text-foreground leading-7"
 
                   const bubbleStyle: CSSProperties | undefined = isUser
-                    ? {
+                    ? ({
                         "--foreground": "0 0% 100%",
                         "--muted-foreground": "0 0% 85%",
-                      }
+                      } as CSSProperties)
                     : undefined
 
                   const attachmentsContainerClass = cn(

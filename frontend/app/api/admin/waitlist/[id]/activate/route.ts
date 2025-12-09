@@ -5,6 +5,7 @@ import { createSupabaseRouteHandlerClient } from "@/lib/supabase/route-handler"
 import { createSupabaseServiceRoleClient } from "@/lib/supabase/service-role"
 import { sendWaitlistActivationEmail } from "@/lib/email/templates/waitlist-activation"
 import { CrossOriginRequestError, ensureSameOrigin } from "@/lib/security/origin"
+import type { WaitlistRequestRow } from "@/lib/supabase/types"
 
 function resolveAppUrl(request: Request): string {
   if (process.env.NEXT_PUBLIC_APP_URL) {
@@ -52,11 +53,12 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   }
 
   const serviceRole = createSupabaseServiceRoleClient()
-  const { data: entry, error: entryError } = await serviceRole
+  const { data: entryData, error: entryError } = await serviceRole
     .from("waitlist_requests")
     .select("*")
     .eq("id", entryId)
-    .maybeSingle()
+    .maybeSingle<WaitlistRequestRow>()
+  const entry = entryData as WaitlistRequestRow | null
 
   if (entryError) {
     console.error("Failed to load waitlist entry", entryError)
@@ -108,18 +110,19 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   }
 
   const now = new Date().toISOString()
+  const updates: Partial<WaitlistRequestRow> = {
+    status: "invited",
+    last_contacted_at: now,
+    activation_sent_at: now,
+    activation_link: magicLink,
+    supabase_user_id: supabaseUserId,
+  }
   const { data: updatedEntry, error: updateError } = await serviceRole
     .from("waitlist_requests")
-    .update({
-      status: "invited",
-      last_contacted_at: now,
-      activation_sent_at: now,
-      activation_link: magicLink,
-      supabase_user_id: supabaseUserId,
-    })
+    .update(updates as never)
     .eq("id", entryId)
     .select("*")
-    .maybeSingle()
+    .maybeSingle<WaitlistRequestRow>()
 
   if (updateError) {
     console.error("Failed to update waitlist entry after activation", updateError)

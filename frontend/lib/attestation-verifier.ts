@@ -109,11 +109,11 @@ let bindingsPromise: Promise<DcapModule> | null = null
 async function loadBindings(): Promise<DcapModule> {
   if (!bindingsPromise) {
     bindingsPromise = (async () => {
-      const module = (await import("@phala/dcap-qvl-web")) as DcapModule
-      if (typeof module.default === "function") {
-        await module.default()
+      const bindings = (await import("@phala/dcap-qvl-web")) as DcapModule
+      if (typeof bindings.default === "function") {
+        await bindings.default()
       }
-      return module
+      return bindings
     })()
   }
   return bindingsPromise
