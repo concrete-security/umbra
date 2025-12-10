@@ -58,7 +58,7 @@ services:
 
   # Auth service for protected endpoints
   auth-service:
-    image: ghcr.io/concrete-security/auth-service:latest
+    image: ghcr.io/concrete-security/auth-service@sha256:1258f556c0b237dbf5dc091d2f2dc2e22d2f377cafef707e38f8ac9487c6bdae
     container_name: auth-service
     environment:
       - HOST=0.0.0.0
