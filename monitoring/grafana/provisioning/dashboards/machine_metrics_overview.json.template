@@ -7,111 +7,115 @@
   "version": 1,
   "refresh": "1s",
   "_comment": "This dashboard provides an overview of vLLM latency and throughput behavior, showing quantiles (P50, P95, P99) for latency metrics, queue waiting times, and token generation throughput.",
+  "templating": {
+    "list": [
+      {
+        "name": "job",
+        "type": "constant",
+        "query": "${VLLM_SCRAPE_JOB_NAME}",
+        "hide": 2
+      },
+      {
+        "name": "datasource",
+        "type": "constant",
+        "query": "${GRAFANA_DATASOURCE_UID}",
+        "hide": 2
+      }
+    ]
+  },
   "panels": [
-
     {
       "title": "Running vs Waiting requests: Server load and saturation over time",
       "type": "timeseries",
       "_comment": "Shows the current number of requests being actively processed (Running) versus those still queued (Waiting). Helps visualize server load and saturation over time.",
-      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
       "gridPos": { "x": 0, "y": 0, "w": 24, "h": 9 },
       "targets": [
-        { "expr": "vllm:num_requests_running", "legendFormat": "Running (req/s)" },
-        { "expr": "vllm:num_requests_waiting", "legendFormat": "Waiting (req/s)" },
-        { "expr": "vllm:num_requests_running + vllm:num_requests_waiting", "legendFormat": "Total (req/s)" }
+        { "expr": "vllm:num_requests_running{scrape_job=\"$job\"}", "legendFormat": "Running (req/s)" },
+        { "expr": "vllm:num_requests_waiting{scrape_job=\"$job\"}", "legendFormat": "Waiting (req/s)" },
+        { "expr": "vllm:num_requests_running{scrape_job=\"$job\"} + vllm:num_requests_waiting{scrape_job=\"$job\"}", "legendFormat": "Total (req/s)" }
       ]
     },
-
     {
-      "title": "Success requests per 30s: Server load and saturation over time",
+      "title": "Success requests per 5m: Server load and saturation over time",
       "type": "timeseries",
       "_comment": "Shows the current number of requests being actively processed (Running) versus those still queued (Waiting). Helps visualize server load and saturation over time.",
-      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
       "gridPos": { "x": 0, "y": 0, "w": 24, "h": 9 },
       "targets": [
-        { "expr": "sum(rate(vllm:request_success_total[30s]))", "legendFormat": "Success (req/s)"}
+        { "expr": "sum(rate(vllm:request_success_total{scrape_job=\"$job\"}[5m]))", "legendFormat": "Success (req/s)" }
       ]
     },
-
     {
       "title": "KeyValue Cache Usage (%): KV saturation → risk of preemptions",
       "description": "The KV Cache is the GPU memory used to store Key and Value vectors during token generation.\nvLLM uses the KV cache to speed up generation.\nIf this memory is insufficient → the system must eject requests = preemptions",
       "type": "timeseries",
       "_comment": "Percentage of GPU KV cache currently used.",
       "_interpretation": "If > 80%: high KV saturation → risk of preemptions. If < 60%: system is safe.",
-      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
       "gridPos": { "x": 0, "y": 9, "w": 12, "h": 9 },
       "targets": [
-        { "expr": "avg(vllm:kv_cache_usage_perc)", "legendFormat": "KV Cache (%)" }
+        { "expr": "avg(vllm:kv_cache_usage_perc{scrape_job=\"$job\"})", "legendFormat": "KV Cache (%)" }
       ],
       "fieldConfig": { "defaults": { "unit": "percentunit" } }
     },
-
     {
       "title": "GPU Preemptions / sec: If > 0: eviction or throttling → GPU fully saturated",
       "type": "timeseries",
       "_comment": "Preemptions happen when KV cache or GPU throughput is insufficient.",
       "_interpretation": "If > 0: eviction or throttling → GPU fully saturated → increase GPU memory or reduce batch size.",
       "gridPos": { "x": 12, "y": 18, "w": 12, "h": 9 },
-      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
       "targets": [
-        { "expr": "rate(vllm:num_preemptions_total[1m])", "legendFormat": "Preemptions/s" }
+        { "expr": "rate(vllm:num_preemptions_total{scrape_job=\"$job\"}[5m])", "legendFormat": "Preemptions/s" }
       ]
     },
-
     {
       "title": "The average number of cores used by vLLM: Overall CPU load",
       "type": "timeseries",
       "_comment": "CPU usage of vLLM process.",
       "_interpretation": "If > 1.0: more than 1 full CPU core used → heavy tokenization or offload. If < 0.2: normal.",
       "gridPos": { "x": 0, "y": 27, "w": 24, "h": 9 },
-      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
       "targets": [
-        { "expr": "rate(process_cpu_seconds_total[1m])", "legendFormat": "CPU Cores" }
-      ],
-      "fieldConfig": { "defaults": { "unit": "ops" } }
+        { "expr": "rate(process_cpu_seconds_total{scrape_job=\"$job\"}[5m])", "legendFormat": "CPU Cores" }
+      ]
     },
-
     {
       "title": "Prefix Cache: nb times vLLM checks if it can reuse a previously calculated prefix Vs nb times vLLM actually finds a previously calculated prefix / sec",
       "type": "timeseries",
       "_comment": "Shows how often prefix cache is queried, and how often it succeeds.",
       "_interpretation": "If queries ↑ but hits stay flat: prefix cache mismatches. If hits follow queries: good reuse.",
       "gridPos": { "x": 0, "y": 36, "w": 24, "h": 9 },
-      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
       "targets": [
-        { "expr": "rate(vllm:prefix_cache_hits_total[1m])", "legendFormat": "nb times vllm checks prefix cache / s" },
-        { "expr": "rate(vllm:prefix_cache_queries_total[1m])", "legendFormat": "nb times vllm finds prefix cache / s" }
+        { "expr": "rate(vllm:prefix_cache_hits_total{scrape_job=\"$job\"}[5m])", "legendFormat": "nb times vllm checks prefix cache / s" },
+        { "expr": "rate(vllm:prefix_cache_queries_total{scrape_job=\"$job\"}[5m])", "legendFormat": "nb times vllm finds prefix cache / s" }
       ]
     },
-
     {
       "title": "% of queries that find a prefix that has already been seen",
       "type": "timeseries",
       "_comment": "Prefix cache effectiveness.",
       "_interpretation": "If > 70%: excellent cache reuse. If < 20%: prompts too unique → prefix cache useless.",
-      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
       "gridPos": { "x": 0, "y": 45, "w": 24, "h": 9 },
       "fieldConfig": { "defaults": { "unit": "percentunit" } },
       "targets": [
-        {
-          "expr": "100*(sum(rate(vllm:prefix_cache_hits_total[1m])) / clamp_min(sum(rate(vllm:prefix_cache_queries_total[1m])),1))",
-          "legendFormat": "Hit-Rate"
-        }
+        { "expr": "100*(sum(rate(vllm:prefix_cache_hits_total{scrape_job=\"$job\"}[5m])) / clamp_min(sum(rate(vllm:prefix_cache_queries_total{scrape_job=\"$job\"}[5m])),1))", "legendFormat": "Hit-Rate" }
       ]
     },
-
     {
       "title": "Process Resident Memory Bytes: The total size of the virtual memory space requested by the process at time T.",
       "type": "timeseries",
       "_comment": "Real memory used by the vLLM process.",
       "_interpretation": "If always rising: memory leak likely. If stable: healthy.",
       "gridPos": { "x": 0, "y": 54, "w": 24, "h": 9 },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
       "targets": [
-        { "expr": "process_resident_memory_bytes", "legendFormat": "RSS" }
+        { "expr": "process_resident_memory_bytes{scrape_job=\"$job\"}", "legendFormat": "RSS" }
       ],
       "fieldConfig": { "defaults": { "unit": "bytes" } }
     }
-
   ]
 }
