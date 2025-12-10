@@ -1,0 +1,40 @@
+[project]
+name = "auth-service"
+version = "0.1.0"
+requires-python = ">=3.10"
+
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "ruff",
+]
+
+test = [
+    "pytest",
+]
+
+[tool.ruff]
+line-length = 100
+indent-width = 4
+
+[tool.ruff.format]
+# Like Black, use double quotes for strings.
+quote-style = "double"
+
+# Like Black, indent with spaces, rather than tabs.
+indent-style = "space"
+
+# Like Black, respect magic trailing commas.
+skip-magic-trailing-comma = false
+
+# Like Black, automatically detect the appropriate line ending.
+line-ending = "auto"
+
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[build-system]
+requires = ["uv_build"]
+build-backend = "uv_build"

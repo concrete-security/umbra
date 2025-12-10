@@ -38,6 +38,7 @@ help:
 	@echo "  test-acme         Test ACME challenge endpoint"
 	@echo "  test-certificate  Test SSL certificate validation"
 	@echo "  test-cors         Test CORS configuration on multiple endpoints"
+	@echo "  test-metrics-auth Test /metrics endpoint with authentication"
 	@echo ""
 	@echo "⚙️  Environment Variables:"
 	@echo "  DEV             Set to 'false' for production mode testing"
@@ -100,3 +101,6 @@ test-certificate:
 
 test-cors:
 	$(PYTHON_RUNNER) test_cvm.py $(DEV_FLAG) --cors --base-url $(NGINX_URL)
+
+test-metrics-auth:
+	$(PYTHON_RUNNER) test_cvm.py $(DEV_FLAG) --metrics-auth --base-url $(NGINX_URL)

@@ -28,16 +28,21 @@ except ImportError:
 class CVMTester:
     """Main test class for CVM services"""
 
+    # Test token used in dev mode (must match docker-compose.dev.override.yml)
+    DEV_AUTH_TOKEN = "test-metrics-token-dev"
+
     def __init__(
         self,
         base_url: str = "https://localhost",
         http_url: str = "http://localhost",
         dev_mode: bool = False,
+        auth_token: str | None = None,
     ):
         self.base_url = base_url.rstrip("/")
         self.http_url = http_url.rstrip("/")
         self.dev_mode = dev_mode
         self.verify_ssl = not dev_mode  # In production mode, verify SSL certificates
+        self.auth_token = auth_token or (self.DEV_AUTH_TOKEN if dev_mode else None)
         self.session = self._create_session()
 
     def _create_session(self) -> requests.Session:
@@ -555,7 +560,12 @@ class CVMTester:
                     "messages": [{"role": "user", "content": "CORS test"}],
                     "max_tokens": 10
                 }
-            }
+            },
+            {
+                'path': '/metrics',
+                'name': 'Metrics Endpoint',
+                'test_methods': ['GET', 'OPTIONS'],
+            },
         ]
 
         # Test allowed origins
@@ -753,6 +763,86 @@ class CVMTester:
 
         return success
 
+    def test_metrics_auth(self) -> bool:
+        """Test /metrics endpoint authentication"""
+        self._print_test_header("Testing Metrics Endpoint Authentication")
+
+        success = True
+
+        # Test 1: Request without auth should return 401
+        try:
+            response = self.session.get(
+                f"{self.base_url}/metrics",
+                verify=self.verify_ssl,
+                timeout=5,
+            )
+
+            if response.status_code == 401:
+                self._print_success("Metrics endpoint correctly returns 401 without auth")
+            else:
+                self._print_error(
+                    f"Metrics endpoint returned {response.status_code} without auth (expected 401)"
+                )
+                success = False
+
+        except requests.exceptions.RequestException as e:
+            self._print_error(f"Metrics auth test (no auth) failed: {str(e)}")
+            success = False
+
+        # Test 2: Request with invalid token should return 401
+        try:
+            response = self.session.get(
+                f"{self.base_url}/metrics",
+                headers={"Authorization": "Bearer invalid-token"},
+                verify=self.verify_ssl,
+                timeout=5,
+            )
+
+            if response.status_code == 401:
+                self._print_success("Metrics endpoint correctly returns 401 with invalid token")
+            else:
+                self._print_error(
+                    f"Metrics endpoint returned {response.status_code} with invalid token (expected 401)"
+                )
+                success = False
+
+        except requests.exceptions.RequestException as e:
+            self._print_error(f"Metrics auth test (invalid token) failed: {str(e)}")
+            success = False
+
+        # Test 3: Request with valid token should return 200
+        if self.auth_token:
+            try:
+                response = self.session.get(
+                    f"{self.base_url}/metrics",
+                    headers={"Authorization": f"Bearer {self.auth_token}"},
+                    verify=self.verify_ssl,
+                    timeout=5,
+                )
+
+                if response.status_code == 200:
+                    self._print_success("Metrics endpoint returns 200 with valid token")
+                    # Verify we got metrics content
+                    content = response.text
+                    if content == "Mock Metrics":
+                        self._print_success("Metrics endpoint returns expected response")
+                    else:
+                        self._print_warning("Metrics content doesn't match expected value")
+                else:
+                    self._print_error(
+                        f"Metrics endpoint returned {response.status_code} with valid token (expected 200)"
+                    )
+                    success = False
+
+            except requests.exceptions.RequestException as e:
+                self._print_error(f"Metrics auth test (valid token) failed: {str(e)}")
+                success = False
+        else:
+            self._print_warning("No auth token configured, skipping valid token test")
+            self._print_info("Use --auth-token to provide a token for production testing")
+
+        return success
+
     def run_all_tests(self) -> bool:
         """Run all test suites"""
         mode = "Development" if self.dev_mode else "Production"
@@ -769,6 +859,7 @@ class CVMTester:
             "attestation": self.test_attestation(),
             "cors": self.test_cors(),
             "vllm": self.test_vllm(),
+            "metrics_auth": self.test_metrics_auth(),
         }
 
         print("\n" + "=" * 50)
@@ -861,6 +952,14 @@ Examples:
     parser.add_argument(
         "--vllm", action="store_true", help="Test vLLM/mock vLLM endpoints"
     )
+    parser.add_argument(
+        "--metrics-auth", action="store_true", help="Test metrics endpoint authentication"
+    )
+    parser.add_argument(
+        "--auth-token",
+        default=None,
+        help="Auth token for metrics endpoint (default: dev token in dev mode)",
+    )
 
     args = parser.parse_args()
 
@@ -875,11 +974,12 @@ Examples:
             args.attestation,
             args.cors,
             args.vllm,
+            args.metrics_auth,
         ]
     ):
         args.all = True
 
-    tester = CVMTester(args.base_url, args.http_url, args.dev)
+    tester = CVMTester(args.base_url, args.http_url, args.dev, args.auth_token)
 
     # Wait for services if requested or if running all tests
     if args.wait or args.all:
@@ -918,6 +1018,9 @@ Examples:
 
     if args.vllm:
         success &= tester.test_vllm()
+
+    if args.metrics_auth:
+        success &= tester.test_metrics_auth()
 
     sys.exit(0 if success else 1)
 
