@@ -1,20 +1,20 @@
-name: Attestation Service
+name: Auth Service
 
 on:
   push:
     branches:
       - main
     paths:
-      - "cvm/attestation-service/**"
+      - "cvm/auth-service/**"
   pull_request:
     paths:
-      - "cvm/attestation-service/**"
+      - "cvm/auth-service/**"
   # for manual trigger from GitHub UI
   workflow_dispatch:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: concrete-security/attestation-service
+  IMAGE_NAME: concrete-security/auth-service
 
 jobs:
   ruff-lint-format:
@@ -27,17 +27,17 @@ jobs:
         uses: astral-sh/setup-uv@2ddd2b9cb38ad8efd50337e8ab201519a34c9f24 # v7
 
       - name: Install dependencies
-        working-directory: ./cvm/attestation-service
+        working-directory: ./cvm/auth-service
         run: |
           uv sync --dev
 
       - name: Run Ruff linter
-        working-directory: ./cvm/attestation-service
+        working-directory: ./cvm/auth-service
         run: |
           uv run ruff check .
 
       - name: Run Ruff formatter check
-        working-directory: ./cvm/attestation-service
+        working-directory: ./cvm/auth-service
         run: |
           uv run ruff format --check .
 
@@ -58,30 +58,65 @@ jobs:
       - name: Build Docker image for testing
         uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6
         with:
-          context: ./cvm/attestation-service
-          file: ./cvm/attestation-service/Dockerfile
+          context: ./cvm/auth-service
+          file: ./cvm/auth-service/Dockerfile
           push: false
-          tags: attestation-service:test
+          tags: auth-service:test
           load: true
 
-      - name: Start attestation service container
+      - name: Start auth service container
         run: |
-          # Start the container in detached mode
-          docker run -d --name attestation-service-test -p 8080:8080 attestation-service:test
+          docker run -d --name auth-service-test -p 8081:8081 -e AUTH_SERVICE_TOKEN=test-token -e MIN_AUTH_SERVICE_TOKEN_LEN=9 auth-service:test
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@2ddd2b9cb38ad8efd50337e8ab201519a34c9f24 # v7
-
-      - name: Run tests
+      - name: Wait for service to be ready
         run: |
-          cd cvm/attestation-service
-          make test-api
+          for i in {1..30}; do
+            if curl -s http://localhost:8081/health | grep -q healthy; then
+              echo "Service is ready"
+              exit 0
+            fi
+            echo "Waiting for service... ($i/30)"
+            sleep 1
+          done
+          echo "Service failed to start"
+          exit 1
+
+      - name: Test health endpoint
+        run: |
+          curl -f http://localhost:8081/health
+
+      - name: Test auth endpoint without token (should return 401)
+        run: |
+          status=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8081/auth)
+          if [ "$status" != "401" ]; then
+            echo "Expected 401, got $status"
+            exit 1
+          fi
+          echo "Correctly returned 401 without token"
+
+      - name: Test auth endpoint with invalid token (should return 401)
+        run: |
+          status=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer wrong-token" http://localhost:8081/auth)
+          if [ "$status" != "401" ]; then
+            echo "Expected 401, got $status"
+            exit 1
+          fi
+          echo "Correctly returned 401 with invalid token"
+
+      - name: Test auth endpoint with valid token (should return 200)
+        run: |
+          status=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer test-token" http://localhost:8081/auth)
+          if [ "$status" != "200" ]; then
+            echo "Expected 200, got $status"
+            exit 1
+          fi
+          echo "Correctly returned 200 with valid token"
 
       - name: Stop and remove test container
         if: always()
         run: |
-          docker stop attestation-service-test || true
-          docker rm attestation-service-test || true
+          docker stop auth-service-test || true
+          docker rm auth-service-test || true
 
   build-and-push:
     name: Build and Push Docker Image
@@ -123,8 +158,8 @@ jobs:
         id: build
         uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6
         with:
-          context: ./cvm/attestation-service
-          file: ./cvm/attestation-service/Dockerfile
+          context: ./cvm/auth-service
+          file: ./cvm/auth-service/Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
