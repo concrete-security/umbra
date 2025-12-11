@@ -33,6 +33,7 @@ jobs:
         env:
           PHALA_API_TOKEN: ${{ secrets.PHALA_API_TOKEN }}
           PHALA_UUID: ${{ secrets.PHALA_DEV_VM_UUID }}
+          AUTH_SERVICE_TOKEN: ${{ secrets.AUTH_SERVICE_TOKEN }}
         run: |
           # Check if docker-compose.yml exists in the cvm directory
           if [ ! -f "cvm/docker-compose.yml" ]; then
@@ -45,8 +46,9 @@ jobs:
           # Authenticate
           phala login "$PHALA_API_TOKEN"
 
+
           # Update Dev CVM
-          phala deploy --compose cvm/docker-compose.yml --uuid "$PHALA_UUID"
+          phala deploy --compose cvm/docker-compose.yml --uuid "$PHALA_UUID" --env-file <(echo "AUTH_SERVICE_TOKEN=$AUTH_SERVICE_TOKEN")
 
           echo "Deployment completed successfully!"
 
