@@ -1,6 +1,6 @@
 services:
   vllm:
-    image: vllm/vllm-openai:latest
+    image: vllm/vllm-openai:v0.11.0
     container_name: vllm
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
@@ -19,6 +19,8 @@ services:
       --max-model-len 131072
       --max-num-seqs 8
       --reasoning-parser openai_gptoss
+      --enable-auto-tool-choice
+      --tool-call-parser openai
       --async-scheduling
       --allowed-origins []
     restart: unless-stopped
