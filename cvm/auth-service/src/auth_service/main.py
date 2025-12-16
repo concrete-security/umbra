@@ -103,9 +103,12 @@ class AuthHandler(BaseHTTPRequestHandler):
 
 
 def main():
+    if MIN_AUTH_SERVICE_TOKEN_LEN < 32:
+        logger.warning("MIN_AUTH_SERVICE_TOKEN_LEN is set below 32 - this is not recommended")
     if not AUTH_SERVICE_TOKEN_HASH:
         logger.warning(
-            "AUTH_SERVICE_TOKEN environment not set or too short (min is 32) - all auth requests will fail"
+            "AUTH_SERVICE_TOKEN environment not set or too short (min is "
+            f"{MIN_AUTH_SERVICE_TOKEN_LEN}) - all auth requests will fail"
         )
     host = os.environ.get("HOST", "0.0.0.0")
     port = int(os.environ.get("PORT", "8081"))
