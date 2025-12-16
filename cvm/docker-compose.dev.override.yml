@@ -51,6 +51,15 @@ services:
       mode: replicated
       replicas: 1
 
+  auth-service:
+    image: auth-service-dev
+    build:
+      context: ./auth-service
+      dockerfile: Dockerfile
+    environment:
+      - AUTH_SERVICE_TOKEN=test-metrics-token-dev
+      - MIN_AUTH_SERVICE_TOKEN_LEN=20
+
 
 configs:
   mock_entrypoint:
@@ -90,7 +99,11 @@ configs:
       @app.get('/health')
       async def health():
           return {'status': 'ok'}
-      
+
+      @app.get('/metrics')
+      async def metrics():
+          return 'Mock Metrics'
+
       @app.get('/v1/models')
       async def list_models():
           return {

@@ -55,6 +55,22 @@ services:
     networks:
       - vllm
       - attestation
+      - auth
+    restart: unless-stopped
+
+  # Auth service for protected endpoints
+  auth-service:
+    image: ghcr.io/concrete-security/auth-service@sha256:0324c2725c3297e7f374480f88dd48ef08989a834c63fadd98c4115a8e69973d
+    container_name: auth-service
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8081
+      - AUTH_SERVICE_TOKEN=${AUTH_SERVICE_TOKEN}
+      - LOG_LEVEL=INFO
+    expose:
+      - "8081"
+    networks:
+      - auth
     restart: unless-stopped
 
   # TDX Attestation service
@@ -82,6 +98,8 @@ networks:
   vllm:
     driver: bridge
   attestation:
+    driver: bridge
+  auth:
     driver: bridge
 
 volumes:
