@@ -46,11 +46,16 @@ jobs:
           # Authenticate
           phala login "$PHALA_API_TOKEN"
 
+          # Prepare env variables
+          ramtmp="$(mktemp -p /dev/shm/)"
+          echo "AUTH_SERVICE_TOKEN=$AUTH_SERVICE_TOKEN" > "$ramtmp"
 
           # Update Dev CVM
-          phala deploy --compose cvm/docker-compose.yml --uuid "$PHALA_UUID" --env-file <(echo "AUTH_SERVICE_TOKEN=$AUTH_SERVICE_TOKEN")
-
+          phala deploy --compose cvm/docker-compose.yml --uuid "$PHALA_UUID" --env-file "$ramtmp"
           echo "Deployment completed successfully!"
+
+          # Clean up
+          shred -u -f "$ramtmp"
 
       - name: Verify Deployment
         env:
