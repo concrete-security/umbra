@@ -1,0 +1,50 @@
+name: Test Development CVM
+
+on:
+  # Trigger after deploy-dev-cvm workflow completes
+  workflow_run:
+    workflows: ["Deploy to Development CVM"]
+    types:
+      - completed
+  # Manual trigger from GitHub UI
+  workflow_dispatch:
+
+jobs:
+  test-dev-cvm:
+    name: Test Development CVM
+    runs-on: ubuntu-latest
+    env:
+      BASE_URL: https://vllm.concrete-security.com
+      BASE_HTTP_URL: http://vllm.concrete-security.com
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@2ddd2b9cb38ad8efd50337e8ab201519a34c9f24 # v3
+
+      - name: Install Python dependencies
+        working-directory: ./cvm
+        run: |
+          uv venv
+          uv pip install -r requirements_test.txt
+
+      - name: Wait for services to be ready
+        working-directory: ./cvm
+        run: |
+          uv run test_cvm.py \
+            --wait \
+            --base-url ${{ env.BASE_URL }} \
+            --timeout 600
+
+      - name: Run CVM tests against dev server
+        working-directory: ./cvm
+        env:
+          AUTH_SERVICE_TOKEN: ${{ secrets.AUTH_SERVICE_TOKEN }}
+        run: |
+          uv run test_cvm.py \
+            --all \
+            --base-url ${{ env.BASE_URL }} \
+            --http-url ${{ env.BASE_HTTP_URL }} \
+            --auth-token "$AUTH_SERVICE_TOKEN"
