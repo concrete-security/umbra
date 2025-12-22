@@ -6,17 +6,33 @@
   "version": 1,
   "refresh": "1s",
   "_comment": "This dashboard provides an overview of vLLM latency and throughput behavior, showing quantiles (P50, P95, P99) for latency metrics, queue waiting times, and token generation throughput.",
+  "templating": {
+    "list": [
+      {
+        "name": "job",
+        "type": "constant",
+        "query": "${VLLM_SCRAPE_JOB_NAME}",
+        "hide": 2
+      },
+      {
+        "name": "datasource",
+        "type": "constant",
+        "query": "${GRAFANA_DATASOURCE_UID}",
+        "hide": 2
+      }
+    ]
+  },
   "panels": [
     {
       "title": "E2E Request Latency (P50/P95/P99) (s): Measures the total latency of a request.",
       "type": "timeseries",
       "_comment": "Displays the End-to-End request latency distribution. Each curve represents a quantile: P50 (median), P95 (high percentile), and P99 (tail). Measures total time per request from start to finish in seconds.",
-      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
       "gridPos": { "x": 0, "y": 0, "w": 24, "h": 9 },
       "targets": [
-        { "expr": "histogram_quantile(0.50, sum(rate(vllm:e2e_request_latency_seconds_bucket[1m])) by (le))", "legendFormat": "E2E_P50" },
-        { "expr": "histogram_quantile(0.95, sum(rate(vllm:e2e_request_latency_seconds_bucket[1m])) by (le))", "legendFormat": "E2E_P95" },
-        { "expr": "histogram_quantile(0.99, sum(rate(vllm:e2e_request_latency_seconds_bucket[1m])) by (le))", "legendFormat": "E2E_P99" }
+        { "expr": "histogram_quantile(0.50, sum(rate(vllm:e2e_request_latency_seconds_bucket{scrape_job=\"$job\"}[5m])) by (le))", "legendFormat": "E2E_P50" },
+        { "expr": "histogram_quantile(0.95, sum(rate(vllm:e2e_request_latency_seconds_bucket{scrape_job=\"$job\"}[5m])) by (le))", "legendFormat": "E2E_P95" },
+        { "expr": "histogram_quantile(0.99, sum(rate(vllm:e2e_request_latency_seconds_bucket{scrape_job=\"$job\"}[5m])) by (le))", "legendFormat": "E2E_P99" }
       ]
     },
 
@@ -24,12 +40,12 @@
       "title": "Time To First Token (s): Waiting time before receiving the first response ",
       "type": "timeseries",
       "_comment": "Shows the latency from the moment a request starts until the first token is generated. Lower values indicate faster response initialization. Displayed with quantiles P50, P95, and P99.",
-      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
       "gridPos": { "x": 0, "y": 9, "w": 24, "h": 9 },
       "targets": [
-        { "expr": "histogram_quantile(0.50, sum(rate(vllm:time_to_first_token_seconds_bucket[1m])) by (le))", "legendFormat": "TTFT_P50" },
-        { "expr": "histogram_quantile(0.95, sum(rate(vllm:time_to_first_token_seconds_bucket[1m])) by (le))", "legendFormat": "TTFT_P95" },
-        { "expr": "histogram_quantile(0.99, sum(rate(vllm:time_to_first_token_seconds_bucket[1m])) by (le))", "legendFormat": "TTFT_P99" }
+        { "expr": "histogram_quantile(0.50, sum(rate(vllm:time_to_first_token_seconds_bucket{scrape_job=\"$job\"}[5m])) by (le))", "legendFormat": "TTFT_P50" },
+        { "expr": "histogram_quantile(0.95, sum(rate(vllm:time_to_first_token_seconds_bucket{scrape_job=\"$job\"}[5m])) by (le))", "legendFormat": "TTFT_P95" },
+        { "expr": "histogram_quantile(0.99, sum(rate(vllm:time_to_first_token_seconds_bucket{scrape_job=\"$job\"}[5m])) by (le))", "legendFormat": "TTFT_P99" }
       ]
     },
 
@@ -37,12 +53,12 @@
       "title": "Inter-token Latency (TPOT): speed experienced by the user.",
       "type": "timeseries",
       "_comment": "Measures the time delay between consecutive output tokens during generation. Useful for assessing decoding efficiency and throughput consistency. Quantiles P50, P95, and P99 are shown.",
-      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
       "gridPos": { "x": 0, "y": 18, "w": 24, "h": 9 },
       "targets": [
-        { "expr": "histogram_quantile(0.50, sum(rate(vllm:inter_token_latency_seconds_bucket[1m])) by (le))", "legendFormat": "TPOT_P50" },
-        { "expr": "histogram_quantile(0.95, sum(rate(vllm:inter_token_latency_seconds_bucket[1m])) by (le))", "legendFormat": "TPOT_P95" },
-        { "expr": "histogram_quantile(0.99, sum(rate(vllm:inter_token_latency_seconds_bucket[1m])) by (le))", "legendFormat": "TPOT_P99" }
+        { "expr": "histogram_quantile(0.50, sum(rate(vllm:inter_token_latency_seconds_bucket{scrape_job=\"$job\"}[5m])) by (le))", "legendFormat": "TPOT_P50" },
+        { "expr": "histogram_quantile(0.95, sum(rate(vllm:inter_token_latency_seconds_bucket{scrape_job=\"$job\"}[5m])) by (le))", "legendFormat": "TPOT_P95" },
+        { "expr": "histogram_quantile(0.99, sum(rate(vllm:inter_token_latency_seconds_bucket{scrape_job=\"$job\"}[5m])) by (le))", "legendFormat": "TPOT_P99" }
       ]
     },
 
@@ -51,11 +67,11 @@
     "title": "How many REQUESTS are COMPLETED and per second: Throughput - the productivity of the model.",
     "type": "timeseries",
     "_comment": "Displays overall throughput metrics. 'Requests/s' counts how many requests are completed per second, while 'Tokens/s' measures the total number of generated tokens per second.",
-    "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+    "datasource": { "type": "prometheus", "uid": "$datasource" },
     "gridPos": { "x": 0, "y": 27, "w": 24, "h": 9 },
     "targets": [
       {
-        "expr": "sum(rate(vllm:request_success_total[1m]))", "legendFormat": "Requests completed / s"
+        "expr": "sum(rate(vllm:request_success_total{scrape_job=\"$job\"}[5m]))", "legendFormat": "Requests completed / s"
       }
     ]
     },
@@ -64,11 +80,11 @@
     "title": "How many TOKENS are GENERATED and per second: Throughput - the productivity of the model.",
     "type": "timeseries",
     "_comment": "Displays overall throughput metrics. 'Requests/s' counts how many requests are completed per second, while 'Tokens/s' measures the total number of generated tokens per second.",
-    "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+    "datasource": { "type": "prometheus", "uid": "$datasource" },
     "gridPos": { "x": 0, "y": 36, "w": 24, "h": 9 },
     "targets": [
       {
-        "expr": "sum(rate(vllm:generation_tokens_total[1m]))", "legendFormat": "Tokens generated / s"
+        "expr": "sum(rate(vllm:generation_tokens_total{scrape_job=\"$job\"}[5m]))", "legendFormat": "Tokens generated / s"
       }
     ]
     },
@@ -76,20 +92,20 @@
     {
       "title": "How long a request wait in the queue before execution (s): (Mean/p50/p95)",
       "type": "timeseries",
-      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
-       "_comment": "Mean queue wait time per request, computed as rate(vllm:request_queue_time_seconds_sum[1m]) / rate(vllm:request_queue_time_seconds_count[1m]). This is the average number of seconds that completed requests spent waiting in the queue over the last minute.",
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+       "_comment": "Mean queue wait time per request, computed as rate(vllm:request_queue_time_seconds_sum[5m]) / rate(vllm:request_queue_time_seconds_count[5m]). This is the average number of seconds that completed requests spent waiting in the queue over the last minute.",
       "gridPos": { "x": 0, "y": 45, "w": 24, "h": 9 },
       "targets": [
         {
-          "expr": "rate(vllm:request_queue_time_seconds_sum[1m]) / rate(vllm:request_queue_time_seconds_count[1m])",
+          "expr": "rate(vllm:request_queue_time_seconds_sum{scrape_job=\"$job\"}[5m]) / rate(vllm:request_queue_time_seconds_count{scrape_job=\"$job\"}[5m])",
           "legendFormat": "Average Wait (avg)"
         },
         {
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(vllm:request_queue_time_seconds_bucket[1m])))",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(vllm:request_queue_time_seconds_bucket{scrape_job=\"$job\"}[5m])))",
           "legendFormat": "Queue Wait (p50)"
         },
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(vllm:request_queue_time_seconds_bucket[1m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(vllm:request_queue_time_seconds_bucket{scrape_job=\"$job\"}[5m])))",
           "legendFormat": "Queue Wait (p95) - Worst Case"
         }
       ]
@@ -100,11 +116,11 @@
       "type": "timeseries",
       "_comment": "Latency of the prefill phase (first compute pass).",
       "_interpretation": "If spikes: prompt lengths too large or GPU memory pressure.",
-      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
       "gridPos": { "x": 0, "y": 54, "w": 24, "h": 9 },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(vllm:request_prefill_time_seconds_bucket[1m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(vllm:request_prefill_time_seconds_bucket{scrape_job=\"$job\"}[5m])))",
           "legendFormat": "Prefill p95"
         }
       ]
@@ -115,11 +131,11 @@
       "type": "timeseries",
       "_comment": "Latency of each decode step.",
       "_interpretation": "If rises at same time as queue ↑: GPU fully saturated.",
-      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
       "gridPos": { "x": 0, "y": 63, "w": 24, "h": 9 },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(vllm:request_decode_time_seconds_bucket[1m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(vllm:request_decode_time_seconds_bucket{scrape_job=\"$job\"}[5m])))",
           "legendFormat": "Decode p95"
         }
       ]
@@ -130,10 +146,10 @@
       "type": "timeseries",
       "_comment": "Input tokens per second (prefill rate).",
       "_interpretation": "If very high: many long prompts. If low but load high: bottleneck in decoding.",
-      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
       "gridPos": { "x": 0, "y": 81, "w": 24, "h": 9 },
       "targets": [
-        { "expr": "sum(rate(vllm:prompt_tokens_total[1m]))", "legendFormat": "Prompt Tokens/s" }
+        { "expr": "sum(rate(vllm:prompt_tokens_total{scrape_job=\"$job\"}[5m]))", "legendFormat": "Prompt Tokens/s" }
       ]
     },
 
@@ -143,11 +159,11 @@
       "type": "timeseries",
       "_comment": "Average request length for generation.",
       "_interpretation": "If ↑: users generate longer outputs. If ↓: more short interactions.",
-      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
       "gridPos": { "x": 0, "y": 90, "w": 24, "h": 9 },
       "targets": [
         {
-          "expr": "sum(rate(vllm:generation_tokens_total[1m])) / sum(rate(vllm:request_success_total[1m]))",
+          "expr": "sum(rate(vllm:generation_tokens_total{scrape_job=\"$job\"}[5m])) / sum(rate(vllm:request_success_total{scrape_job=\"$job\"}[5m]))",
           "legendFormat": "Tokens per Request"
         }
       ]

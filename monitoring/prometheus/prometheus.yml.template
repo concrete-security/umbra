@@ -1,11 +1,15 @@
 global:
-  scrape_interval: 5s
-  evaluation_interval: 5s
+  scrape_interval: 60s
+  evaluation_interval: 60s
 
 scrape_configs:
   - job_name: "base_vllm"
     scheme: "${SCHEME}"
     metrics_path: /metrics
+
+    authorization:
+      type: Bearer
+      credentials: "${VLLM_METRICS_AUTH_TOKEN}"
 
     static_configs:
       - targets: ["${VLLM_TARGET}"]
