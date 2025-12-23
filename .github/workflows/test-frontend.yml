@@ -1,0 +1,51 @@
+name: Frontend Tests
+
+on:
+  push:
+    branches:
+      - main
+      - prod
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Setup PNPM
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.15.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: frontend
+
+      - name: Install Playwright Browsers
+        run: npx playwright install --with-deps
+        working-directory: frontend
+
+      - name: Run unit + e2e tests
+        run: make test-ci
+        working-directory: frontend
+        env:
+          FORM_TOKEN_SECRET: github-actions-form-token
