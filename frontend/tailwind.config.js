@@ -39,6 +39,11 @@ module.exports = {
           DEFAULT: "hsl(var(--destructive))",
           foreground: "hsl(var(--destructive-foreground))",
         },
+        brand: {
+          primary: "hsl(var(--brand-primary) / <alpha-value>)",
+          secondary: "hsl(var(--brand-secondary) / <alpha-value>)",
+          accent: "hsl(var(--brand-accent) / <alpha-value>)",
+        },
         muted: {
           DEFAULT: "hsl(var(--muted))",
           foreground: "hsl(var(--muted-foreground))",

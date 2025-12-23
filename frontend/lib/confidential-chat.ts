@@ -92,7 +92,16 @@ export async function* streamConfidentialChat(
   const resolved = resolveProviderConfig(options.provider)
 
   if (!resolved.baseUrl) {
-    yield { type: "error", error: "No provider base URL configured." }
+    yield { type: "error", error: "No provider base URL configured. Please set the provider URL in the Provider settings." }
+    return
+  }
+
+  // Enforce HTTPS in production (allow loopback for local development)
+  if (!isSecureProviderUrl(resolved.baseUrl)) {
+    yield {
+      type: "error",
+      error: "Insecure provider URL: use https:// (or localhost/127.0.0.1 for local dev).",
+    }
     return
   }
 
@@ -107,7 +116,7 @@ export async function* streamConfidentialChat(
 
   const model = optionalEnv(payload.model) ?? resolved.model
   if (!model) {
-    yield { type: "error", error: "No model specified. Set a model id in Provider settings." }
+    yield { type: "error", error: "No model specified. Please set a model ID in the Provider settings." }
     return
   }
 
@@ -130,7 +139,7 @@ export async function* streamConfidentialChat(
     requestBody.cache_salt = payload.cache_salt
   }
 
-  const endpoint = `${resolved.baseUrl}/chat/completions`
+  const endpoint = `${resolved.baseUrl}/v1/chat/completions`
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
   }
@@ -179,43 +188,6 @@ export async function* streamConfidentialChat(
     const interpreted = interpretProviderError(rawMessage)
     yield { type: "error", error: interpreted?.message ?? rawMessage }
   }
-}
-
-export async function sendConfidentialChat(
-  payload: ConfidentialChatPayload,
-  options: ConfidentialChatOptions = {}
-): Promise<{ message: string; reasoning_content?: string; finish_reason?: string }> {
-  let message = ""
-  let reasoning = ""
-  let finishReason: string | undefined
-
-  for await (const chunk of streamConfidentialChat(payload, options)) {
-    if (chunk.type === "delta" && chunk.content) {
-      message += chunk.content
-    }
-
-    if (chunk.type === "reasoning_delta" && chunk.reasoning_content) {
-      reasoning += chunk.reasoning_content
-    }
-
-    if (chunk.type === "done") {
-      if (chunk.content) {
-        message = chunk.content
-      }
-      if (chunk.reasoning_content) {
-        reasoning = chunk.reasoning_content
-      }
-      if (chunk.finish_reason) {
-        finishReason = chunk.finish_reason
-      }
-    }
-
-    if (chunk.type === "error") {
-      throw new Error(chunk.error)
-    }
-  }
-
-  return { message, reasoning_content: reasoning || undefined, finish_reason: finishReason }
 }
 
 async function* readStreamingResponse(
@@ -612,11 +584,39 @@ function interpretProviderError(message: string): ProviderErrorInfo | null {
     }
   }
 
-  const networkPatterns = [/failed to fetch/, /networkerror/, /cors/, /certificate/, /timed out/, /timeout/, /load failed/]
-  if (networkPatterns.some((pattern) => pattern.test(lower))) {
+  // Check for specific network error patterns
+  if (/failed to fetch|networkerror|load failed/.test(lower)) {
     return {
       status: 503,
-      message: "Unable to reach the provider. Check network access, CORS, and TLS configuration.",
+      message: "Cannot connect to the provider. Please check that the provider URL is correct and the service is running.",
+    }
+  }
+
+  if (/cors/.test(lower)) {
+    return {
+      status: 503,
+      message: "CORS error: The provider is blocking requests from this domain. Please check the provider's CORS configuration.",
+    }
+  }
+
+  if (/certificate|ssl|tls/.test(lower)) {
+    return {
+      status: 503,
+      message: "TLS/SSL certificate error. Please verify the provider URL uses the correct protocol (https://) and has a valid certificate.",
+    }
+  }
+
+  if (/timed out|timeout/.test(lower)) {
+    return {
+      status: 503,
+      message: "Request timed out. The provider may be overloaded or unreachable. Please try again later.",
+    }
+  }
+
+  if (/connection refused|connection reset|econnrefused/.test(lower)) {
+    return {
+      status: 503,
+      message: "Connection refused. The provider service may be down or the URL may be incorrect. Please check the provider settings.",
     }
   }
 
@@ -654,4 +654,20 @@ function normalizeBaseUrl(value?: string): string | undefined {
 
 function stripTrailingSlash(value: string) {
   return value.endsWith("/") ? value.slice(0, -1) : value
+}
+
+function isLoopbackHostname(host: string) {
+  const h = host.toLowerCase()
+  return h === 'localhost' || h === '::1' || h === '0.0.0.0' || h.startsWith('127.')
+}
+
+function isSecureProviderUrl(value: string): boolean {
+  try {
+    const url = new URL(value)
+    if (url.protocol === 'https:') return true
+    if (url.protocol === 'http:' && isLoopbackHostname(url.hostname)) return true
+    return false
+  } catch {
+    return false
+  }
 }
