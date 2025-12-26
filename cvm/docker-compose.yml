@@ -33,7 +33,7 @@ services:
 
   # Combined Nginx reverse proxy and Certificate Manager
   nginx-cert-manager:
-    image: ghcr.io/concrete-security/cert-manager@sha256:41670300c1027c6ae1920ff5fe3e78239b097b83c3288062ab9a648005fc1c05
+    image: ghcr.io/concrete-security/cert-manager@sha256:92655a24060497516ea0cfd79b7fbfb599f13d303eb0c3e9c79cf8c5ee9cc1d1
     container_name: nginx-cert-manager
     ports:
       - "80:80"
@@ -60,7 +60,7 @@ services:
 
   # Auth service for protected endpoints
   auth-service:
-    image: ghcr.io/concrete-security/auth-service@sha256:29a10d75e44bdda06418afe9fa3a75ed7393e50fd1babc661aa25d9d1ad27160
+    image: ghcr.io/concrete-security/auth-service@sha256:f819c57d1648a4b4340fc296ef9872e43b70c7190d67a93820cf4f7b657d5310
     container_name: auth-service
     environment:
       - HOST=0.0.0.0
@@ -75,7 +75,7 @@ services:
 
   # TDX Attestation service
   attestation-service:
-    image: ghcr.io/concrete-security/attestation-service@sha256:f17a36d65858243143d041906a063300ac72124492404fe1f2f581eeee7939fe
+    image: ghcr.io/concrete-security/attestation-service@sha256:ad98abfe2d97fd2f25beba4a7e343376bce2ac0e8c3ed2ded97b38b06df12841
     container_name: attestation-service
     environment:
       - HOST=0.0.0.0
