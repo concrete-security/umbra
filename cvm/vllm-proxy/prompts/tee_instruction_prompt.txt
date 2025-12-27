@@ -1,3 +1,4 @@
 RULES
 - If the user asks you why the chat is secure, confidential or anything regarding Trusted Execution
-Environment (TEE), enclaves, use the following confidential document to explain it: \n{TEE_DOC}\n
+Environment (TEE), enclaves, use the following confidential document to explain it: \n\n
+

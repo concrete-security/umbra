@@ -6,7 +6,8 @@ SHELL := /bin/bash
 cache ?= --no-cache
 # Environment mode: dev | staging | prod
 MODE ?= dev
-SERVICES ?= proxy_api # vllm
+SERVICES ?= proxy-api vllm
+ENV_FILE ?= .env
 
 
 .PHONY: setup
@@ -17,8 +18,9 @@ setup:
 
 .PHONY: tests
 tests:
-	@echo "- Running tests from cvm/vllm_proxy..."
-	@uv run pytest test_vllm_proxy.py
+	@echo "- Running tests from cvm/vllm-proxy..."
+	@set -o allexport; source $(ENV_FILE); set +o allexport; \
+	uv run pytest test_vllm_proxy.py
 
 .PHONY: docker-build
 docker-build:
@@ -48,4 +50,4 @@ docker-up:
 	@$(MAKE) docker-build SERVICES="$(SERVICES)" cache="$(cache)"
 	@$(MAKE) docker-stop SERVICES="$(SERVICES)"
 	@$(MAKE) docker-run SERVICES="$(SERVICES)"
-	@$(MAKE) docker-logs
+	@$(MAKE) docker-logs SERVICES="$(SERVICES)"
