@@ -250,9 +250,11 @@ async def proxy_logic(route: VLLMRoute, body: Any) -> Response:
         system_prompt=BASE_SYSTEM_CORE + "\n" + IS_TEE_RELATED_PROMPT +  "\n" + BASIC_SCOPE_PROMPT + "\n" + BASE_INSRUCTIONS + "\n",
     )
 
-
     async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, read=120.0)) as c:
         raw_response, dt_call1 = await _forward_to_vllm(route, payload, c)
+
+    logger.info(f"1. {raw_response=}")
+    logger.info(f"2. {raw_response.json()=}")
 
     content, reasoning = _extract_content_and_reasoning(route=route, json_data=raw_response.json())
 
