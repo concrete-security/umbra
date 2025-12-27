@@ -729,9 +729,9 @@ class CVMTester:
         # Test chat completions endpoint
         try:
             payload = {
-                "model": "openai/gpt-oss-120b",
-                "messages": [{"role": "user", "content": "Hello via HTTPS proxy!"}],
-                "max_tokens": 50,
+                "prompt": "Hello via HTTPS proxy!",
+                "document": "",
+                "user_id": "user_01",
             }
 
             response = self.session.post(
