@@ -31,11 +31,11 @@ services:
       timeout: 10s
       retries: 3
 
-  proxy_api:
+  proxy-api:
       build:
-        context: ./vllm_proxy
+        context: ./vllm-proxy
         dockerfile: Dockerfile
-      container_name: proxy_api
+      container_name: proxy-api
       depends_on:
         vllm:
           condition: service_healthy
@@ -43,7 +43,9 @@ services:
         - vllm
         - proxy_api
       environment:
-        - BASE_VLLM_URL=http://vllm:8000
+        - TEMPERATURE=0.2
+        - MAX_TOKENS=131072
+        - MODEL_ID=openai/gpt-oss-120b
         - HOST=0.0.0.0
         - PORT=7000
       # No external ports - internal access only

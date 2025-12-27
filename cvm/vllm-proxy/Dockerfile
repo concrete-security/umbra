@@ -1,7 +1,7 @@
 # ghcr.io/astral-sh/uv:debian-slim
 FROM ghcr.io/astral-sh/uv@sha256:2301babdaa11591889ea3933304912ba0814503fd89242819fdd8e7610d80c88
 
-WORKDIR /vllm_proxy
+WORKDIR /vllm-proxy
 
 COPY entrypoint.sh app/entrypoint.sh
 COPY proxy_app.py utils.py data/tee_info.txt prompts/ README.md ./

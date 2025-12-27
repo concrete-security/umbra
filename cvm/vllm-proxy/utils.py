@@ -1,11 +1,8 @@
 
 import csv
-import json
 import logging
-import os
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 
 class BenchmarkLogger:
@@ -58,7 +55,7 @@ class BenchmarkLogger:
             self.logger.debug("Benchmark row added: %s", row)
 
 
-def load_txt(path: str) -> str:
+def load_txt(path: Union[str, Path]) -> str:
     p = Path(path)
     if p.is_file():
         try:
