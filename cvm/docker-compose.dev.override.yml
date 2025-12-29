@@ -1,5 +1,5 @@
 services:
-  # Mock VLLM service
+  # Mock Base VLLM service
   vllm:
     image: python:3.11-slim
     container_name: vllm-mock
@@ -25,6 +25,9 @@ services:
     build:
       context: ./cert-manager
       dockerfile: Dockerfile
+    depends_on:
+      proxy-api:
+        condition: service_healthy
     environment:
       - DOMAIN=localhost
       - DEV_MODE=true
@@ -70,39 +73,44 @@ configs:
   mock_server:
     content: |
       from fastapi import FastAPI, HTTPException
+      from fastapi.responses import PlainTextResponse
       from pydantic import BaseModel
-      from typing import List, Optional, Dict, Any
+      from typing import List, Optional, Dict, Any, Union
       import json
       import time
-      
+
       app = FastAPI()
-      
+
       class ChatMessage(BaseModel):
-          role: str
-          content: str
-      
+        role: str
+        content: str
+
       class ChatCompletionRequest(BaseModel):
           model: str
           messages: List[ChatMessage]
           temperature: Optional[float] = 0.7
           max_tokens: Optional[int] = None
           stream: Optional[bool] = False
-      
-      class ChatCompletionResponse(BaseModel):
-          id: str
-          object: str = 'chat.completion'
-          created: int
+
+      class ResponsesRequest(BaseModel):
           model: str
-          choices: List[Dict[str, Any]]
-          usage: Dict[str, int]
-      
+          input: Union[str, List[ChatMessage]]
+          max_output_tokens: Optional[int] = None
+          temperature: Optional[float] = 0.7
+          stream: Optional[bool] = False
+          reasoning: Optional[Dict[str, Any]] = {"effort": "mock"}
+
       @app.get('/health')
       async def health():
           return {'status': 'ok'}
 
-      @app.get('/metrics')
+      @app.get("/metrics", response_class=PlainTextResponse)
       async def metrics():
-          return 'Mock Metrics'
+          return (
+              '# HELP vllm:num_requests_running Number of requests in model execution batches.\n'
+              '# TYPE vllm:num_requests_running gauge\n'
+              'vllm:num_requests_running{engine="0",model_name="openai/gpt-oss-120b"} 0\n'
+          )
 
       @app.get('/v1/models')
       async def list_models():
@@ -117,12 +125,13 @@ configs:
                   }
               ]
           }
-      
+
       @app.post('/v1/chat/completions')
       async def chat_completions(request: ChatCompletionRequest):
           # Simple mock response
           mock_response = 'This is a mock response from the vLLM mock service. Your message was: ' + str(request.messages[-1].content if request.messages else 'No message')
-          
+          mock_reasoning = "🧠 This is a mock reasoning from the vLLM mock service."
+
           return {
               'id': 'chatcmpl-mock-' + str(int(time.time())),
               'object': 'chat.completion',
@@ -133,7 +142,9 @@ configs:
                       'index': 0,
                       'message': {
                           'role': 'assistant',
-                          'content': mock_response
+                          'content': mock_response,
+                          'reasoning': mock_reasoning,
+                          'reasoning_content': mock_reasoning,
                       },
                       'finish_reason': 'stop'
                   }
@@ -144,7 +155,73 @@ configs:
                   'total_tokens': 70
               }
           }
-      
+
+      @app.post('/v1/responses')
+      async def chat_response(request: ResponsesRequest):
+          # Simple mock response
+          mock_response = 'This is a mock response from the vLLM mock service. Your message was: ' + request.input
+          mock_reasoning = "🧠 This is a mock reasoning from the vLLM mock service."
+
+          return {
+              "id": f"resp_mock_{int(time.time())}",
+              "created_at": int(time.time()),
+              "incomplete_details": None,
+              "instructions": None,
+              "metadata": None,
+              "model": request.model,
+              "object": "response",
+              "output": [
+                  {
+                      "id": f"rs_mock_{int(time.time())}",
+                      "summary": [],
+                      "type": "reasoning",
+                      "content": [
+                          {
+                              "text": mock_reasoning,
+                              "type": "reasoning_text",
+                          }
+                      ],
+                      "encrypted_content": None,
+                      "status": None,
+                  },
+                  {
+                      "id": f"msg_mock_{int(time.time())}",
+                      "content": [
+                          {
+                              "annotations": [],
+                              "text": mock_response,
+                              "type": "output_text",
+                              "logprobs": None,
+                          }
+                      ],
+                      "role": "assistant",
+                      "status": "completed",
+                      "type": "message",
+                  },
+              ],
+              "parallel_tool_calls": True,
+              "temperature": request.temperature,
+              "tool_choice": "auto",
+              "tools": [],
+              "top_p": 1.0,
+              "background": False,
+              "max_output_tokens": request.max_output_tokens,
+              "previous_response_id": None,
+              "reasoning": None,
+              "status": "completed",
+              "truncation": "disabled",
+              "usage": {
+                  "input_tokens": 0,
+                  "input_tokens_details": {"cached_tokens": 0},
+                  "output_tokens": 0,
+                  "output_tokens_details": {"reasoning_tokens": 0, "tool_output_tokens": 0},
+                  "total_tokens": 0,
+              },
+              "user": None,
+              "input_messages": None,
+              "output_messages": None,
+          }
+
       if __name__ == '__main__':
           import uvicorn
           uvicorn.run(app, host='0.0.0.0', port=8000)
