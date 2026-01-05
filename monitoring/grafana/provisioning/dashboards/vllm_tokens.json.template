@@ -1,0 +1,104 @@
+{
+  "id": null,
+  "uid": "vllm-tokens-7d-30d-min",
+  "title": "vLLM - Tokens totals (7d / 30d)",
+  "timezone": "browser",
+  "schemaVersion": 36,
+  "version": 1,
+  "refresh": "1m",
+  "templating": {
+    "list": [
+      {
+        "name": "job",
+        "type": "constant",
+        "query": "${VLLM_SCRAPE_JOB_NAME}",
+        "hide": 2
+      },
+      {
+        "name": "datasource",
+        "type": "constant",
+        "query": "${GRAFANA_DATASOURCE_UID}",
+        "hide": 2
+      }
+    ]
+  },
+  "time": { "from": "now-30d", "to": "now" },
+  "panels": [
+    {
+      "title": "Output generated tokens — last 7d",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 7 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(vllm:generation_tokens_total{scrape_job=\"$job\"}[7d]))",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "title": "Output generated tokens — last 30d",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 7 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(vllm:generation_tokens_total{scrape_job=\"$job\"}[30d]))",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "title": "Input processend tokens — last 7d",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "gridPos": { "x": 0, "y": 7, "w": 12, "h": 7 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(vllm:prompt_tokens_total{scrape_job=\"$job\"}[7d]))",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "title": "Input processend tokens — last 30d",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "gridPos": { "x": 12, "y": 7, "w": 12, "h": 7 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(vllm:prompt_tokens_total{scrape_job=\"$job\"}[30d]))",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "title": "Output generated tokens / s — (rate over 5m)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "gridPos": { "x": 0, "y": 14, "w": 24, "h": 8 },
+      "targets": [
+        {
+          "expr": "sum(rate(vllm:generation_tokens_total{scrape_job=\"$job\"}[5m]))",
+          "legendFormat": "gen tokens/s (5m)"
+        }
+      ]
+    },
+    {
+      "title": "Input processend tokens / s — (rate over 5m)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "gridPos": { "x": 0, "y": 22, "w": 24, "h": 8 },
+      "targets": [
+        {
+          "expr": "sum(rate(vllm:prompt_tokens_total{scrape_job=\"$job\"}[5m]))",
+          "legendFormat": "prompt tokens/s (5m)"
+        }
+      ]
+    }
+  ]
+}
