@@ -1,0 +1,200 @@
+{
+  "id": null,
+  "uid": "vllm-output-tokens-generation",
+  "title": "vLLM - Tokens totals",
+  "timezone": "browser",
+  "schemaVersion": 36,
+  "version": 1,
+  "refresh": "1m",
+  "templating": {
+    "list": [
+      {
+        "name": "job",
+        "type": "constant",
+        "query": "${VLLM_SCRAPE_JOB_NAME}",
+        "hide": 2
+      },
+      {
+        "name": "datasource",
+        "type": "constant",
+        "query": "${GRAFANA_DATASOURCE_UID}",
+        "hide": 2
+      }
+    ]
+  },
+  "time": { "from": "now-30d", "to": "now" },
+  "panels": [
+    {
+      "title": "Output generated tokens — last 7d",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 7 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(vllm:generation_tokens_total{scrape_job=\"$job\"}[7d]))",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "title": "Output generated tokens — last 30d",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 7 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(vllm:generation_tokens_total{scrape_job=\"$job\"}[30d]))",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "title": "Input processend tokens — last 7d",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "gridPos": { "x": 0, "y": 7, "w": 12, "h": 7 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(vllm:prompt_tokens_total{scrape_job=\"$job\"}[7d]))",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "title": "Input processend tokens — last 30d",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "gridPos": { "x": 12, "y": 7, "w": 12, "h": 7 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(vllm:prompt_tokens_total{scrape_job=\"$job\"}[30d]))",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "title": "Output generated tokens / s — (rate over 5m)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "gridPos": { "x": 0, "y": 14, "w": 24, "h": 8 },
+      "targets": [
+        {
+          "expr": "sum(rate(vllm:generation_tokens_total{scrape_job=\"$job\"}[5m]))",
+          "legendFormat": "gen tokens/s (5m)"
+        }
+      ]
+    },
+    {
+      "title": "Input processend tokens / s — (rate over 5m)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "gridPos": { "x": 0, "y": 22, "w": 24, "h": 8 },
+      "targets": [
+        {
+          "expr": "sum(rate(vllm:prompt_tokens_total{scrape_job=\"$job\"}[5m]))",
+          "legendFormat": "prompt tokens/s (5m)"
+        }
+      ]
+    },
+
+    {
+      "id": 14,
+      "title": "Output generated tokens — per day ",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "gridPos": { "x": 0, "y": 30, "w": 24, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(vllm:generation_tokens_total{scrape_job=\"$job\"}[1d]))",
+          "legendFormat": "tokens/day",
+          "interval": "1d"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "bars",
+            "lineWidth": 0,
+            "fillOpacity": 100,
+            "barAlignment": 0,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "single", "sort": "none" }
+      }
+    },
+
+    {
+      "id": 12,
+      "title": "Output generated tokens — per week ",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "gridPos": { "x": 0, "y": 38, "w": 24, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(vllm:generation_tokens_total{scrape_job=\"$job\"}[1w]))",
+          "legendFormat": "tokens/week",
+          "interval": "1w"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "bars",
+            "lineWidth": 0,
+            "fillOpacity": 100,
+            "barAlignment": 0,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "single", "sort": "none" }
+      }
+    },
+
+    {
+      "id": 13,
+      "title": "Output generated tokens — per month (rolling 30d) ",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "gridPos": { "x": 0, "y": 46, "w": 24, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(vllm:generation_tokens_total{scrape_job=\"$job\"}[30d]))",
+          "legendFormat": "tokens/30d",
+          "interval": "30d"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "bars",
+            "lineWidth": 0,
+            "fillOpacity": 100,
+            "barAlignment": 0,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "single", "sort": "none" }
+      }
+    }
+  ]
+}

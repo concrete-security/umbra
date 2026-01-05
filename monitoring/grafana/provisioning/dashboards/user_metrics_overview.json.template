@@ -50,7 +50,7 @@
     },
 
     {
-      "title": "Inter-token Latency (TPOT): speed experienced by the user.",
+      "title": "Inter-token Latency (ITL): speed experienced by the user.",
       "type": "timeseries",
       "_comment": "Measures the time delay between consecutive output tokens during generation. Useful for assessing decoding efficiency and throughput consistency. Quantiles P50, P95, and P99 are shown.",
       "datasource": { "type": "prometheus", "uid": "$datasource" },
