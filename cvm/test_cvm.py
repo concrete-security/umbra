@@ -727,14 +727,14 @@ class CVMTester:
             success = False
 
         # Test chat engines
-        payload = {
-            "prompt": "Hello via HTTPS proxy!",
-            "document": "",
-            "user_id": "user_01",
-        }
-
         # 1. Test chat completions endpoint
         try:
+            payload = {
+                "model": "openai/gpt-oss-120b",
+                "messages": [{"role": "user", "content": "Hello via HTTPS proxy!"}],
+                "max_tokens": 50,
+            }
+
             response = self.session.post(
                 f"{self.base_url}/v1/chat/completions",
                 json=payload,
@@ -764,6 +764,13 @@ class CVMTester:
 
         # 2. Test responses endpoint
         try:
+
+            payload = {
+                "model": "openai/gpt-oss-120b",
+                "max_tokens": 50,
+                "input": "Hello via HTTPS proxy!",
+            }
+
             response = self.session.post(
                 f"{self.base_url}/v1/responses",
                 json=payload,
