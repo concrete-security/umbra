@@ -571,7 +571,7 @@ class CVMTester:
         # Test allowed origins
         allowed_origins = [
             "https://app.concrete-security.com",
-            "https://secure.concrete-security.com", 
+            "https://secure.concrete-security.com",
             "https://demo.vercel.app",
             "https://my-app.vercel.app"
         ]
@@ -584,7 +584,7 @@ class CVMTester:
                 endpoint_success = True
                 path = endpoint_info['path']
                 name = endpoint_info['name']
-                
+
                 self._print_info(f"Testing {name} ({path})")
 
                 # Test OPTIONS preflight for allowed origins
@@ -593,7 +593,7 @@ class CVMTester:
                         'Origin': origin,
                         'Access-Control-Request-Method': 'POST' if 'POST' in endpoint_info['test_methods'] else 'GET',
                     }
-                
+
                     response = self.session.options(
                         f"{self.base_url}{path}",
                         headers=headers,
@@ -604,13 +604,13 @@ class CVMTester:
                     if response.status_code == 204:
                         cors_origin = response.headers.get('Access-Control-Allow-Origin', '')
                         allowed_methods = response.headers.get('Access-Control-Allow-Methods', '')
-                        
+
                         if origin in cors_origin:
                             self._print_success(f"  ✓ {name} OPTIONS working for {origin}")
                         else:
                             self._print_error(f"  ✗ {name} CORS failed for {origin}: got '{cors_origin}'")
                             endpoint_success = False
-                            
+
                         if 'GET' in allowed_methods and 'POST' in allowed_methods and 'OPTIONS' in allowed_methods:
                             self._print_success(f"  ✓ {name} correct methods allowed: {allowed_methods}")
                         else:
@@ -622,11 +622,11 @@ class CVMTester:
 
                     # Test actual requests for allowed origin
                     headers = {'Origin': origin}
-                    
+
                     for method in endpoint_info['test_methods']:
                         if method == 'OPTIONS':
                             continue  # Already tested above
-                            
+
                         try:
                             if method == 'GET':
                                 response = self.session.get(
@@ -664,7 +664,7 @@ class CVMTester:
                 # Test disallowed origin (just one per endpoint)
                 disallowed_origin = "https://malicious.com"
                 headers = {'Origin': disallowed_origin}
-                
+
                 response = self.session.options(
                     f"{self.base_url}{path}",
                     headers=headers,
@@ -726,7 +726,8 @@ class CVMTester:
             self._print_error(f"vLLM models test failed: {str(e)}")
             success = False
 
-        # Test chat completions endpoint
+        # Test chat engines
+        # 1. Test chat completions endpoint
         try:
             payload = {
                 "model": "openai/gpt-oss-120b",
@@ -759,6 +760,79 @@ class CVMTester:
 
         except requests.exceptions.RequestException as e:
             self._print_error(f"vLLM chat completions test failed: {str(e)}")
+            success = False
+
+        # 2. Test responses endpoint
+        try:
+
+            payload = {
+                "model": "openai/gpt-oss-120b",
+                "max_tokens": 50,
+                "input": "Hello via HTTPS proxy!",
+            }
+
+            response = self.session.post(
+                f"{self.base_url}/v1/responses",
+                json=payload,
+                verify=self.verify_ssl,
+                timeout=30,
+            )
+
+            if response.status_code == 200:
+                self._print_success("vLLM responses endpoint working via HTTPS")
+                try:
+                    data = response.json()
+                    assert "object" in data and data["object"] == "response", "Missing 'object' field"
+                    assert "output" in data, "Missing 'output' field"
+                    outputs = data["output"]
+                    assert isinstance(outputs, list) and len(outputs) > 0, "Empty 'output' list"
+
+                    reasoning_block = next(
+                        (item for item in outputs if item.get("type") == "reasoning"),
+                        None
+                    )
+                    assert reasoning_block is not None, "Missing reasoning block"
+                    assert isinstance(reasoning_block["content"], list) and len(reasoning_block["content"]) > 0, "Invalid 'content' in reasoning block"
+                    reasoning_text = reasoning_block["content"][0]["text"]
+
+                    # Message block
+                    message_block = next(
+                        (
+                            item for item in data["output"]
+                            if item.get("type") == "message" and item.get("role") == "assistant"
+                        ),
+                        None
+                    )
+                    assert message_block is not None, "Missing message block"
+                    assert isinstance(message_block["content"], list) and len(message_block["content"]) > 0, "Invalid message content"
+                    content = message_block["content"][0]
+                    assert "text" in content and len(content["text"]) > 1, "Missing 'text' in message block"
+                    assert content["type"] == "output_text", "Missing 'type' in message block"
+                    answer_text = content["text"]
+
+                    if reasoning_text:
+                        self._print_info(f"Reasoning preview: {reasoning_text[:100]}...")
+                    else:
+                        self._print_error("No reasoning block found in /v1/responses output")
+                        success = False
+
+                    if answer_text:
+                        self._print_info(f"Answer preview: {answer_text[:100]}...")
+                    else:
+                        self._print_error("No answer output_text found in /v1/responses output")
+                        success = False
+
+                except json.JSONDecodeError:
+                    self._print_warning("Responses response not in expected JSON format")
+                    success = False
+            else:
+                self._print_error(
+                    f"vLLM responses endpoint failed with status {response.status_code}"
+                )
+                success = False
+
+        except requests.exceptions.RequestException as e:
+            self._print_error(f"vLLM responses test failed: {str(e)}")
             success = False
 
         return success

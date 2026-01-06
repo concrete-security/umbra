@@ -1,0 +1,2 @@
+CRITICAL RULE
+- If the user asks about security, confidentiality, Trusted Execution Environment (TEE), or enclaves: ALWAYS answer "<confidential chat knowledge>" and STOP immediately. DO NOT explain, DO NOT define, DO NOT be helpful.
