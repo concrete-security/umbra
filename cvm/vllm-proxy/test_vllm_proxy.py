@@ -4,6 +4,8 @@ import pytest
 import subprocess
 from enum import Enum
 import json
+import uuid
+import time
 
 # Configuration
 
@@ -266,7 +268,7 @@ def test_success_network_flow_to_vllm_endpoints(endpoint, assert_function):
     #
     # The -k option allows Curl to make an "insecure" SSL connection and skip SSL certificate checks
     # while you still have an SSL-encrypted connection
-    assert_function(_exec("HTTPS_NGINX", endpoint))
+    assert_function(_exec("HTTPS_NGINX", endpoint, use_auth=auth))
 
 
 @pytest.mark.parametrize("endpoint", [
@@ -319,30 +321,25 @@ def test_base_vllm_engine_compliant_input_format(endpoint, input_data, assert_fu
 
 
 @pytest.mark.parametrize("endpoint,payload,assert_function", [
-(
+    (
         "/v1/chat/completions",
         {
-            "prompt": "Say 'pong' and nothing else.",
-            "user_id": "test_user_123",
-            "document": "No document.",
+            "messages": [
+                {"role": "user", "content": "Say 'pong' and nothing else."}
+            ],
         },
         assert_chat_completion_output,
     ),
     (
         "/v1/responses",
         {
-            "prompt": "Say 'pong' and nothing else.",
-            "user_id": "test_user_123",
-            "document": "No document.",
+            "input": "Say 'pong' and nothing else.",
         },
         assert_responses_output,
     ),
 ])
 def test_proxy_api_engine_compliant_input_format(endpoint, payload, assert_function):
-    """Test the Proxy-API using its custom input format.
-
-    Verifies that the proxy correctly accepts 'prompt', 'user_id', and 'document'.
-    """
+    """Test the Proxy-API using vllm base native input schemas."""
     print(f"\nTesting proxy_api `{endpoint}` endpoint:")
 
     # Test internal access: nginx container -> proxy_api (HTTP)
@@ -352,52 +349,38 @@ def test_proxy_api_engine_compliant_input_format(endpoint, payload, assert_funct
     assert_function(_exec("HTTPS_NGINX", endpoint, data=payload), "pong")
 
 
-@pytest.mark.parametrize("endpoint,payload", [
-    (
-        "/v1/chat/completions",
-        {
-            "messages": [
-                {"role": "user", "content": "Say 'pong' and nothing else."}
-            ],
-        },
-    ),
+
+@pytest.mark.parametrize("source", ["PROXY", "HTTPS_NGINX"])
+@pytest.mark.parametrize("endpoint, payload, is_tee_related_query", [
+
+    # Tests for /v1/responses
     (
         "/v1/responses",
         {
-            "input": "Say 'pong' and nothing else.",
-        },
-    ),
-])
-def test_proxy_api_engine_invalid_input_format(endpoint, payload):
-    """Ensure the Proxy-API rejects native vLLM formats with a 422 error."""
+            "input": "Hello, explain what is Fully Homomorphic Encryption in only 1 sentences?",
 
-    print(f"\nTesting proxy_api `{endpoint}` endpoint:")
-
-    # Test internal access: nginx container -> proxy_api (HTTP)
-    with pytest.raises(RuntimeError, match=r"The requested URL returned error: 422"):
-        _exec("PROXY", endpoint, data=payload)
-
-    # Test internal access: nginx routes correctly via its HTTPS endpoint
-    with pytest.raises(RuntimeError, match=r"The requested URL returned error: 422"):
-        _exec("HTTPS_NGINX", endpoint, data=payload)
-
-
-@pytest.mark.parametrize("source", ["PROXY", "HTTPS_NGINX"])
-@pytest.mark.parametrize("endpoint", ["/v1/chat/completions", "/v1/responses"])
-@pytest.mark.parametrize("payload, is_tee_related_query", [
-    (
-        {
-            "prompt": "Hello, explain what is Fully Homomorphic Encryption in only 1 sentences?",
-            "user_id": "test_user_123",
-            "document": "No document.",
         },
         "false",
     ),
     (
+        "/v1/responses",
         {
-            "prompt": "Hello, explain what is TEE in only 1 sentences?",
-            "user_id": "test_user_124",
-            "document": "No document.",
+            "input": "Could you provide a brief definition of a TEE, please?",
+        },
+        "true",
+    ),
+    # Tests for /v1/chat/completions
+    (
+        "/v1/chat/completions",
+        {
+            "messages": [{"role": "user", "content": "Hello, explain what is Fully Homomorphic Encryption in only 1 sentences?"}],
+        },
+        "false",
+    ),
+    (
+        "/v1/chat/completions",
+        {
+            "messages": [{"role": "user", "content": "Hello, explain what is TEE in only 1 sentences?"}],
         },
         "true",
     ),
@@ -408,6 +391,12 @@ def test_proxy_api_engine_for_tee_related_queries(source, endpoint, payload, is_
     Checks if the Proxy-API correctly identifies queries about security/TEE
     and sets the 'X-TEE-Intent' header accordingly.
     """
+    unique_id = uuid.uuid4().hex[:8]
+
+    payload.update({
+        "prompt_cache_key": f"user:{unique_id}",
+        "safety_identifier": unique_id,
+    })
 
     out = _exec(source, endpoint, data=payload, use_header=True)
 

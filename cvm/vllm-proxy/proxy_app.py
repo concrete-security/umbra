@@ -34,18 +34,6 @@ IS_TEE_RELATED_PROMPT = load_txt("is_tee_related_prompt.txt")
 BASIC_SCOPE_PROMPT = load_txt("basic_scope_prompt.txt")
 
 
-class ChatProxyInput(BaseModel):
-    # Required
-    prompt: str
-    user_id: str
-    document: str
-
-    # Optional
-    model_id: Optional[str] = DEFAULT_MODEL_ID
-    temperature: Optional[float] = DEFAULT_TEMPERATURE
-    max_tokens: Optional[int] = DEFAULT_MAX_TOKENS
-
-
 # Logging
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
@@ -62,7 +50,6 @@ benchmark_logger = BenchmarkLogger(
     columns=[
         "is_cvm",
         "machine",
-        "user_id",
         "date",
         "total_call_time_s",
         "call1_time_s",
@@ -80,24 +67,10 @@ benchmark_logger = BenchmarkLogger(
 VLLMRoute = Literal["chat/completions", "responses"]
 
 
-def _merge_prompt(prompt: str, document: Optional[str]) -> str:
-    """Combine the user prompt with an optional document context.
-
-    Args:
-        prompt (str): The main user query.
-        document (Optional[str]): Additional document.
-
-    Returns:
-        str: The formatted string containing both prompt and document.
-    """
-    return f"{prompt}\n\nDocument:\n{document}" if document else prompt
-
-
 def _build_vllm_payload(
-    route: VLLMRoute,
     *,
-    body: Any,
-    prompt_merged: str,
+    route: VLLMRoute,
+    payload: Any,
     system_prompt: str,
 ) -> Dict[str, Any]:
     """Construct the JSON payload for vLLM based on the target route.
@@ -106,8 +79,7 @@ def _build_vllm_payload(
     The model parameters and system prompts are hardcoded at the backend level.
     Args:
         route (VLLMRoute): Target vLLM endpoint either "chat/completions" or "responses".
-        body (Any): Input object containing user_id and metadata.
-        prompt_merged (str): The final processed prompt.
+        payload (Any): Input object.
         system_prompt (str): System instructions to inject.
 
     Returns:
@@ -116,26 +88,19 @@ def _build_vllm_payload(
     Raises:
         ValueError: If the route is not supported.
     """
-    payload: Dict[str, Any] = {
-        "model": DEFAULT_MODEL_ID,
-        "temperature": DEFAULT_TEMPERATURE,
-        "prompt_cache_key": f"user:{body.user_id}",
-        "safety_identifier": body.user_id,
-    }
+
     if route == "chat/completions":
-        payload.update({
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt_merged},
-            ],
-            "max_completion_tokens": DEFAULT_MAX_TOKENS,
-        })
+        assert "messages" in payload
+        payload["messages"] = [
+            {"role": "system", "content": system_prompt}
+        ] + payload["messages"]
+
     elif route == "responses":
         payload.update({
-            "instructions": system_prompt,
-            "input": prompt_merged,
-            "max_output_tokens": DEFAULT_MAX_TOKENS,
-        })
+                "instructions": system_prompt,
+                "input": f"[SYSTEM RULE: {system_prompt}]\n\nUser Question: {payload['input']}"
+            })
+
     else:
         raise ValueError(f"Unsupported route: `{route}`")
 
@@ -226,8 +191,7 @@ async def proxy_logic(route: VLLMRoute, body: Any) -> Response:
 
     Args:
         route (VLLMRoute): Target vLLM endpoint either "chat/completions" or "responses".
-        body (Any): Input data containing "prompt", "user_id", and "document".
-
+        body (Any): Input data.
     Returns:
         Response: FastAPI response with vLLM output and 'X-TEE-Intent' header.
 
@@ -238,12 +202,9 @@ async def proxy_logic(route: VLLMRoute, body: Any) -> Response:
     dt_call1 = dt_call2 = 0.0
     global_t0 = time.perf_counter()
 
-    prompt_merged = _merge_prompt(body.prompt, getattr(body, "document", None))
-
     payload = _build_vllm_payload(
-        route,
-        body=body,
-        prompt_merged=prompt_merged,
+        route=route,
+        payload=body,
         system_prompt=BASE_SYSTEM_CORE + "\n" + IS_TEE_RELATED_PROMPT +  "\n" + BASIC_SCOPE_PROMPT + "\n" + BASE_INSRUCTIONS + "\n",
     )
 
@@ -260,9 +221,8 @@ async def proxy_logic(route: VLLMRoute, body: Any) -> Response:
     if asked_about_tee:
         logger.info("🎁 TEE related query")
         payload = _build_vllm_payload(
-            route,
-            body=body,
-            prompt_merged=prompt_merged,
+            route=route,
+            payload=body,
             system_prompt=BASE_SYSTEM_CORE + "\n" + TEE_INSTRUCTION +  "\n" + TEE_DOC + "\n" + BASE_INSRUCTIONS + "\n",
         )
 
@@ -276,7 +236,6 @@ async def proxy_logic(route: VLLMRoute, body: Any) -> Response:
         {
             "is_cvm": IS_CVM,
             "machine": MACHINE,
-            "user_id": body.user_id,
             "date": time.strftime("%Y-%m-%d %H:%M:%S"),
             "total_call_time_s": global_dt,
             "call1_time_s": dt_call1,
@@ -288,7 +247,7 @@ async def proxy_logic(route: VLLMRoute, body: Any) -> Response:
         }
     )
 
-    logger.info(f"{route=} for user_id={body.user_id} completed in {global_dt}s")
+    logger.info(f"{route=} - completed in {global_dt}s")
     logger.info(f"👉 {content=}")
     logger.info(f"🧠 {reasoning=}")
 
@@ -301,12 +260,12 @@ async def proxy_logic(route: VLLMRoute, body: Any) -> Response:
 
 
 @app.post("/v1/chat/completions")
-async def chat_endpoint(body: ChatProxyInput):
+async def chat_endpoint(body: Dict[str, Any]):
     return await proxy_logic("chat/completions", body)
 
 
 @app.post("/v1/responses")
-async def responses_endpoint(body: ChatProxyInput):
+async def responses_endpoint(body: Dict[str, Any]):
     return await proxy_logic("responses", body)
 
 

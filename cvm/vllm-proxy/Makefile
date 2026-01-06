@@ -1,17 +1,17 @@
 SHELL := /bin/bash
 
-# Usage:
-#   make docker-run
-#   make docker-run cache=--no-cache
 cache ?= --no-cache
-# Environment mode: dev | staging | prod
-MODE ?= dev
-SERVICES ?= proxy-api vllm
+SERVICES ?= proxy-api # vllm nginx-cert-manager auth-service attestation-service
 ENV_FILE ?= .env
 
 
 .PHONY: setup
 setup:
+	@command -v uv >/dev/null 2>&1 || { \
+            echo "❌ uv not installed."; \
+            echo "curl -LsSf https://astral.sh/uv/install.sh | sh"; \
+            exit 1; \
+    }
 	@echo "- Setting up environment using uv..."
 	@uv sync --all-groups
 	@echo "✅ Setup complete!"
