@@ -81,11 +81,20 @@ def concat_all_results(files_by_uid, other_metrics=False):
 def extract_bench_params(filename: str):
     name = Path(filename).name
     params = {}
-    m = re.search(r"machine([A-Za-z0-9]+)", name)
+    m = re.search(r"machine([A-Za-z0-9.-]+)", name)
     params["machine"] = m.group(1) if m else None
 
     m = re.search(r"side([A-Za-z0-9]+)", name)
     params["side"] = m.group(1) if m else None
+
+    m = re.search(r"runtime([A-Za-z0-9]+)", name)
+    params["runtime"] = m.group(1) if m else None
+
+    m = re.search(r"url([A-Za-z0-9.:-]+)", name)
+    params["url"] = m.group(1) if m else None
+
+    m = re.search(r"endpoint([A-Za-z0-9]+)", name)
+    params["endpoint"] = m.group(1) if m else None
 
     m = re.search(r"input([0-9]+)", name)
     params["input"] = int(m.group(1)) if m else None
@@ -93,7 +102,7 @@ def extract_bench_params(filename: str):
     m = re.search(r"out([0-9]+)", name)
     params["out"] = int(m.group(1)) if m else None
 
-    m = re.search(r"parallel_([0-9]+)", name)
+    m = re.search(r"parallel([0-9]+)", name)
     params["parallel"] = int(m.group(1)) if m else None
 
     m = re.search(r"rps([0-9]+)", name)

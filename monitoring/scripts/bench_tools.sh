@@ -2,19 +2,26 @@
 set -Eeuo pipefail
 
 
-# Export all .env variables
-if [ -f .env ]; then
-    set -o allexport
-    source .env
-    set +o allexport
-fi
-
 # Benchmark parameters
-URL="${SCHEME}://${VLLM_TARGET}"
 
+SCHEME=${SCHEME:-http}
+VLLM_TARGET=${VLLM_TARGET:-89.169.96.185}
+URL=${URL:-${SCHEME}://${VLLM_TARGET}}
+
+RUNTIME=${RUNTIME:-CVM}
+MACHINE=${MACHINE:-phala-H200}
 SIDE=${SIDE:-client}
 
 VLLM_ENDPOINT=${VLLM_ENDPOINT:-/v1/chat/completions}
+
+if [[ "${VLLM_ENDPOINT}" == /v1/chat/* ]]; then
+  ENDPOINT=${ENDPOINT:-chat}
+elif [[ "${VLLM_ENDPOINT}" == /v1/responses* ]]; then
+  ENDPOINT=${ENDPOINT:-responses}
+else
+  ENDPOINT=${ENDPOINT:-other}
+fi
+
 MAXSEQ=${MAXSEQ:-8}
 FREQUENCY=${FREQUENCY:-8}
 NB_REQUESTS=${NB_REQUESTS:-2}
@@ -41,8 +48,8 @@ build_filename() {
     local id="$1"
     local prefix="$2"
     local extension="$3"
-    printf "%s/bench_%s_%s_machine%s_side%s_input%s_out%s_parallel%s_rps%s_np%s_dataset%s.%s" \
-        "${BENCHMARK_INPUT_DIR}" "${id}" "${prefix}" "${MACHINE}" "${SIDE}" \
+    printf "%s/bench_%s_%s_machine%s_runtime%s_side%s_url%s_endpoint%s_input%s_out%s_parallel%s_rps%s_np%s_dataset%s.%s" \
+        "${BENCHMARK_INPUT_DIR}" "${id}" "${prefix}" "${MACHINE}" "${RUNTIME}" "${SIDE}" "${VLLM_TARGET}" "${ENDPOINT}" \
         "${INPUT_SIZE}" "${OUTPUT_SIZE}" "${MAXSEQ}" "${FREQUENCY}" "${NB_REQUESTS}" "${DATASET}" "${extension}"
 }
 
@@ -74,7 +81,7 @@ single_vllm_bench() {
     local file_base=$(basename "${file_name}")
 
     echo "🌐 Selected URL=${URL}"
-    echo "🚀 Running vLLM bench with MACHINE=${MACHINE} URL=${URL} SIDE=${SIDE} DATASET=${DATASET}"
+    echo "🚀 Running vLLM bench with MACHINE=${MACHINE} RUNTIME=${RUNTIME} SIDE=${SIDE} DATASET=${DATASET}"
     echo "Input=${INPUT_SIZE} Output=${OUTPUT_SIZE} PARALLEL=${MAXSEQ} FREQUENCE=${FREQUENCY} TOTAL_QUERY=${NB_REQUESTS}"
 
     uv run --group bench --active -- vllm bench serve \
@@ -230,7 +237,6 @@ bench_loop() {
             DATASET="$DATASET" MAXSEQ="$MAXSEQ" \
             single_vllm_bench
 
-            # Arrêt propre des métriques
             if [[ -n "$GPU_PID" ]]; then
                 kill "$GPU_PID" 2>/dev/null || true
                 wait "$GPU_PID" 2>/dev/null || true

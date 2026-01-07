@@ -8,8 +8,14 @@ SCRIPT ?= scripts/bench_tools.sh
 BENCHMARK_INPUT_DIR ?= Results_benchmarks/raw_results
 BENCHMARK_OUTPUT_DIR ?= Results_benchmarks/combined_results
 
-MACHINE ?= phala
+MACHINE ?= Phala-H200
 MAXSEQ ?= 8
+SCHEME ?= http
+VLLM_TARGET ?= 89.169.96.185
+RUNTIME ?= CVM
+SIDE ?= client
+DATASET ?= random
+VLLM_ENDPOINT ?= /v1/chat/completions
 
 RIN_LIST ?= 128
 ROUT_LIST ?= 128
@@ -99,7 +105,16 @@ docker-up:
 .PHONY: single-vllm-bench
 single-vllm-bench:
 	@echo "Running vLLM benchmark..."
-	@BENCHMARK_INPUT_DIR=${BENCHMARK_INPUT_DIR} bash $(SCRIPT) single_vllm_bench
+	@BENCHMARK_INPUT_DIR=$(BENCHMARK_INPUT_DIR) \
+	  SCHEME=$(SCHEME) \
+	  VLLM_TARGET=$(VLLM_TARGET) \
+	  VLLM_ENDPOINT=$(VLLM_ENDPOINT) \
+	  MACHINE=$(MACHINE) \
+	  RUNTIME=$(RUNTIME) \
+	  SIDE=$(SIDE) \
+	  DATASET=$(DATASET) \
+	  MAXSEQ=$(MAXSEQ) \
+	  bash $(SCRIPT) single_vllm_bench
 
 .PHONY: bench-loop
 bench-loop:
@@ -110,7 +125,11 @@ bench-loop:
 	@echo "NP_LIST   = $(NP_LIST)"
 	@echo "MAXSEQ    = $(MAXSEQ)"
 	@BENCHMARK_INPUT_DIR=$(BENCHMARK_INPUT_DIR) \
+	  SCHEME=$(SCHEME) \
+	  VLLM_TARGET=$(VLLM_TARGET) \
+	  VLLM_ENDPOINT=$(VLLM_ENDPOINT) \
 	  MACHINE=$(MACHINE) \
+	  RUNTIME=$(RUNTIME) \
 	  SIDE=$(SIDE) \
 	  DATASET=$(DATASET) \
 	  MAXSEQ=$(MAXSEQ) \
@@ -124,11 +143,35 @@ bench-loop:
 	    "$(USE_OTHER_METRICS)" \
 	    "$(VERBOSE)" \
 	    "$(SAVE)"
-
 .PHONY: combine-results
 combine-results:
 	@python3 scripts/combine_benchmarks.py --input_dir $(BENCHMARK_INPUT_DIR) --output_dir $(BENCHMARK_OUTPUT_DIR)
 
 .PHONY: all-benchmarks
 all-benchmarks:
-	MAXSEQ=8 NP_LIST=100 RPS_LIST=1 RIN_LIST=100000 ROUT_LIST=1000 make bench-loop
+
+	VLLM_ENDPOINT=/v1/chat/completions MACHINE=Phala-H200 SCHEME=http VLLM_TARGET=89.169.96.185 RUNTIME=VM \
+	MAXSEQ=8 NP_LIST=100 RPS_LIST=1 RIN_LIST=4096 ROUT_LIST=1024 make bench-loop
+	VLLM_ENDPOINT=/v1/chat/completions MACHINE=Phala-H200 SCHEME=https VLLM_TARGET=vllm.concrete-security.com RUNTIME=CVM \
+	MAXSEQ=8 NP_LIST=100 RPS_LIST=1 RIN_LIST=4096 ROUT_LIST=1024 make bench-loop
+
+	VLLM_ENDPOINT=/v1/chat/completions MACHINE=Phala-H200 SCHEME=http VLLM_TARGET=89.169.96.185 RUNTIME=VM \
+	MAXSEQ=8 NP_LIST=100 RPS_LIST=1 RIN_LIST=1000 ROUT_LIST=500 make bench-loop
+	VLLM_ENDPOINT=/v1/chat/completions MACHINE=Phala-H200 SCHEME=https VLLM_TARGET=vllm.concrete-security.com RUNTIME=CVM \
+	MAXSEQ=8 NP_LIST=100 RPS_LIST=1 RIN_LIST=1000 ROUT_LIST=500 make bench-loop
+
+	VLLM_ENDPOINT=/v1/chat/completions MACHINE=Phala-H200 SCHEME=http VLLM_TARGET=89.169.96.185 RUNTIME=VM \
+	MAXSEQ=8 NP_LIST=100 RPS_LIST=16 RIN_LIST=512 ROUT_LIST=256 make bench-loop
+	VLLM_ENDPOINT=/v1/chat/completions MACHINE=Phala-H200 SCHEME=https VLLM_TARGET=vllm.concrete-security.com RUNTIME=CVM \
+	MAXSEQ=8 NP_LIST=100 RPS_LIST=16 RIN_LIST=512 ROUT_LIST=256 make bench-loop
+
+	VLLM_ENDPOINT=/v1/chat/completions MACHINE=Phala-H200 SCHEME=http VLLM_TARGET=89.169.96.185 RUNTIME=VM \
+	MAXSEQ=8 NP_LIST=100 RPS_LIST=16 RIN_LIST=4096 ROUT_LIST=1024 make bench-loop
+	VLLM_ENDPOINT=/v1/chat/completions MACHINE=Phala-H200 SCHEME=https VLLM_TARGET=vllm.concrete-security.com RUNTIME=CVM \
+	MAXSEQ=8 NP_LIST=100 RPS_LIST=16 RIN_LIST=4096 ROUT_LIST=1024 make bench-loop
+
+	VLLM_ENDPOINT=/v1/chat/completions MACHINE=Phala-H200 SCHEME=http VLLM_TARGET=89.169.96.185 RUNTIME=VM \
+	MAXSEQ=8 NP_LIST=100 RPS_LIST=16 RIN_LIST=1000 ROUT_LIST=500 make bench-loop
+	VLLM_ENDPOINT=/v1/chat/completions MACHINE=Phala-H200 SCHEME=https VLLM_TARGET=vllm.concrete-security.com RUNTIME=CVM \
+	MAXSEQ=8 NP_LIST=100 RPS_LIST=16 RIN_LIST=1000 ROUT_LIST=500 make bench-loop
+
