@@ -50,14 +50,15 @@ tests:
 
 .PHONY: prometheus-conf
 prometheus-conf:
-	@set -o allexport; source $(ENV_FILE); set +o allexport; \ && \
+	@set -o allexport; source $(ENV_FILE); set +o allexport; \
     envsubst $(PROMETHEUS_VARS) < prometheus/prometheus.yml.template > prometheus/prometheus.yml
 
 .PHONY: grafana-conf
 grafana-conf:
 	@set -o allexport; source $(ENV_FILE); set +o allexport; \
 	envsubst $(GRAFANA_VARS) < grafana/provisioning/dashboards/user_metrics_overview.json.template > grafana/provisioning/dashboards/user_metrics_overview.json && \
-	envsubst $(GRAFANA_VARS) < grafana/provisioning/dashboards/machine_metrics_overview.json.template > grafana/provisioning/dashboards/machine_metrics_overview.json
+	envsubst $(GRAFANA_VARS) < grafana/provisioning/dashboards/machine_metrics_overview.json.template > grafana/provisioning/dashboards/machine_metrics_overview.json && \
+	envsubst $(GRAFANA_VARS) < grafana/provisioning/dashboards/vllm_tokens.json.template > grafana/provisioning/dashboards/vllm_tokens.json
 
 .PHONY: docker-build
 docker-build:
