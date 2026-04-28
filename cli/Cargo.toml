@@ -1,0 +1,21 @@
+[package]
+name = "concrete-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Command-line client for the Concrete platform"
+
+[[bin]]
+name = "concrete"
+path = "src/main.rs"
+
+[lib]
+name = "concrete_cli"
+path = "src/lib.rs"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+
+[build-dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
