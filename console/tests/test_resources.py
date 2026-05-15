@@ -6,6 +6,7 @@ from concrete_console.resources import (
     operation_resource,
     profile_resource,
     ssh_key_resource,
+    traffic_log_resource,
     user_quota_resource,
     user_resource,
 )
@@ -145,3 +146,28 @@ def test_operation_resource_formats_target_progress_and_payloads() -> None:
     assert resource["result"] == {"row_count": 1, "sha256": "abc"}
     assert resource["error"] is None
     assert resource["expires_at"] == "2026-06-14T19:41:00Z"
+
+
+def test_traffic_log_resource_formats_fields() -> None:
+    resource = traffic_log_resource(
+        {
+            "id": UUID("00000000-0000-4000-8000-000000000040"),
+            "timestamp": datetime(2026, 5, 15, 20, 0, tzinfo=timezone.utc),
+            "security_cvm_id": UUID("00000000-0000-4000-8000-000000000041"),
+            "cvm_id": UUID("00000000-0000-4000-8000-000000000042"),
+            "source_ip": "10.0.0.2",
+            "destination_ip": "93.184.216.34",
+            "destination_host": "example.com",
+            "protocol": "https",
+            "port": 443,
+            "method": "GET",
+            "path": "/",
+            "response_code": 200,
+            "bytes_transferred": 1234,
+        }
+    )
+
+    assert resource["timestamp"] == "2026-05-15T20:00:00Z"
+    assert resource["security_cvm_id"] == "00000000-0000-4000-8000-000000000041"
+    assert resource["cvm_id"] == "00000000-0000-4000-8000-000000000042"
+    assert resource["bytes_transferred"] == 1234

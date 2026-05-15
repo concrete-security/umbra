@@ -18,6 +18,12 @@ from concrete_console.routes import (
     validate_permission_symbol,
     validate_profile_policy,
 )
+from concrete_console.routes_internal import (
+    TrafficLogBatch,
+    TrafficLogIn,
+    validate_traffic_log_batch_shape,
+    validate_traffic_log_timestamps,
+)
 
 
 def profile_row(**overrides):
@@ -136,6 +142,48 @@ def test_validate_audit_export_request_rejects_unknown_action() -> None:
 
     assert exc.value.status_code == 422
     assert exc.value.detail["error"]["details"]["errors"][0]["type"] == "unknown_action"
+
+
+def traffic_log(**overrides) -> TrafficLogIn:
+    value = {
+        "timestamp": datetime.now(timezone.utc),
+        "cvm_id": UUID("00000000-0000-4000-8000-000000000042"),
+        "source_ip": "10.0.0.2",
+        "destination_ip": "93.184.216.34",
+        "destination_host": "example.com",
+        "protocol": "https",
+        "port": 443,
+        "method": "GET",
+        "path": "/",
+        "response_code": 200,
+        "bytes_transferred": 1234,
+    }
+    value.update(overrides)
+    return TrafficLogIn(**value)
+
+
+def test_validate_traffic_log_batch_shape_rejects_missing_cvm_id() -> None:
+    with pytest.raises(HTTPException) as exc:
+        validate_traffic_log_batch_shape(TrafficLogBatch(idempotency_key="batch-1", logs=[traffic_log(cvm_id=None)]))
+
+    assert exc.value.status_code == 422
+    assert exc.value.detail["error"]["details"]["errors"][0]["type"] == "missing_cvm_id"
+
+
+def test_validate_traffic_log_batch_shape_rejects_invalid_key() -> None:
+    with pytest.raises(HTTPException) as exc:
+        validate_traffic_log_batch_shape(TrafficLogBatch(idempotency_key="bad key", logs=[traffic_log()]))
+
+    assert exc.value.status_code == 422
+    assert exc.value.detail["error"]["details"]["errors"][0]["type"] == "invalid_idempotency_key"
+
+
+def test_validate_traffic_log_timestamps_rejects_skew() -> None:
+    with pytest.raises(HTTPException) as exc:
+        validate_traffic_log_timestamps([traffic_log(timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc))])
+
+    assert exc.value.status_code == 422
+    assert exc.value.detail["error"]["details"]["errors"][0]["type"] == "timestamp_skew"
 
 
 def test_ssh_key_fingerprint_accepts_openssh_public_key() -> None:

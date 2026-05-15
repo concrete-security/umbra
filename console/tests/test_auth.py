@@ -5,6 +5,7 @@ import pytest
 from fastapi import HTTPException
 
 from concrete_console.auth import CurrentUser, require_current_user
+from concrete_console.internal_auth import parse_service_bearer_authorization
 from concrete_console.routes_auth import DeviceStartRequest, device_start
 
 
@@ -51,6 +52,18 @@ def test_require_current_user_rejects_whitespace_slop_before_db_lookup() -> None
 
     assert exc.value.status_code == 401
     assert exc.value.detail["error"]["code"] == "UNAUTHORIZED"
+
+
+def test_parse_service_bearer_rejects_jwt_shape_before_db_lookup() -> None:
+    with pytest.raises(HTTPException) as exc:
+        parse_service_bearer_authorization("Bearer header.payload.signature")
+
+    assert exc.value.status_code == 401
+    assert exc.value.detail["error"]["code"] == "UNAUTHORIZED"
+
+
+def test_parse_service_bearer_accepts_opaque_token() -> None:
+    assert parse_service_bearer_authorization("Bearer opaque_token-123") == "opaque_token-123"
 
 
 def test_device_start_rejects_non_google_provider_before_provider_call() -> None:

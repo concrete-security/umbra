@@ -37,6 +37,7 @@ from concrete_console.resources import (
     profile_resource,
     ssh_key_resource,
     timestamp,
+    traffic_log_resource,
     user_quota_resource,
     user_resource,
 )
@@ -2091,8 +2092,68 @@ def validate_audit_export_request(body: AuditExportCreate) -> None:
             422,
             "VALIDATION_ERROR",
             "unknown audit action",
-            {"errors": [{"type": "unknown_action", "field": "action"}]},
+        {"errors": [{"type": "unknown_action", "field": "action"}]},
         )
+
+
+@router.get("/traffic-logs")
+async def list_traffic_logs(
+    cvm_id: UUID | None = None,
+    security_cvm_id: UUID | None = None,
+    from_: datetime | None = Query(default=None, alias="from"),
+    to: datetime | None = None,
+    limit: int = Query(default=100, ge=1, le=1000),
+    cursor: str | None = Query(default=None, max_length=128),
+    current_user: CurrentUser = Depends(require_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> dict:
+    current_user.require_permission("TRAFFIC_LOGS_VIEW")
+    cursor_value = parse_traffic_log_cursor(cursor)
+    clauses = ["sc.entity_id = $1"]
+    values: list[object] = [current_user.entity_id]
+
+    def bind(value: object) -> str:
+        values.append(value)
+        return f"${len(values)}"
+
+    if cvm_id is not None:
+        clauses.append(f"tl.cvm_id = {bind(cvm_id)}")
+    if security_cvm_id is not None:
+        clauses.append(f"tl.security_cvm_id = {bind(security_cvm_id)}")
+    if from_ is not None:
+        clauses.append(f"tl.timestamp >= {bind(from_)}")
+    if to is not None:
+        clauses.append(f"tl.timestamp <= {bind(to)}")
+    if cursor_value is not None:
+        cursor_timestamp, cursor_id = cursor_value
+        clauses.append(f"(tl.timestamp, tl.id) < ({bind(cursor_timestamp)}, {bind(cursor_id)})")
+
+    values.append(limit + 1)
+    query = f"""
+        SELECT
+            tl.id,
+            tl.timestamp,
+            tl.security_cvm_id,
+            tl.cvm_id,
+            tl.source_ip,
+            tl.destination_ip,
+            tl.destination_host,
+            tl.protocol,
+            tl.port,
+            tl.method,
+            tl.path,
+            tl.response_code,
+            tl.bytes_transferred
+        FROM traffic_logs tl
+        JOIN security_cvms sc ON sc.id = tl.security_cvm_id
+        WHERE {' AND '.join(clauses)}
+        ORDER BY tl.timestamp DESC, tl.id DESC
+        LIMIT ${len(values)}
+    """
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(query, *values)
+    next_cursor = traffic_log_cursor(rows[limit]) if len(rows) > limit else None
+    return list_page([traffic_log_resource(row) for row in rows[:limit]], next_cursor=next_cursor)
 
 
 @router.get("/operations/{operation_id}")
@@ -2159,6 +2220,29 @@ def parse_audit_cursor(cursor: str | None) -> int | None:
             {"errors": [{"type": "invalid_cursor", "field": "cursor"}]},
         )
     return value
+
+
+def traffic_log_cursor(row: asyncpg.Record) -> str:
+    return f"{timestamp(row['timestamp'])}|{row['id']}"
+
+
+def parse_traffic_log_cursor(cursor: str | None) -> tuple[datetime, UUID] | None:
+    if cursor is None:
+        return None
+    try:
+        timestamp_text, id_text = cursor.split("|", 1)
+        timestamp_value = datetime.fromisoformat(timestamp_text.replace("Z", "+00:00"))
+        id_value = UUID(id_text)
+    except (ValueError, AttributeError):
+        raise api_error(
+            422,
+            "VALIDATION_ERROR",
+            "invalid cursor",
+            {"errors": [{"type": "invalid_cursor", "field": "cursor"}]},
+        ) from None
+    if timestamp_value.tzinfo is None:
+        timestamp_value = timestamp_value.replace(tzinfo=timezone.utc)
+    return timestamp_value, id_value
 
 
 def ssh_key_cursor(row: asyncpg.Record) -> str:

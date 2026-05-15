@@ -13,6 +13,7 @@ from concrete_console.log_config import bind_request_context, clear_context, con
 from concrete_console.metrics import monotonic_seconds, observe_request, prometheus_text
 from concrete_console.readiness import run_ready_checks
 from concrete_console.routes_auth import router as auth_router
+from concrete_console.routes_internal import router as internal_router
 from concrete_console.routes import router
 
 REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
@@ -38,6 +39,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(title="Concrete Console", version="0.1.0", lifespan=lifespan)
 app.include_router(auth_router)
+app.include_router(internal_router)
 app.include_router(router)
 
 

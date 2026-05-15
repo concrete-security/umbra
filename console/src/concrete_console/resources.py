@@ -156,6 +156,25 @@ def operation_resource(row: Any) -> dict[str, Any]:
     }
 
 
+def traffic_log_resource(row: Any) -> dict[str, Any]:
+    row = dict(row)
+    return {
+        "id": str(row["id"]),
+        "timestamp": timestamp(row["timestamp"]),
+        "security_cvm_id": str(row["security_cvm_id"]),
+        "cvm_id": str(row["cvm_id"]) if row["cvm_id"] else None,
+        "source_ip": row["source_ip"],
+        "destination_ip": row["destination_ip"],
+        "destination_host": row["destination_host"],
+        "protocol": row["protocol"],
+        "port": row["port"],
+        "method": row["method"],
+        "path": row["path"],
+        "response_code": row["response_code"],
+        "bytes_transferred": row["bytes_transferred"],
+    }
+
+
 def json_payload(value: Any) -> Any:
     if isinstance(value, str):
         return json.loads(value)
