@@ -69,6 +69,9 @@ pub enum Command {
     #[command(subcommand)]
     SecurityCvm(SecurityCvmCommand),
 
+    /// Query egress traffic logs.
+    TrafficLogs(TrafficLogsArgs),
+
     /// Manage users and user permissions.
     #[command(subcommand)]
     User(UserCommand),
@@ -300,6 +303,33 @@ pub struct SecurityCvmAttestationArgs {
     /// Request a fresh Console-side attestation probe instead of persisted state.
     #[arg(long)]
     pub probe: bool,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct TrafficLogsArgs {
+    /// Filter to logs for this Dev CVM UUID.
+    #[arg(long)]
+    pub cvm: Option<String>,
+
+    /// Filter to logs for this Security CVM UUID.
+    #[arg(long)]
+    pub security_cvm: Option<String>,
+
+    /// Include logs at or after this RFC3339 timestamp.
+    #[arg(long = "from")]
+    pub from: Option<String>,
+
+    /// Include logs at or before this RFC3339 timestamp.
+    #[arg(long)]
+    pub to: Option<String>,
+
+    /// Page size, 1..1000.
+    #[arg(long, default_value_t = 100)]
+    pub limit: u16,
+
+    /// Opaque pagination cursor from the previous response.
+    #[arg(long)]
+    pub cursor: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]

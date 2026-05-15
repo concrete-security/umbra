@@ -642,7 +642,7 @@ async def list_ssh_keys(
     """
     async with pool.acquire() as conn:
         rows = await conn.fetch(query, *values)
-    next_cursor = ssh_key_cursor(rows[limit]) if len(rows) > limit else None
+    next_cursor = ssh_key_cursor(rows[limit - 1]) if len(rows) > limit else None
     return list_page([ssh_key_resource(row) for row in rows[:limit]], next_cursor=next_cursor)
 
 
@@ -2465,7 +2465,7 @@ async def list_audit_events(
     """
     async with pool.acquire() as conn:
         rows = await conn.fetch(query, *values)
-    next_cursor = str(rows[limit]["seq"]) if len(rows) > limit else None
+    next_cursor = str(rows[limit - 1]["seq"]) if len(rows) > limit else None
     return list_page([audit_event_resource(row) for row in rows[:limit]], next_cursor=next_cursor)
 
 
@@ -3019,7 +3019,7 @@ async def list_traffic_logs(
     """
     async with pool.acquire() as conn:
         rows = await conn.fetch(query, *values)
-    next_cursor = traffic_log_cursor(rows[limit]) if len(rows) > limit else None
+    next_cursor = traffic_log_cursor(rows[limit - 1]) if len(rows) > limit else None
     return list_page([traffic_log_resource(row) for row in rows[:limit]], next_cursor=next_cursor)
 
 
