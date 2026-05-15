@@ -4,7 +4,14 @@ from uuid import UUID
 import pytest
 from fastapi import HTTPException
 
-from concrete_console.routes import policy_sha256, profile_etag, require_if_match, validate_profile_policy
+from concrete_console.routes import (
+    policy_sha256,
+    profile_etag,
+    require_if_match,
+    user_etag,
+    validate_permission_symbol,
+    validate_profile_policy,
+)
 
 
 def profile_row(**overrides):
@@ -16,8 +23,28 @@ def profile_row(**overrides):
     return row
 
 
+def user_row(**overrides):
+    row = {
+        "id": UUID("00000000-0000-4000-8000-000000000020"),
+        "email": "dev@example.com",
+        "name": "Dev User",
+        "entity_id": UUID("00000000-0000-4000-8000-000000000002"),
+        "entity_name": "Example",
+        "permissions": ["CVM_LAUNCH"],
+        "created_at": datetime(2026, 5, 15, 18, 40, tzinfo=timezone.utc),
+        "deactivated_at": None,
+        "deleted_at": None,
+    }
+    row.update(overrides)
+    return row
+
+
 def test_profile_etag_uses_updated_at_microseconds() -> None:
     assert profile_etag(profile_row()) == 'W/"00000000-0000-4000-8000-000000000010:123456"'
+
+
+def test_user_etag_changes_with_permissions() -> None:
+    assert user_etag(user_row(permissions=[])) != user_etag(user_row(permissions=["CVM_LAUNCH"]))
 
 
 def test_require_if_match_rejects_missing_header() -> None:
@@ -59,3 +86,11 @@ def test_validate_profile_policy_rejects_bad_sandbox_env() -> None:
     assert exc.value.status_code == 422
     errors = exc.value.detail["error"]["details"]["errors"]
     assert {error["type"] for error in errors} == {"invalid_name", "reserved_name", "value_denied"}
+
+
+def test_validate_permission_symbol_rejects_unknown_permission() -> None:
+    with pytest.raises(HTTPException) as exc:
+        validate_permission_symbol("NOT_A_PERMISSION")
+
+    assert exc.value.status_code == 422
+    assert exc.value.detail["error"]["code"] == "VALIDATION_ERROR"

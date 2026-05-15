@@ -87,6 +87,20 @@ class UserCreate(BaseModel):
         return sorted(set(value))
 
 
+class PermissionGrant(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    permissions: list[str] = Field(min_length=1, max_length=16)
+
+    @field_validator("permissions")
+    @classmethod
+    def validate_permissions(cls, value: list[str]) -> list[str]:
+        unknown = sorted(set(value) - PERMISSIONS)
+        if unknown:
+            raise ValueError(f"unknown permissions: {', '.join(unknown)}")
+        return sorted(set(value))
+
+
 class ProfileCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -150,12 +164,21 @@ def profile_etag(row: asyncpg.Record | dict) -> str:
     return f'W/"{row["id"]}:{epoch_us}"'
 
 
-def require_if_match(row: asyncpg.Record | dict, if_match: str | None) -> None:
-    current = profile_etag(row)
+def user_etag(row: asyncpg.Record | dict) -> str:
+    payload = user_resource({**dict(row), "profiles": []})
+    digest = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    return f'W/"{payload["id"]}:{digest}"'
+
+
+def require_matching_etag(current: str, if_match: str | None) -> None:
     if not if_match:
         raise api_error(428, "PRECONDITION_REQUIRED", "missing If-Match header", {"etag": current})
     if if_match != current:
         raise api_error(412, "PRECONDITION_FAILED", "resource changed since last read", {"etag": current})
+
+
+def require_if_match(row: asyncpg.Record | dict, if_match: str | None) -> None:
+    require_matching_etag(profile_etag(row), if_match)
 
 
 def policy_sha256(policy: dict[str, Any]) -> str:
@@ -204,7 +227,17 @@ def validate_profile_policy(policy: dict[str, Any]) -> None:
         raise api_error(422, "VALIDATION_ERROR", "invalid profile policy", {"errors": errors})
 
 
-async def fetch_user_resource(conn: asyncpg.Connection, user_id: UUID) -> dict:
+def validate_permission_symbol(permission: str) -> None:
+    if permission not in PERMISSIONS:
+        raise api_error(
+            422,
+            "VALIDATION_ERROR",
+            "unknown permission",
+            {"errors": [{"field": "permission", "type": "unknown_permission"}]},
+        )
+
+
+async def fetch_user_row(conn: asyncpg.Connection, user_id: UUID) -> asyncpg.Record:
     row = await conn.fetchrow(
         """
         SELECT
@@ -228,16 +261,24 @@ async def fetch_user_resource(conn: asyncpg.Connection, user_id: UUID) -> dict:
     )
     if row is None:
         raise api_error(404, "NOT_FOUND", "resource not found")
+    return row
+
+
+async def fetch_user_resource(conn: asyncpg.Connection, user_id: UUID, response: Response | None = None) -> dict:
+    row = await fetch_user_row(conn, user_id)
+    if response is not None:
+        response.headers["ETag"] = user_etag(row)
     return user_resource({**dict(row), "profiles": []})
 
 
 @router.get("/me")
 async def get_me(
+    response: Response,
     current_user: CurrentUser = Depends(require_current_user),
     pool: asyncpg.Pool = Depends(get_pool),
 ) -> dict:
     async with pool.acquire() as conn:
-        return await fetch_user_resource(conn, current_user.id)
+        return await fetch_user_resource(conn, current_user.id, response)
 
 
 @router.post("/entities", status_code=201)
@@ -330,6 +371,24 @@ async def list_users(
     return list_page([user_resource({**dict(row), "profiles": []}) for row in rows])
 
 
+@router.get("/entities/{entity_id}/users/{user_id}")
+async def get_user(
+    entity_id: UUID,
+    user_id: UUID,
+    response: Response,
+    current_user: CurrentUser = Depends(require_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> dict:
+    current_user.require_entity(entity_id)
+    current_user.require_permission("USER_MANAGE")
+    async with pool.acquire() as conn:
+        row = await fetch_user_row(conn, user_id)
+    if row["entity_id"] != entity_id or row["deleted_at"] is not None:
+        raise api_error(404, "NOT_FOUND", "resource not found")
+    response.headers["ETag"] = user_etag(row)
+    return user_resource({**dict(row), "profiles": []})
+
+
 @router.get("/entities/{entity_id}/profiles")
 async def list_profiles(
     entity_id: UUID,
@@ -413,6 +472,7 @@ async def create_profile(
 @router.post("/entities/{entity_id}/users", status_code=201)
 async def create_user(
     entity_id: UUID,
+    response: Response,
     body: UserCreate,
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
     current_user: CurrentUser = Depends(require_current_user),
@@ -489,7 +549,7 @@ async def create_user(
                     target_id=user_id,
                     after={"permission": permission},
                 )
-            return await fetch_user_resource(conn, user_id)
+            return await fetch_user_resource(conn, user_id, response)
 
 
 @router.get("/profiles/{profile_id}")
@@ -814,10 +874,120 @@ async def remove_profile_user(
     return Response(status_code=204)
 
 
+@router.post("/users/{user_id}/permissions")
+async def grant_user_permissions(
+    user_id: UUID,
+    body: PermissionGrant,
+    if_match: Annotated[str | None, Header(alias="If-Match")] = None,
+    current_user: CurrentUser = Depends(require_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> dict:
+    if "PLATFORM_OPERATOR" in body.permissions:
+        raise api_error(403, "FORBIDDEN", "PLATFORM_OPERATOR cannot be granted by this route", {"required": "self_grant_forbidden"})
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            target = await conn.fetchrow(
+                """
+                SELECT id, entity_id, deleted_at
+                FROM users
+                WHERE id = $1
+                FOR UPDATE
+                """,
+                user_id,
+            )
+            if target is None or target["deleted_at"] is not None:
+                raise api_error(404, "NOT_FOUND", "resource not found")
+            current_user.require_entity(target["entity_id"])
+            current_user.require_permission("PERMISSION_MANAGE")
+            user_row = await fetch_user_row(conn, user_id)
+            require_matching_etag(user_etag(user_row), if_match)
+            for permission in body.permissions:
+                result = await conn.execute(
+                    """
+                    INSERT INTO user_permissions (user_id, permission)
+                    VALUES ($1, $2)
+                    ON CONFLICT DO NOTHING
+                    """,
+                    user_id,
+                    permission,
+                )
+                if result == "INSERT 0 1":
+                    await insert_audit_event(
+                        conn,
+                        entity_id=target["entity_id"],
+                        actor_id=current_user.id,
+                        actor_email=current_user.email,
+                        action="PERMISSION_GRANTED",
+                        target_type="user",
+                        target_id=user_id,
+                        after={"permission": permission},
+                    )
+            permissions = await conn.fetch(
+                """
+                SELECT permission::text AS permission
+                FROM user_permissions
+                WHERE user_id = $1
+                ORDER BY permission::text
+                """,
+                user_id,
+            )
+    return {"user_id": str(user_id), "permissions": [row["permission"] for row in permissions]}
+
+
+@router.delete("/users/{user_id}/permissions/{permission}", status_code=204)
+async def revoke_user_permission(
+    user_id: UUID,
+    permission: str,
+    if_match: Annotated[str | None, Header(alias="If-Match")] = None,
+    current_user: CurrentUser = Depends(require_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> Response:
+    validate_permission_symbol(permission)
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            target = await conn.fetchrow(
+                """
+                SELECT id, entity_id, deleted_at
+                FROM users
+                WHERE id = $1
+                FOR UPDATE
+                """,
+                user_id,
+            )
+            if target is None or target["deleted_at"] is not None:
+                raise api_error(404, "NOT_FOUND", "resource not found")
+            current_user.require_entity(target["entity_id"])
+            current_user.require_permission("PERMISSION_MANAGE")
+            user_row = await fetch_user_row(conn, user_id)
+            require_matching_etag(user_etag(user_row), if_match)
+            result = await conn.execute(
+                """
+                DELETE FROM user_permissions
+                WHERE user_id = $1
+                  AND permission = $2
+                """,
+                user_id,
+                permission,
+            )
+            if result == "DELETE 1":
+                await insert_audit_event(
+                    conn,
+                    entity_id=target["entity_id"],
+                    actor_id=current_user.id,
+                    actor_email=current_user.email,
+                    action="PERMISSION_REVOKED",
+                    target_type="user",
+                    target_id=user_id,
+                    before={"permission": permission},
+                )
+    return Response(status_code=204)
+
+
 @router.post("/entities/{entity_id}/users/{user_id}/actions/deactivate")
 async def deactivate_user(
     entity_id: UUID,
     user_id: UUID,
+    response: Response,
     current_user: CurrentUser = Depends(require_current_user),
     pool: asyncpg.Pool = Depends(get_pool),
 ) -> dict:
@@ -875,13 +1045,14 @@ async def deactivate_user(
                     "deactivated_by": str(current_user.id),
                 },
             )
-            return await fetch_user_resource(conn, user_id)
+            return await fetch_user_resource(conn, user_id, response)
 
 
 @router.post("/entities/{entity_id}/users/{user_id}/actions/reactivate")
 async def reactivate_user(
     entity_id: UUID,
     user_id: UUID,
+    response: Response,
     current_user: CurrentUser = Depends(require_current_user),
     pool: asyncpg.Pool = Depends(get_pool),
 ) -> dict:
@@ -917,7 +1088,7 @@ async def reactivate_user(
                 before=before,
                 after={"deactivated_at": None},
             )
-            return await fetch_user_resource(conn, user_id)
+            return await fetch_user_resource(conn, user_id, response)
 
 
 @router.get("/audit/events")
