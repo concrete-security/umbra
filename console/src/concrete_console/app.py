@@ -11,7 +11,7 @@ from concrete_console.config import load_settings
 from concrete_console.db import close_pool
 from concrete_console.log_config import bind_request_context, clear_context, configure_logging, logger
 from concrete_console.metrics import monotonic_seconds, observe_request, prometheus_text
-from concrete_console.readiness import run_ready_checks
+from concrete_console.readiness import run_ready_checks, verify_configured_phala_cli
 from concrete_console.routes_auth import router as auth_router
 from concrete_console.routes_internal import router as internal_router
 from concrete_console.routes import router
@@ -31,6 +31,7 @@ log = logger()
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    await verify_configured_phala_cli(fetch_timeout=5.0)
     try:
         yield
     finally:
