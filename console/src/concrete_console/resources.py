@@ -57,6 +57,7 @@ def list_page(items: list[dict[str, Any]], *, next_cursor: str | None = None) ->
 
 def profile_resource(row: Any) -> dict[str, Any]:
     row = dict(row)
+    attached_cvms = json_payload(row.get("attached_cvms", []))
     return {
         "id": str(row["id"]),
         "entity_id": str(row["entity_id"]),
@@ -64,7 +65,9 @@ def profile_resource(row: Any) -> dict[str, Any]:
         "description": row["description"],
         "policy": json_payload(row["policy"]),
         "assigned": bool(row.get("assigned", False)),
-        "attached_cvms": row.get("attached_cvms", []),
+        "attached_cvms": [
+            {"id": str(cvm["id"]), "fqdn": cvm["fqdn"], "state": cvm["state"]} for cvm in attached_cvms
+        ],
         "attached_cvm_count": row.get("attached_cvm_count", 0),
         "created_at": timestamp(row["created_at"]),
         "updated_at": timestamp(row["updated_at"]),

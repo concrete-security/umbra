@@ -1033,7 +1033,8 @@ async def list_profiles(
             current_user.id,
             can_manage,
         )
-    return list_page([profile_resource({**dict(row), "attached_cvms": [], "attached_cvm_count": 0}) for row in rows])
+        profiles = await with_profile_cvm_summaries(conn, rows)
+    return list_page([profile_resource(row) for row in profiles])
 
 
 @router.post("/entities/{entity_id}/profiles", status_code=201)
@@ -1255,13 +1256,14 @@ async def get_profile(
             profile_id,
             current_user.id,
         )
-    if row is None:
-        raise api_error(404, "NOT_FOUND", "resource not found")
-    current_user.require_entity(row["entity_id"])
-    if "USER_MANAGE" not in current_user.permissions and not row["assigned"]:
-        raise api_error(404, "NOT_FOUND", "resource not found")
+        if row is None:
+            raise api_error(404, "NOT_FOUND", "resource not found")
+        current_user.require_entity(row["entity_id"])
+        if "USER_MANAGE" not in current_user.permissions and not row["assigned"]:
+            raise api_error(404, "NOT_FOUND", "resource not found")
+        row = (await with_profile_cvm_summaries(conn, [row]))[0]
     response.headers["ETag"] = profile_etag(row)
-    return profile_resource({**dict(row), "attached_cvms": [], "attached_cvm_count": 0})
+    return profile_resource(row)
 
 
 @router.patch("/profiles/{profile_id}")
@@ -1362,8 +1364,60 @@ async def patch_profile(
                     profile_id,
                     current_user.id,
                 )
+        row = (await with_profile_cvm_summaries(conn, [row]))[0]
     response.headers["ETag"] = profile_etag(row)
-    return profile_resource({**dict(row), "attached_cvms": [], "attached_cvm_count": 0})
+    return profile_resource(row)
+
+
+async def with_profile_cvm_summaries(conn: asyncpg.Connection, rows: list[Any]) -> list[dict[str, Any]]:
+    profiles = [dict(row) for row in rows]
+    if not profiles:
+        return []
+    profile_ids = [profile["id"] for profile in profiles]
+    summary_rows = await conn.fetch(
+        """
+        WITH attached AS (
+            SELECT
+                cp.profile_id,
+                c.id,
+                c.fqdn,
+                c.state::text AS state,
+                row_number() OVER (PARTITION BY cp.profile_id ORDER BY c.created_at, c.id) AS rn,
+                count(*) OVER (PARTITION BY cp.profile_id) AS attached_cvm_count
+            FROM cvm_profiles cp
+            JOIN cvms c ON c.id = cp.cvm_id
+            WHERE cp.profile_id = ANY($1::uuid[])
+              AND c.deleted_at IS NULL
+        )
+        SELECT
+            profile_id,
+            max(attached_cvm_count)::int AS attached_cvm_count,
+            COALESCE(
+                jsonb_agg(
+                    jsonb_build_object('id', id, 'fqdn', fqdn, 'state', state)
+                    ORDER BY rn
+                ) FILTER (WHERE rn <= 100),
+                '[]'::jsonb
+            ) AS attached_cvms
+        FROM attached
+        GROUP BY profile_id
+        """,
+        profile_ids,
+    )
+    summaries = {
+        row["profile_id"]: {
+            "attached_cvms": json_payload(row["attached_cvms"]),
+            "attached_cvm_count": row["attached_cvm_count"],
+        }
+        for row in summary_rows
+    }
+    return [
+        {
+            **profile,
+            **summaries.get(profile["id"], {"attached_cvms": [], "attached_cvm_count": 0}),
+        }
+        for profile in profiles
+    ]
 
 
 @router.delete("/profiles/{profile_id}", status_code=204)

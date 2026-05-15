@@ -64,8 +64,11 @@ def test_profile_resource_parses_json_policy() -> None:
             "description": "",
             "policy": '{"sandbox_env":{"PLACEHOLDER":"value"}}',
             "assigned": True,
-            "attached_cvms": [],
-            "attached_cvm_count": 0,
+            "attached_cvms": (
+                '[{"id":"00000000-0000-4000-8000-000000000030",'
+                '"fqdn":"cvm.example.test","state":"RUNNING"}]'
+            ),
+            "attached_cvm_count": 1,
             "created_at": datetime(2026, 5, 15, 18, 3, tzinfo=timezone.utc),
             "updated_at": datetime(2026, 5, 15, 18, 4, tzinfo=timezone.utc),
         }
@@ -73,6 +76,14 @@ def test_profile_resource_parses_json_policy() -> None:
 
     assert resource["policy"] == {"sandbox_env": {"PLACEHOLDER": "value"}}
     assert resource["assigned"] is True
+    assert resource["attached_cvms"] == [
+        {
+            "id": "00000000-0000-4000-8000-000000000030",
+            "fqdn": "cvm.example.test",
+            "state": "RUNNING",
+        }
+    ]
+    assert resource["attached_cvm_count"] == 1
 
 
 def test_ssh_key_resource_formats_created_at() -> None:
