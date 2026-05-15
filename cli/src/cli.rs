@@ -61,6 +61,10 @@ pub enum Command {
     #[command(subcommand)]
     Profile(ProfileCommand),
 
+    /// Manage entity and user quotas.
+    #[command(subcommand)]
+    Quota(QuotaCommand),
+
     /// Manage users and user permissions.
     #[command(subcommand)]
     User(UserCommand),
@@ -232,6 +236,50 @@ pub enum ProfileMembersCommand {
         /// User UUID to remove from the profile.
         user_id: String,
     },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum QuotaCommand {
+    /// Read effective quotas.
+    Get(QuotaScopeArgs),
+
+    /// Set a quota override.
+    Set(QuotaSetArgs),
+
+    /// Clear a quota override.
+    Clear(QuotaClearArgs),
+}
+
+#[derive(clap::Args, Debug)]
+pub struct QuotaScopeArgs {
+    /// Read or mutate quotas for this entity UUID. Defaults to the current session entity.
+    #[arg(long, conflicts_with = "user")]
+    pub entity: Option<String>,
+
+    /// Read or mutate quotas for this user UUID.
+    #[arg(long)]
+    pub user: Option<String>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct QuotaSetArgs {
+    /// Quota resource.
+    pub resource: String,
+
+    /// New quota limit.
+    pub limit: u64,
+
+    #[command(flatten)]
+    pub scope: QuotaScopeArgs,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct QuotaClearArgs {
+    /// Quota resource.
+    pub resource: String,
+
+    #[command(flatten)]
+    pub scope: QuotaScopeArgs,
 }
 
 #[derive(Subcommand, Debug)]
