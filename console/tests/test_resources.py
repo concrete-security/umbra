@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from uuid import UUID
 
-from concrete_console.resources import profile_resource, user_resource
+from concrete_console.resources import entity_quota_resource, profile_resource, user_quota_resource, user_resource
 
 
 def user_row(**overrides):
@@ -63,3 +63,35 @@ def test_profile_resource_parses_json_policy() -> None:
 
     assert resource["policy"] == {"sandbox_env": {"PLACEHOLDER": "value"}}
     assert resource["assigned"] is True
+
+
+def test_quota_resources_format_optional_setter() -> None:
+    set_at = datetime(2026, 5, 15, 18, 50, tzinfo=timezone.utc)
+
+    entity_quota = entity_quota_resource(
+        {
+            "entity_id": UUID("00000000-0000-4000-8000-000000000002"),
+            "resource": "users",
+            "limit": 10,
+            "source": "override",
+            "current_usage": 2,
+            "set_by": UUID("00000000-0000-4000-8000-000000000020"),
+            "set_at": set_at,
+        }
+    )
+    user_quota = user_quota_resource(
+        {
+            "user_id": UUID("00000000-0000-4000-8000-000000000020"),
+            "resource": "dev_cvms",
+            "limit": 5,
+            "source": "default",
+            "current_usage": 0,
+            "set_by": None,
+            "set_at": None,
+        }
+    )
+
+    assert entity_quota["set_by"] == "00000000-0000-4000-8000-000000000020"
+    assert entity_quota["set_at"] == "2026-05-15T18:50:00Z"
+    assert user_quota["set_by"] is None
+    assert user_quota["set_at"] is None

@@ -17,7 +17,16 @@ from concrete_console.bootstrap import email_domain
 from concrete_console.config import load_settings
 from concrete_console.db import get_pool
 from concrete_console.errors import api_error
-from concrete_console.resources import audit_event_resource, entity_resource, json_payload, list_page, profile_resource, user_resource
+from concrete_console.resources import (
+    audit_event_resource,
+    entity_quota_resource,
+    entity_resource,
+    json_payload,
+    list_page,
+    profile_resource,
+    user_quota_resource,
+    user_resource,
+)
 
 PERMISSIONS = {
     "CVM_LAUNCH",
@@ -41,6 +50,18 @@ DEFAULT_SANDBOX_ENV_VALUE_DENYLIST = (
     r"^AKIA[0-9A-Z]{16}$",
     r"^ASIA[0-9A-Z]{16}$",
 )
+ENTITY_QUOTA_RESOURCES = ("dev_cvms", "ssh_keys", "users", "profiles")
+USER_QUOTA_RESOURCES = ("dev_cvms", "ssh_keys")
+DEFAULT_ENTITY_QUOTAS = {
+    "dev_cvms": ("DEFAULT_QUOTA_DEV_CVMS_PER_ENTITY", 50),
+    "ssh_keys": ("DEFAULT_QUOTA_SSH_KEYS_PER_ENTITY", 1000),
+    "users": ("DEFAULT_QUOTA_USERS_PER_ENTITY", 1000),
+    "profiles": ("DEFAULT_QUOTA_PROFILES_PER_ENTITY", 50),
+}
+DEFAULT_USER_QUOTAS = {
+    "dev_cvms": ("DEFAULT_QUOTA_DEV_CVMS_PER_USER", 5),
+    "ssh_keys": ("DEFAULT_QUOTA_SSH_KEYS_PER_USER", 10),
+}
 
 router = APIRouter(prefix="/api/v1")
 
@@ -99,6 +120,12 @@ class PermissionGrant(BaseModel):
         if unknown:
             raise ValueError(f"unknown permissions: {', '.join(unknown)}")
         return sorted(set(value))
+
+
+class QuotaPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    limit: int = Field(ge=0)
 
 
 class ProfileCreate(BaseModel):
@@ -234,6 +261,124 @@ def validate_permission_symbol(permission: str) -> None:
             "VALIDATION_ERROR",
             "unknown permission",
             {"errors": [{"field": "permission", "type": "unknown_permission"}]},
+        )
+
+
+def validate_entity_quota_resource(resource: str) -> None:
+    if resource not in ENTITY_QUOTA_RESOURCES:
+        raise api_error(
+            400,
+            "VALIDATION_ERROR",
+            "unknown quota resource",
+            {"errors": [{"field": "resource", "type": "unknown_quota_resource"}]},
+        )
+
+
+def validate_user_quota_resource(resource: str) -> None:
+    validate_entity_quota_resource(resource)
+    if resource not in USER_QUOTA_RESOURCES:
+        raise api_error(
+            400,
+            "VALIDATION_ERROR",
+            "quota resource is not user-scoped",
+            {"errors": [{"field": "resource", "type": "entity_only_quota_resource"}]},
+        )
+
+
+def default_quota_limit(resource: str, *, scope: str) -> int:
+    defaults = DEFAULT_USER_QUOTAS if scope == "user" else DEFAULT_ENTITY_QUOTAS
+    env_name, fallback = defaults[resource]
+    return int(load_settings().raw.get(env_name, fallback))
+
+
+async def entity_quota_limit(conn: asyncpg.Connection, entity_id: UUID, resource: str) -> tuple[int, str, UUID | None, datetime | None]:
+    row = await conn.fetchrow(
+        """
+        SELECT limit_value, set_by, set_at
+        FROM entity_quotas
+        WHERE entity_id = $1
+          AND resource = $2
+        """,
+        entity_id,
+        resource,
+    )
+    if row is None:
+        return default_quota_limit(resource, scope="entity"), "default", None, None
+    return row["limit_value"], "override", row["set_by"], row["set_at"]
+
+
+async def user_quota_limit(conn: asyncpg.Connection, user_id: UUID, resource: str) -> tuple[int, str, UUID | None, datetime | None]:
+    row = await conn.fetchrow(
+        """
+        SELECT uq.limit_value, uq.set_by, uq.set_at
+        FROM user_quotas uq
+        WHERE uq.user_id = $1
+          AND uq.resource = $2
+        """,
+        user_id,
+        resource,
+    )
+    if row is not None:
+        return row["limit_value"], "user_override", row["set_by"], row["set_at"]
+    entity_id = await conn.fetchval("SELECT entity_id FROM users WHERE id = $1", user_id)
+    limit, entity_source, set_by, set_at = await entity_quota_limit(conn, entity_id, resource)
+    source = "entity_override" if entity_source == "override" else "default"
+    return limit, source, set_by, set_at
+
+
+async def entity_quota_usage(conn: asyncpg.Connection, entity_id: UUID, resource: str) -> int:
+    if resource == "users":
+        return await conn.fetchval(
+            "SELECT count(*) FROM users WHERE entity_id = $1 AND deleted_at IS NULL",
+            entity_id,
+        )
+    if resource == "profiles":
+        return await conn.fetchval(
+            "SELECT count(*) FROM entity_profiles WHERE entity_id = $1 AND deleted_at IS NULL",
+            entity_id,
+        )
+    return 0
+
+
+async def user_quota_usage(conn: asyncpg.Connection, user_id: UUID, resource: str) -> int:
+    return 0
+
+
+async def entity_quota_payload(conn: asyncpg.Connection, entity_id: UUID, resource: str) -> dict[str, object]:
+    limit, source, set_by, set_at = await entity_quota_limit(conn, entity_id, resource)
+    return {
+        "entity_id": entity_id,
+        "resource": resource,
+        "limit": limit,
+        "source": source,
+        "current_usage": await entity_quota_usage(conn, entity_id, resource),
+        "set_by": set_by,
+        "set_at": set_at,
+    }
+
+
+async def user_quota_payload(conn: asyncpg.Connection, user_id: UUID, resource: str) -> dict[str, object]:
+    limit, source, set_by, set_at = await user_quota_limit(conn, user_id, resource)
+    return {
+        "user_id": user_id,
+        "resource": resource,
+        "limit": limit,
+        "source": source,
+        "current_usage": await user_quota_usage(conn, user_id, resource),
+        "set_by": set_by,
+        "set_at": set_at,
+    }
+
+
+async def enforce_entity_quota(conn: asyncpg.Connection, entity_id: UUID, resource: str) -> None:
+    limit, _, _, _ = await entity_quota_limit(conn, entity_id, resource)
+    current_usage = await entity_quota_usage(conn, entity_id, resource)
+    if current_usage >= limit:
+        raise api_error(
+            403,
+            "QUOTA_EXCEEDED",
+            "entity quota exceeded",
+            {"resource": resource, "scope": "entity", "limit": limit, "current_usage": current_usage},
         )
 
 
@@ -389,6 +534,124 @@ async def get_user(
     return user_resource({**dict(row), "profiles": []})
 
 
+@router.get("/entities/{entity_id}/quotas")
+async def get_entity_quotas(
+    entity_id: UUID,
+    current_user: CurrentUser = Depends(require_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> dict:
+    current_user.require_entity(entity_id)
+    current_user.require_permission("USER_MANAGE")
+    async with pool.acquire() as conn:
+        if await conn.fetchval("SELECT 1 FROM entities WHERE id = $1", entity_id) is None:
+            raise api_error(404, "NOT_FOUND", "resource not found")
+        quotas = [entity_quota_resource(await entity_quota_payload(conn, entity_id, resource)) for resource in ENTITY_QUOTA_RESOURCES]
+    return {"quotas": quotas}
+
+
+@router.patch("/entities/{entity_id}/quotas/{resource}")
+async def set_entity_quota(
+    entity_id: UUID,
+    resource: str,
+    body: QuotaPatch,
+    current_user: CurrentUser = Depends(require_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> dict:
+    validate_entity_quota_resource(resource)
+    current_user.require_permission("PLATFORM_OPERATOR")
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            if await conn.fetchval("SELECT 1 FROM entities WHERE id = $1", entity_id) is None:
+                raise api_error(404, "NOT_FOUND", "resource not found")
+            if resource in USER_QUOTA_RESOURCES:
+                user_quota_count = await conn.fetchval(
+                    """
+                    SELECT count(*)
+                    FROM user_quotas uq
+                    JOIN users u ON u.id = uq.user_id
+                    WHERE u.entity_id = $1
+                      AND uq.resource = $2
+                      AND uq.limit_value > $3
+                    """,
+                    entity_id,
+                    resource,
+                    body.limit,
+                )
+                if user_quota_count:
+                    raise api_error(
+                        409,
+                        "CONFLICT",
+                        "user quotas exceed requested entity quota",
+                        {"state": "user_quota_above_new_entity_quota", "user_quota_count": user_quota_count},
+                    )
+            before = await entity_quota_payload(conn, entity_id, resource)
+            await conn.execute(
+                """
+                INSERT INTO entity_quotas (entity_id, resource, limit_value, set_by, set_at)
+                VALUES ($1, $2, $3, $4, now())
+                ON CONFLICT (entity_id, resource) DO UPDATE
+                SET limit_value = EXCLUDED.limit_value,
+                    set_by = EXCLUDED.set_by,
+                    set_at = EXCLUDED.set_at
+                """,
+                entity_id,
+                resource,
+                body.limit,
+                current_user.id,
+            )
+            after = await entity_quota_payload(conn, entity_id, resource)
+            await insert_audit_event(
+                conn,
+                entity_id=entity_id,
+                actor_id=current_user.id,
+                actor_email=current_user.email,
+                action="QUOTA_SET",
+                target_type="entity",
+                target_id=entity_id,
+                before={"scope": "entity", "scope_id": str(entity_id), "resource": resource, "limit": before["limit"]},
+                after={"scope": "entity", "scope_id": str(entity_id), "resource": resource, "limit": body.limit},
+            )
+    return entity_quota_resource(after)
+
+
+@router.delete("/entities/{entity_id}/quotas/{resource}", status_code=204)
+async def clear_entity_quota(
+    entity_id: UUID,
+    resource: str,
+    current_user: CurrentUser = Depends(require_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> Response:
+    validate_entity_quota_resource(resource)
+    current_user.require_permission("PLATFORM_OPERATOR")
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            if await conn.fetchval("SELECT 1 FROM entities WHERE id = $1", entity_id) is None:
+                raise api_error(404, "NOT_FOUND", "resource not found")
+            before = await entity_quota_payload(conn, entity_id, resource)
+            result = await conn.execute(
+                """
+                DELETE FROM entity_quotas
+                WHERE entity_id = $1
+                  AND resource = $2
+                """,
+                entity_id,
+                resource,
+            )
+            if result == "DELETE 1":
+                await insert_audit_event(
+                    conn,
+                    entity_id=entity_id,
+                    actor_id=current_user.id,
+                    actor_email=current_user.email,
+                    action="QUOTA_CLEARED",
+                    target_type="entity",
+                    target_id=entity_id,
+                    before={"scope": "entity", "scope_id": str(entity_id), "resource": resource, "limit": before["limit"]},
+                    after=None,
+                )
+    return Response(status_code=204)
+
+
 @router.get("/entities/{entity_id}/profiles")
 async def list_profiles(
     entity_id: UUID,
@@ -440,6 +703,7 @@ async def create_profile(
     profile_id = uuid4()
     async with pool.acquire() as conn:
         async with conn.transaction():
+            await enforce_entity_quota(conn, entity_id, "profiles")
             try:
                 row = await conn.fetchrow(
                     """
@@ -506,6 +770,7 @@ async def create_user(
 
         user_id = uuid4()
         async with conn.transaction():
+            await enforce_entity_quota(conn, entity_id, "users")
             try:
                 await conn.execute(
                     """
@@ -979,6 +1244,120 @@ async def revoke_user_permission(
                     target_type="user",
                     target_id=user_id,
                     before={"permission": permission},
+                )
+    return Response(status_code=204)
+
+
+@router.get("/users/{user_id}/quotas")
+async def get_user_quotas(
+    user_id: UUID,
+    current_user: CurrentUser = Depends(require_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> dict:
+    async with pool.acquire() as conn:
+        target = await conn.fetchrow("SELECT id, entity_id, deleted_at FROM users WHERE id = $1", user_id)
+        if target is None or target["deleted_at"] is not None:
+            raise api_error(404, "NOT_FOUND", "resource not found")
+        if current_user.id != user_id:
+            current_user.require_entity(target["entity_id"])
+            if "USER_MANAGE" not in current_user.permissions and "QUOTA_MANAGE" not in current_user.permissions:
+                raise api_error(403, "FORBIDDEN", "missing required permission", {"required": "USER_MANAGE_OR_QUOTA_MANAGE"})
+        quotas = [user_quota_resource(await user_quota_payload(conn, user_id, resource)) for resource in USER_QUOTA_RESOURCES]
+    return {"quotas": quotas}
+
+
+@router.patch("/users/{user_id}/quotas/{resource}")
+async def set_user_quota(
+    user_id: UUID,
+    resource: str,
+    body: QuotaPatch,
+    current_user: CurrentUser = Depends(require_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> dict:
+    validate_user_quota_resource(resource)
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            target = await conn.fetchrow("SELECT id, entity_id, deleted_at FROM users WHERE id = $1", user_id)
+            if target is None or target["deleted_at"] is not None:
+                raise api_error(404, "NOT_FOUND", "resource not found")
+            if "PLATFORM_OPERATOR" not in current_user.permissions:
+                current_user.require_entity(target["entity_id"])
+                current_user.require_permission("QUOTA_MANAGE")
+            entity_limit, _, _, _ = await entity_quota_limit(conn, target["entity_id"], resource)
+            if body.limit > entity_limit:
+                raise api_error(
+                    409,
+                    "CONFLICT",
+                    "user quota exceeds effective entity quota",
+                    {"state": "user_quota_above_entity_quota", "entity_quota": entity_limit},
+                )
+            before = await user_quota_payload(conn, user_id, resource)
+            await conn.execute(
+                """
+                INSERT INTO user_quotas (user_id, resource, limit_value, set_by, set_at)
+                VALUES ($1, $2, $3, $4, now())
+                ON CONFLICT (user_id, resource) DO UPDATE
+                SET limit_value = EXCLUDED.limit_value,
+                    set_by = EXCLUDED.set_by,
+                    set_at = EXCLUDED.set_at
+                """,
+                user_id,
+                resource,
+                body.limit,
+                current_user.id,
+            )
+            after = await user_quota_payload(conn, user_id, resource)
+            await insert_audit_event(
+                conn,
+                entity_id=target["entity_id"],
+                actor_id=current_user.id,
+                actor_email=current_user.email,
+                action="QUOTA_SET",
+                target_type="user",
+                target_id=user_id,
+                before={"scope": "user", "scope_id": str(user_id), "resource": resource, "limit": before["limit"]},
+                after={"scope": "user", "scope_id": str(user_id), "resource": resource, "limit": body.limit},
+            )
+    return user_quota_resource(after)
+
+
+@router.delete("/users/{user_id}/quotas/{resource}", status_code=204)
+async def clear_user_quota(
+    user_id: UUID,
+    resource: str,
+    current_user: CurrentUser = Depends(require_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> Response:
+    validate_user_quota_resource(resource)
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            target = await conn.fetchrow("SELECT id, entity_id, deleted_at FROM users WHERE id = $1", user_id)
+            if target is None or target["deleted_at"] is not None:
+                raise api_error(404, "NOT_FOUND", "resource not found")
+            if "PLATFORM_OPERATOR" not in current_user.permissions:
+                current_user.require_entity(target["entity_id"])
+                current_user.require_permission("QUOTA_MANAGE")
+            before = await user_quota_payload(conn, user_id, resource)
+            result = await conn.execute(
+                """
+                DELETE FROM user_quotas
+                WHERE user_id = $1
+                  AND resource = $2
+                """,
+                user_id,
+                resource,
+            )
+            if result == "DELETE 1":
+                await insert_audit_event(
+                    conn,
+                    entity_id=target["entity_id"],
+                    actor_id=current_user.id,
+                    actor_email=current_user.email,
+                    action="QUOTA_CLEARED",
+                    target_type="user",
+                    target_id=user_id,
+                    before={"scope": "user", "scope_id": str(user_id), "resource": resource, "limit": before["limit"]},
+                    after=None,
                 )
     return Response(status_code=204)
 

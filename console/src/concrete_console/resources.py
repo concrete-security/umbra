@@ -71,6 +71,32 @@ def profile_resource(row: Any) -> dict[str, Any]:
     }
 
 
+def entity_quota_resource(row: Any) -> dict[str, Any]:
+    row = dict(row)
+    return {
+        "entity_id": str(row["entity_id"]),
+        "resource": row["resource"],
+        "limit": row["limit"],
+        "source": row["source"],
+        "current_usage": row["current_usage"],
+        "set_by": str(row["set_by"]) if row["set_by"] else None,
+        "set_at": timestamp(row["set_at"]) if row["set_at"] else None,
+    }
+
+
+def user_quota_resource(row: Any) -> dict[str, Any]:
+    row = dict(row)
+    return {
+        "user_id": str(row["user_id"]),
+        "resource": row["resource"],
+        "limit": row["limit"],
+        "source": row["source"],
+        "current_usage": row["current_usage"],
+        "set_by": str(row["set_by"]) if row["set_by"] else None,
+        "set_at": timestamp(row["set_at"]) if row["set_at"] else None,
+    }
+
+
 def audit_event_resource(row: Any) -> dict[str, Any]:
     row = dict(row)
     return {
