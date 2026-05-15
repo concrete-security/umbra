@@ -24,6 +24,7 @@ async def run_ready_checks() -> dict[str, CheckState]:
         _capped("oidc_jwks", _check_oidc_jwks(), timeout=1.0),
         _capped("cloudflare_adapter", _check_cloudflare_adapter(), timeout=1.0),
         _capped("phala_adapter", _check_phala_adapter(), timeout=1.0),
+        _capped("audit_anchor_target", _check_audit_anchor_target(), timeout=1.0),
     )
     return dict(results)
 
@@ -93,6 +94,16 @@ async def _check_cloudflare_adapter() -> None:
 
 async def _check_phala_adapter() -> None:
     await verify_configured_phala_cli(fetch_timeout=0.5)
+
+
+async def _check_audit_anchor_target() -> None:
+    target = load_settings().raw.get("AUDIT_ANCHOR_TARGET", "").strip()
+    if not target:
+        return
+
+    async with httpx.AsyncClient(timeout=0.5, follow_redirects=True) as client:
+        response = await client.head(target)
+    response.raise_for_status()
 
 
 async def verify_configured_phala_cli(*, fetch_timeout: float) -> None:

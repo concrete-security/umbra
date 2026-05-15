@@ -64,8 +64,10 @@ def test_run_ready_checks_includes_oidc_jwks(monkeypatch) -> None:
     monkeypatch.setattr(readiness, "_check_oidc_jwks", ok)
     monkeypatch.setattr(readiness, "_check_cloudflare_adapter", ok)
     monkeypatch.setattr(readiness, "_check_phala_adapter", ok)
+    monkeypatch.setattr(readiness, "_check_audit_anchor_target", ok)
 
     assert asyncio.run(readiness.run_ready_checks()) == {
+        "audit_anchor_target": "ok",
         "cloudflare_adapter": "ok",
         "database": "ok",
         "jwt_keys": "ok",
@@ -205,6 +207,43 @@ def test_phala_readiness_skips_when_unconfigured(monkeypatch) -> None:
     monkeypatch.delenv("PHALA_CLI_SHA256", raising=False)
 
     asyncio.run(readiness._check_phala_adapter())
+
+
+def test_audit_anchor_readiness_heads_configured_target(monkeypatch) -> None:
+    seen: list[str] = []
+
+    monkeypatch.setenv("AUDIT_ANCHOR_TARGET", "https://anchors.example/healthz")
+
+    class FakeClient:
+        def __init__(self, *, timeout: float, follow_redirects: bool) -> None:
+            assert timeout == 0.5
+            assert follow_redirects is True
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def head(self, url: str):
+            seen.append(url)
+
+            def raise_for_status() -> None:
+                return None
+
+            return SimpleNamespace(raise_for_status=raise_for_status)
+
+    monkeypatch.setattr(readiness.httpx, "AsyncClient", FakeClient)
+
+    asyncio.run(readiness._check_audit_anchor_target())
+
+    assert seen == ["https://anchors.example/healthz"]
+
+
+def test_audit_anchor_readiness_skips_when_unconfigured(monkeypatch) -> None:
+    monkeypatch.delenv("AUDIT_ANCHOR_TARGET", raising=False)
+
+    asyncio.run(readiness._check_audit_anchor_target())
 
 
 def test_metrics_requires_bearer_token(monkeypatch) -> None:
