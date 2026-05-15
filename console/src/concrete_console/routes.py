@@ -95,6 +95,7 @@ async def fetch_user_resource(conn: asyncpg.Connection, user_id: UUID) -> dict:
             COALESCE(array_agg(up.permission::text ORDER BY up.permission::text)
                 FILTER (WHERE up.permission IS NOT NULL), ARRAY[]::text[]) AS permissions,
             u.created_at,
+            u.deactivated_at,
             u.deleted_at
         FROM users u
         JOIN entities e ON e.id = u.entity_id
@@ -193,6 +194,7 @@ async def list_users(
                 COALESCE(array_agg(up.permission::text ORDER BY up.permission::text)
                     FILTER (WHERE up.permission IS NOT NULL), ARRAY[]::text[]) AS permissions,
                 u.created_at,
+                u.deactivated_at,
                 u.deleted_at
             FROM users u
             JOIN entities e ON e.id = u.entity_id
@@ -289,6 +291,112 @@ async def create_user(
             return await fetch_user_resource(conn, user_id)
 
 
+@router.post("/entities/{entity_id}/users/{user_id}/actions/deactivate")
+async def deactivate_user(
+    entity_id: UUID,
+    user_id: UUID,
+    current_user: CurrentUser = Depends(require_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> dict:
+    current_user.require_entity(entity_id)
+    current_user.require_permission("USER_MANAGE")
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            user = await lock_user_for_lifecycle(conn, entity_id=entity_id, user_id=user_id)
+            if user["deleted_at"] is not None:
+                raise api_error(409, "CONFLICT", "user has been erased", {"state": "already_erased"})
+            if user["deactivated_at"] is not None:
+                raise api_error(409, "CONFLICT", "user is already deactivated", {"state": "already_deactivated"})
+            revoked_rows = await conn.fetch(
+                """
+                UPDATE refresh_tokens
+                SET revoked_at = COALESCE(revoked_at, now())
+                WHERE user_id = $1
+                  AND revoked_at IS NULL
+                RETURNING access_jti, access_expires_at
+                """,
+                user_id,
+            )
+            for row in revoked_rows:
+                await conn.execute(
+                    """
+                    INSERT INTO revoked_tokens (jti, expires_at, revoked_by)
+                    VALUES ($1, $2, $3)
+                    ON CONFLICT (jti) DO NOTHING
+                    """,
+                    row["access_jti"],
+                    row["access_expires_at"],
+                    current_user.id,
+                )
+            updated = await conn.fetchrow(
+                """
+                UPDATE users
+                SET deactivated_at = now(), deactivated_by = $1
+                WHERE id = $2
+                RETURNING deactivated_at
+                """,
+                current_user.id,
+                user_id,
+            )
+            await insert_audit_event(
+                conn,
+                entity_id=entity_id,
+                actor_id=current_user.id,
+                actor_email=current_user.email,
+                action="USER_DEACTIVATED",
+                target_type="user",
+                target_id=user_id,
+                before={"deactivated_at": None},
+                after={
+                    "deactivated_at": updated["deactivated_at"].isoformat().replace("+00:00", "Z"),
+                    "deactivated_by": str(current_user.id),
+                },
+            )
+            return await fetch_user_resource(conn, user_id)
+
+
+@router.post("/entities/{entity_id}/users/{user_id}/actions/reactivate")
+async def reactivate_user(
+    entity_id: UUID,
+    user_id: UUID,
+    current_user: CurrentUser = Depends(require_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> dict:
+    current_user.require_entity(entity_id)
+    current_user.require_permission("USER_MANAGE")
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            user = await lock_user_for_lifecycle(conn, entity_id=entity_id, user_id=user_id)
+            if user["deleted_at"] is not None:
+                raise api_error(409, "CONFLICT", "user has been erased", {"state": "already_erased"})
+            if user["deactivated_at"] is None:
+                raise api_error(409, "CONFLICT", "user is not deactivated", {"state": "not_deactivated"})
+            before = {
+                "deactivated_at": user["deactivated_at"].isoformat().replace("+00:00", "Z"),
+                "deactivated_by": str(user["deactivated_by"]) if user["deactivated_by"] else None,
+            }
+            await conn.execute(
+                """
+                UPDATE users
+                SET deactivated_at = NULL, deactivated_by = NULL
+                WHERE id = $1
+                """,
+                user_id,
+            )
+            await insert_audit_event(
+                conn,
+                entity_id=entity_id,
+                actor_id=current_user.id,
+                actor_email=current_user.email,
+                action="USER_REACTIVATED",
+                target_type="user",
+                target_id=user_id,
+                before=before,
+                after={"deactivated_at": None},
+            )
+            return await fetch_user_resource(conn, user_id)
+
+
 @router.get("/audit/events")
 async def list_audit_events(
     actor_id: UUID | None = None,
@@ -369,3 +477,20 @@ def parse_audit_cursor(cursor: str | None) -> int | None:
             {"errors": [{"type": "invalid_cursor", "field": "cursor"}]},
         )
     return value
+
+
+async def lock_user_for_lifecycle(conn: asyncpg.Connection, *, entity_id: UUID, user_id: UUID) -> asyncpg.Record:
+    row = await conn.fetchrow(
+        """
+        SELECT id, entity_id, email, name, deactivated_at, deactivated_by, deleted_at
+        FROM users
+        WHERE id = $1
+          AND entity_id = $2
+        FOR UPDATE
+        """,
+        user_id,
+        entity_id,
+    )
+    if row is None:
+        raise api_error(404, "NOT_FOUND", "resource not found")
+    return row

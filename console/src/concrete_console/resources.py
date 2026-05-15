@@ -33,9 +33,19 @@ def user_resource(row: Any) -> dict[str, Any]:
         },
         "permissions": sorted(row["permissions"]),
         "profiles": row.get("profiles", []),
+        "state": user_state(row),
+        "deactivated_at": timestamp(row["deactivated_at"]) if row["deactivated_at"] else None,
         "created_at": timestamp(row["created_at"]),
         "deleted_at": timestamp(row["deleted_at"]) if row["deleted_at"] else None,
     }
+
+
+def user_state(row: dict[str, Any]) -> str:
+    if row["deleted_at"]:
+        return "erased"
+    if row["deactivated_at"]:
+        return "deactivated"
+    return "active"
 
 
 def list_page(items: list[dict[str, Any]], *, next_cursor: str | None = None) -> dict[str, Any]:
