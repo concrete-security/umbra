@@ -1302,6 +1302,9 @@ async def patch_profile(
                 or next_policy != old_policy
             )
             if changed:
+                policy_changed = next_policy != old_policy
+                if policy_changed:
+                    await ensure_profile_policy_update_compatible(conn, profile_id=profile_id, next_policy=next_policy)
                 try:
                     row = await conn.fetchrow(
                         """
@@ -1332,7 +1335,8 @@ async def patch_profile(
                         "profile name is already registered",
                         {"state": "profile_name_taken"},
                     ) from None
-                if next_policy != old_policy:
+                if policy_changed:
+                    await bump_attached_cvm_policy_versions(conn, profile_id)
                     await insert_audit_event(
                         conn,
                         entity_id=profile["entity_id"],
@@ -2351,6 +2355,54 @@ async def bump_cvm_policy_version(conn: asyncpg.Connection, cvm_id: UUID) -> Non
         """,
         cvm_id,
     )
+
+
+async def bump_attached_cvm_policy_versions(conn: asyncpg.Connection, profile_id: UUID) -> None:
+    await conn.execute(
+        """
+        UPDATE cvms c
+        SET policy_version = policy_version + 1,
+            updated_at = now()
+        FROM cvm_profiles cp
+        WHERE cp.cvm_id = c.id
+          AND cp.profile_id = $1
+          AND c.deleted_at IS NULL
+          AND c.state <> 'TERMINATED'
+        """,
+        profile_id,
+    )
+
+
+async def ensure_profile_policy_update_compatible(
+    conn: asyncpg.Connection,
+    *,
+    profile_id: UUID,
+    next_policy: dict[str, Any],
+) -> None:
+    rows = await conn.fetch(
+        """
+        SELECT c.id AS cvm_id, ep.id AS profile_id, ep.policy
+        FROM cvms c
+        JOIN cvm_profiles target_cp
+          ON target_cp.cvm_id = c.id
+         AND target_cp.profile_id = $1
+        JOIN cvm_profiles cp ON cp.cvm_id = c.id
+        JOIN entity_profiles ep
+          ON ep.id = cp.profile_id
+         AND ep.entity_id = c.entity_id
+         AND ep.deleted_at IS NULL
+        WHERE c.deleted_at IS NULL
+          AND c.state <> 'TERMINATED'
+        ORDER BY c.id, cp.attached_at, cp.profile_id
+        """,
+        profile_id,
+    )
+    grouped: dict[UUID, list[dict[str, Any]]] = {}
+    for row in rows:
+        policy = next_policy if row["profile_id"] == profile_id else row["policy"]
+        grouped.setdefault(row["cvm_id"], []).append({"profile_id": row["profile_id"], "policy": policy})
+    for profile_rows in grouped.values():
+        ensure_no_sandbox_env_conflict(profile_rows)
 
 
 def ensure_no_sandbox_env_conflict(profile_rows: list[Any]) -> None:
