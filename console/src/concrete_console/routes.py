@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Annotated
 from uuid import UUID, uuid4
 
 import asyncpg
-from fastapi import APIRouter, Depends, Header, Query
+from fastapi import APIRouter, Depends, Header, Query, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from concrete_console.audit import AUDIT_ACTIONS, insert_audit_event
@@ -87,6 +87,12 @@ class ProfileCreate(BaseModel):
         return value.strip()
 
 
+class ProfileUserAssign(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: UUID
+
+
 def require_idempotency_key(value: str | None) -> None:
     if not value:
         raise api_error(
@@ -95,6 +101,23 @@ def require_idempotency_key(value: str | None) -> None:
             "missing Idempotency-Key",
             {"errors": [{"type": "missing_idempotency_key"}]},
         )
+
+
+def profile_etag(row: asyncpg.Record | dict) -> str:
+    row = dict(row)
+    updated_at = row["updated_at"]
+    if updated_at.tzinfo is None:
+        updated_at = updated_at.replace(tzinfo=timezone.utc)
+    epoch_us = int(updated_at.timestamp() * 1_000_000)
+    return f'W/"{row["id"]}:{epoch_us}"'
+
+
+def require_if_match(row: asyncpg.Record | dict, if_match: str | None) -> None:
+    current = profile_etag(row)
+    if not if_match:
+        raise api_error(428, "PRECONDITION_REQUIRED", "missing If-Match header", {"etag": current})
+    if if_match != current:
+        raise api_error(412, "PRECONDITION_FAILED", "resource changed since last read", {"etag": current})
 
 
 async def fetch_user_resource(conn: asyncpg.Connection, user_id: UUID) -> dict:
@@ -262,6 +285,7 @@ async def list_profiles(
 @router.post("/entities/{entity_id}/profiles", status_code=201)
 async def create_profile(
     entity_id: UUID,
+    response: Response,
     body: ProfileCreate,
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
     current_user: CurrentUser = Depends(require_current_user),
@@ -298,6 +322,7 @@ async def create_profile(
                 target_id=profile_id,
                 after={"name": body.name, "description": body.description},
             )
+    response.headers["ETag"] = profile_etag(row)
     return profile_resource({**dict(row), "attached_cvms": [], "attached_cvm_count": 0})
 
 
@@ -386,6 +411,7 @@ async def create_user(
 @router.get("/profiles/{profile_id}")
 async def get_profile(
     profile_id: UUID,
+    response: Response,
     current_user: CurrentUser = Depends(require_current_user),
     pool: asyncpg.Pool = Depends(get_pool),
 ) -> dict:
@@ -416,7 +442,146 @@ async def get_profile(
     current_user.require_entity(row["entity_id"])
     if "USER_MANAGE" not in current_user.permissions and not row["assigned"]:
         raise api_error(404, "NOT_FOUND", "resource not found")
+    response.headers["ETag"] = profile_etag(row)
     return profile_resource({**dict(row), "attached_cvms": [], "attached_cvm_count": 0})
+
+
+@router.post("/profiles/{profile_id}/users", status_code=204)
+async def assign_profile_user(
+    profile_id: UUID,
+    body: ProfileUserAssign,
+    if_match: Annotated[str | None, Header(alias="If-Match")] = None,
+    current_user: CurrentUser = Depends(require_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> Response:
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            profile = await conn.fetchrow(
+                """
+                SELECT id, entity_id, name, updated_at
+                FROM entity_profiles
+                WHERE id = $1
+                  AND deleted_at IS NULL
+                FOR UPDATE
+                """,
+                profile_id,
+            )
+            if profile is None:
+                raise api_error(404, "NOT_FOUND", "resource not found")
+            current_user.require_entity(profile["entity_id"])
+            current_user.require_permission("USER_MANAGE")
+            require_if_match(profile, if_match)
+            target_user = await conn.fetchrow(
+                """
+                SELECT id
+                FROM users
+                WHERE id = $1
+                  AND entity_id = $2
+                  AND deleted_at IS NULL
+                """,
+                body.user_id,
+                profile["entity_id"],
+            )
+            if target_user is None:
+                raise api_error(404, "NOT_FOUND", "resource not found")
+            result = await conn.execute(
+                """
+                INSERT INTO profile_users (profile_id, user_id)
+                VALUES ($1, $2)
+                ON CONFLICT DO NOTHING
+                """,
+                profile_id,
+                body.user_id,
+            )
+            if result == "INSERT 0 1":
+                await conn.execute(
+                    """
+                    UPDATE entity_profiles
+                    SET updated_at = now()
+                    WHERE id = $1
+                    """,
+                    profile_id,
+                )
+                await insert_audit_event(
+                    conn,
+                    entity_id=profile["entity_id"],
+                    actor_id=current_user.id,
+                    actor_email=current_user.email,
+                    action="PROFILE_USER_ASSIGNED",
+                    target_type="profile",
+                    target_id=profile_id,
+                    after={"user_id": str(body.user_id)},
+                )
+    return Response(status_code=204)
+
+
+@router.delete("/profiles/{profile_id}/users/{user_id}", status_code=204)
+async def remove_profile_user(
+    profile_id: UUID,
+    user_id: UUID,
+    if_match: Annotated[str | None, Header(alias="If-Match")] = None,
+    current_user: CurrentUser = Depends(require_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> Response:
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            profile = await conn.fetchrow(
+                """
+                SELECT id, entity_id, name, updated_at
+                FROM entity_profiles
+                WHERE id = $1
+                  AND deleted_at IS NULL
+                FOR UPDATE
+                """,
+                profile_id,
+            )
+            if profile is None:
+                raise api_error(404, "NOT_FOUND", "resource not found")
+            current_user.require_entity(profile["entity_id"])
+            current_user.require_permission("USER_MANAGE")
+            require_if_match(profile, if_match)
+            target_user = await conn.fetchrow(
+                """
+                SELECT id
+                FROM users
+                WHERE id = $1
+                  AND entity_id = $2
+                  AND deleted_at IS NULL
+                """,
+                user_id,
+                profile["entity_id"],
+            )
+            if target_user is None:
+                raise api_error(404, "NOT_FOUND", "resource not found")
+            result = await conn.execute(
+                """
+                DELETE FROM profile_users
+                WHERE profile_id = $1
+                  AND user_id = $2
+                """,
+                profile_id,
+                user_id,
+            )
+            if result == "DELETE 1":
+                await conn.execute(
+                    """
+                    UPDATE entity_profiles
+                    SET updated_at = now()
+                    WHERE id = $1
+                    """,
+                    profile_id,
+                )
+                await insert_audit_event(
+                    conn,
+                    entity_id=profile["entity_id"],
+                    actor_id=current_user.id,
+                    actor_email=current_user.email,
+                    action="PROFILE_USER_REMOVED",
+                    target_type="profile",
+                    target_id=profile_id,
+                    before={"user_id": str(user_id)},
+                )
+    return Response(status_code=204)
 
 
 @router.post("/entities/{entity_id}/users/{user_id}/actions/deactivate")
