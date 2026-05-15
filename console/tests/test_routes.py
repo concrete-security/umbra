@@ -21,6 +21,9 @@ from concrete_console.routes import (
 from concrete_console.routes_internal import (
     TrafficLogBatch,
     TrafficLogIn,
+    etag_matches,
+    merge_profile_policies,
+    sc_control_etag,
     validate_traffic_log_batch_shape,
     validate_traffic_log_timestamps,
 )
@@ -184,6 +187,78 @@ def test_validate_traffic_log_timestamps_rejects_skew() -> None:
 
     assert exc.value.status_code == 422
     assert exc.value.detail["error"]["details"]["errors"][0]["type"] == "timestamp_skew"
+
+
+def test_merge_profile_policies_field_typed() -> None:
+    merged = merge_profile_policies(
+        [
+            {
+                "profile_id": "profile-a",
+                "policy": {
+                    "allowed_destinations": [{"id": "anthropic", "host": "api.anthropic.com"}],
+                    "blocked_destinations": [{"id": "admin", "host": "admin.example.com"}],
+                    "secret_patterns": [{"id": "openai", "pattern": "sk-[A-Za-z0-9]+"}],
+                    "sandbox_env": {"ANTHROPIC_API_KEY": "concrete-proxy-injected"},
+                },
+            },
+            {
+                "profile_id": "profile-b",
+                "policy": {
+                    "allowed_destinations": [{"id": "github", "host": "api.github.com"}],
+                    "blocked_destinations": [{"id": "admin", "host": "admin.example.com"}],
+                    "secret_injections": [{"id": "anthropic-key", "header": "authorization"}],
+                    "sandbox_env": {"OPENAI_API_KEY": "concrete-proxy-injected"},
+                },
+            },
+        ]
+    )
+
+    assert merged == {
+        "allowed_destinations": [
+            {"id": "anthropic", "host": "api.anthropic.com"},
+            {"id": "github", "host": "api.github.com"},
+        ],
+        "blocked_destinations": [{"id": "admin", "host": "admin.example.com"}],
+        "secret_patterns": [{"id": "openai", "pattern": "sk-[A-Za-z0-9]+"}],
+        "secret_injections": [{"id": "anthropic-key", "header": "authorization"}],
+        "sandbox_env": [
+            {"name": "ANTHROPIC_API_KEY", "value": "concrete-proxy-injected"},
+            {"name": "OPENAI_API_KEY", "value": "concrete-proxy-injected"},
+        ],
+    }
+
+
+def test_merge_profile_policies_denies_intersect_with_missing_field() -> None:
+    merged = merge_profile_policies(
+        [
+            {"policy": {"blocked_destinations": [{"id": "admin", "host": "admin.example.com"}]}},
+            {"policy": {"allowed_destinations": [{"id": "github", "host": "api.github.com"}]}},
+        ]
+    )
+
+    assert merged["blocked_destinations"] == []
+
+
+def test_merge_profile_policies_rejects_sandbox_env_conflict() -> None:
+    with pytest.raises(HTTPException) as exc:
+        merge_profile_policies(
+            [
+                {"policy": {"sandbox_env": {"API_KEY": "placeholder-a"}}},
+                {"policy": {"sandbox_env": {"API_KEY": "placeholder-b"}}},
+            ]
+        )
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail["error"]["details"]["state"] == "sandbox_env_conflict"
+
+
+def test_sc_control_etag_matches_quoted_and_bare_values() -> None:
+    body = {"entries": [{"cvm_id": "00000000-0000-4000-8000-000000000042", "policy_version": 1}]}
+    etag = sc_control_etag(body)
+
+    assert etag_matches(etag, etag)
+    assert etag_matches(etag.strip('"'), etag)
+    assert not etag_matches('"stale"', etag)
 
 
 def test_ssh_key_fingerprint_accepts_openssh_public_key() -> None:

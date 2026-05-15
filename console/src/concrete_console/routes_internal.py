@@ -1,18 +1,21 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import hashlib
+import json
 import re
-from typing import Any
+from typing import Annotated, Any
 from uuid import UUID
 
 import asyncpg
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Header, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from concrete_console.db import get_pool
 from concrete_console.errors import api_error
 from concrete_console.idempotency import advisory_lock_key, request_body_sha256
 from concrete_console.internal_auth import CurrentServicePrincipal, require_security_cvm_ingest_principal
+from concrete_console.resources import json_payload, timestamp
 
 router = APIRouter(prefix="/internal")
 
@@ -43,6 +46,73 @@ class TrafficLogBatch(BaseModel):
 
     idempotency_key: str = Field(min_length=1, max_length=128)
     logs: list[TrafficLogIn] = Field(min_length=1, max_length=1000)
+
+
+@router.get("/sc-control/cvms", response_model=None)
+async def list_sc_control_cvms(
+    response: Response,
+    if_none_match: Annotated[str | None, Header(alias="If-None-Match")] = None,
+    current_principal: CurrentServicePrincipal = Depends(require_security_cvm_ingest_principal),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> dict[str, Any] | Response:
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT
+                c.id,
+                c.fqdn,
+                c.policy_version,
+                c.updated_at,
+                spt.token_hash AS proxy_token_hash,
+                COALESCE(
+                    jsonb_agg(
+                        jsonb_build_object(
+                            'profile_id', ep.id,
+                            'policy', ep.policy
+                        )
+                        ORDER BY cp.attached_at, cp.profile_id
+                    ) FILTER (WHERE ep.id IS NOT NULL),
+                    '[]'::jsonb
+                ) AS profile_policies
+            FROM cvms c
+            JOIN service_principal_tokens spt
+              ON spt.principal_type = 'dev_cvm'
+             AND spt.principal_id = c.id
+             AND spt.purpose = 'PROXY_AUTH'
+             AND spt.deleted_at IS NULL
+             AND (spt.expires_at IS NULL OR spt.expires_at > now())
+            LEFT JOIN cvm_profiles cp ON cp.cvm_id = c.id
+            LEFT JOIN entity_profiles ep
+              ON ep.id = cp.profile_id
+             AND ep.entity_id = c.entity_id
+             AND ep.deleted_at IS NULL
+            WHERE c.entity_id = $1
+              AND c.deleted_at IS NULL
+              AND c.state IN ('RUNNING', 'PROVISIONING')
+            GROUP BY c.id, c.fqdn, c.policy_version, c.updated_at, spt.token_hash
+            ORDER BY c.updated_at, c.id
+            """,
+            current_principal.entity_id,
+        )
+
+    body = {
+        "entries": [
+            {
+                "cvm_id": str(row["id"]),
+                "fqdn": row["fqdn"],
+                "proxy_token_hash": row["proxy_token_hash"],
+                "merged_policy": merge_profile_policies(json_payload(row["profile_policies"])),
+                "policy_version": row["policy_version"],
+                "updated_at": timestamp(row["updated_at"]),
+            }
+            for row in rows
+        ]
+    }
+    etag = sc_control_etag(body)
+    if etag_matches(if_none_match, etag):
+        return Response(status_code=304, headers={"ETag": etag})
+    response.headers["ETag"] = etag
+    return body
 
 
 @router.post("/traffic-logs")
@@ -147,6 +217,98 @@ async def ingest_traffic_logs(
                 ],
             )
     return {"accepted": len(body.logs), "deduplicated": False}
+
+
+def merge_profile_policies(profile_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    policies: list[dict[str, Any]] = []
+    for row in profile_rows:
+        policy = json_payload(row.get("policy", {}))
+        if isinstance(policy, dict):
+            policies.append(policy)
+    return {
+        "allowed_destinations": merge_union_lists(policies, "allowed_destinations"),
+        "blocked_destinations": merge_intersection_lists(policies, "blocked_destinations"),
+        "secret_patterns": merge_union_lists(policies, "secret_patterns"),
+        "secret_injections": merge_union_lists(policies, "secret_injections"),
+        "sandbox_env": merge_sandbox_env(policies),
+    }
+
+
+def merge_union_lists(policies: list[dict[str, Any]], field: str) -> list[Any]:
+    merged: list[Any] = []
+    seen: set[str] = set()
+    for policy in policies:
+        value = policy.get(field, [])
+        if not isinstance(value, list):
+            continue
+        for item in value:
+            key = canonical_json(item)
+            if key not in seen:
+                seen.add(key)
+                merged.append(item)
+    return merged
+
+
+def merge_intersection_lists(policies: list[dict[str, Any]], field: str) -> list[Any]:
+    if not policies:
+        return []
+    first_items = policies[0].get(field, [])
+    if not isinstance(first_items, list):
+        first_items = []
+    common = {canonical_json(item) for item in first_items}
+    for policy in policies[1:]:
+        items = policy.get(field, [])
+        if not isinstance(items, list):
+            items = []
+        common &= {canonical_json(item) for item in items}
+    merged: list[Any] = []
+    seen: set[str] = set()
+    for item in first_items:
+        key = canonical_json(item)
+        if key in common and key not in seen:
+            seen.add(key)
+            merged.append(item)
+    return merged
+
+
+def merge_sandbox_env(policies: list[dict[str, Any]]) -> list[dict[str, str]]:
+    merged: dict[str, str] = {}
+    conflicts: list[str] = []
+    for policy in policies:
+        sandbox_env = policy.get("sandbox_env", {})
+        if not isinstance(sandbox_env, dict):
+            continue
+        for name, value in sandbox_env.items():
+            if not isinstance(name, str) or not isinstance(value, str):
+                continue
+            existing = merged.get(name)
+            if existing is not None and existing != value:
+                conflicts.append(name)
+                continue
+            merged[name] = value
+    if conflicts:
+        raise api_error(
+            409,
+            "CONFLICT",
+            "attached profiles contain conflicting sandbox_env values",
+            {"state": "sandbox_env_conflict", "names": sorted(set(conflicts))},
+        )
+    return [{"name": name, "value": merged[name]} for name in sorted(merged)]
+
+
+def sc_control_etag(body: dict[str, Any]) -> str:
+    return f'"{hashlib.sha256(canonical_json(body).encode("utf-8")).hexdigest()}"'
+
+
+def etag_matches(if_none_match: str | None, etag: str) -> bool:
+    if if_none_match is None:
+        return False
+    candidates = {candidate.strip() for candidate in if_none_match.split(",")}
+    return "*" in candidates or etag in candidates or etag.strip('"') in candidates
+
+
+def canonical_json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
 def validate_traffic_log_batch_shape(body: TrafficLogBatch) -> None:
