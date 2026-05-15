@@ -71,6 +71,7 @@ DEFAULT_USER_QUOTAS = {
     "dev_cvms": ("DEFAULT_QUOTA_DEV_CVMS_PER_USER", 5),
     "ssh_keys": ("DEFAULT_QUOTA_SSH_KEYS_PER_USER", 10),
 }
+CREATE_ENTITY_ROUTE = "POST /api/v1/entities"
 ADMIN_SESSIONS_REVOKE_ROUTE = "POST /api/v1/admin/sessions/revoke"
 
 router = APIRouter(prefix="/api/v1")
@@ -454,16 +455,34 @@ async def get_me(
 
 @router.post("/entities", status_code=201)
 async def create_entity(
+    request: Request,
     body: EntityCreate,
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
     current_user: CurrentUser = Depends(require_current_user),
     pool: asyncpg.Pool = Depends(get_pool),
-) -> dict:
-    require_idempotency_key(idempotency_key)
+) -> Any:
+    idempotency_key_value = require_idempotency_key(idempotency_key)
     current_user.require_permission("PLATFORM_OPERATOR")
+    body_sha256 = request_body_sha256(await request.body())
     entity_id = uuid4()
     async with pool.acquire() as conn:
         async with conn.transaction():
+            await acquire_idempotency_lock(
+                conn,
+                credential_id=str(current_user.id),
+                idempotency_key=idempotency_key_value,
+                route=CREATE_ENTITY_ROUTE,
+            )
+            cached = await lookup_idempotency_response(
+                conn,
+                credential_id=str(current_user.id),
+                idempotency_key=idempotency_key_value,
+                route=CREATE_ENTITY_ROUTE,
+                body_sha256=body_sha256,
+            )
+            if cached is not None:
+                return JSONResponse(status_code=cached.status_code, content=cached.body, headers=cached.headers)
+
             try:
                 row = await conn.fetchrow(
                     """
@@ -487,7 +506,17 @@ async def create_entity(
                 target_id=entity_id,
                 after={"name": body.name.strip(), "domain": body.domain},
             )
-    return entity_resource(row)
+            response_body = entity_resource(row)
+            await store_idempotency_response(
+                conn,
+                credential_id=str(current_user.id),
+                idempotency_key=idempotency_key_value,
+                route=CREATE_ENTITY_ROUTE,
+                body_sha256=body_sha256,
+                status_code=201,
+                response_body=response_body,
+            )
+    return response_body
 
 
 @router.get("/entities/{entity_id}")
@@ -717,18 +746,37 @@ async def list_profiles(
 @router.post("/entities/{entity_id}/profiles", status_code=201)
 async def create_profile(
     entity_id: UUID,
+    request: Request,
     response: Response,
     body: ProfileCreate,
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
     current_user: CurrentUser = Depends(require_current_user),
     pool: asyncpg.Pool = Depends(get_pool),
-) -> dict:
-    require_idempotency_key(idempotency_key)
+) -> Any:
+    idempotency_key_value = require_idempotency_key(idempotency_key)
     current_user.require_entity(entity_id)
     current_user.require_permission("USER_MANAGE")
+    route = f"POST /api/v1/entities/{entity_id}/profiles"
+    body_sha256 = request_body_sha256(await request.body())
     profile_id = uuid4()
     async with pool.acquire() as conn:
         async with conn.transaction():
+            await acquire_idempotency_lock(
+                conn,
+                credential_id=str(current_user.id),
+                idempotency_key=idempotency_key_value,
+                route=route,
+            )
+            cached = await lookup_idempotency_response(
+                conn,
+                credential_id=str(current_user.id),
+                idempotency_key=idempotency_key_value,
+                route=route,
+                body_sha256=body_sha256,
+            )
+            if cached is not None:
+                return JSONResponse(status_code=cached.status_code, content=cached.body, headers=cached.headers)
+
             await enforce_entity_quota(conn, entity_id, "profiles")
             try:
                 row = await conn.fetchrow(
@@ -755,24 +803,39 @@ async def create_profile(
                 target_id=profile_id,
                 after={"name": body.name, "description": body.description},
             )
-    response.headers["ETag"] = profile_etag(row)
-    return profile_resource({**dict(row), "attached_cvms": [], "attached_cvm_count": 0})
+            etag = profile_etag(row)
+            response.headers["ETag"] = etag
+            response_body = profile_resource({**dict(row), "attached_cvms": [], "attached_cvm_count": 0})
+            await store_idempotency_response(
+                conn,
+                credential_id=str(current_user.id),
+                idempotency_key=idempotency_key_value,
+                route=route,
+                body_sha256=body_sha256,
+                status_code=201,
+                response_body=response_body,
+                response_headers={"ETag": etag},
+            )
+    return response_body
 
 
 @router.post("/entities/{entity_id}/users", status_code=201)
 async def create_user(
     entity_id: UUID,
+    request: Request,
     response: Response,
     body: UserCreate,
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
     current_user: CurrentUser = Depends(require_current_user),
     pool: asyncpg.Pool = Depends(get_pool),
-) -> dict:
-    require_idempotency_key(idempotency_key)
+) -> Any:
+    idempotency_key_value = require_idempotency_key(idempotency_key)
     current_user.require_entity(entity_id)
     current_user.require_permission("USER_MANAGE")
     if body.permissions:
         current_user.require_permission("PERMISSION_MANAGE")
+    route = f"POST /api/v1/entities/{entity_id}/users"
+    body_sha256 = request_body_sha256(await request.body())
 
     async with pool.acquire() as conn:
         entity = await conn.fetchrow("SELECT id, name, domain FROM entities WHERE id = $1", entity_id)
@@ -796,6 +859,22 @@ async def create_user(
 
         user_id = uuid4()
         async with conn.transaction():
+            await acquire_idempotency_lock(
+                conn,
+                credential_id=str(current_user.id),
+                idempotency_key=idempotency_key_value,
+                route=route,
+            )
+            cached = await lookup_idempotency_response(
+                conn,
+                credential_id=str(current_user.id),
+                idempotency_key=idempotency_key_value,
+                route=route,
+                body_sha256=body_sha256,
+            )
+            if cached is not None:
+                return JSONResponse(status_code=cached.status_code, content=cached.body, headers=cached.headers)
+
             await enforce_entity_quota(conn, entity_id, "users")
             try:
                 await conn.execute(
@@ -840,7 +919,18 @@ async def create_user(
                     target_id=user_id,
                     after={"permission": permission},
                 )
-            return await fetch_user_resource(conn, user_id, response)
+            response_body = await fetch_user_resource(conn, user_id, response)
+            await store_idempotency_response(
+                conn,
+                credential_id=str(current_user.id),
+                idempotency_key=idempotency_key_value,
+                route=route,
+                body_sha256=body_sha256,
+                status_code=201,
+                response_body=response_body,
+                response_headers={"ETag": response.headers["ETag"]},
+            )
+            return response_body
 
 
 @router.get("/profiles/{profile_id}")
