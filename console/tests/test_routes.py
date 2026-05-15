@@ -4,7 +4,7 @@ from uuid import UUID
 import pytest
 from fastapi import HTTPException
 
-from concrete_console.routes import profile_etag, require_if_match
+from concrete_console.routes import policy_sha256, profile_etag, require_if_match, validate_profile_policy
 
 
 def profile_row(**overrides):
@@ -35,3 +35,27 @@ def test_require_if_match_rejects_stale_header() -> None:
     assert exc.value.status_code == 412
     assert exc.value.detail["error"]["code"] == "PRECONDITION_FAILED"
 
+
+def test_policy_sha256_is_canonical() -> None:
+    assert policy_sha256({"b": 2, "a": 1}) == policy_sha256({"a": 1, "b": 2})
+
+
+def test_validate_profile_policy_accepts_sandbox_env() -> None:
+    validate_profile_policy({"sandbox_env": {"PLACEHOLDER": "value"}, "opaque": {"kept": True}})
+
+
+def test_validate_profile_policy_rejects_bad_sandbox_env() -> None:
+    with pytest.raises(HTTPException) as exc:
+        validate_profile_policy(
+            {
+                "sandbox_env": {
+                    "1BAD": "value",
+                    "PATH": "/tmp/bin",
+                    "TOKEN": "sk-" + "a" * 32,
+                }
+            }
+        )
+
+    assert exc.value.status_code == 422
+    errors = exc.value.detail["error"]["details"]["errors"]
+    assert {error["type"] for error in errors} == {"invalid_name", "reserved_name", "value_denied"}
