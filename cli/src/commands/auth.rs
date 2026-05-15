@@ -1,9 +1,17 @@
-use std::{thread, time::Duration};
+use std::{
+    io::{Read, Write},
+    net::{TcpListener, TcpStream},
+    thread,
+    time::{Duration, Instant},
+};
 
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{SecondsFormat, Utc};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
+use url::Url;
 use zeroize::Zeroizing;
 
 use crate::{
@@ -31,6 +39,15 @@ struct DeviceStartRequest<'a> {
 #[derive(Debug, Serialize)]
 struct RefreshRequest<'a> {
     refresh_token: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct LoopbackTokenRequest<'a> {
+    grant_type: &'a str,
+    code: &'a str,
+    code_verifier: &'a str,
+    redirect_uri: &'a str,
+    client_id: &'a str,
 }
 
 #[derive(Debug, Deserialize)]
@@ -126,10 +143,6 @@ fn login(
         eprintln!("[usage] unsupported OIDC provider: {provider}");
         return ExitStatus::Usage;
     }
-    if !device {
-        eprintln!("[usage] loopback auth login is not implemented yet; rerun with --device");
-        return ExitStatus::Usage;
-    }
     let console_url = match config.require_console_url() {
         Ok(value) => value,
         Err(message) => {
@@ -138,6 +151,15 @@ fn login(
         }
     };
     let client = Client::new();
+    if !device {
+        return match loopback_login(&client, config, console_url, json_output) {
+            Ok(()) => ExitStatus::Ok,
+            Err((status, message)) => {
+                eprintln!("{message}");
+                status
+            }
+        };
+    }
     let start = match device_start(&client, console_url, &provider) {
         Ok(value) => value,
         Err(message) => {
@@ -168,6 +190,252 @@ fn login(
             status
         }
     }
+}
+
+fn loopback_login(
+    client: &Client,
+    config: &ResolvedConfig,
+    console_url: &str,
+    json_output: bool,
+) -> Result<(), (ExitStatus, String)> {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|err| {
+        (
+            ExitStatus::Error,
+            format!("[error] failed to bind loopback callback: {err}"),
+        )
+    })?;
+    listener.set_nonblocking(true).map_err(|err| {
+        (
+            ExitStatus::Error,
+            format!("[error] failed to configure loopback callback: {err}"),
+        )
+    })?;
+    let port = listener
+        .local_addr()
+        .map_err(|err| {
+            (
+                ExitStatus::Error,
+                format!("[error] failed to read loopback callback address: {err}"),
+            )
+        })?
+        .port();
+    let redirect_uri = format!("http://127.0.0.1:{port}/callback");
+    let code_verifier =
+        Zeroizing::new(random_urlsafe(32).map_err(|message| (ExitStatus::Error, message))?);
+    let code_challenge = pkce_s256(&code_verifier);
+    let state = Zeroizing::new(random_urlsafe(32).map_err(|message| (ExitStatus::Error, message))?);
+    let authorize_url = authorize_url(
+        console_url,
+        &config.oidc_client_id,
+        &redirect_uri,
+        &code_challenge,
+        &state,
+    )
+    .map_err(|message| (ExitStatus::Error, message))?;
+
+    webbrowser::open(authorize_url.as_str()).map_err(|err| {
+        (
+            ExitStatus::Error,
+            format!("[error] failed to open browser; rerun with --device if this host is headless: {err}"),
+        )
+    })?;
+    eprintln!("Opened browser for authentication.");
+
+    let code = Zeroizing::new(
+        wait_for_loopback_code(&listener, &state, Duration::from_secs(300))
+            .map_err(|message| (ExitStatus::Error, message))?,
+    );
+    let token_pair = exchange_loopback_token(
+        client,
+        console_url,
+        &code,
+        &code_verifier,
+        &redirect_uri,
+        &config.oidc_client_id,
+    )?;
+    complete_login(
+        client,
+        console_url,
+        &config.config_dir,
+        token_pair,
+        json_output,
+    )
+}
+
+fn authorize_url(
+    console_url: &str,
+    client_id: &str,
+    redirect_uri: &str,
+    code_challenge: &str,
+    state: &str,
+) -> Result<Url, String> {
+    let mut url = Url::parse(&format!("{console_url}/api/v1/auth/authorize"))
+        .map_err(|err| format!("[error] invalid console_url: {err}"))?;
+    url.query_pairs_mut()
+        .append_pair("client_id", client_id)
+        .append_pair("redirect_uri", redirect_uri)
+        .append_pair("response_type", "code")
+        .append_pair("code_challenge", code_challenge)
+        .append_pair("code_challenge_method", "S256")
+        .append_pair("state", state)
+        .append_pair("scope", "openid email profile");
+    Ok(url)
+}
+
+fn exchange_loopback_token(
+    client: &Client,
+    console_url: &str,
+    code: &str,
+    code_verifier: &str,
+    redirect_uri: &str,
+    client_id: &str,
+) -> Result<TokenPair, (ExitStatus, String)> {
+    let response = client
+        .post(format!("{console_url}/api/v1/auth/token"))
+        .json(&LoopbackTokenRequest {
+            grant_type: "authorization_code",
+            code,
+            code_verifier,
+            redirect_uri,
+            client_id,
+        })
+        .send()
+        .map_err(|err| {
+            (
+                ExitStatus::Error,
+                format!("[error] failed to exchange authorization code: {err}"),
+            )
+        })?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let error = response.json::<OAuthError>().ok().map(|body| body.error);
+        return Err((
+            ExitStatus::Error,
+            match error {
+                Some(value) => format!("[error] authorization code exchange failed: {value}"),
+                None => format!("[error] authorization code exchange failed: HTTP {status}"),
+            },
+        ));
+    }
+    response.json::<TokenPair>().map_err(|err| {
+        (
+            ExitStatus::Error,
+            format!("[error] malformed token response: {err}"),
+        )
+    })
+}
+
+fn wait_for_loopback_code(
+    listener: &TcpListener,
+    expected_state: &str,
+    timeout: Duration,
+) -> Result<String, String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match listener.accept() {
+            Ok((mut stream, _)) => return handle_loopback_callback(&mut stream, expected_state),
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                if Instant::now() >= deadline {
+                    return Err("[error] loopback authentication timed out".to_string());
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            Err(err) => return Err(format!("[error] loopback callback failed: {err}")),
+        }
+    }
+}
+
+fn handle_loopback_callback(
+    stream: &mut TcpStream,
+    expected_state: &str,
+) -> Result<String, String> {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|err| format!("[error] failed to configure loopback callback: {err}"))?;
+    let mut buffer = [0_u8; 8192];
+    let bytes = stream
+        .read(&mut buffer)
+        .map_err(|err| format!("[error] failed to read loopback callback: {err}"))?;
+    let request = std::str::from_utf8(&buffer[..bytes])
+        .map_err(|_| "[error] loopback callback was not valid UTF-8".to_string())?;
+    let result = parse_loopback_request(request, expected_state);
+    let response = if result.is_ok() {
+        loopback_response(
+            "200 OK",
+            "Authentication complete. Return to the Concrete CLI.",
+        )
+    } else {
+        loopback_response(
+            "400 Bad Request",
+            "Authentication failed. Return to the CLI.",
+        )
+    };
+    stream
+        .write_all(response.as_bytes())
+        .map_err(|err| format!("[error] failed to write loopback callback response: {err}"))?;
+    result
+}
+
+fn parse_loopback_request(request: &str, expected_state: &str) -> Result<String, String> {
+    let request_line = request
+        .lines()
+        .next()
+        .ok_or_else(|| "[error] loopback callback was empty".to_string())?;
+    let mut parts = request_line.split_whitespace();
+    let method = parts
+        .next()
+        .ok_or_else(|| "[error] loopback callback method was missing".to_string())?;
+    let target = parts
+        .next()
+        .ok_or_else(|| "[error] loopback callback target was missing".to_string())?;
+    if method != "GET" {
+        return Err("[error] loopback callback used an unexpected method".to_string());
+    }
+    parse_loopback_target(target, expected_state)
+}
+
+fn parse_loopback_target(target: &str, expected_state: &str) -> Result<String, String> {
+    let url = if target.starts_with("http://") || target.starts_with("https://") {
+        Url::parse(target)
+    } else {
+        Url::parse(&format!("http://127.0.0.1{target}"))
+    }
+    .map_err(|_| "[error] loopback callback URL was malformed".to_string())?;
+    if url.path() != "/callback" {
+        return Err("[error] loopback callback used an unexpected path".to_string());
+    }
+    let mut code = None;
+    let mut state = None;
+    for (key, value) in url.query_pairs() {
+        match key.as_ref() {
+            "code" => code = Some(value.into_owned()),
+            "state" => state = Some(value.into_owned()),
+            _ => {}
+        }
+    }
+    if state.as_deref() != Some(expected_state) {
+        return Err("[error] loopback callback state did not match".to_string());
+    }
+    code.filter(|value| !value.is_empty())
+        .ok_or_else(|| "[error] loopback callback did not include a code".to_string())
+}
+
+fn loopback_response(status: &str, body: &str) -> String {
+    format!(
+        "HTTP/1.1 {status}\r\ncontent-type: text/plain; charset=utf-8\r\ncache-control: no-store\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+fn random_urlsafe(byte_len: usize) -> Result<String, String> {
+    let mut bytes = Zeroizing::new(vec![0_u8; byte_len]);
+    getrandom::fill(bytes.as_mut_slice())
+        .map_err(|err| format!("[error] failed to generate random auth token: {err}"))?;
+    Ok(URL_SAFE_NO_PAD.encode(bytes.as_slice()))
+}
+
+fn pkce_s256(code_verifier: &str) -> String {
+    URL_SAFE_NO_PAD.encode(Sha256::digest(code_verifier.as_bytes()))
 }
 
 fn device_start(client: &Client, console_url: &str, provider: &str) -> Result<DeviceStart, String> {
@@ -565,4 +833,33 @@ fn status(config: &ResolvedConfig, json_output: bool) -> ExitStatus {
 
 fn format_time(value: chrono::DateTime<Utc>) -> String {
     value.to_rfc3339_opts(SecondsFormat::Secs, true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pkce_s256_matches_rfc7636_example() {
+        assert_eq!(
+            pkce_s256("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
+            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+        );
+    }
+
+    #[test]
+    fn parse_loopback_target_returns_code_for_matching_state() {
+        let code = parse_loopback_target("/callback?code=console-code&state=expected", "expected")
+            .expect("callback parses");
+
+        assert_eq!(code, "console-code");
+    }
+
+    #[test]
+    fn parse_loopback_target_rejects_mismatched_state() {
+        let error = parse_loopback_target("/callback?code=console-code&state=wrong", "expected")
+            .expect_err("state mismatch is rejected");
+
+        assert!(error.contains("state"));
+    }
 }
