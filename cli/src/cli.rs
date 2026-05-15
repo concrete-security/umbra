@@ -45,6 +45,10 @@ pub enum Command {
     #[command(subcommand)]
     Audit(AuditCommand),
 
+    /// Manage SSH public keys registered with the Console.
+    #[command(subcommand)]
+    Key(KeyCommand),
+
     /// Print version, build commit, target triple, and build date.
     Version,
 }
@@ -88,6 +92,32 @@ pub struct AuditEventsArgs {
     /// Opaque pagination cursor from the previous response.
     #[arg(long)]
     pub cursor: Option<String>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum KeyCommand {
+    /// List SSH public keys registered by the current user.
+    List,
+
+    /// Register an SSH public key.
+    Add(KeyAddArgs),
+
+    /// Deregister an SSH public key.
+    Remove {
+        /// Key UUID from `concrete key list`.
+        key_id: String,
+    },
+}
+
+#[derive(clap::Args, Debug)]
+pub struct KeyAddArgs {
+    /// Human-readable key label.
+    #[arg(long)]
+    pub label: String,
+
+    /// Path to an OpenSSH public key file. Reads stdin when omitted.
+    #[arg(long)]
+    pub file: Option<PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]

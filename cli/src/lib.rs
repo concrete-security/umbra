@@ -29,6 +29,7 @@ pub fn run() -> ExitCode {
     let status = match args.command {
         cli::Command::Audit(command) => commands::audit::run(command, &config, args.json),
         cli::Command::Auth(command) => commands::auth::run(command, &config, args.json),
+        cli::Command::Key(command) => commands::key::run(command, &config, args.json),
         cli::Command::Version => commands::version::run(args.json),
     };
     ExitCode::from(status)
