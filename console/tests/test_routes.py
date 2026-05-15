@@ -7,6 +7,7 @@ from fastapi import HTTPException
 from concrete_console.routes import (
     policy_sha256,
     profile_etag,
+    require_idempotency_key,
     require_if_match,
     user_etag,
     validate_permission_symbol,
@@ -61,6 +62,22 @@ def test_require_if_match_rejects_stale_header() -> None:
 
     assert exc.value.status_code == 412
     assert exc.value.detail["error"]["code"] == "PRECONDITION_FAILED"
+
+
+def test_require_idempotency_key_rejects_missing_header() -> None:
+    with pytest.raises(HTTPException) as exc:
+        require_idempotency_key(None)
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail["error"]["details"]["errors"][0]["type"] == "missing_idempotency_key"
+
+
+def test_require_idempotency_key_rejects_invalid_header() -> None:
+    with pytest.raises(HTTPException) as exc:
+        require_idempotency_key("bad key")
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail["error"]["details"]["errors"][0]["type"] == "invalid_idempotency_key"
 
 
 def test_policy_sha256_is_canonical() -> None:

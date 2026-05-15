@@ -8,7 +8,8 @@ from typing import Annotated, Any
 from uuid import UUID, uuid4
 
 import asyncpg
-from fastapi import APIRouter, Depends, Header, Query, Response
+from fastapi import APIRouter, Depends, Header, Query, Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from concrete_console.audit import AUDIT_ACTIONS, insert_audit_event
@@ -17,6 +18,12 @@ from concrete_console.bootstrap import email_domain
 from concrete_console.config import load_settings
 from concrete_console.db import get_pool
 from concrete_console.errors import api_error
+from concrete_console.idempotency import (
+    acquire_idempotency_lock,
+    lookup_idempotency_response,
+    request_body_sha256,
+    store_idempotency_response,
+)
 from concrete_console.resources import (
     audit_event_resource,
     entity_quota_resource,
@@ -24,6 +31,7 @@ from concrete_console.resources import (
     json_payload,
     list_page,
     profile_resource,
+    timestamp,
     user_quota_resource,
     user_resource,
 )
@@ -43,6 +51,7 @@ PERMISSIONS = {
 SANDBOX_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 SANDBOX_ENV_RESERVED_NAMES = {"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "PATH", "HOME"}
 SANDBOX_ENV_RESERVED_PREFIXES = ("CONCRETE_", "SECURITY_CVM_", "AUTHORIZED_SSH_", "SANDBOX_ENV_")
+IDEMPOTENCY_KEY_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 DEFAULT_SANDBOX_ENV_VALUE_DENYLIST = (
     r"^sk-ant-[A-Za-z0-9_-]+$",
     r"^sk-[A-Za-z0-9]{32,}$",
@@ -62,6 +71,7 @@ DEFAULT_USER_QUOTAS = {
     "dev_cvms": ("DEFAULT_QUOTA_DEV_CVMS_PER_USER", 5),
     "ssh_keys": ("DEFAULT_QUOTA_SSH_KEYS_PER_USER", 10),
 }
+ADMIN_SESSIONS_REVOKE_ROUTE = "POST /api/v1/admin/sessions/revoke"
 
 router = APIRouter(prefix="/api/v1")
 
@@ -128,6 +138,14 @@ class QuotaPatch(BaseModel):
     limit: int = Field(ge=0)
 
 
+class AdminSessionsRevoke(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: UUID | None = None
+    entity_id: UUID | None = None
+    issued_before: datetime | None = None
+
+
 class ProfileCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -172,7 +190,7 @@ class ProfileUserAssign(BaseModel):
     user_id: UUID
 
 
-def require_idempotency_key(value: str | None) -> None:
+def require_idempotency_key(value: str | None) -> str:
     if not value:
         raise api_error(
             400,
@@ -180,6 +198,14 @@ def require_idempotency_key(value: str | None) -> None:
             "missing Idempotency-Key",
             {"errors": [{"type": "missing_idempotency_key"}]},
         )
+    if not IDEMPOTENCY_KEY_RE.fullmatch(value):
+        raise api_error(
+            400,
+            "BAD_REQUEST",
+            "invalid Idempotency-Key",
+            {"errors": [{"type": "invalid_idempotency_key"}]},
+        )
+    return value
 
 
 def profile_etag(row: asyncpg.Record | dict) -> str:
@@ -1468,6 +1494,119 @@ async def reactivate_user(
                 after={"deactivated_at": None},
             )
             return await fetch_user_resource(conn, user_id, response)
+
+
+@router.post("/admin/sessions/revoke")
+async def revoke_admin_sessions(
+    request: Request,
+    body: AdminSessionsRevoke,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+    current_user: CurrentUser = Depends(require_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> Any:
+    idempotency_key_value = require_idempotency_key(idempotency_key)
+    current_user.require_permission("PLATFORM_OPERATOR")
+    if body.user_id is None and body.entity_id is None and body.issued_before is None:
+        raise api_error(400, "BAD_REQUEST", "at least one revoke filter is required")
+    body_sha256 = request_body_sha256(await request.body())
+
+    clauses = ["rt.revoked_at IS NULL"]
+    values: list[object] = []
+
+    def bind(value: object) -> str:
+        values.append(value)
+        return f"${len(values)}"
+
+    if body.user_id is not None:
+        clauses.append(f"rt.user_id = {bind(body.user_id)}")
+    if body.entity_id is not None:
+        clauses.append(f"u.entity_id = {bind(body.entity_id)}")
+    if body.issued_before is not None:
+        clauses.append(f"rt.issued_at < {bind(body.issued_before)}")
+
+    query = f"""
+        SELECT rt.jti, rt.access_jti, rt.access_expires_at
+        FROM refresh_tokens rt
+        JOIN users u ON u.id = rt.user_id
+        WHERE {' AND '.join(clauses)}
+        FOR UPDATE OF rt
+    """
+    revoked_jti_count = 0
+    revoked_refresh_token_count = 0
+    response_body: dict[str, int]
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await acquire_idempotency_lock(
+                conn,
+                credential_id=str(current_user.id),
+                idempotency_key=idempotency_key_value,
+                route=ADMIN_SESSIONS_REVOKE_ROUTE,
+            )
+            cached = await lookup_idempotency_response(
+                conn,
+                credential_id=str(current_user.id),
+                idempotency_key=idempotency_key_value,
+                route=ADMIN_SESSIONS_REVOKE_ROUTE,
+                body_sha256=body_sha256,
+            )
+            if cached is not None:
+                return JSONResponse(status_code=cached.status_code, content=cached.body, headers=cached.headers)
+
+            rows = await conn.fetch(query, *values)
+            revoked_refresh_token_count = len(rows)
+            for row in rows:
+                inserted = await conn.fetchval(
+                    """
+                    INSERT INTO revoked_tokens (jti, expires_at, revoked_by)
+                    VALUES ($1, $2, $3)
+                    ON CONFLICT (jti) DO NOTHING
+                    RETURNING 1
+                    """,
+                    row["access_jti"],
+                    row["access_expires_at"],
+                    current_user.id,
+                )
+                if inserted:
+                    revoked_jti_count += 1
+            if rows:
+                await conn.execute(
+                    """
+                    UPDATE refresh_tokens
+                    SET revoked_at = now()
+                    WHERE jti = ANY($1::uuid[])
+                    """,
+                    [row["jti"] for row in rows],
+                )
+            await insert_audit_event(
+                conn,
+                entity_id=current_user.entity_id,
+                actor_id=current_user.id,
+                actor_email=current_user.email,
+                action="SESSIONS_REVOKED",
+                target_type="admin_sessions",
+                target_id=current_user.id,
+                after={
+                    "user_id": str(body.user_id) if body.user_id else None,
+                    "entity_id": str(body.entity_id) if body.entity_id else None,
+                    "issued_before": timestamp(body.issued_before) if body.issued_before else None,
+                    "revoked_jti_count": revoked_jti_count,
+                    "revoked_refresh_token_count": revoked_refresh_token_count,
+                },
+            )
+            response_body = {
+                "revoked_jti_count": revoked_jti_count,
+                "revoked_refresh_token_count": revoked_refresh_token_count,
+            }
+            await store_idempotency_response(
+                conn,
+                credential_id=str(current_user.id),
+                idempotency_key=idempotency_key_value,
+                route=ADMIN_SESSIONS_REVOKE_ROUTE,
+                body_sha256=body_sha256,
+                status_code=200,
+                response_body=response_body,
+            )
+    return response_body
 
 
 @router.get("/audit/events")
