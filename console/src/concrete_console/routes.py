@@ -821,14 +821,35 @@ async def get_entity_quotas(
 async def set_entity_quota(
     entity_id: UUID,
     resource: str,
+    request: Request,
     body: QuotaPatch,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
     current_user: CurrentUser = Depends(require_current_user),
     pool: asyncpg.Pool = Depends(get_pool),
-) -> dict:
+) -> Any:
     validate_entity_quota_resource(resource)
+    idempotency_key_value = require_idempotency_key(idempotency_key)
     current_user.require_permission("PLATFORM_OPERATOR")
+    route = f"PATCH /api/v1/entities/{entity_id}/quotas/{resource}"
+    body_sha256 = request_body_sha256(await request.body())
     async with pool.acquire() as conn:
         async with conn.transaction():
+            await acquire_idempotency_lock(
+                conn,
+                credential_id=str(current_user.id),
+                idempotency_key=idempotency_key_value,
+                route=route,
+            )
+            cached = await lookup_idempotency_response(
+                conn,
+                credential_id=str(current_user.id),
+                idempotency_key=idempotency_key_value,
+                route=route,
+                body_sha256=body_sha256,
+            )
+            if cached is not None:
+                return JSONResponse(status_code=cached.status_code, content=cached.body, headers=cached.headers)
+
             if await conn.fetchval("SELECT 1 FROM entities WHERE id = $1", entity_id) is None:
                 raise api_error(404, "NOT_FOUND", "resource not found")
             if resource in USER_QUOTA_RESOURCES:
@@ -879,7 +900,17 @@ async def set_entity_quota(
                 before={"scope": "entity", "scope_id": str(entity_id), "resource": resource, "limit": before["limit"]},
                 after={"scope": "entity", "scope_id": str(entity_id), "resource": resource, "limit": body.limit},
             )
-    return entity_quota_resource(after)
+            response_body = entity_quota_resource(after)
+            await store_idempotency_response(
+                conn,
+                credential_id=str(current_user.id),
+                idempotency_key=idempotency_key_value,
+                route=route,
+                body_sha256=body_sha256,
+                status_code=200,
+                response_body=response_body,
+            )
+    return response_body
 
 
 @router.delete("/entities/{entity_id}/quotas/{resource}", status_code=204)
@@ -1599,11 +1630,16 @@ async def get_user_quotas(
 async def set_user_quota(
     user_id: UUID,
     resource: str,
+    request: Request,
     body: QuotaPatch,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
     current_user: CurrentUser = Depends(require_current_user),
     pool: asyncpg.Pool = Depends(get_pool),
-) -> dict:
+) -> Any:
     validate_user_quota_resource(resource)
+    idempotency_key_value = require_idempotency_key(idempotency_key)
+    route = f"PATCH /api/v1/users/{user_id}/quotas/{resource}"
+    body_sha256 = request_body_sha256(await request.body())
     async with pool.acquire() as conn:
         async with conn.transaction():
             target = await conn.fetchrow("SELECT id, entity_id, deleted_at FROM users WHERE id = $1", user_id)
@@ -1612,6 +1648,22 @@ async def set_user_quota(
             if "PLATFORM_OPERATOR" not in current_user.permissions:
                 current_user.require_entity(target["entity_id"])
                 current_user.require_permission("QUOTA_MANAGE")
+            await acquire_idempotency_lock(
+                conn,
+                credential_id=str(current_user.id),
+                idempotency_key=idempotency_key_value,
+                route=route,
+            )
+            cached = await lookup_idempotency_response(
+                conn,
+                credential_id=str(current_user.id),
+                idempotency_key=idempotency_key_value,
+                route=route,
+                body_sha256=body_sha256,
+            )
+            if cached is not None:
+                return JSONResponse(status_code=cached.status_code, content=cached.body, headers=cached.headers)
+
             entity_limit, _, _, _ = await entity_quota_limit(conn, target["entity_id"], resource)
             if body.limit > entity_limit:
                 raise api_error(
@@ -1647,7 +1699,17 @@ async def set_user_quota(
                 before={"scope": "user", "scope_id": str(user_id), "resource": resource, "limit": before["limit"]},
                 after={"scope": "user", "scope_id": str(user_id), "resource": resource, "limit": body.limit},
             )
-    return user_quota_resource(after)
+            response_body = user_quota_resource(after)
+            await store_idempotency_response(
+                conn,
+                credential_id=str(current_user.id),
+                idempotency_key=idempotency_key_value,
+                route=route,
+                body_sha256=body_sha256,
+                status_code=200,
+                response_body=response_body,
+            )
+    return response_body
 
 
 @router.delete("/users/{user_id}/quotas/{resource}", status_code=204)
