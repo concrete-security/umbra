@@ -1,18 +1,19 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Annotated
 from uuid import UUID, uuid4
 
 import asyncpg
-from fastapi import APIRouter, Depends, Header
+from fastapi import APIRouter, Depends, Header, Query
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from concrete_console.audit import insert_audit_event
+from concrete_console.audit import AUDIT_ACTIONS, insert_audit_event
 from concrete_console.auth import CurrentUser, require_current_user
 from concrete_console.bootstrap import email_domain
 from concrete_console.db import get_pool
 from concrete_console.errors import api_error
-from concrete_console.resources import entity_resource, list_page, user_resource
+from concrete_console.resources import audit_event_resource, entity_resource, list_page, user_resource
 
 PERMISSIONS = {
     "CVM_LAUNCH",
@@ -286,3 +287,85 @@ async def create_user(
                     after={"permission": permission},
                 )
             return await fetch_user_resource(conn, user_id)
+
+
+@router.get("/audit/events")
+async def list_audit_events(
+    actor_id: UUID | None = None,
+    target_type: str | None = Query(default=None, max_length=50),
+    target_id: str | None = Query(default=None, max_length=255),
+    action: str | None = Query(default=None, max_length=100),
+    from_: datetime | None = Query(default=None, alias="from"),
+    to: datetime | None = None,
+    limit: int = Query(default=100, ge=1, le=500),
+    cursor: str | None = Query(default=None, max_length=32),
+    current_user: CurrentUser = Depends(require_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> dict:
+    current_user.require_permission("AUDIT_VIEW")
+    if action is not None and action not in AUDIT_ACTIONS:
+        raise api_error(
+            422,
+            "VALIDATION_ERROR",
+            "unknown audit action",
+            {"errors": [{"type": "unknown_action", "field": "action"}]},
+        )
+    after_seq = parse_audit_cursor(cursor)
+    clauses = ["entity_id = $1"]
+    values: list[object] = [current_user.entity_id]
+
+    def bind(value: object) -> str:
+        values.append(value)
+        return f"${len(values)}"
+
+    if actor_id is not None:
+        clauses.append(f"actor_id = {bind(actor_id)}")
+    if target_type is not None:
+        clauses.append(f"target_type = {bind(target_type)}")
+    if target_id is not None:
+        clauses.append(f"target_id = {bind(target_id)}")
+    if action is not None:
+        clauses.append(f"action = {bind(action)}")
+    if from_ is not None:
+        clauses.append(f"timestamp >= {bind(from_)}")
+    if to is not None:
+        clauses.append(f"timestamp <= {bind(to)}")
+    if after_seq is not None:
+        clauses.append(f"seq > {bind(after_seq)}")
+
+    values.append(limit + 1)
+    query = f"""
+        SELECT
+            seq, id, entity_id, actor_id, actor_email, action, target_type, target_id,
+            before, after, ip_address, description, request_id, timestamp, prev_hash, row_hash
+        FROM audit_events
+        WHERE {' AND '.join(clauses)}
+        ORDER BY seq ASC
+        LIMIT ${len(values)}
+    """
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(query, *values)
+    next_cursor = str(rows[limit]["seq"]) if len(rows) > limit else None
+    return list_page([audit_event_resource(row) for row in rows[:limit]], next_cursor=next_cursor)
+
+
+def parse_audit_cursor(cursor: str | None) -> int | None:
+    if cursor is None:
+        return None
+    try:
+        value = int(cursor)
+    except ValueError:
+        raise api_error(
+            422,
+            "VALIDATION_ERROR",
+            "invalid cursor",
+            {"errors": [{"type": "invalid_cursor", "field": "cursor"}]},
+        ) from None
+    if value < 0:
+        raise api_error(
+            422,
+            "VALIDATION_ERROR",
+            "invalid cursor",
+            {"errors": [{"type": "invalid_cursor", "field": "cursor"}]},
+        )
+    return value

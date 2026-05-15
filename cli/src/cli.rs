@@ -41,8 +41,53 @@ pub enum Command {
     #[command(subcommand)]
     Auth(AuthCommand),
 
+    /// Query and verify Console audit records.
+    #[command(subcommand)]
+    Audit(AuditCommand),
+
     /// Print version, build commit, target triple, and build date.
     Version,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AuditCommand {
+    /// Query control-plane audit events.
+    Events(AuditEventsArgs),
+}
+
+#[derive(clap::Args, Debug)]
+pub struct AuditEventsArgs {
+    /// Filter to events recorded by this user id.
+    #[arg(long)]
+    pub actor: Option<String>,
+
+    /// Filter to events for this target type.
+    #[arg(long)]
+    pub target_type: Option<String>,
+
+    /// Filter to events for this target id.
+    #[arg(long)]
+    pub target_id: Option<String>,
+
+    /// Filter to a typed audit action.
+    #[arg(long)]
+    pub action: Option<String>,
+
+    /// Filter to events created at or after this RFC3339 timestamp.
+    #[arg(long = "from")]
+    pub from: Option<String>,
+
+    /// Filter to events created at or before this RFC3339 timestamp.
+    #[arg(long)]
+    pub to: Option<String>,
+
+    /// Page size, 1..500.
+    #[arg(long, default_value_t = 100)]
+    pub limit: u16,
+
+    /// Opaque pagination cursor from the previous response.
+    #[arg(long)]
+    pub cursor: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]

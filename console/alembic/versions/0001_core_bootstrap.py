@@ -33,6 +33,56 @@ def upgrade() -> None:
     )
     op.execute(
         """
+        CREATE TYPE audit_action AS ENUM (
+            'ENTITY_CREATED',
+            'ENTITY_UPDATED',
+            'USER_REGISTERED',
+            'USER_DEACTIVATED',
+            'USER_REACTIVATED',
+            'USER_ERASED',
+            'PERMISSION_GRANTED',
+            'PERMISSION_REVOKED',
+            'PROFILE_CREATED',
+            'PROFILE_DELETED',
+            'PROFILE_USER_ASSIGNED',
+            'PROFILE_USER_REMOVED',
+            'SSH_KEY_ADDED',
+            'SSH_KEY_REMOVED',
+            'CVM_LAUNCHED',
+            'CVM_STARTED',
+            'CVM_STOPPED',
+            'CVM_TERMINATED',
+            'SUBDOMAIN_PROVISIONED',
+            'SUBDOMAIN_DEPROVISIONED',
+            'SECURITY_CVM_PROVISIONING_STARTED',
+            'SECURITY_CVM_PROVISIONED',
+            'SECURITY_CVM_PROVISIONING_FAILED',
+            'SECURITY_CVM_DECOMMISSIONED',
+            'SECURITY_CVM_ATTESTATION_VERIFIED',
+            'SECURITY_CVM_ATTESTATION_DRIFT',
+            'CVM_ATTESTATION_VERIFIED',
+            'CVM_ATTESTATION_DRIFT',
+            'CVM_PROFILE_ATTACHED',
+            'CVM_PROFILE_DETACHED',
+            'PROFILE_POLICY_UPDATED',
+            'AUTH_SESSION_ISSUED',
+            'AUTH_SESSION_REFRESHED',
+            'AUTH_SESSION_REVOKED',
+            'AUTH_REFRESH_REUSE_DETECTED',
+            'OAUTH_IDENTITY_LINKED',
+            'OAUTH_REBIND_REFUSED',
+            'OPERATION_RESULT_DISCLOSED',
+            'AUDIT_EXPORT_REQUESTED',
+            'AUDIT_EXPORT_ISSUED',
+            'JWT_KEY_ROTATED',
+            'QUOTA_SET',
+            'QUOTA_CLEARED',
+            'SESSIONS_REVOKED'
+        )
+        """
+    )
+    op.execute(
+        """
         CREATE TABLE entities (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             name VARCHAR(200) NOT NULL,
@@ -95,23 +145,30 @@ def upgrade() -> None:
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             entity_id UUID NULL REFERENCES entities(id) ON DELETE SET NULL,
             actor_id UUID NULL REFERENCES users(id) ON DELETE SET NULL,
-            actor_email VARCHAR(320) NOT NULL,
-            action VARCHAR(100) NOT NULL,
-            target_type VARCHAR(50) NULL,
-            target_id UUID NULL,
-            before JSONB NOT NULL DEFAULT '{}'::jsonb,
-            after JSONB NOT NULL DEFAULT '{}'::jsonb,
-            request_id VARCHAR(128) NULL,
+            actor_email VARCHAR(320) NULL,
+            action audit_action NOT NULL,
+            target_type VARCHAR(50) NOT NULL,
+            target_id VARCHAR(100) NOT NULL,
+            before JSONB NULL,
+            after JSONB NULL,
             ip_address VARCHAR(45) NULL,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            description VARCHAR(200) NOT NULL DEFAULT '',
+            request_id VARCHAR(128) NULL,
+            timestamp TIMESTAMPTZ NOT NULL DEFAULT now(),
             prev_hash CHAR(64) NOT NULL,
             row_hash CHAR(64) NOT NULL UNIQUE
         )
         """
     )
+    op.execute("CREATE INDEX ix_audit_events_actor_id ON audit_events(actor_id)")
+    op.execute("CREATE INDEX ix_audit_events_target ON audit_events(target_type, target_id)")
+    op.execute("CREATE INDEX ix_audit_events_action_timestamp ON audit_events(action, timestamp)")
 
 
 def downgrade() -> None:
+    op.execute("DROP INDEX IF EXISTS ix_audit_events_action_timestamp")
+    op.execute("DROP INDEX IF EXISTS ix_audit_events_target")
+    op.execute("DROP INDEX IF EXISTS ix_audit_events_actor_id")
     op.execute("DROP TABLE IF EXISTS audit_events")
     op.execute("DROP INDEX IF EXISTS ux_entity_profiles_entity_name_live")
     op.execute("DROP TABLE IF EXISTS entity_profiles")
@@ -119,4 +176,5 @@ def downgrade() -> None:
     op.execute("DROP INDEX IF EXISTS ux_users_email_live")
     op.execute("DROP TABLE IF EXISTS users")
     op.execute("DROP TABLE IF EXISTS entities")
+    op.execute("DROP TYPE IF EXISTS audit_action")
     op.execute("DROP TYPE IF EXISTS permission")

@@ -15,6 +15,7 @@ BOOTSTRAP_PERMISSIONS = (
     "PLATFORM_OPERATOR",
     "USER_MANAGE",
     "PERMISSION_MANAGE",
+    "AUDIT_VIEW",
 )
 
 
@@ -35,10 +36,10 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-async def ensure_entity(conn: asyncpg.Connection, *, name: str, domain: str) -> UUID:
+async def ensure_entity(conn: asyncpg.Connection, *, name: str, domain: str) -> tuple[UUID, bool]:
     entity_id = await conn.fetchval("SELECT id FROM entities WHERE domain = $1", domain)
     if entity_id:
-        return entity_id
+        return entity_id, False
 
     entity_id = uuid4()
     await conn.execute(
@@ -50,7 +51,7 @@ async def ensure_entity(conn: asyncpg.Connection, *, name: str, domain: str) -> 
         name or domain,
         domain,
     )
-    return entity_id
+    return entity_id, True
 
 
 async def has_permission_manager(conn: asyncpg.Connection, entity_id: UUID) -> bool:
@@ -167,7 +168,7 @@ async def run() -> int:
     conn = await asyncpg.connect(asyncpg_dsn(settings.database_url))
     try:
         async with conn.transaction():
-            entity_id = await ensure_entity(
+            entity_id, entity_created = await ensure_entity(
                 conn,
                 name=args.entity_name.strip() or domain,
                 domain=domain,
@@ -175,6 +176,17 @@ async def run() -> int:
             if await has_permission_manager(conn, entity_id):
                 print("bootstrap already complete")
                 return 0
+            if entity_created:
+                await insert_audit_event(
+                    conn,
+                    entity_id=entity_id,
+                    actor_id=None,
+                    actor_email="system@bootstrap",
+                    action="ENTITY_CREATED",
+                    target_type="entity",
+                    target_id=entity_id,
+                    after={"name": args.entity_name.strip() or domain, "domain": domain},
+                )
             user_id = await create_admin(
                 conn,
                 entity_id=entity_id,

@@ -27,6 +27,7 @@ pub fn run() -> ExitCode {
     };
     let config = config::ResolvedConfig::resolve(args.config.clone(), args.console_url.clone());
     let status = match args.command {
+        cli::Command::Audit(command) => commands::audit::run(command, &config, args.json),
         cli::Command::Auth(command) => commands::auth::run(command, &config, args.json),
         cli::Command::Version => commands::version::run(args.json),
     };

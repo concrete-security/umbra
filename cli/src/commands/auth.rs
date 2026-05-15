@@ -615,6 +615,17 @@ fn token(config: &ResolvedConfig) -> ExitStatus {
     }
 }
 
+pub(crate) fn session_for_console(
+    config: &ResolvedConfig,
+) -> Result<Session, (ExitStatus, String)> {
+    let session = load_session_or_auth_required(config)?;
+    if session.expires_at > Utc::now() {
+        Ok(session)
+    } else {
+        refresh_existing_session(config)
+    }
+}
+
 fn load_session_or_auth_required(config: &ResolvedConfig) -> Result<Session, (ExitStatus, String)> {
     match session::load(&config.config_dir) {
         Ok(Some(value)) => Ok(value),
