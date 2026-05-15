@@ -5,14 +5,17 @@ import os
 @dataclass(frozen=True)
 class Settings:
     database_url: str
+    raw: dict[str, str]
 
 
 def load_settings() -> Settings:
+    raw = dict(os.environ)
     return Settings(
-        database_url=os.environ.get(
+        database_url=raw.get(
             "DATABASE_URL",
             "postgresql+asyncpg://concrete:concrete@localhost:5432/concrete",
-        )
+        ),
+        raw=raw,
     )
 
 
