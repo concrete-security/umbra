@@ -7,7 +7,7 @@ from typing import Annotated
 from uuid import UUID
 
 import asyncpg
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 import httpx
 import jwt
@@ -65,6 +65,12 @@ class DevicePollRequest(BaseModel):
     polling_secret: str = Field(min_length=20, max_length=512)
 
 
+class DeviceStartRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: str | None = Field(default=None, max_length=64)
+
+
 def oauth_error(error: str) -> JSONResponse:
     return JSONResponse(status_code=400, content={"error": error})
 
@@ -96,8 +102,12 @@ def request_id(request: Request) -> str | None:
 
 @router.post("/device/start")
 async def device_start(
+    body: DeviceStartRequest | None = Body(default=None),
     pool: asyncpg.Pool = Depends(get_pool),
 ):
+    provider = (body.provider if body else None) or "google"
+    if provider != "google":
+        raise api_error(400, "BAD_REQUEST", "unsupported OIDC provider")
     try:
         idp_response = await start_device_flow()
     except (httpx.HTTPError, ValueError):

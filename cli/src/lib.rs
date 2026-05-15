@@ -4,7 +4,9 @@ use clap::Parser;
 
 mod cli;
 mod commands;
+mod config;
 mod exit;
+mod session;
 
 pub use exit::ExitStatus;
 
@@ -23,7 +25,9 @@ pub fn run() -> ExitCode {
             };
         }
     };
+    let config = config::ResolvedConfig::resolve(args.config.clone(), args.console_url.clone());
     let status = match args.command {
+        cli::Command::Auth(command) => commands::auth::run(command, &config, args.json),
         cli::Command::Version => commands::version::run(args.json),
     };
     ExitCode::from(status)

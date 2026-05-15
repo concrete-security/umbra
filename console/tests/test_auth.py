@@ -5,6 +5,7 @@ import pytest
 from fastapi import HTTPException
 
 from concrete_console.auth import CurrentUser, require_current_user
+from concrete_console.routes_auth import DeviceStartRequest, device_start
 
 
 def current_user(*, permissions: set[str] | None = None) -> CurrentUser:
@@ -50,3 +51,11 @@ def test_require_current_user_rejects_whitespace_slop_before_db_lookup() -> None
 
     assert exc.value.status_code == 401
     assert exc.value.detail["error"]["code"] == "UNAUTHORIZED"
+
+
+def test_device_start_rejects_non_google_provider_before_provider_call() -> None:
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(device_start(body=DeviceStartRequest(provider="github"), pool=object()))
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail["error"]["code"] == "BAD_REQUEST"
