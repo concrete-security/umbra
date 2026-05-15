@@ -31,6 +31,7 @@ pub fn run() -> ExitCode {
         args.profile.clone(),
     );
     let status = match args.command {
+        cli::Command::Admin(command) => commands::admin::run(command, &config, args.json),
         cli::Command::Audit(command) => commands::audit::run(command, &config, args.json),
         cli::Command::Auth(command) => commands::auth::run(command, &config, args.json),
         cli::Command::Key(command) => commands::key::run(command, &config, args.json),

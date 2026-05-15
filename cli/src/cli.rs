@@ -41,6 +41,10 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
+    /// Platform-operator maintenance commands.
+    #[command(subcommand)]
+    Admin(AdminCommand),
+
     /// Authenticate and inspect the local Console session.
     #[command(subcommand)]
     Auth(AuthCommand),
@@ -59,6 +63,55 @@ pub enum Command {
 
     /// Print version, build commit, target triple, and build date.
     Version,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AdminCommand {
+    /// Force-revoke Console sessions by predicate.
+    #[command(subcommand)]
+    Sessions(AdminSessionsCommand),
+
+    /// Manage Console JWT signing keys.
+    #[command(subcommand)]
+    Keys(AdminKeysCommand),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AdminSessionsCommand {
+    /// Revoke sessions matching the supplied filters.
+    Revoke(AdminSessionsRevokeArgs),
+}
+
+#[derive(clap::Args, Debug)]
+pub struct AdminSessionsRevokeArgs {
+    /// Revoke sessions for this user UUID only.
+    #[arg(long)]
+    pub user: Option<String>,
+
+    /// Revoke sessions for this entity UUID only.
+    #[arg(long)]
+    pub entity: Option<String>,
+
+    /// Revoke sessions issued before this RFC3339 timestamp.
+    #[arg(long)]
+    pub issued_before: Option<String>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AdminKeysCommand {
+    /// Rotate the Console JWT signing key.
+    Rotate(AdminKeysRotateArgs),
+}
+
+#[derive(clap::Args, Debug)]
+pub struct AdminKeysRotateArgs {
+    /// New active JWT signing key id.
+    #[arg(long)]
+    pub new_kid: String,
+
+    /// Seconds to retain the previous key for verification.
+    #[arg(long, default_value_t = 3600, value_parser = clap::value_parser!(u32).range(0..=86400))]
+    pub retire_old_after_seconds: u32,
 }
 
 #[derive(Subcommand, Debug)]
