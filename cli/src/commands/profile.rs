@@ -26,6 +26,12 @@ struct ProfileListPage {
     next_cursor: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ProfileMemberListPage {
+    items: Vec<ProfileMember>,
+    next_cursor: Option<String>,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 struct Profile {
     id: String,
@@ -51,6 +57,13 @@ struct AttachedCvm {
 struct ProfileWithEtag {
     profile: Profile,
     etag: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ProfileMember {
+    user_id: String,
+    email: String,
+    added_at: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -196,9 +209,47 @@ fn members(
     json_output: bool,
 ) -> ExitStatus {
     match command {
+        ProfileMembersCommand::List => member_list(config, json_output),
         ProfileMembersCommand::Add { user_id } => member_add(config, &user_id, json_output),
         ProfileMembersCommand::Remove { user_id } => member_remove(config, &user_id, json_output),
     }
+}
+
+fn member_list(config: &ResolvedConfig, json_output: bool) -> ExitStatus {
+    let (console_url, session, profile_id) = match selected_profile_session(config) {
+        Ok(value) => value,
+        Err((status, message)) => {
+            eprintln!("{message}");
+            return status;
+        }
+    };
+    let page = match fetch_profile_members(console_url, &session.access_token, profile_id) {
+        Ok(value) => value,
+        Err((status, message)) => {
+            eprintln!("{message}");
+            return status;
+        }
+    };
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&page.items)
+                .expect("profile member list output serializes")
+        );
+    } else if page.items.is_empty() {
+        println!("no profile members");
+    } else {
+        for member in &page.items {
+            println!(
+                "{} {} added_at={}",
+                member.user_id, member.email, member.added_at
+            );
+        }
+        if let Some(cursor) = page.next_cursor {
+            eprintln!("next cursor: {cursor}");
+        }
+    }
+    ExitStatus::Ok
 }
 
 fn member_add(config: &ResolvedConfig, user_id: &str, json_output: bool) -> ExitStatus {
@@ -327,6 +378,24 @@ fn fetch_profile(
             )
         })?;
     read_profile_with_etag(response, "fetch profile")
+}
+
+fn fetch_profile_members(
+    console_url: &str,
+    access_token: &str,
+    profile_id: &str,
+) -> Result<ProfileMemberListPage, (ExitStatus, String)> {
+    let response = Client::new()
+        .get(format!("{console_url}/api/v1/profiles/{profile_id}/users"))
+        .bearer_auth(access_token)
+        .send()
+        .map_err(|err| {
+            (
+                ExitStatus::Error,
+                format!("[error] failed to list profile members: {err}"),
+            )
+        })?;
+    read_json_response(response, "list profile members")
 }
 
 fn patch_profile(

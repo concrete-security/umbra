@@ -74,6 +74,15 @@ def profile_resource(row: Any) -> dict[str, Any]:
     }
 
 
+def profile_member_resource(row: Any) -> dict[str, Any]:
+    row = dict(row)
+    return {
+        "user_id": str(row["user_id"]),
+        "email": row["email"],
+        "added_at": timestamp(row["added_at"]),
+    }
+
+
 def ssh_key_resource(row: Any) -> dict[str, Any]:
     row = dict(row)
     return {

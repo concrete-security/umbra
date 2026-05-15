@@ -5,6 +5,7 @@ from concrete_console.resources import (
     cvm_resource,
     entity_quota_resource,
     operation_resource,
+    profile_member_resource,
     profile_resource,
     security_cvm_attestation_resource,
     security_cvm_resource,
@@ -85,6 +86,22 @@ def test_profile_resource_parses_json_policy() -> None:
         }
     ]
     assert resource["attached_cvm_count"] == 1
+
+
+def test_profile_member_resource_formats_membership() -> None:
+    resource = profile_member_resource(
+        {
+            "user_id": UUID("00000000-0000-4000-8000-000000000020"),
+            "email": "dev@example.com",
+            "added_at": datetime(2026, 5, 15, 18, 4, tzinfo=timezone.utc),
+        }
+    )
+
+    assert resource == {
+        "user_id": "00000000-0000-4000-8000-000000000020",
+        "email": "dev@example.com",
+        "added_at": "2026-05-15T18:04:00Z",
+    }
 
 
 def test_ssh_key_resource_formats_created_at() -> None:

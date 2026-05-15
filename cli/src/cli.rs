@@ -214,6 +214,9 @@ pub struct ProfileConfigureArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum ProfileMembersCommand {
+    /// List users assigned to the selected profile.
+    List,
+
     /// Add a user to the selected profile.
     Add {
         /// User UUID to add to the profile.

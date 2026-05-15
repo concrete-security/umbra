@@ -36,6 +36,7 @@ from concrete_console.resources import (
     json_payload,
     list_page,
     operation_resource,
+    profile_member_resource,
     profile_resource,
     security_cvm_attestation_resource,
     security_cvm_resource,
@@ -1502,6 +1503,51 @@ async def delete_profile(
                 before={"name": profile["name"]},
             )
     return Response(status_code=204)
+
+
+@router.get("/profiles/{profile_id}/users")
+async def list_profile_users(
+    profile_id: UUID,
+    current_user: CurrentUser = Depends(require_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> dict:
+    async with pool.acquire() as conn:
+        profile = await conn.fetchrow(
+            """
+            SELECT
+                ep.id,
+                ep.entity_id,
+                (pu.user_id IS NOT NULL) AS assigned
+            FROM entity_profiles ep
+            LEFT JOIN profile_users pu
+              ON pu.profile_id = ep.id
+             AND pu.user_id = $2
+            WHERE ep.id = $1
+              AND ep.deleted_at IS NULL
+            """,
+            profile_id,
+            current_user.id,
+        )
+        if profile is None:
+            raise api_error(404, "NOT_FOUND", "resource not found")
+        current_user.require_entity(profile["entity_id"])
+        if "USER_MANAGE" not in current_user.permissions and not profile["assigned"]:
+            raise api_error(404, "NOT_FOUND", "resource not found")
+        rows = await conn.fetch(
+            """
+            SELECT
+                pu.user_id,
+                u.email,
+                pu.added_at
+            FROM profile_users pu
+            JOIN users u ON u.id = pu.user_id
+            WHERE pu.profile_id = $1
+              AND u.deleted_at IS NULL
+            ORDER BY u.email, pu.user_id
+            """,
+            profile_id,
+        )
+    return list_page([profile_member_resource(row) for row in rows])
 
 
 @router.post("/profiles/{profile_id}/users", status_code=204)
