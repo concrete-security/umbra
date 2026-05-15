@@ -7,12 +7,14 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 from fastapi import HTTPException
 
 from concrete_console.routes import (
+    AuditExportCreate,
     policy_sha256,
     profile_etag,
     require_idempotency_key,
     require_if_match,
     ssh_key_fingerprint,
     user_etag,
+    validate_audit_export_request,
     validate_permission_symbol,
     validate_profile_policy,
 )
@@ -114,6 +116,26 @@ def test_validate_permission_symbol_rejects_unknown_permission() -> None:
 
     assert exc.value.status_code == 422
     assert exc.value.detail["error"]["code"] == "VALIDATION_ERROR"
+
+
+def test_validate_audit_export_request_accepts_supported_format_and_action() -> None:
+    validate_audit_export_request(AuditExportCreate(format="ndjson", action="USER_REGISTERED"))
+
+
+def test_validate_audit_export_request_rejects_unsupported_format() -> None:
+    with pytest.raises(HTTPException) as exc:
+        validate_audit_export_request(AuditExportCreate(format="xlsx"))
+
+    assert exc.value.status_code == 422
+    assert exc.value.detail["error"]["details"]["errors"][0]["type"] == "unsupported_format"
+
+
+def test_validate_audit_export_request_rejects_unknown_action() -> None:
+    with pytest.raises(HTTPException) as exc:
+        validate_audit_export_request(AuditExportCreate(format="csv", action="NOT_A_REAL_ACTION"))
+
+    assert exc.value.status_code == 422
+    assert exc.value.detail["error"]["details"]["errors"][0]["type"] == "unknown_action"
 
 
 def test_ssh_key_fingerprint_accepts_openssh_public_key() -> None:

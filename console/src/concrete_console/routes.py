@@ -79,6 +79,7 @@ DEFAULT_USER_QUOTAS = {
 CREATE_ENTITY_ROUTE = "POST /api/v1/entities"
 CREATE_SSH_KEY_ROUTE = "POST /api/v1/me/keys"
 ADMIN_SESSIONS_REVOKE_ROUTE = "POST /api/v1/admin/sessions/revoke"
+AUDIT_EXPORT_ROUTE = "POST /api/v1/audit/export"
 OPERATION_KIND_PERMISSIONS = {
     "audit.export": "AUDIT_EXPORT",
     "cvm.launch": "CVM_LAUNCH",
@@ -149,6 +150,18 @@ class QuotaPatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     limit: int = Field(ge=0)
+
+
+class AuditExportCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    format: str = Field(min_length=1, max_length=16)
+    actor_id: UUID | None = None
+    target_type: str | None = Field(default=None, max_length=50)
+    target_id: str | None = Field(default=None, max_length=255)
+    action: str | None = Field(default=None, max_length=100)
+    from_: datetime | None = Field(default=None, alias="from")
+    to: datetime | None = None
 
 
 class AdminSessionsRevoke(BaseModel):
@@ -2039,6 +2052,47 @@ async def list_audit_events(
         rows = await conn.fetch(query, *values)
     next_cursor = str(rows[limit]["seq"]) if len(rows) > limit else None
     return list_page([audit_event_resource(row) for row in rows[:limit]], next_cursor=next_cursor)
+
+
+@router.post("/audit/export", status_code=202)
+async def create_audit_export(
+    body: AuditExportCreate,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+    current_user: CurrentUser = Depends(require_current_user),
+) -> dict:
+    require_idempotency_key(idempotency_key)
+    current_user.require_permission("AUDIT_EXPORT")
+    validate_audit_export_request(body)
+    if not load_settings().raw.get("AUDIT_EXPORT_BUCKET", "").strip():
+        raise api_error(
+            503,
+            "SERVICE_UNAVAILABLE",
+            "audit export bucket is not configured",
+            {"component": "audit_export_bucket"},
+        )
+    raise api_error(
+        503,
+        "SERVICE_UNAVAILABLE",
+        "audit export storage backend is not implemented",
+        {"component": "audit_export_store"},
+    )
+
+
+def validate_audit_export_request(body: AuditExportCreate) -> None:
+    if body.format not in {"csv", "ndjson"}:
+        raise api_error(
+            422,
+            "VALIDATION_ERROR",
+            "unsupported audit export format",
+            {"errors": [{"type": "unsupported_format", "field": "format"}]},
+        )
+    if body.action is not None and body.action not in AUDIT_ACTIONS:
+        raise api_error(
+            422,
+            "VALIDATION_ERROR",
+            "unknown audit action",
+            {"errors": [{"type": "unknown_action", "field": "action"}]},
+        )
 
 
 @router.get("/operations/{operation_id}")
