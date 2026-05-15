@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import re
+from threading import RLock
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -43,6 +44,13 @@ class VerifyingKey:
     key: Any
 
 
+@dataclass(frozen=True)
+class RotationResult:
+    old_active_kid: str
+    active_kid: str
+    retiring_kids: tuple[str, ...]
+
+
 def _file_ref_path(ref: str) -> Path:
     if not ref.startswith("file://"):
         raise ValueError(f"unsupported key reference: {ref.split(':', 1)[0]}")
@@ -67,33 +75,57 @@ def _jwk_to_key(jwk: dict[str, Any]) -> Any:
     return jwt.PyJWK.from_dict(jwk).key
 
 
+def _load_key_material(settings: JwtSettings, *, active_kid: str) -> tuple[str, dict[str, VerifyingKey]]:
+    if settings.algorithm not in {"EdDSA", "RS256"}:
+        raise ValueError("JWT_ALGORITHM must be EdDSA or RS256")
+    if not KID_RE.fullmatch(active_kid):
+        raise ValueError("JWT active kid has invalid characters")
+
+    private_key = _file_ref_path(settings.private_key_ref).read_text()
+    jwks = json.loads(_file_ref_path(settings.public_keys_ref).read_text())
+    keys: dict[str, VerifyingKey] = {}
+    for jwk in jwks.get("keys", []):
+        kid = jwk.get("kid")
+        if not isinstance(kid, str) or not KID_RE.fullmatch(kid):
+            raise ValueError("JWKS entry has invalid kid")
+        alg = jwk.get("alg") or settings.algorithm
+        if alg not in {"EdDSA", "RS256"}:
+            raise ValueError("JWKS entry has unsupported alg")
+        keys[kid] = VerifyingKey(kid=kid, alg=alg, key=_jwk_to_key({**jwk, "alg": alg}))
+    if active_kid not in keys:
+        raise ValueError("active kid must appear in JWT_PUBLIC_KEYS_REF")
+    if keys[active_kid].alg != settings.algorithm:
+        raise ValueError("active kid algorithm must match JWT_ALGORITHM")
+    _self_test_active_key(private_key, keys[active_kid], algorithm=settings.algorithm)
+    return private_key, keys
+
+
+def _self_test_active_key(private_key: str, verifying_key: VerifyingKey, *, algorithm: str) -> None:
+    token = jwt.encode(
+        {"probe": "jwt-key-self-test"},
+        private_key,
+        algorithm=algorithm,
+        headers={"kid": verifying_key.kid, "typ": "at+JWT", "alg": algorithm},
+    )
+    jwt.decode(token, verifying_key.key, algorithms=[verifying_key.alg], options={"verify_aud": False})
+
+
 class JwtManager:
     def __init__(self, settings: JwtSettings):
-        if settings.algorithm not in {"EdDSA", "RS256"}:
-            raise ValueError("JWT_ALGORITHM must be EdDSA or RS256")
-        if not KID_RE.fullmatch(settings.active_kid):
-            raise ValueError("JWT_ACTIVE_KID has invalid characters")
-
         self.settings = settings
-        self.private_key = _file_ref_path(settings.private_key_ref).read_text()
-        jwks = json.loads(_file_ref_path(settings.public_keys_ref).read_text())
-        keys: dict[str, VerifyingKey] = {}
-        for jwk in jwks.get("keys", []):
-            kid = jwk.get("kid")
-            if not isinstance(kid, str) or not KID_RE.fullmatch(kid):
-                raise ValueError("JWKS entry has invalid kid")
-            alg = jwk.get("alg") or settings.algorithm
-            if alg not in {"EdDSA", "RS256"}:
-                raise ValueError("JWKS entry has unsupported alg")
-            keys[kid] = VerifyingKey(kid=kid, alg=alg, key=_jwk_to_key({**jwk, "alg": alg}))
-        if settings.active_kid not in keys:
-            raise ValueError("JWT_ACTIVE_KID must appear in JWT_PUBLIC_KEYS_REF")
+        self.active_kid = settings.active_kid
+        self.private_key, keys = _load_key_material(settings, active_kid=settings.active_kid)
         self.verifying_keys = keys
+        self._retiring_deadlines: dict[str, datetime] = {}
+        self._lock = RLock()
 
     def issue_access_token(self, *, user_id: UUID, entity_id: UUID) -> SigningResult:
         now = datetime.now(timezone.utc)
         expires_at = now + timedelta(seconds=self.settings.access_ttl_seconds)
         jti = uuid4()
+        with self._lock:
+            private_key = self.private_key
+            active_kid = self.active_kid
         payload = {
             "iss": self.settings.issuer,
             "aud": self.settings.audience,
@@ -106,15 +138,55 @@ class JwtManager:
         }
         token = jwt.encode(
             payload,
-            self.private_key,
+            private_key,
             algorithm=self.settings.algorithm,
             headers={
-                "kid": self.settings.active_kid,
+                "kid": active_kid,
                 "typ": "at+JWT",
                 "alg": self.settings.algorithm,
             },
         )
         return SigningResult(access_token=token, jti=jti, expires_at=expires_at)
+
+    def rotate(self, *, new_kid: str, retire_old_after_seconds: int) -> RotationResult:
+        if not KID_RE.fullmatch(new_kid):
+            raise ValueError("new_kid has invalid characters")
+        if retire_old_after_seconds < 0 or retire_old_after_seconds > 86_400:
+            raise ValueError("retire_old_after_seconds is out of range")
+
+        with self._lock:
+            now = datetime.now(timezone.utc)
+            self._prune_retired_keys(now)
+            old_active_kid = self.active_kid
+            old_keys = dict(self.verifying_keys)
+            old_kids = tuple(sorted(kid for kid in old_keys if kid != new_kid))
+            private_key, new_keys = _load_key_material(self.settings, active_kid=new_kid)
+
+            retiring_kids: tuple[str, ...] = ()
+            if retire_old_after_seconds > 0:
+                deadline = now + timedelta(seconds=retire_old_after_seconds)
+                for kid in old_kids:
+                    new_keys[kid] = old_keys[kid]
+                    self._retiring_deadlines[kid] = deadline
+                retiring_kids = old_kids
+            else:
+                for kid in old_kids:
+                    new_keys.pop(kid, None)
+
+            self.private_key = private_key
+            self.verifying_keys = new_keys
+            self.active_kid = new_kid
+            self._retiring_deadlines.pop(new_kid, None)
+            self._retiring_deadlines = {
+                kid: deadline
+                for kid, deadline in self._retiring_deadlines.items()
+                if kid in self.verifying_keys and kid != self.active_kid
+            }
+            return RotationResult(
+                old_active_kid=old_active_kid,
+                active_kid=new_kid,
+                retiring_kids=retiring_kids,
+            )
 
     def verify_access_token(self, token: str) -> dict[str, Any]:
         if token.count(".") != 2 or any(not part for part in token.split(".")):
@@ -132,7 +204,9 @@ class JwtManager:
         kid = header.get("kid")
         if not isinstance(kid, str) or not KID_RE.fullmatch(kid):
             raise jwt.InvalidTokenError("invalid kid")
-        verifying_key = self.verifying_keys.get(kid)
+        with self._lock:
+            self._prune_retired_keys(datetime.now(timezone.utc))
+            verifying_key = self.verifying_keys.get(kid)
         if verifying_key is None:
             raise jwt.InvalidTokenError("unknown kid")
         if header.get("alg") != verifying_key.alg:
@@ -148,6 +222,13 @@ class JwtManager:
             audience=self.settings.audience,
             leeway=self.settings.leeway_seconds,
         )
+
+    def _prune_retired_keys(self, now: datetime) -> None:
+        expired = [kid for kid, deadline in self._retiring_deadlines.items() if deadline <= now]
+        for kid in expired:
+            if kid != self.active_kid:
+                self.verifying_keys.pop(kid, None)
+            self._retiring_deadlines.pop(kid, None)
 
 
 _manager: JwtManager | None = None

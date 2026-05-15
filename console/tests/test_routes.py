@@ -7,6 +7,7 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 from fastapi import HTTPException
 
 from concrete_console.routes import (
+    AdminKeysRotate,
     AuditExportCreate,
     cvm_etag,
     erased_user_email,
@@ -94,6 +95,18 @@ def test_erased_user_email_is_stable_tombstone() -> None:
         erased_user_email(UUID("00000000-0000-4000-8000-000000000020"), "example.com")
         == "<erased-4bcc13e151d8>@example.com"
     )
+
+
+def test_admin_keys_rotate_defaults_retirement_window() -> None:
+    body = AdminKeysRotate(new_kid="next-key_2026.05.15")
+
+    assert body.retire_old_after_seconds == 3600
+
+
+@pytest.mark.parametrize("new_kid", ["bad key", "bad/key"])
+def test_admin_keys_rotate_rejects_invalid_kid(new_kid: str) -> None:
+    with pytest.raises(ValueError):
+        AdminKeysRotate(new_kid=new_kid)
 
 
 def test_require_if_match_rejects_missing_header() -> None:

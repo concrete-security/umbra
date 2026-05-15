@@ -39,7 +39,7 @@ async def _check_database() -> None:
 async def _check_jwt_keys() -> None:
     def load_keys() -> None:
         manager = get_jwt_manager()
-        active_kid = manager.settings.active_kid
+        active_kid = manager.active_kid
         if active_kid not in manager.verifying_keys:
             raise RuntimeError("active JWT kid is not in verifying key set")
 

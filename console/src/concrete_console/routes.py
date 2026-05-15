@@ -27,6 +27,7 @@ from concrete_console.idempotency import (
     request_body_sha256,
     store_idempotency_response,
 )
+from concrete_console.jwt_keys import get_jwt_manager
 from concrete_console.resources import (
     audit_event_resource,
     cvm_resource,
@@ -83,6 +84,7 @@ DEFAULT_USER_QUOTAS = {
 CREATE_ENTITY_ROUTE = "POST /api/v1/entities"
 CREATE_SSH_KEY_ROUTE = "POST /api/v1/me/keys"
 ADMIN_SESSIONS_REVOKE_ROUTE = "POST /api/v1/admin/sessions/revoke"
+ADMIN_KEYS_ROTATE_ROUTE = "POST /api/v1/admin/keys/rotate"
 AUDIT_EXPORT_ROUTE = "POST /api/v1/audit/export"
 OPERATION_KIND_PERMISSIONS = {
     "audit.export": "AUDIT_EXPORT",
@@ -174,6 +176,13 @@ class AdminSessionsRevoke(BaseModel):
     user_id: UUID | None = None
     entity_id: UUID | None = None
     issued_before: datetime | None = None
+
+
+class AdminKeysRotate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    new_kid: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9._-]+$")
+    retire_old_after_seconds: int = Field(default=3600, ge=0, le=86_400)
 
 
 class ProfileCreate(BaseModel):
@@ -2244,6 +2253,79 @@ async def revoke_admin_sessions(
                 credential_id=str(current_user.id),
                 idempotency_key=idempotency_key_value,
                 route=ADMIN_SESSIONS_REVOKE_ROUTE,
+                body_sha256=body_sha256,
+                status_code=200,
+                response_body=response_body,
+            )
+    return response_body
+
+
+@router.post("/admin/keys/rotate")
+async def rotate_admin_keys(
+    request: Request,
+    body: AdminKeysRotate,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+    current_user: CurrentUser = Depends(require_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> Any:
+    idempotency_key_value = require_idempotency_key(idempotency_key)
+    current_user.require_permission("PLATFORM_OPERATOR")
+    body_sha256 = request_body_sha256(await request.body())
+
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await acquire_idempotency_lock(
+                conn,
+                credential_id=str(current_user.id),
+                idempotency_key=idempotency_key_value,
+                route=ADMIN_KEYS_ROTATE_ROUTE,
+            )
+            cached = await lookup_idempotency_response(
+                conn,
+                credential_id=str(current_user.id),
+                idempotency_key=idempotency_key_value,
+                route=ADMIN_KEYS_ROTATE_ROUTE,
+                body_sha256=body_sha256,
+            )
+            if cached is not None:
+                return JSONResponse(status_code=cached.status_code, content=cached.body, headers=cached.headers)
+
+            try:
+                rotation = get_jwt_manager().rotate(
+                    new_kid=body.new_kid,
+                    retire_old_after_seconds=body.retire_old_after_seconds,
+                )
+            except ValueError as exc:
+                raise api_error(
+                    503,
+                    "SERVICE_UNAVAILABLE",
+                    "JWT key material is not ready for rotation",
+                    {"component": "jwt_key_store"},
+                ) from exc
+
+            response_body = {
+                "active_kid": rotation.active_kid,
+                "retiring_kids": list(rotation.retiring_kids),
+            }
+            await insert_audit_event(
+                conn,
+                entity_id=current_user.entity_id,
+                actor_id=current_user.id,
+                actor_email=current_user.email,
+                action="JWT_KEY_ROTATED",
+                target_type="jwt_key",
+                target_id=rotation.active_kid,
+                before={"active_kid": rotation.old_active_kid},
+                after={
+                    **response_body,
+                    "retire_old_after_seconds": body.retire_old_after_seconds,
+                },
+            )
+            await store_idempotency_response(
+                conn,
+                credential_id=str(current_user.id),
+                idempotency_key=idempotency_key_value,
+                route=ADMIN_KEYS_ROTATE_ROUTE,
                 body_sha256=body_sha256,
                 status_code=200,
                 response_body=response_body,

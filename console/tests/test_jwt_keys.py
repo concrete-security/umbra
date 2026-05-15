@@ -14,7 +14,7 @@ def b64url(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).decode().rstrip("=")
 
 
-def write_ed25519_keypair(tmp_path):
+def generate_ed25519_material(kid: str):
     private_key = ed25519.Ed25519PrivateKey.generate()
     public_key = private_key.public_key()
     private_pem = private_key.private_bytes(
@@ -26,25 +26,23 @@ def write_ed25519_keypair(tmp_path):
         encoding=serialization.Encoding.Raw,
         format=serialization.PublicFormat.Raw,
     )
+    jwk = {
+        "kty": "OKP",
+        "crv": "Ed25519",
+        "kid": kid,
+        "alg": "EdDSA",
+        "x": b64url(public_bytes),
+    }
+    return private_pem, jwk
+
+
+def write_ed25519_keypair(tmp_path):
+    private_pem, jwk = generate_ed25519_material("test-key")
 
     private_path = tmp_path / "private.pem"
     public_path = tmp_path / "public.jwks"
     private_path.write_bytes(private_pem)
-    public_path.write_text(
-        json.dumps(
-            {
-                "keys": [
-                    {
-                        "kty": "OKP",
-                        "crv": "Ed25519",
-                        "kid": "test-key",
-                        "alg": "EdDSA",
-                        "x": b64url(public_bytes),
-                    }
-                ]
-            }
-        )
-    )
+    public_path.write_text(json.dumps({"keys": [jwk]}))
     return private_path, public_path
 
 
@@ -75,6 +73,71 @@ def test_access_token_round_trips_with_configured_jwks(tmp_path) -> None:
     assert claims["entity_id"] == "00000000-0000-4000-8000-000000000002"
     assert claims["jti"] == str(result.jti)
     assert result.expires_at > datetime.now(timezone.utc)
+
+
+def test_rotate_switches_active_kid_and_retains_old_verifier(tmp_path) -> None:
+    private_path, public_path = write_ed25519_keypair(tmp_path)
+    manager = JwtManager(
+        JwtSettings(
+            algorithm="EdDSA",
+            private_key_ref=f"file://{private_path}",
+            public_keys_ref=f"file://{public_path}",
+            active_kid="test-key",
+            issuer="issuer",
+            audience="audience",
+            access_ttl_seconds=3600,
+            leeway_seconds=0,
+        )
+    )
+    old_token = manager.issue_access_token(
+        user_id="00000000-0000-4000-8000-000000000001",
+        entity_id="00000000-0000-4000-8000-000000000002",
+    ).access_token
+    next_private_pem, next_jwk = generate_ed25519_material("next-key")
+    private_path.write_bytes(next_private_pem)
+    public_path.write_text(json.dumps({"keys": [next_jwk]}))
+
+    rotation = manager.rotate(new_kid="next-key", retire_old_after_seconds=3600)
+    new_token = manager.issue_access_token(
+        user_id="00000000-0000-4000-8000-000000000001",
+        entity_id="00000000-0000-4000-8000-000000000002",
+    ).access_token
+
+    assert rotation.old_active_kid == "test-key"
+    assert rotation.active_kid == "next-key"
+    assert rotation.retiring_kids == ("test-key",)
+    assert jwt.get_unverified_header(new_token)["kid"] == "next-key"
+    assert manager.verify_access_token(old_token)["sub"] == "00000000-0000-4000-8000-000000000001"
+    assert manager.verify_access_token(new_token)["sub"] == "00000000-0000-4000-8000-000000000001"
+
+
+def test_rotate_with_immediate_retirement_rejects_old_kid(tmp_path) -> None:
+    private_path, public_path = write_ed25519_keypair(tmp_path)
+    manager = JwtManager(
+        JwtSettings(
+            algorithm="EdDSA",
+            private_key_ref=f"file://{private_path}",
+            public_keys_ref=f"file://{public_path}",
+            active_kid="test-key",
+            issuer="issuer",
+            audience="audience",
+            access_ttl_seconds=3600,
+            leeway_seconds=0,
+        )
+    )
+    old_token = manager.issue_access_token(
+        user_id="00000000-0000-4000-8000-000000000001",
+        entity_id="00000000-0000-4000-8000-000000000002",
+    ).access_token
+    next_private_pem, next_jwk = generate_ed25519_material("next-key")
+    private_path.write_bytes(next_private_pem)
+    public_path.write_text(json.dumps({"keys": [next_jwk]}))
+
+    rotation = manager.rotate(new_kid="next-key", retire_old_after_seconds=0)
+
+    assert rotation.retiring_kids == ()
+    with pytest.raises(jwt.InvalidTokenError, match="unknown kid"):
+        manager.verify_access_token(old_token)
 
 
 def test_access_token_rejects_caller_supplied_key_headers(tmp_path) -> None:
