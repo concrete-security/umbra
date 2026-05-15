@@ -4,6 +4,7 @@ use chrono::{SecondsFormat, Utc};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use zeroize::Zeroizing;
 
 use crate::{
     cli::AuthCommand,
@@ -25,6 +26,11 @@ struct DeviceStart {
 #[derive(Debug, Serialize)]
 struct DeviceStartRequest<'a> {
     provider: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct RefreshRequest<'a> {
+    refresh_token: &'a str,
 }
 
 #[derive(Debug, Deserialize)]
@@ -104,6 +110,8 @@ pub fn run(command: AuthCommand, config: &ResolvedConfig, json: bool) -> ExitSta
         } => login(config, json, provider, device || no_browser),
         AuthCommand::Logout => logout(config, json),
         AuthCommand::Status => status(config, json),
+        AuthCommand::Refresh => refresh(config, json),
+        AuthCommand::Token => token(config),
     }
 }
 
@@ -287,6 +295,139 @@ fn complete_login(
         );
     }
     Ok(())
+}
+
+fn refresh(config: &ResolvedConfig, json_output: bool) -> ExitStatus {
+    match refresh_existing_session(config) {
+        Ok(session) => {
+            if json_output {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "expires_at": format_time(session.expires_at),
+                        "refresh_expires_at": session.refresh_expires_at.map(format_time),
+                    })
+                );
+            } else {
+                println!(
+                    "session refreshed until {}",
+                    format_time(session.expires_at)
+                );
+            }
+            ExitStatus::Ok
+        }
+        Err((status, message)) => {
+            eprintln!("{message}");
+            status
+        }
+    }
+}
+
+fn token(config: &ResolvedConfig) -> ExitStatus {
+    let session = match load_session_or_auth_required(config) {
+        Ok(session) => session,
+        Err((status, message)) => {
+            eprintln!("{message}");
+            return status;
+        }
+    };
+    if session.expires_at > Utc::now() {
+        println!("{}", session.access_token);
+        return ExitStatus::Ok;
+    }
+    match refresh_existing_session(config) {
+        Ok(session) => {
+            println!("{}", session.access_token);
+            ExitStatus::Ok
+        }
+        Err((status, message)) => {
+            eprintln!("{message}");
+            status
+        }
+    }
+}
+
+fn load_session_or_auth_required(config: &ResolvedConfig) -> Result<Session, (ExitStatus, String)> {
+    match session::load(&config.config_dir) {
+        Ok(Some(value)) => Ok(value),
+        Ok(None) => Err((
+            ExitStatus::AuthRequired,
+            "[auth_required] no session found".to_string(),
+        )),
+        Err(message) => Err((ExitStatus::Error, message)),
+    }
+}
+
+fn refresh_existing_session(config: &ResolvedConfig) -> Result<Session, (ExitStatus, String)> {
+    let mut session = load_session_or_auth_required(config)?;
+    let refresh_token = Zeroizing::new(session.refresh_token.clone().ok_or_else(|| {
+        (
+            ExitStatus::AuthRequired,
+            "[auth_required] no refresh token stored; run concrete auth login".to_string(),
+        )
+    })?);
+    match session.refresh_expires_at {
+        Some(expires_at) if expires_at > Utc::now() => {}
+        _ => {
+            return Err((
+                ExitStatus::AuthRequired,
+                "[auth_required] refresh token expired; run concrete auth login".to_string(),
+            ))
+        }
+    }
+    let console_url = config
+        .require_console_url()
+        .map_err(|message| (ExitStatus::Usage, message))?;
+    let client = Client::new();
+    let token_pair = refresh_token_pair(&client, console_url, refresh_token.as_str())?;
+    let now = Utc::now();
+    session.access_token = token_pair.access_token;
+    session.refresh_token = token_pair.refresh_token;
+    session.expires_at = now + chrono::Duration::seconds(token_pair.expires_in);
+    session.refresh_expires_at = token_pair
+        .refresh_expires_in
+        .map(|seconds| now + chrono::Duration::seconds(seconds));
+    session::write_atomic(&config.config_dir, &session)
+        .map_err(|message| (ExitStatus::Error, message))?;
+    Ok(session)
+}
+
+fn refresh_token_pair(
+    client: &Client,
+    console_url: &str,
+    refresh_token: &str,
+) -> Result<TokenPair, (ExitStatus, String)> {
+    let response = client
+        .post(format!("{console_url}/api/v1/auth/refresh"))
+        .json(&RefreshRequest { refresh_token })
+        .send()
+        .map_err(|err| {
+            (
+                ExitStatus::Error,
+                format!("[error] failed to refresh session: {err}"),
+            )
+        })?;
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+        return Err((
+            ExitStatus::AuthRequired,
+            "[auth_required] refresh token rejected; run concrete auth login".to_string(),
+        ));
+    }
+    if !response.status().is_success() {
+        return Err((
+            ExitStatus::Error,
+            format!(
+                "[error] failed to refresh session: HTTP {}",
+                response.status()
+            ),
+        ));
+    }
+    response.json::<TokenPair>().map_err(|err| {
+        (
+            ExitStatus::Error,
+            format!("[error] malformed refresh response: {err}"),
+        )
+    })
 }
 
 fn logout(config: &ResolvedConfig, json_output: bool) -> ExitStatus {

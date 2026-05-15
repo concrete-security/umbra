@@ -67,4 +67,10 @@ pub enum AuthCommand {
 
     /// Show local session status without a network call.
     Status,
+
+    /// Force a refresh of the stored access token.
+    Refresh,
+
+    /// Print the current access token.
+    Token,
 }
