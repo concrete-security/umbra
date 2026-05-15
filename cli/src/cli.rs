@@ -57,6 +57,10 @@ pub enum Command {
     #[command(subcommand)]
     Entity(EntityCommand),
 
+    /// Manage Dev CVMs.
+    #[command(subcommand)]
+    Cvm(CvmCommand),
+
     /// Manage SSH public keys registered with the Console.
     #[command(subcommand)]
     Key(KeyCommand),
@@ -202,6 +206,24 @@ pub struct EntityListArgs {
     /// Opaque pagination cursor from the previous response.
     #[arg(long)]
     pub cursor: Option<String>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum CvmCommand {
+    /// List Dev CVMs visible to the current user.
+    List,
+
+    /// Attach a profile to a Dev CVM.
+    Attach {
+        /// Dev CVM UUID.
+        cvm_id: String,
+    },
+
+    /// Detach a profile from a Dev CVM.
+    Detach {
+        /// Dev CVM UUID.
+        cvm_id: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
