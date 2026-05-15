@@ -69,9 +69,14 @@ async def require_current_user(
     authorization: Annotated[str | None, Header()] = None,
     pool: asyncpg.Pool = Depends(get_pool),
 ) -> CurrentUser:
-    if not authorization or not authorization.startswith("Bearer "):
+    if authorization is None:
         raise api_error(401, "UNAUTHORIZED", "missing bearer token")
-    token = authorization.removeprefix("Bearer ").strip()
+    try:
+        scheme, token = authorization.split(" ", 1)
+    except ValueError:
+        raise api_error(401, "UNAUTHORIZED", "missing bearer token") from None
+    if scheme != "Bearer" or not token or token.strip() != token or " " in token:
+        raise api_error(401, "UNAUTHORIZED", "missing bearer token")
     try:
         claims = get_jwt_manager().verify_access_token(token)
         user_id = UUID(str(claims["sub"]))

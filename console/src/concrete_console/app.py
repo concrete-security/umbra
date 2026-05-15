@@ -5,6 +5,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from concrete_console.db import close_pool
+from concrete_console.routes_auth import router as auth_router
 from concrete_console.routes import router
 
 
@@ -17,6 +18,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="Concrete Console", version="0.1.0", lifespan=lifespan)
+app.include_router(auth_router)
 app.include_router(router)
 
 

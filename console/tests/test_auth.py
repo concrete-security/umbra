@@ -1,9 +1,10 @@
+import asyncio
 from uuid import UUID
 
 import pytest
 from fastapi import HTTPException
 
-from concrete_console.auth import CurrentUser
+from concrete_console.auth import CurrentUser, require_current_user
 
 
 def current_user(*, permissions: set[str] | None = None) -> CurrentUser:
@@ -41,3 +42,11 @@ def test_require_entity_allows_platform_operator_cross_entity() -> None:
     current_user(permissions={"PLATFORM_OPERATOR"}).require_entity(
         UUID("00000000-0000-4000-8000-000000000003")
     )
+
+
+def test_require_current_user_rejects_whitespace_slop_before_db_lookup() -> None:
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(require_current_user("Bearer  not-a-token"))
+
+    assert exc.value.status_code == 401
+    assert exc.value.detail["error"]["code"] == "UNAUTHORIZED"
