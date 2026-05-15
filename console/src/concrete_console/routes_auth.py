@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import hmac
 import re
 from typing import Annotated
 from uuid import UUID
@@ -18,7 +19,15 @@ from concrete_console.crypto import pkce_s256, random_token_urlsafe, sha256_hex
 from concrete_console.db import get_pool
 from concrete_console.errors import api_error
 from concrete_console.jwt_keys import get_jwt_manager
-from concrete_console.oidc import exchange_authorization_code, google_authorize_redirect, oidc_settings, verify_google_id_token
+from concrete_console.oidc import (
+    IdpOAuthError,
+    exchange_authorization_code,
+    google_authorize_redirect,
+    oidc_settings,
+    poll_device_code,
+    start_device_flow,
+    verify_google_id_token,
+)
 from concrete_console.sessions import issue_token_pair
 
 router = APIRouter(prefix="/api/v1/auth")
@@ -49,6 +58,13 @@ class LogoutRequest(BaseModel):
     refresh_token: str | None = Field(default=None, max_length=512)
 
 
+class DevicePollRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    device_code: str = Field(min_length=1, max_length=255)
+    polling_secret: str = Field(min_length=20, max_length=512)
+
+
 def oauth_error(error: str) -> JSONResponse:
     return JSONResponse(status_code=400, content={"error": error})
 
@@ -76,6 +92,138 @@ def request_ip(request: Request) -> str | None:
 def request_id(request: Request) -> str | None:
     value = request.headers.get("x-request-id")
     return value[:128] if value else None
+
+
+@router.post("/device/start")
+async def device_start(
+    pool: asyncpg.Pool = Depends(get_pool),
+):
+    try:
+        idp_response = await start_device_flow()
+    except (httpx.HTTPError, ValueError):
+        raise api_error(502, "UPSTREAM_ERROR", "OIDC device authorization failed") from None
+
+    device_code = idp_response.get("device_code")
+    user_code = idp_response.get("user_code")
+    verification_url = idp_response.get("verification_url") or idp_response.get("verification_uri")
+    expires_in = int(idp_response.get("expires_in", 0))
+    interval = int(idp_response.get("interval", 5))
+    if not all(isinstance(value, str) and value for value in (device_code, user_code, verification_url)):
+        raise api_error(502, "UPSTREAM_ERROR", "OIDC device authorization response was incomplete")
+    if expires_in <= 0:
+        raise api_error(502, "UPSTREAM_ERROR", "OIDC device authorization response was incomplete")
+
+    polling_secret = random_token_urlsafe()
+    async with pool.acquire() as conn:
+        await prune_expired_auth_rows(conn)
+        await conn.execute(
+            """
+            INSERT INTO device_flow_pending (
+                device_code,
+                polling_secret_hash,
+                provider,
+                expires_at,
+                interval_seconds
+            )
+            VALUES ($1, $2, 'google', now() + ($3::int * interval '1 second'), $4)
+            """,
+            device_code,
+            sha256_hex(polling_secret),
+            expires_in,
+            max(interval, 1),
+        )
+    return {
+        "user_code": user_code,
+        "verification_url": verification_url,
+        "device_code": device_code,
+        "polling_secret": polling_secret,
+        "expires_in": expires_in,
+        "interval": max(interval, 1),
+    }
+
+
+@router.post("/device/poll")
+async def device_poll(
+    body: DevicePollRequest,
+    request: Request,
+    pool: asyncpg.Pool = Depends(get_pool),
+):
+    now = datetime.now(timezone.utc)
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """
+                SELECT device_code, polling_secret_hash, expires_at, interval_seconds, last_polled_at
+                FROM device_flow_pending
+                WHERE device_code = $1
+                FOR UPDATE
+                """,
+                body.device_code,
+            )
+            if row is None:
+                return oauth_error("access_denied")
+            if not hmac.compare_digest(row["polling_secret_hash"], sha256_hex(body.polling_secret)):
+                raise api_error(401, "UNAUTHORIZED", "invalid polling secret")
+            if row["expires_at"] <= now:
+                await conn.execute("DELETE FROM device_flow_pending WHERE device_code = $1", body.device_code)
+                return oauth_error("expired_token")
+            if row["last_polled_at"] is not None:
+                earliest = row["last_polled_at"].timestamp() + max(row["interval_seconds"] - 1, 0)
+                if now.timestamp() < earliest:
+                    return oauth_error("slow_down")
+            await conn.execute(
+                "UPDATE device_flow_pending SET last_polled_at = now() WHERE device_code = $1",
+                body.device_code,
+            )
+
+    try:
+        idp_tokens = await poll_device_code(body.device_code)
+    except IdpOAuthError as exc:
+        if exc.error in {"authorization_pending", "slow_down"}:
+            return oauth_error(exc.error)
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM device_flow_pending WHERE device_code = $1", body.device_code)
+        return oauth_error(exc.error)
+    except (httpx.HTTPError, jwt.PyJWTError, ValueError):
+        raise api_error(502, "UPSTREAM_ERROR", "OIDC device token exchange failed") from None
+
+    try:
+        claims = await verify_google_id_token(idp_tokens.id_token, nonce=None, access_token=idp_tokens.access_token)
+    except (jwt.PyJWTError, ValueError):
+        raise api_error(502, "UPSTREAM_ERROR", "OIDC id_token verification failed") from None
+
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            pending = await conn.fetchrow(
+                """
+                SELECT device_code
+                FROM device_flow_pending
+                WHERE device_code = $1
+                FOR UPDATE
+                """,
+                body.device_code,
+            )
+            if pending is None:
+                return oauth_error("access_denied")
+            user_id = await resolve_oidc_user(conn, provider="google", claims=claims)
+            await conn.execute("DELETE FROM device_flow_pending WHERE device_code = $1", body.device_code)
+            token_pair = await issue_token_pair(
+                conn,
+                user_id=user_id,
+                ip_address=request_ip(request),
+                request_id=request_id(request),
+            )
+            await insert_audit_event(
+                conn,
+                entity_id=token_pair.entity_id,
+                actor_id=token_pair.user_id,
+                actor_email=token_pair.actor_email,
+                action="AUTH_SESSION_ISSUED",
+                target_type="user",
+                target_id=token_pair.user_id,
+                after={"refresh_jti": str(token_pair.refresh_jti), "flow": "device"},
+            )
+            return token_pair.response
 
 
 @router.get("/authorize")

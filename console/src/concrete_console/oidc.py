@@ -41,6 +41,12 @@ class IdpTokenResponse:
     access_token: str | None
 
 
+class IdpOAuthError(Exception):
+    def __init__(self, error: str):
+        super().__init__(error)
+        self.error = error
+
+
 @dataclass
 class JwksCache:
     keys: dict[str, dict[str, Any]]
@@ -108,6 +114,52 @@ async def exchange_authorization_code(code: str, *, settings: OidcSettings | Non
             },
         )
     response.raise_for_status()
+    body = response.json()
+    id_token = body.get("id_token")
+    if not isinstance(id_token, str):
+        raise ValueError("token endpoint did not return id_token")
+    access_token = body.get("access_token")
+    return IdpTokenResponse(
+        id_token=id_token,
+        access_token=access_token if isinstance(access_token, str) else None,
+    )
+
+
+async def start_device_flow(*, settings: OidcSettings | None = None) -> dict[str, Any]:
+    settings = settings or oidc_settings()
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        response = await client.post(
+            settings.device_code_url,
+            data={
+                "client_id": settings.google_client_id,
+                "scope": "openid email profile",
+            },
+        )
+    response.raise_for_status()
+    return response.json()
+
+
+async def poll_device_code(device_code: str, *, settings: OidcSettings | None = None) -> IdpTokenResponse:
+    settings = settings or oidc_settings()
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        response = await client.post(
+            settings.token_url,
+            data={
+                "client_id": settings.google_client_id,
+                "client_secret": settings.google_client_secret,
+                "device_code": device_code,
+                "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+            },
+        )
+    if response.status_code >= 400:
+        try:
+            error = response.json().get("error")
+        except ValueError:
+            error = None
+        if isinstance(error, str) and error:
+            raise IdpOAuthError(error)
+        response.raise_for_status()
+
     body = response.json()
     id_token = body.get("id_token")
     if not isinstance(id_token, str):

@@ -97,6 +97,7 @@ def upgrade() -> None:
             polling_secret_hash VARCHAR(128) NOT NULL,
             provider VARCHAR(50) NOT NULL,
             expires_at TIMESTAMPTZ NOT NULL,
+            interval_seconds INTEGER NOT NULL DEFAULT 5,
             last_polled_at TIMESTAMPTZ NULL,
             created_at TIMESTAMPTZ NOT NULL DEFAULT now()
         )

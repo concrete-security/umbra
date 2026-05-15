@@ -2,7 +2,14 @@ import pytest
 import jwt
 
 from concrete_console.crypto import pkce_s256
-from concrete_console.oidc import OidcSettings, google_authorize_redirect, oidc_settings, verify_google_id_token
+from concrete_console.oidc import (
+    IdpOAuthError,
+    OidcSettings,
+    google_authorize_redirect,
+    oidc_settings,
+    poll_device_code,
+    verify_google_id_token,
+)
 
 
 def test_oidc_settings_refuses_endpoint_override_without_debug_flag(monkeypatch) -> None:
@@ -67,3 +74,47 @@ def test_google_id_token_rejects_caller_supplied_key_headers_before_jwks(monkeyp
         import asyncio
 
         asyncio.run(verify_google_id_token(token, nonce=None, access_token=None, settings=settings))
+
+
+def test_device_poll_preserves_idp_pending_error(monkeypatch) -> None:
+    settings = OidcSettings(
+        google_client_id="google-client",
+        google_client_secret="secret",
+        console_url="https://console.example.com",
+        client_allowlist=frozenset({"concrete-cli-v1"}),
+        authorize_url="https://accounts.example/authorize",
+        token_url="https://accounts.example/token",
+        device_code_url="https://accounts.example/device",
+        jwks_url="https://accounts.example/jwks",
+    )
+
+    class FakeResponse:
+        status_code = 400
+
+        def json(self):
+            return {"error": "authorization_pending"}
+
+        def raise_for_status(self):
+            raise AssertionError("poll_device_code should surface OAuth errors directly")
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def post(self, *args, **kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr("concrete_console.oidc.httpx.AsyncClient", FakeClient)
+
+    with pytest.raises(IdpOAuthError) as exc:
+        import asyncio
+
+        asyncio.run(poll_device_code("device-code", settings=settings))
+
+    assert exc.value.error == "authorization_pending"
