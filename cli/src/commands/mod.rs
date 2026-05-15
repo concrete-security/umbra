@@ -4,5 +4,6 @@ pub mod auth;
 pub mod key;
 pub mod profile;
 pub mod quota;
+pub mod security_cvm;
 pub mod user;
 pub mod version;

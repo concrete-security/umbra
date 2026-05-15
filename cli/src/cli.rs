@@ -65,6 +65,10 @@ pub enum Command {
     #[command(subcommand)]
     Quota(QuotaCommand),
 
+    /// Inspect the entity Security CVM.
+    #[command(subcommand)]
+    SecurityCvm(SecurityCvmCommand),
+
     /// Manage users and user permissions.
     #[command(subcommand)]
     User(UserCommand),
@@ -280,6 +284,22 @@ pub struct QuotaClearArgs {
 
     #[command(flatten)]
     pub scope: QuotaScopeArgs,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum SecurityCvmCommand {
+    /// Show the current entity Security CVM.
+    Show,
+
+    /// Show the current entity Security CVM attestation diagnostic.
+    Attestation(SecurityCvmAttestationArgs),
+}
+
+#[derive(clap::Args, Debug)]
+pub struct SecurityCvmAttestationArgs {
+    /// Request a fresh Console-side attestation probe instead of persisted state.
+    #[arg(long)]
+    pub probe: bool,
 }
 
 #[derive(Subcommand, Debug)]
