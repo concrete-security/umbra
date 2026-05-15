@@ -12,6 +12,7 @@ from concrete_console.config import load_settings
 from concrete_console.db import get_pool
 from concrete_console.jwt_keys import get_jwt_manager
 from concrete_console.oidc import load_google_jwks
+from concrete_console.scheduler import check_operation_scheduler_recent
 
 CheckState = Literal["ok", "failed"]
 DEFAULT_PHALA_CLI_PATH = "/usr/local/bin/phala"
@@ -25,6 +26,7 @@ async def run_ready_checks() -> dict[str, CheckState]:
         _capped("cloudflare_adapter", _check_cloudflare_adapter(), timeout=1.0),
         _capped("phala_adapter", _check_phala_adapter(), timeout=1.0),
         _capped("audit_anchor_target", _check_audit_anchor_target(), timeout=1.0),
+        _capped("operation_scheduler", _check_operation_scheduler(), timeout=1.0),
     )
     return dict(results)
 
@@ -104,6 +106,10 @@ async def _check_audit_anchor_target() -> None:
     async with httpx.AsyncClient(timeout=0.5, follow_redirects=True) as client:
         response = await client.head(target)
     response.raise_for_status()
+
+
+async def _check_operation_scheduler() -> None:
+    check_operation_scheduler_recent()
 
 
 async def verify_configured_phala_cli(*, fetch_timeout: float) -> None:

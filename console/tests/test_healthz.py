@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from concrete_console import app as app_module
 from concrete_console import readiness
+from concrete_console import scheduler
 from concrete_console.app import app
 
 
@@ -65,6 +66,7 @@ def test_run_ready_checks_includes_oidc_jwks(monkeypatch) -> None:
     monkeypatch.setattr(readiness, "_check_cloudflare_adapter", ok)
     monkeypatch.setattr(readiness, "_check_phala_adapter", ok)
     monkeypatch.setattr(readiness, "_check_audit_anchor_target", ok)
+    monkeypatch.setattr(readiness, "_check_operation_scheduler", ok)
 
     assert asyncio.run(readiness.run_ready_checks()) == {
         "audit_anchor_target": "ok",
@@ -72,20 +74,32 @@ def test_run_ready_checks_includes_oidc_jwks(monkeypatch) -> None:
         "database": "ok",
         "jwt_keys": "ok",
         "oidc_jwks": "ok",
+        "operation_scheduler": "ok",
         "phala_adapter": "ok",
     }
 
 
-def test_lifespan_verifies_phala_cli_integrity(monkeypatch) -> None:
+def test_lifespan_verifies_phala_cli_integrity_and_runs_scheduler(monkeypatch) -> None:
     seen: list[float] = []
+    scheduler_tasks: list[object] = []
 
     async def verify(*, fetch_timeout: float) -> None:
         seen.append(fetch_timeout)
+
+    def start() -> object:
+        task = object()
+        scheduler_tasks.append(task)
+        return task
+
+    async def stop(task: object) -> None:
+        scheduler_tasks.append(task)
 
     async def close() -> None:
         return None
 
     monkeypatch.setattr(app_module, "verify_configured_phala_cli", verify)
+    monkeypatch.setattr(app_module, "start_operation_scheduler", start)
+    monkeypatch.setattr(app_module, "stop_operation_scheduler", stop)
     monkeypatch.setattr(app_module, "close_pool", close)
 
     async def exercise() -> None:
@@ -95,6 +109,8 @@ def test_lifespan_verifies_phala_cli_integrity(monkeypatch) -> None:
     asyncio.run(exercise())
 
     assert seen == [5.0]
+    assert len(scheduler_tasks) == 2
+    assert scheduler_tasks[0] is scheduler_tasks[1]
 
 
 def test_oidc_jwks_readiness_requires_keys(monkeypatch) -> None:
@@ -244,6 +260,28 @@ def test_audit_anchor_readiness_skips_when_unconfigured(monkeypatch) -> None:
     monkeypatch.delenv("AUDIT_ANCHOR_TARGET", raising=False)
 
     asyncio.run(readiness._check_audit_anchor_target())
+
+
+def test_operation_scheduler_readiness_requires_recent_tick(monkeypatch) -> None:
+    monkeypatch.setenv("RECONCILER_INTERVAL_SECONDS", "30")
+    scheduler._last_successful_tick_monotonic = None
+
+    try:
+        scheduler.check_operation_scheduler_recent(now=100)
+    except RuntimeError as exc:
+        assert str(exc) == "operation scheduler has not ticked"
+    else:
+        raise AssertionError("expected missing scheduler tick failure")
+
+    scheduler.mark_scheduler_tick_success(now=100)
+    scheduler.check_operation_scheduler_recent(now=159)
+
+    try:
+        scheduler.check_operation_scheduler_recent(now=161)
+    except RuntimeError as exc:
+        assert str(exc) == "operation scheduler tick is stale"
+    else:
+        raise AssertionError("expected stale scheduler tick failure")
 
 
 def test_metrics_requires_bearer_token(monkeypatch) -> None:

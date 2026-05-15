@@ -15,6 +15,7 @@ from concrete_console.readiness import run_ready_checks, verify_configured_phala
 from concrete_console.routes_auth import router as auth_router
 from concrete_console.routes_internal import router as internal_router
 from concrete_console.routes import router
+from concrete_console.scheduler import start_operation_scheduler, stop_operation_scheduler
 
 REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 SECURITY_HEADERS = {
@@ -32,9 +33,11 @@ log = logger()
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     await verify_configured_phala_cli(fetch_timeout=5.0)
+    scheduler_task = start_operation_scheduler()
     try:
         yield
     finally:
+        await stop_operation_scheduler(scheduler_task)
         await close_pool()
 
 
