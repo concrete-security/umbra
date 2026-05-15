@@ -8,8 +8,11 @@ from fastapi import HTTPException
 
 from concrete_console.routes import (
     AuditExportCreate,
+    cvm_etag,
+    ensure_no_sandbox_env_conflict,
     policy_sha256,
     profile_etag,
+    require_cvm_profile_mutable,
     require_idempotency_key,
     require_if_match,
     ssh_key_fingerprint,
@@ -54,8 +57,31 @@ def user_row(**overrides):
     return row
 
 
+def cvm_row(**overrides):
+    row = {
+        "id": UUID("00000000-0000-4000-8000-000000000030"),
+        "state": "RUNNING",
+        "policy_version": 4,
+        "updated_at": datetime(1970, 1, 1, 0, 0, 0, 123456, tzinfo=timezone.utc),
+    }
+    row.update(overrides)
+    return row
+
+
 def test_profile_etag_uses_updated_at_microseconds() -> None:
     assert profile_etag(profile_row()) == 'W/"00000000-0000-4000-8000-000000000010:123456"'
+
+
+def test_cvm_etag_includes_policy_version() -> None:
+    assert cvm_etag(cvm_row()) == 'W/"00000000-0000-4000-8000-000000000030:4:123456"'
+
+
+def test_require_cvm_profile_mutable_rejects_terminated_cvm() -> None:
+    with pytest.raises(HTTPException) as exc:
+        require_cvm_profile_mutable(cvm_row(state="TERMINATED"), action="detach")
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail["error"]["details"]["state"] == "cvm_terminated"
 
 
 def test_user_etag_changes_with_permissions() -> None:
@@ -117,6 +143,26 @@ def test_validate_profile_policy_rejects_bad_sandbox_env() -> None:
     assert exc.value.status_code == 422
     errors = exc.value.detail["error"]["details"]["errors"]
     assert {error["type"] for error in errors} == {"invalid_name", "reserved_name", "value_denied"}
+
+
+def test_ensure_no_sandbox_env_conflict_rejects_different_values() -> None:
+    with pytest.raises(HTTPException) as exc:
+        ensure_no_sandbox_env_conflict(
+            [
+                {
+                    "profile_id": UUID("00000000-0000-4000-8000-000000000031"),
+                    "policy": {"sandbox_env": {"API_KEY": "placeholder-a"}},
+                },
+                {
+                    "profile_id": UUID("00000000-0000-4000-8000-000000000032"),
+                    "policy": {"sandbox_env": {"API_KEY": "placeholder-b"}},
+                },
+            ]
+        )
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail["error"]["details"]["state"] == "sandbox_env_conflict"
+    assert exc.value.detail["error"]["details"]["name"] == "API_KEY"
 
 
 def test_validate_permission_symbol_rejects_unknown_permission() -> None:

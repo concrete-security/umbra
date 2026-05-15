@@ -219,6 +219,12 @@ class ProfileUserAssign(BaseModel):
     user_id: UUID
 
 
+class CVMProfileAttach(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    profile_id: UUID
+
+
 class SSHKeyCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -269,6 +275,26 @@ def user_etag(row: asyncpg.Record | dict) -> str:
     payload = user_resource({**dict(row), "profiles": []})
     digest = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
     return f'W/"{payload["id"]}:{digest}"'
+
+
+def cvm_etag(row: asyncpg.Record | dict) -> str:
+    row = dict(row)
+    updated_at = row["updated_at"]
+    if updated_at.tzinfo is None:
+        updated_at = updated_at.replace(tzinfo=timezone.utc)
+    epoch_us = int(updated_at.timestamp() * 1_000_000)
+    return f'W/"{row["id"]}:{row["policy_version"]}:{epoch_us}"'
+
+
+def require_cvm_profile_mutable(row: asyncpg.Record | dict, *, action: str) -> None:
+    if row["state"] == "TERMINATED":
+        preposition = "to" if action == "attach" else "from"
+        raise api_error(
+            409,
+            "CONFLICT",
+            f"cannot {action} a profile {preposition} a terminated CVM",
+            {"state": "cvm_terminated"},
+        )
 
 
 def require_matching_etag(current: str, if_match: str | None) -> None:
@@ -2131,6 +2157,7 @@ async def list_cvms(
 @router.get("/cvms/{cvm_id}")
 async def get_cvm(
     cvm_id: UUID,
+    response: Response,
     current_user: CurrentUser = Depends(require_current_user),
     pool: asyncpg.Pool = Depends(get_pool),
 ) -> dict:
@@ -2142,6 +2169,230 @@ async def get_cvm(
     rows = await fetch_cvm_rows(pool, where_clause=" AND ".join(clauses), values=values)
     if not rows:
         raise api_error(404, "NOT_FOUND", "resource not found")
+    response.headers["ETag"] = cvm_etag(rows[0])
+    return cvm_resource(rows[0])
+
+
+@router.post("/cvms/{cvm_id}/profiles")
+async def attach_cvm_profile(
+    cvm_id: UUID,
+    body: CVMProfileAttach,
+    response: Response,
+    if_match: Annotated[str | None, Header(alias="If-Match")] = None,
+    current_user: CurrentUser = Depends(require_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> dict:
+    current_user.require_permission("CVM_MANAGE")
+    changed = False
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            cvm = await lock_cvm_for_policy_mutation(conn, cvm_id=cvm_id, current_user=current_user)
+            require_matching_etag(cvm_etag(cvm), if_match)
+            require_cvm_profile_mutable(cvm, action="attach")
+            profile = await conn.fetchrow(
+                """
+                SELECT id AS profile_id, entity_id, name, policy
+                FROM entity_profiles
+                WHERE id = $1
+                  AND entity_id = $2
+                  AND deleted_at IS NULL
+                """,
+                body.profile_id,
+                current_user.entity_id,
+            )
+            if profile is None:
+                raise api_error(404, "NOT_FOUND", "resource not found")
+            membership = await conn.fetchval(
+                """
+                SELECT 1
+                FROM profile_users
+                WHERE profile_id = $1
+                  AND user_id = $2
+                LIMIT 1
+                """,
+                body.profile_id,
+                current_user.id,
+            )
+            if membership is None:
+                raise api_error(
+                    403,
+                    "FORBIDDEN",
+                    "profile membership is required",
+                    {"required": "profile_member", "profile_id": str(body.profile_id)},
+                )
+            existing_policies = await conn.fetch(
+                """
+                SELECT ep.id AS profile_id, ep.policy
+                FROM cvm_profiles cp
+                JOIN entity_profiles ep ON ep.id = cp.profile_id
+                WHERE cp.cvm_id = $1
+                  AND ep.deleted_at IS NULL
+                ORDER BY cp.attached_at, cp.profile_id
+                """,
+                cvm_id,
+            )
+            ensure_no_sandbox_env_conflict([*existing_policies, profile])
+            result = await conn.execute(
+                """
+                INSERT INTO cvm_profiles (cvm_id, profile_id, attached_by)
+                VALUES ($1, $2, $3)
+                ON CONFLICT DO NOTHING
+                """,
+                cvm_id,
+                body.profile_id,
+                current_user.id,
+            )
+            changed = result == "INSERT 0 1"
+            if changed:
+                await bump_cvm_policy_version(conn, cvm_id)
+                await insert_audit_event(
+                    conn,
+                    entity_id=current_user.entity_id,
+                    actor_id=current_user.id,
+                    actor_email=current_user.email,
+                    action="CVM_PROFILE_ATTACHED",
+                    target_type="cvm",
+                    target_id=cvm_id,
+                    after={
+                        "cvm_id": str(cvm_id),
+                        "profile_id": str(profile["profile_id"]),
+                        "profile_name": profile["name"],
+                        "policy_version": cvm["policy_version"] + 1,
+                    },
+                )
+    return await fetch_visible_cvm_resource(pool, cvm_id=cvm_id, current_user=current_user, response=response)
+
+
+@router.delete("/cvms/{cvm_id}/profiles/{profile_id}")
+async def detach_cvm_profile(
+    cvm_id: UUID,
+    profile_id: UUID,
+    response: Response,
+    if_match: Annotated[str | None, Header(alias="If-Match")] = None,
+    current_user: CurrentUser = Depends(require_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> dict:
+    current_user.require_permission("CVM_MANAGE")
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            cvm = await lock_cvm_for_policy_mutation(conn, cvm_id=cvm_id, current_user=current_user)
+            require_matching_etag(cvm_etag(cvm), if_match)
+            require_cvm_profile_mutable(cvm, action="detach")
+            attachment = await conn.fetchrow(
+                """
+                SELECT ep.id, ep.name
+                FROM cvm_profiles cp
+                JOIN entity_profiles ep ON ep.id = cp.profile_id
+                WHERE cp.cvm_id = $1
+                  AND ep.id = $2
+                  AND ep.entity_id = $3
+                  AND ep.deleted_at IS NULL
+                """,
+                cvm_id,
+                profile_id,
+                current_user.entity_id,
+            )
+            if attachment is None:
+                raise api_error(404, "NOT_FOUND", "resource not found")
+            attachment_count = await conn.fetchval("SELECT count(*) FROM cvm_profiles WHERE cvm_id = $1", cvm_id)
+            if attachment_count <= 1:
+                raise api_error(409, "CONFLICT", "cannot detach the last CVM profile", {"state": "last_profile"})
+            await conn.execute("DELETE FROM cvm_profiles WHERE cvm_id = $1 AND profile_id = $2", cvm_id, profile_id)
+            await bump_cvm_policy_version(conn, cvm_id)
+            await insert_audit_event(
+                conn,
+                entity_id=current_user.entity_id,
+                actor_id=current_user.id,
+                actor_email=current_user.email,
+                action="CVM_PROFILE_DETACHED",
+                target_type="cvm",
+                target_id=cvm_id,
+                before={
+                    "cvm_id": str(cvm_id),
+                    "profile_id": str(attachment["id"]),
+                    "profile_name": attachment["name"],
+                    "policy_version_before": cvm["policy_version"],
+                },
+                after={"policy_version_after": cvm["policy_version"] + 1},
+            )
+    return await fetch_visible_cvm_resource(pool, cvm_id=cvm_id, current_user=current_user, response=response)
+
+
+async def lock_cvm_for_policy_mutation(
+    conn: asyncpg.Connection,
+    *,
+    cvm_id: UUID,
+    current_user: CurrentUser,
+) -> asyncpg.Record:
+    row = await conn.fetchrow(
+        """
+        SELECT id, entity_id, state::text AS state, policy_version, updated_at
+        FROM cvms
+        WHERE id = $1
+          AND entity_id = $2
+          AND deleted_at IS NULL
+        FOR UPDATE
+        """,
+        cvm_id,
+        current_user.entity_id,
+    )
+    if row is None:
+        raise api_error(404, "NOT_FOUND", "resource not found")
+    return row
+
+
+async def bump_cvm_policy_version(conn: asyncpg.Connection, cvm_id: UUID) -> None:
+    await conn.execute(
+        """
+        UPDATE cvms
+        SET policy_version = policy_version + 1,
+            updated_at = now()
+        WHERE id = $1
+        """,
+        cvm_id,
+    )
+
+
+def ensure_no_sandbox_env_conflict(profile_rows: list[Any]) -> None:
+    merged: dict[str, tuple[str, str]] = {}
+    for row in profile_rows:
+        policy = json_payload(row["policy"])
+        if not isinstance(policy, dict):
+            continue
+        sandbox_env = policy.get("sandbox_env", {})
+        if not isinstance(sandbox_env, dict):
+            continue
+        for name, value in sandbox_env.items():
+            if not isinstance(name, str) or not isinstance(value, str):
+                continue
+            existing = merged.get(name)
+            if existing is not None and existing[0] != value:
+                raise api_error(
+                    409,
+                    "CONFLICT",
+                    "attached profiles contain conflicting sandbox_env values",
+                    {
+                        "state": "sandbox_env_conflict",
+                        "name": name,
+                        "profile_ids": sorted([existing[1], str(row["profile_id"])]),
+                    },
+                )
+            merged[name] = (value, str(row["profile_id"]))
+
+
+async def fetch_visible_cvm_resource(
+    pool: asyncpg.Pool,
+    *,
+    cvm_id: UUID,
+    current_user: CurrentUser,
+    response: Response | None = None,
+) -> dict:
+    clauses = ["c.id = $1", "c.entity_id = $2", "c.deleted_at IS NULL"]
+    rows = await fetch_cvm_rows(pool, where_clause=" AND ".join(clauses), values=[cvm_id, current_user.entity_id])
+    if not rows:
+        raise api_error(404, "NOT_FOUND", "resource not found")
+    if response is not None:
+        response.headers["ETag"] = cvm_etag(rows[0])
     return cvm_resource(rows[0])
 
 
@@ -2166,6 +2417,7 @@ async def fetch_cvm_rows(
             c.rtmr3_digest,
             c.attestation_verified_at,
             c.error_reason,
+            c.policy_version,
             c.created_at,
             c.updated_at,
             COALESCE(
