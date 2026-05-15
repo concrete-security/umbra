@@ -33,6 +33,7 @@ from concrete_console.resources import (
     entity_resource,
     json_payload,
     list_page,
+    operation_resource,
     profile_resource,
     ssh_key_resource,
     timestamp,
@@ -78,6 +79,12 @@ DEFAULT_USER_QUOTAS = {
 CREATE_ENTITY_ROUTE = "POST /api/v1/entities"
 CREATE_SSH_KEY_ROUTE = "POST /api/v1/me/keys"
 ADMIN_SESSIONS_REVOKE_ROUTE = "POST /api/v1/admin/sessions/revoke"
+OPERATION_KIND_PERMISSIONS = {
+    "audit.export": "AUDIT_EXPORT",
+    "cvm.launch": "CVM_LAUNCH",
+    "cvm.terminate": "CVM_MANAGE",
+    "security_cvm.provision": "SECURITY_CVM_CONFIGURE",
+}
 
 router = APIRouter(prefix="/api/v1")
 
@@ -2032,6 +2039,50 @@ async def list_audit_events(
         rows = await conn.fetch(query, *values)
     next_cursor = str(rows[limit]["seq"]) if len(rows) > limit else None
     return list_page([audit_event_resource(row) for row in rows[:limit]], next_cursor=next_cursor)
+
+
+@router.get("/operations/{operation_id}")
+async def get_operation(
+    operation_id: UUID,
+    current_user: CurrentUser = Depends(require_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> dict:
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT
+                o.id,
+                o.kind,
+                o.status::text AS status,
+                o.actor_id,
+                o.actor_email,
+                o.target_type,
+                o.target_id,
+                o.progress_step,
+                o.progress_percent,
+                o.result,
+                o.error,
+                o.created_at,
+                o.updated_at,
+                o.expires_at,
+                u.entity_id AS actor_entity_id
+            FROM operations o
+            LEFT JOIN users u ON u.id = o.actor_id
+            WHERE o.id = $1
+              AND (o.expires_at IS NULL OR o.expires_at > now())
+            """,
+            operation_id,
+        )
+    if row is None:
+        raise api_error(404, "NOT_FOUND", "resource not found")
+    if row["actor_id"] != current_user.id:
+        if "PLATFORM_OPERATOR" not in current_user.permissions and row["actor_entity_id"] != current_user.entity_id:
+            raise api_error(404, "NOT_FOUND", "resource not found")
+        required_permission = OPERATION_KIND_PERMISSIONS.get(row["kind"])
+        if required_permission is None:
+            raise api_error(404, "NOT_FOUND", "resource not found")
+        current_user.require_permission(required_permission)
+    return operation_resource(row)
 
 
 def parse_audit_cursor(cursor: str | None) -> int | None:

@@ -130,6 +130,32 @@ def audit_event_resource(row: Any) -> dict[str, Any]:
     }
 
 
+def operation_resource(row: Any) -> dict[str, Any]:
+    row = dict(row)
+    progress = None
+    if row["progress_step"] is not None:
+        progress = {
+            "step": row["progress_step"],
+            "percent": row["progress_percent"],
+        }
+    return {
+        "id": str(row["id"]),
+        "kind": row["kind"],
+        "status": row["status"],
+        "actor_id": str(row["actor_id"]) if row["actor_id"] else None,
+        "target": {
+            "type": row["target_type"],
+            "id": str(row["target_id"]) if row["target_id"] else None,
+        },
+        "result": json_payload(row["result"]) if row["result"] is not None else None,
+        "error": json_payload(row["error"]) if row["error"] is not None else None,
+        "progress": progress,
+        "created_at": timestamp(row["created_at"]),
+        "updated_at": timestamp(row["updated_at"]),
+        "expires_at": timestamp(row["expires_at"]) if row["expires_at"] else None,
+    }
+
+
 def json_payload(value: Any) -> Any:
     if isinstance(value, str):
         return json.loads(value)

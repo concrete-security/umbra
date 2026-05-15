@@ -3,6 +3,7 @@ from uuid import UUID
 
 from concrete_console.resources import (
     entity_quota_resource,
+    operation_resource,
     profile_resource,
     ssh_key_resource,
     user_quota_resource,
@@ -115,3 +116,32 @@ def test_quota_resources_format_optional_setter() -> None:
     assert entity_quota["set_at"] == "2026-05-15T18:50:00Z"
     assert user_quota["set_by"] is None
     assert user_quota["set_at"] is None
+
+
+def test_operation_resource_formats_target_progress_and_payloads() -> None:
+    resource = operation_resource(
+        {
+            "id": UUID("00000000-0000-4000-8000-000000000030"),
+            "kind": "audit.export",
+            "status": "succeeded",
+            "actor_id": UUID("00000000-0000-4000-8000-000000000001"),
+            "target_type": "audit_export",
+            "target_id": UUID("00000000-0000-4000-8000-000000000030"),
+            "progress_step": "finalise",
+            "progress_percent": 100,
+            "result": '{"row_count":1,"sha256":"abc"}',
+            "error": None,
+            "created_at": datetime(2026, 5, 15, 19, 40, tzinfo=timezone.utc),
+            "updated_at": datetime(2026, 5, 15, 19, 41, tzinfo=timezone.utc),
+            "expires_at": datetime(2026, 6, 14, 19, 41, tzinfo=timezone.utc),
+        }
+    )
+
+    assert resource["target"] == {
+        "type": "audit_export",
+        "id": "00000000-0000-4000-8000-000000000030",
+    }
+    assert resource["progress"] == {"step": "finalise", "percent": 100}
+    assert resource["result"] == {"row_count": 1, "sha256": "abc"}
+    assert resource["error"] is None
+    assert resource["expires_at"] == "2026-06-14T19:41:00Z"
