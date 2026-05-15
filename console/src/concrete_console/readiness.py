@@ -5,6 +5,7 @@ from typing import Literal
 
 from concrete_console.db import get_pool
 from concrete_console.jwt_keys import get_jwt_manager
+from concrete_console.oidc import load_google_jwks
 
 CheckState = Literal["ok", "failed"]
 
@@ -13,6 +14,7 @@ async def run_ready_checks() -> dict[str, CheckState]:
     results = await asyncio.gather(
         _capped("database", _check_database(), timeout=1.0),
         _capped("jwt_keys", _check_jwt_keys(), timeout=1.0),
+        _capped("oidc_jwks", _check_oidc_jwks(), timeout=1.0),
     )
     return dict(results)
 
@@ -44,3 +46,12 @@ async def _check_jwt_keys() -> None:
             raise RuntimeError("active JWT kid is not in verifying key set")
 
     await asyncio.to_thread(load_keys)
+
+
+async def _check_oidc_jwks() -> None:
+    async def load_keys() -> None:
+        keys = await load_google_jwks(force=False)
+        if not keys:
+            raise RuntimeError("OIDC JWKS did not return any keys")
+
+    await asyncio.wait_for(load_keys(), timeout=0.5)

@@ -204,6 +204,10 @@ async def _load_jwks(settings: OidcSettings, *, force: bool = False) -> dict[str
     return keys
 
 
+async def load_google_jwks(*, settings: OidcSettings | None = None, force: bool = False) -> dict[str, dict[str, Any]]:
+    return await _load_jwks(settings or oidc_settings(), force=force)
+
+
 def _at_hash(access_token: str) -> str:
     digest = jwt.algorithms.get_default_algorithms()["RS256"].compute_hash_digest(access_token.encode("ascii"))
     return b64url(digest[: len(digest) // 2])
@@ -228,10 +232,10 @@ async def verify_google_id_token(
     if not isinstance(kid, str) or not GOOGLE_KID_RE.fullmatch(kid):
         raise jwt.InvalidTokenError("invalid id_token kid")
 
-    keys = await _load_jwks(settings)
+    keys = await load_google_jwks(settings=settings)
     jwk = keys.get(kid)
     if jwk is None:
-        keys = await _load_jwks(settings, force=True)
+        keys = await load_google_jwks(settings=settings, force=True)
         jwk = keys.get(kid)
     if jwk is None:
         raise jwt.InvalidTokenError("unknown id_token kid")
