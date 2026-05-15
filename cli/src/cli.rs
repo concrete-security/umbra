@@ -53,6 +53,10 @@ pub enum Command {
     #[command(subcommand)]
     Audit(AuditCommand),
 
+    /// Manage tenant entities.
+    #[command(subcommand)]
+    Entity(EntityCommand),
+
     /// Manage SSH public keys registered with the Console.
     #[command(subcommand)]
     Key(KeyCommand),
@@ -161,6 +165,36 @@ pub struct AuditEventsArgs {
     #[arg(long)]
     pub to: Option<String>,
 
+    /// Page size, 1..500.
+    #[arg(long, default_value_t = 100)]
+    pub limit: u16,
+
+    /// Opaque pagination cursor from the previous response.
+    #[arg(long)]
+    pub cursor: Option<String>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum EntityCommand {
+    /// Create a tenant entity.
+    Add(EntityAddArgs),
+
+    /// List tenant entities.
+    List(EntityListArgs),
+}
+
+#[derive(clap::Args, Debug)]
+pub struct EntityAddArgs {
+    /// Entity domain.
+    pub domain: String,
+
+    /// Entity display name.
+    #[arg(long)]
+    pub name: String,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct EntityListArgs {
     /// Page size, 1..500.
     #[arg(long, default_value_t = 100)]
     pub limit: u16,

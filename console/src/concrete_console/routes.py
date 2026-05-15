@@ -748,6 +748,35 @@ async def delete_ssh_key(
     return Response(status_code=204)
 
 
+@router.get("/entities")
+async def list_entities(
+    limit: int = Query(default=100, ge=1, le=500),
+    cursor: str | None = Query(default=None, max_length=80),
+    current_user: CurrentUser = Depends(require_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> dict:
+    current_user.require_permission("PLATFORM_OPERATOR")
+    cursor_anchor = parse_entity_cursor(cursor)
+    values: list[object] = []
+    clauses: list[str] = []
+    if cursor_anchor is not None:
+        values.extend([cursor_anchor[0], cursor_anchor[1]])
+        clauses.append("(created_at, id) < ($1, $2)")
+    values.append(limit + 1)
+    where_clause = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    query = f"""
+        SELECT id, name, domain, created_at
+        FROM entities
+        {where_clause}
+        ORDER BY created_at DESC, id DESC
+        LIMIT ${len(values)}
+    """
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(query, *values)
+    next_cursor = entity_cursor(rows[limit - 1]) if len(rows) > limit else None
+    return list_page([entity_resource(row) for row in rows[:limit]], next_cursor=next_cursor)
+
+
 @router.post("/entities", status_code=201)
 async def create_entity(
     request: Request,
@@ -3091,6 +3120,29 @@ def parse_audit_cursor(cursor: str | None) -> int | None:
 
 def traffic_log_cursor(row: asyncpg.Record) -> str:
     return f"{timestamp(row['timestamp'])}|{row['id']}"
+
+
+def entity_cursor(row: asyncpg.Record) -> str:
+    return f"{timestamp(row['created_at'])}|{row['id']}"
+
+
+def parse_entity_cursor(cursor: str | None) -> tuple[datetime, UUID] | None:
+    if cursor is None:
+        return None
+    try:
+        created_at_raw, entity_id_raw = cursor.split("|", 1)
+        created_at = datetime.fromisoformat(created_at_raw.replace("Z", "+00:00"))
+        entity_id = UUID(entity_id_raw)
+    except (ValueError, TypeError):
+        raise api_error(
+            422,
+            "VALIDATION_ERROR",
+            "invalid cursor",
+            {"errors": [{"type": "invalid_cursor", "field": "cursor"}]},
+        ) from None
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    return created_at, entity_id
 
 
 def parse_traffic_log_cursor(cursor: str | None) -> tuple[datetime, UUID] | None:

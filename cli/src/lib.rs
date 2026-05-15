@@ -34,6 +34,7 @@ pub fn run() -> ExitCode {
         cli::Command::Admin(command) => commands::admin::run(command, &config, args.json),
         cli::Command::Audit(command) => commands::audit::run(command, &config, args.json),
         cli::Command::Auth(command) => commands::auth::run(command, &config, args.json),
+        cli::Command::Entity(command) => commands::entity::run(command, &config, args.json),
         cli::Command::Key(command) => commands::key::run(command, &config, args.json),
         cli::Command::Profile(command) => commands::profile::run(command, &config, args.json),
         cli::Command::Quota(command) => commands::quota::run(command, &config, args.json),
