@@ -9,6 +9,7 @@ from fastapi import HTTPException
 from concrete_console.routes import (
     AuditExportCreate,
     cvm_etag,
+    erased_user_email,
     ensure_no_sandbox_env_conflict,
     policy_sha256,
     profile_etag,
@@ -86,6 +87,13 @@ def test_require_cvm_profile_mutable_rejects_terminated_cvm() -> None:
 
 def test_user_etag_changes_with_permissions() -> None:
     assert user_etag(user_row(permissions=[])) != user_etag(user_row(permissions=["CVM_LAUNCH"]))
+
+
+def test_erased_user_email_is_stable_tombstone() -> None:
+    assert (
+        erased_user_email(UUID("00000000-0000-4000-8000-000000000020"), "example.com")
+        == "<erased-4bcc13e151d8>@example.com"
+    )
 
 
 def test_require_if_match_rejects_missing_header() -> None:

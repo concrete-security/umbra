@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, Header, Query, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from concrete_console.audit import AUDIT_ACTIONS, insert_audit_event
+from concrete_console.audit import AUDIT_ACTIONS, insert_audit_event, redact_user_audit_trail
 from concrete_console.auth import CurrentUser, require_current_user
 from concrete_console.bootstrap import email_domain
 from concrete_console.config import load_settings
@@ -276,6 +276,11 @@ def user_etag(row: asyncpg.Record | dict) -> str:
     payload = user_resource({**dict(row), "profiles": []})
     digest = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
     return f'W/"{payload["id"]}:{digest}"'
+
+
+def erased_user_email(user_id: UUID, domain: str) -> str:
+    digest = hashlib.sha256(str(user_id).encode("utf-8")).hexdigest()[:12]
+    return f"<erased-{digest}>@{domain}"
 
 
 def cvm_etag(row: asyncpg.Record | dict) -> str:
@@ -552,8 +557,11 @@ async def fetch_user_row(conn: asyncpg.Connection, user_id: UUID) -> asyncpg.Rec
             u.name,
             u.entity_id,
             e.name AS entity_name,
-            COALESCE(array_agg(up.permission::text ORDER BY up.permission::text)
-                FILTER (WHERE up.permission IS NOT NULL), ARRAY[]::text[]) AS permissions,
+            (
+                SELECT COALESCE(array_agg(up.permission::text ORDER BY up.permission::text), ARRAY[]::text[])
+                FROM user_permissions up
+                WHERE up.user_id = u.id
+            ) AS permissions,
             u.created_at,
             u.deactivated_at,
             u.deleted_at
@@ -1987,6 +1995,149 @@ async def reactivate_user(
             return await fetch_user_resource(conn, user_id, response)
 
 
+@router.delete("/entities/{entity_id}/users/{user_id}", status_code=204)
+async def erase_user(
+    entity_id: UUID,
+    user_id: UUID,
+    request: Request,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+    if_match: Annotated[str | None, Header(alias="If-Match")] = None,
+    current_user: CurrentUser = Depends(require_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> Response:
+    idempotency_key_value = require_idempotency_key(idempotency_key)
+    current_user.require_entity(entity_id)
+    if current_user.id != user_id and "PLATFORM_OPERATOR" not in current_user.permissions:
+        raise api_error(
+            403,
+            "FORBIDDEN",
+            "user erasure requires self or platform operator",
+            {"required": "self_or_platform_operator"},
+        )
+    route = f"DELETE /api/v1/entities/{entity_id}/users/{user_id}"
+    body_sha256 = request_body_sha256(await request.body())
+
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await acquire_idempotency_lock(
+                conn,
+                credential_id=str(current_user.id),
+                idempotency_key=idempotency_key_value,
+                route=route,
+            )
+            cached = await lookup_idempotency_response(
+                conn,
+                credential_id=str(current_user.id),
+                idempotency_key=idempotency_key_value,
+                route=route,
+                body_sha256=body_sha256,
+            )
+            if cached is not None:
+                return Response(status_code=cached.status_code, headers=cached.headers)
+
+            user = await lock_user_for_lifecycle(conn, entity_id=entity_id, user_id=user_id)
+            if user["deleted_at"] is not None:
+                raise api_error(404, "NOT_FOUND", "resource not found")
+            if if_match is not None:
+                require_matching_etag(user_etag(user), if_match)
+
+            live_cvm_count = await conn.fetchval(
+                """
+                SELECT count(*)
+                FROM cvms
+                WHERE owner_id = $1
+                  AND deleted_at IS NULL
+                  AND state <> 'TERMINATED'
+                """,
+                user_id,
+            )
+            if live_cvm_count:
+                rows = await conn.fetch(
+                    """
+                    SELECT id
+                    FROM cvms
+                    WHERE owner_id = $1
+                      AND deleted_at IS NULL
+                      AND state <> 'TERMINATED'
+                    ORDER BY created_at, id
+                    LIMIT 100
+                    """,
+                    user_id,
+                )
+                raise api_error(
+                    409,
+                    "CONFLICT",
+                    "user owns live CVMs",
+                    {
+                        "state": "user_owns_cvms",
+                        "live_cvm_count": live_cvm_count,
+                        "live_cvm_ids": [str(row["id"]) for row in rows],
+                    },
+                )
+
+            revoked_rows = await conn.fetch(
+                """
+                SELECT access_jti, access_expires_at
+                FROM refresh_tokens
+                WHERE user_id = $1
+                """,
+                user_id,
+            )
+            for row in revoked_rows:
+                await conn.execute(
+                    """
+                    INSERT INTO revoked_tokens (jti, expires_at, revoked_by)
+                    VALUES ($1, $2, $3)
+                    ON CONFLICT (jti) DO NOTHING
+                    """,
+                    row["access_jti"],
+                    row["access_expires_at"],
+                    current_user.id,
+                )
+
+            tombstone_email = erased_user_email(user_id, user["entity_domain"])
+            await insert_audit_event(
+                conn,
+                entity_id=entity_id,
+                actor_id=current_user.id,
+                actor_email=current_user.email,
+                action="USER_ERASED",
+                target_type="user",
+                target_id=user_id,
+                before={"email": user["email"], "name": user["name"]},
+                after={"email": tombstone_email, "name": "<erased>", "deleted_by": str(current_user.id)},
+            )
+            await conn.execute(
+                """
+                UPDATE users
+                SET email = $2,
+                    name = '<erased>',
+                    deleted_at = now(),
+                    deleted_by = $3
+                WHERE id = $1
+                """,
+                user_id,
+                tombstone_email,
+                current_user.id,
+            )
+            await conn.execute("DELETE FROM oauth_identities WHERE user_id = $1", user_id)
+            await conn.execute("DELETE FROM ssh_keys WHERE user_id = $1", user_id)
+            await conn.execute("DELETE FROM user_permissions WHERE user_id = $1", user_id)
+            await conn.execute("DELETE FROM profile_users WHERE user_id = $1", user_id)
+            await conn.execute("DELETE FROM refresh_tokens WHERE user_id = $1", user_id)
+            await redact_user_audit_trail(conn, email=user["email"], replacement=tombstone_email)
+            await store_idempotency_response(
+                conn,
+                credential_id=str(current_user.id),
+                idempotency_key=idempotency_key_value,
+                route=route,
+                body_sha256=body_sha256,
+                status_code=204,
+                response_body=None,
+            )
+    return Response(status_code=204)
+
+
 @router.post("/admin/sessions/revoke")
 async def revoke_admin_sessions(
     request: Request,
@@ -2827,11 +2978,27 @@ def parse_ssh_key_cursor(cursor: str | None) -> tuple[datetime, UUID] | None:
 async def lock_user_for_lifecycle(conn: asyncpg.Connection, *, entity_id: UUID, user_id: UUID) -> asyncpg.Record:
     row = await conn.fetchrow(
         """
-        SELECT id, entity_id, email, name, deactivated_at, deactivated_by, deleted_at
-        FROM users
-        WHERE id = $1
-          AND entity_id = $2
-        FOR UPDATE
+        SELECT
+            u.id,
+            u.entity_id,
+            u.email,
+            u.name,
+            e.name AS entity_name,
+            e.domain AS entity_domain,
+            (
+                SELECT COALESCE(array_agg(up.permission::text ORDER BY up.permission::text), ARRAY[]::text[])
+                FROM user_permissions up
+                WHERE up.user_id = u.id
+            ) AS permissions,
+            u.created_at,
+            u.deactivated_at,
+            u.deactivated_by,
+            u.deleted_at
+        FROM users u
+        JOIN entities e ON e.id = u.entity_id
+        WHERE u.id = $1
+          AND u.entity_id = $2
+        FOR UPDATE OF u
         """,
         user_id,
         entity_id,

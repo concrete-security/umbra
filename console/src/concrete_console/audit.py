@@ -140,3 +140,130 @@ async def insert_audit_event(
         prev_hash,
         row_hash,
     )
+
+
+def redact_email_payload(value: Any, *, email: str, replacement: str) -> tuple[Any, bool]:
+    if value is None:
+        return None, False
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except ValueError:
+            return value, False
+        if isinstance(decoded, (dict, list)):
+            return redact_email_payload(decoded, email=email, replacement=replacement)
+        return value, False
+    if isinstance(value, list):
+        changed = False
+        items: list[Any] = []
+        for item in value:
+            redacted_item, item_changed = redact_email_payload(item, email=email, replacement=replacement)
+            changed = changed or item_changed
+            items.append(redacted_item)
+        return items, changed
+    if isinstance(value, dict):
+        changed = False
+        redacted: dict[str, Any] = {}
+        for key, item in value.items():
+            if key == "email" and item == email:
+                redacted[key] = replacement
+                changed = True
+                continue
+            redacted_item, item_changed = redact_email_payload(item, email=email, replacement=replacement)
+            changed = changed or item_changed
+            redacted[key] = redacted_item
+        return redacted, changed
+    return value, False
+
+
+async def redact_user_audit_trail(conn: asyncpg.Connection, *, email: str, replacement: str) -> None:
+    await conn.execute("SELECT pg_advisory_xact_lock($1)", AUDIT_CHAIN_LOCK_ID)
+    rows = await conn.fetch(
+        """
+        SELECT
+            seq, id, entity_id, actor_id, actor_email, action, target_type, target_id,
+            before, after, ip_address, description, request_id, timestamp, prev_hash, row_hash
+        FROM audit_events
+        ORDER BY seq ASC
+        FOR UPDATE
+        """
+    )
+
+    updates: dict[int, dict[str, Any]] = {}
+    first_changed_index: int | None = None
+    for index, row in enumerate(rows):
+        actor_email = replacement if row["actor_email"] == email else row["actor_email"]
+        before, before_changed = redact_email_payload(row["before"], email=email, replacement=replacement)
+        after, after_changed = redact_email_payload(row["after"], email=email, replacement=replacement)
+        changed = actor_email != row["actor_email"] or before_changed or after_changed
+        if changed:
+            updates[row["seq"]] = {
+                "actor_email": actor_email,
+                "before": before,
+                "after": after,
+            }
+            if first_changed_index is None:
+                first_changed_index = index
+
+    if first_changed_index is None:
+        return
+
+    prev_hash = EMPTY_HASH if first_changed_index == 0 else rows[first_changed_index - 1]["row_hash"]
+    for row in rows[first_changed_index:]:
+        update = updates.get(
+            row["seq"],
+            {
+                "actor_email": row["actor_email"],
+                "before": _json_payload(row["before"]),
+                "after": _json_payload(row["after"]),
+            },
+        )
+        row_hash = audit_row_hash(
+            {
+                "seq": row["seq"],
+                "id": str(row["id"]),
+                "entity_id": str(row["entity_id"]) if row["entity_id"] else None,
+                "actor_id": str(row["actor_id"]) if row["actor_id"] else None,
+                "actor_email": update["actor_email"],
+                "action": row["action"],
+                "target_type": row["target_type"],
+                "target_id": row["target_id"],
+                "before": update["before"],
+                "after": update["after"],
+                "ip_address": row["ip_address"],
+                "description": row["description"],
+                "request_id": row["request_id"],
+                "timestamp": _timestamp(row["timestamp"]),
+                "prev_hash": prev_hash,
+            }
+        )
+        await conn.execute(
+            """
+            UPDATE audit_events
+            SET actor_email = $2,
+                before = $3::jsonb,
+                after = $4::jsonb,
+                prev_hash = $5,
+                row_hash = $6
+            WHERE seq = $1
+            """,
+            row["seq"],
+            update["actor_email"],
+            json.dumps(update["before"]) if update["before"] is not None else None,
+            json.dumps(update["after"]) if update["after"] is not None else None,
+            prev_hash,
+            row_hash,
+        )
+        prev_hash = row_hash
+
+
+def _json_payload(value: Any) -> Any:
+    if isinstance(value, str):
+        return json.loads(value)
+    return value
+
+
+def _timestamp(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.isoformat().replace("+00:00", "Z")

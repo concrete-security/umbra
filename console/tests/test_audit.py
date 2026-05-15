@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 import pytest
 from fastapi import HTTPException
 
-from concrete_console.audit import EMPTY_HASH, audit_row_hash
+from concrete_console.audit import EMPTY_HASH, audit_row_hash, redact_email_payload
 from concrete_console.routes import parse_audit_cursor
 
 
@@ -27,6 +27,27 @@ def test_audit_hash_matches_insert_payload_shape() -> None:
     }
 
     assert audit_row_hash(row) == audit_row_hash(dict(reversed(list(row.items()))))
+
+
+def test_redact_email_payload_rewrites_nested_email_values() -> None:
+    payload = {
+        "email": "dev@example.com",
+        "name": "Dev User",
+        "nested": [{"email": "dev@example.com"}, {"email": "other@example.com"}],
+    }
+
+    redacted, changed = redact_email_payload(
+        payload,
+        email="dev@example.com",
+        replacement="<erased-abc123>@example.com",
+    )
+
+    assert changed is True
+    assert redacted == {
+        "email": "<erased-abc123>@example.com",
+        "name": "Dev User",
+        "nested": [{"email": "<erased-abc123>@example.com"}, {"email": "other@example.com"}],
+    }
 
 
 def test_parse_audit_cursor_accepts_positive_integer() -> None:
