@@ -2,9 +2,11 @@ from datetime import datetime, timezone
 from uuid import UUID
 
 from concrete_console.resources import (
+    cvm_resource,
     entity_quota_resource,
     operation_resource,
     profile_resource,
+    security_cvm_resource,
     ssh_key_resource,
     traffic_log_resource,
     user_quota_resource,
@@ -171,3 +173,60 @@ def test_traffic_log_resource_formats_fields() -> None:
     assert resource["security_cvm_id"] == "00000000-0000-4000-8000-000000000041"
     assert resource["cvm_id"] == "00000000-0000-4000-8000-000000000042"
     assert resource["bytes_transferred"] == 1234
+
+
+def test_cvm_resource_formats_nested_profiles_and_keys() -> None:
+    resource = cvm_resource(
+        {
+            "id": UUID("00000000-0000-4000-8000-000000000050"),
+            "owner_id": UUID("00000000-0000-4000-8000-000000000051"),
+            "owner_email": "dev@example.com",
+            "entity_id": UUID("00000000-0000-4000-8000-000000000002"),
+            "profiles": '[{"id":"00000000-0000-4000-8000-000000000060","name":"default"}]',
+            "state": "RUNNING",
+            "instance_type": "tdx.small",
+            "region": "us",
+            "ssh_keys": '[{"id":"00000000-0000-4000-8000-000000000061","label":"laptop"}]',
+            "fqdn": "cvm.example.test",
+            "expected_image_measurement": "a" * 64,
+            "image_measurement": "b" * 64,
+            "rtmr3_digest": "c" * 96,
+            "attestation_verified_at": datetime(2026, 5, 15, 20, 10, tzinfo=timezone.utc),
+            "error_reason": None,
+            "created_at": datetime(2026, 5, 15, 20, 5, tzinfo=timezone.utc),
+            "updated_at": datetime(2026, 5, 15, 20, 6, tzinfo=timezone.utc),
+        }
+    )
+
+    assert resource["owner"] == {"id": "00000000-0000-4000-8000-000000000051", "email": "dev@example.com"}
+    assert resource["profiles"] == [{"id": "00000000-0000-4000-8000-000000000060", "name": "default"}]
+    assert resource["ssh_keys"] == [{"id": "00000000-0000-4000-8000-000000000061", "label": "laptop"}]
+    assert resource["attestation_verified_at"] == "2026-05-15T20:10:00Z"
+
+
+def test_security_cvm_resource_omits_secret_material() -> None:
+    resource = security_cvm_resource(
+        {
+            "id": UUID("00000000-0000-4000-8000-000000000070"),
+            "entity_id": UUID("00000000-0000-4000-8000-000000000002"),
+            "state": "RUNNING",
+            "fqdn": "sc.example.test",
+            "instance_type": "tdx.small",
+            "region": "us",
+            "error_reason": None,
+            "policy_version": 3,
+            "expected_image_measurement": "a" * 64,
+            "image_measurement": "b" * 64,
+            "rtmr3_digest": "c" * 96,
+            "attestation_verified_at": None,
+            "created_at": datetime(2026, 5, 15, 20, 11, tzinfo=timezone.utc),
+            "updated_at": datetime(2026, 5, 15, 20, 12, tzinfo=timezone.utc),
+            "ca_cert_pem": "must-not-appear",
+            "ca_export_token_plaintext": "must-not-appear",
+        }
+    )
+
+    assert resource["policy_version"] == 3
+    assert resource["attestation_verified_at"] is None
+    assert "ca_cert_pem" not in resource
+    assert "ca_export_token_plaintext" not in resource

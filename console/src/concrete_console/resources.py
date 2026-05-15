@@ -175,6 +175,53 @@ def traffic_log_resource(row: Any) -> dict[str, Any]:
     }
 
 
+def cvm_resource(row: Any) -> dict[str, Any]:
+    row = dict(row)
+    profiles = json_payload(row.get("profiles", []))
+    ssh_keys = json_payload(row.get("ssh_keys", []))
+    return {
+        "id": str(row["id"]),
+        "owner": {
+            "id": str(row["owner_id"]),
+            "email": row["owner_email"],
+        },
+        "entity_id": str(row["entity_id"]),
+        "profiles": [{"id": str(profile["id"]), "name": profile["name"]} for profile in profiles],
+        "state": row["state"],
+        "instance_type": row["instance_type"],
+        "region": row["region"],
+        "ssh_keys": [{"id": str(key["id"]), "label": key["label"]} for key in ssh_keys],
+        "fqdn": row["fqdn"],
+        "expected_image_measurement": row["expected_image_measurement"],
+        "image_measurement": row["image_measurement"],
+        "rtmr3_digest": row["rtmr3_digest"],
+        "attestation_verified_at": timestamp(row["attestation_verified_at"]) if row["attestation_verified_at"] else None,
+        "error_reason": row["error_reason"],
+        "created_at": timestamp(row["created_at"]),
+        "updated_at": timestamp(row["updated_at"]),
+    }
+
+
+def security_cvm_resource(row: Any) -> dict[str, Any]:
+    row = dict(row)
+    return {
+        "id": str(row["id"]),
+        "entity_id": str(row["entity_id"]),
+        "state": row["state"],
+        "fqdn": row["fqdn"],
+        "instance_type": row["instance_type"],
+        "region": row["region"],
+        "error_reason": row["error_reason"],
+        "policy_version": row["policy_version"],
+        "expected_image_measurement": row["expected_image_measurement"],
+        "image_measurement": row["image_measurement"],
+        "rtmr3_digest": row["rtmr3_digest"],
+        "attestation_verified_at": timestamp(row["attestation_verified_at"]) if row["attestation_verified_at"] else None,
+        "created_at": timestamp(row["created_at"]),
+        "updated_at": timestamp(row["updated_at"]),
+    }
+
+
 def json_payload(value: Any) -> Any:
     if isinstance(value, str):
         return json.loads(value)

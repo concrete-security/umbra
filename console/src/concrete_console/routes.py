@@ -29,12 +29,14 @@ from concrete_console.idempotency import (
 )
 from concrete_console.resources import (
     audit_event_resource,
+    cvm_resource,
     entity_quota_resource,
     entity_resource,
     json_payload,
     list_page,
     operation_resource,
     profile_resource,
+    security_cvm_resource,
     ssh_key_resource,
     timestamp,
     traffic_log_resource,
@@ -2092,8 +2094,153 @@ def validate_audit_export_request(body: AuditExportCreate) -> None:
             422,
             "VALIDATION_ERROR",
             "unknown audit action",
-        {"errors": [{"type": "unknown_action", "field": "action"}]},
+            {"errors": [{"type": "unknown_action", "field": "action"}]},
         )
+
+
+@router.get("/cvms")
+async def list_cvms(
+    profile_id: UUID | None = None,
+    current_user: CurrentUser = Depends(require_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> dict:
+    clauses = ["c.entity_id = $1", "c.deleted_at IS NULL"]
+    values: list[object] = [current_user.entity_id]
+    if "CVM_MANAGE" not in current_user.permissions:
+        values.append(current_user.id)
+        clauses.append(f"c.owner_id = ${len(values)}")
+    if profile_id is not None:
+        values.append(profile_id)
+        clauses.append(
+            f"""
+            EXISTS (
+                SELECT 1
+                FROM cvm_profiles cp_filter
+                JOIN entity_profiles ep_filter ON ep_filter.id = cp_filter.profile_id
+                WHERE cp_filter.cvm_id = c.id
+                  AND ep_filter.id = ${len(values)}
+                  AND ep_filter.entity_id = c.entity_id
+                  AND ep_filter.deleted_at IS NULL
+            )
+            """
+        )
+    rows = await fetch_cvm_rows(pool, where_clause=" AND ".join(clauses), values=values)
+    return list_page([cvm_resource(row) for row in rows])
+
+
+@router.get("/cvms/{cvm_id}")
+async def get_cvm(
+    cvm_id: UUID,
+    current_user: CurrentUser = Depends(require_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> dict:
+    clauses = ["c.id = $1", "c.entity_id = $2", "c.deleted_at IS NULL"]
+    values: list[object] = [cvm_id, current_user.entity_id]
+    if "CVM_MANAGE" not in current_user.permissions:
+        values.append(current_user.id)
+        clauses.append(f"c.owner_id = ${len(values)}")
+    rows = await fetch_cvm_rows(pool, where_clause=" AND ".join(clauses), values=values)
+    if not rows:
+        raise api_error(404, "NOT_FOUND", "resource not found")
+    return cvm_resource(rows[0])
+
+
+async def fetch_cvm_rows(
+    pool: asyncpg.Pool,
+    *,
+    where_clause: str,
+    values: list[object],
+) -> list[asyncpg.Record]:
+    query = f"""
+        SELECT
+            c.id,
+            c.owner_id,
+            owner.email AS owner_email,
+            c.entity_id,
+            c.state::text AS state,
+            c.instance_type,
+            c.region,
+            c.fqdn,
+            c.expected_image_measurement,
+            c.image_measurement,
+            c.rtmr3_digest,
+            c.attestation_verified_at,
+            c.error_reason,
+            c.created_at,
+            c.updated_at,
+            COALESCE(
+                (
+                    SELECT jsonb_agg(
+                        jsonb_build_object('id', ep.id, 'name', ep.name)
+                        ORDER BY ep.name, ep.id
+                    )
+                    FROM cvm_profiles cp
+                    JOIN entity_profiles ep ON ep.id = cp.profile_id
+                    WHERE cp.cvm_id = c.id
+                      AND ep.deleted_at IS NULL
+                ),
+                '[]'::jsonb
+            ) AS profiles,
+            COALESCE(
+                (
+                    SELECT jsonb_agg(
+                        jsonb_build_object('id', sk.id, 'label', sk.label)
+                        ORDER BY sk.label, sk.id
+                    )
+                    FROM cvm_ssh_keys csk
+                    JOIN ssh_keys sk ON sk.id = csk.ssh_key_id
+                    WHERE csk.cvm_id = c.id
+                      AND sk.deleted_at IS NULL
+                ),
+                '[]'::jsonb
+            ) AS ssh_keys
+        FROM cvms c
+        JOIN users owner ON owner.id = c.owner_id
+        WHERE {where_clause}
+        ORDER BY c.created_at DESC, c.id
+    """
+    async with pool.acquire() as conn:
+        return await conn.fetch(query, *values)
+
+
+@router.get("/entities/{entity_id}/security-cvm")
+async def get_security_cvm(
+    entity_id: UUID,
+    current_user: CurrentUser = Depends(require_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> dict:
+    if current_user.entity_id != entity_id:
+        raise api_error(404, "NOT_FOUND", "resource not found")
+    current_user.require_permission("SECURITY_CVM_CONFIGURE")
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT
+                id,
+                entity_id,
+                state::text AS state,
+                fqdn,
+                instance_type,
+                region,
+                error_reason,
+                policy_version,
+                expected_image_measurement,
+                image_measurement,
+                rtmr3_digest,
+                attestation_verified_at,
+                created_at,
+                updated_at
+            FROM security_cvms
+            WHERE entity_id = $1
+              AND deleted_at IS NULL
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            entity_id,
+        )
+    if row is None:
+        raise api_error(404, "NOT_FOUND", "resource not found")
+    return security_cvm_resource(row)
 
 
 @router.get("/traffic-logs")
