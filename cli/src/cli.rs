@@ -31,6 +31,10 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub console_url: Option<String>,
 
+    /// Override the default profile for this invocation.
+    #[arg(long, global = true)]
+    pub profile: Option<String>,
+
     #[command(subcommand)]
     pub command: Command,
 }
@@ -48,6 +52,10 @@ pub enum Command {
     /// Manage SSH public keys registered with the Console.
     #[command(subcommand)]
     Key(KeyCommand),
+
+    /// Manage profiles and profile membership.
+    #[command(subcommand)]
+    Profile(ProfileCommand),
 
     /// Print version, build commit, target triple, and build date.
     Version,
@@ -118,6 +126,52 @@ pub struct KeyAddArgs {
     /// Path to an OpenSSH public key file. Reads stdin when omitted.
     #[arg(long)]
     pub file: Option<PathBuf>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ProfileCommand {
+    /// List profiles visible to the current user.
+    List,
+
+    /// Show the selected profile.
+    Show,
+
+    /// Update the selected profile.
+    Configure(ProfileConfigureArgs),
+
+    /// Manage users assigned to the selected profile.
+    #[command(subcommand)]
+    Members(ProfileMembersCommand),
+}
+
+#[derive(clap::Args, Debug)]
+pub struct ProfileConfigureArgs {
+    /// New profile name.
+    #[arg(long)]
+    pub name: Option<String>,
+
+    /// New profile description.
+    #[arg(long)]
+    pub description: Option<String>,
+
+    /// JSON policy file path. Use '-' to read stdin.
+    #[arg(long)]
+    pub policy_file: Option<PathBuf>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ProfileMembersCommand {
+    /// Add a user to the selected profile.
+    Add {
+        /// User UUID to add to the profile.
+        user_id: String,
+    },
+
+    /// Remove a user from the selected profile.
+    Remove {
+        /// User UUID to remove from the profile.
+        user_id: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]

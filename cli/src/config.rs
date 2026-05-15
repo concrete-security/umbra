@@ -8,6 +8,7 @@ use serde::Deserialize;
 #[derive(Debug, Default, Deserialize)]
 struct ConfigFile {
     console_url: Option<String>,
+    default_profile: Option<String>,
     oidc_client_id: Option<String>,
     oidc_provider: Option<String>,
 }
@@ -18,6 +19,7 @@ pub struct ResolvedConfig {
     pub config_dir_source: ConfigSource,
     pub console_url: Option<String>,
     pub console_url_source: ConfigSource,
+    pub profile: Option<String>,
     pub oidc_client_id: String,
     pub oidc_client_id_source: ConfigSource,
     pub oidc_provider: String,
@@ -46,7 +48,11 @@ impl ConfigSource {
 }
 
 impl ResolvedConfig {
-    pub fn resolve(config_dir_flag: Option<PathBuf>, console_url_flag: Option<String>) -> Self {
+    pub fn resolve(
+        config_dir_flag: Option<PathBuf>,
+        console_url_flag: Option<String>,
+        profile_flag: Option<String>,
+    ) -> Self {
         let (config_dir, config_dir_source) = if let Some(value) = config_dir_flag {
             (value, ConfigSource::Flag)
         } else if let Some(value) = env::var_os("CONCRETE_CONFIG_DIR").map(PathBuf::from) {
@@ -68,6 +74,17 @@ impl ResolvedConfig {
             (None, ConfigSource::Missing)
         };
         let console_url = console_url.map(|value| value.trim_end_matches('/').to_string());
+
+        let profile = if let Some(value) = profile_flag {
+            Some(value)
+        } else if let Some(value) = env::var("CONCRETE_DEFAULT_PROFILE")
+            .ok()
+            .filter(|value| !value.is_empty())
+        {
+            Some(value)
+        } else {
+            file.default_profile
+        };
 
         let (oidc_client_id, oidc_client_id_source) = if let Some(value) =
             env::var("CONCRETE_OIDC_CLIENT_ID")
@@ -97,6 +114,7 @@ impl ResolvedConfig {
             config_dir_source,
             console_url,
             console_url_source,
+            profile,
             oidc_client_id,
             oidc_client_id_source,
             oidc_provider,
@@ -107,6 +125,12 @@ impl ResolvedConfig {
     pub fn require_console_url(&self) -> Result<&str, String> {
         self.console_url.as_deref().ok_or_else(|| {
             "[usage] missing console_url; set --console-url, CONCRETE_CONSOLE_URL, or config.toml".to_string()
+        })
+    }
+
+    pub fn require_profile(&self) -> Result<&str, String> {
+        self.profile.as_deref().ok_or_else(|| {
+            "[usage] missing profile; set --profile, CONCRETE_DEFAULT_PROFILE, or config.toml default_profile".to_string()
         })
     }
 }
