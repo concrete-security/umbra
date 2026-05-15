@@ -1445,6 +1445,24 @@ async def delete_profile(
             current_user.require_entity(profile["entity_id"])
             current_user.require_permission("USER_MANAGE")
             require_if_match(profile, if_match)
+            attached_cvm_count = await conn.fetchval(
+                """
+                SELECT count(*)
+                FROM cvm_profiles cp
+                JOIN cvms c ON c.id = cp.cvm_id
+                WHERE cp.profile_id = $1
+                  AND c.deleted_at IS NULL
+                  AND c.state <> 'TERMINATED'
+                """,
+                profile_id,
+            )
+            if attached_cvm_count:
+                raise api_error(
+                    409,
+                    "CONFLICT",
+                    "profile is attached to live CVMs",
+                    {"state": "cvms_attached", "attached_cvm_count": attached_cvm_count},
+                )
             await conn.execute(
                 """
                 UPDATE entity_profiles
