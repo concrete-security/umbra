@@ -12,6 +12,7 @@ _requests_total: DefaultDict[tuple[str, str, str], int] = defaultdict(int)
 _duration_sum: DefaultDict[tuple[str, str, str], float] = defaultdict(float)
 _duration_count: DefaultDict[tuple[str, str, str], int] = defaultdict(int)
 _duration_buckets: DefaultDict[tuple[str, str, str, float], int] = defaultdict(int)
+_redacted_values_total: DefaultDict[str, int] = defaultdict(int)
 
 
 def monotonic_seconds() -> float:
@@ -29,9 +30,15 @@ def observe_request(*, route: str, method: str, status: int, duration_seconds: f
                 _duration_buckets[(*labels, bucket)] += 1
 
 
+def observe_redacted_value_in_log(*, source: str) -> None:
+    with _lock:
+        _redacted_values_total[source] += 1
+
+
 def prometheus_text() -> str:
     lines: list[str] = []
     _emit_request_metrics(lines)
+    _emit_redaction_metrics(lines)
     _emit_zero_placeholders(lines)
     return "\n".join(lines) + "\n"
 
@@ -73,6 +80,18 @@ def _emit_request_metrics(lines: list[str]) -> None:
         )
 
 
+def _emit_redaction_metrics(lines: list[str]) -> None:
+    lines.append("# HELP concrete_console_redacted_value_in_log_total Secret values caught by log redaction.")
+    lines.append("# TYPE concrete_console_redacted_value_in_log_total counter")
+    with _lock:
+        items = sorted(_redacted_values_total.items())
+    if not items:
+        lines.append('concrete_console_redacted_value_in_log_total{source=""} 0')
+        return
+    for source, value in items:
+        lines.append(f'concrete_console_redacted_value_in_log_total{{source="{_label(source)}"}} {value}')
+
+
 def _emit_zero_placeholders(lines: list[str]) -> None:
     placeholders = [
         ("concrete_console_rate_limit_drops_total", "counter", 'route="",dimension=""'),
@@ -87,7 +106,6 @@ def _emit_zero_placeholders(lines: list[str]) -> None:
         ("concrete_console_auth_refresh_reuse_detected_total", "counter", ""),
         ("concrete_console_traffic_logs_ingested_total", "counter", 'principal_id=""'),
         ("concrete_console_traffic_log_resolution_rate", "gauge", ""),
-        ("concrete_console_redacted_value_in_log_total", "counter", 'source=""'),
     ]
     for name, metric_type, labels in placeholders:
         lines.append(f"# TYPE {name} {metric_type}")
