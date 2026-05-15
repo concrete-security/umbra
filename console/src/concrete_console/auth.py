@@ -11,6 +11,7 @@ import jwt
 from concrete_console.db import get_pool
 from concrete_console.errors import api_error
 from concrete_console.jwt_keys import get_jwt_manager
+from concrete_console.log_config import bind_actor
 
 
 @dataclass(frozen=True)
@@ -90,4 +91,6 @@ async def require_current_user(
     if revoked:
         raise api_error(401, "UNAUTHORIZED", "token has been revoked")
 
-    return await load_current_user(pool, user_id, entity_id)
+    current_user = await load_current_user(pool, user_id, entity_id)
+    bind_actor(str(current_user.id))
+    return current_user

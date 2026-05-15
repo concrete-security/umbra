@@ -96,6 +96,9 @@ def request_ip(request: Request) -> str | None:
 
 
 def request_id(request: Request) -> str | None:
+    resolved = getattr(request.state, "request_id", None)
+    if isinstance(resolved, str):
+        return resolved
     value = request.headers.get("x-request-id")
     return value[:128] if value else None
 

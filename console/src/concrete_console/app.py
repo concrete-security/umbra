@@ -1,16 +1,31 @@
 from contextlib import asynccontextmanager
 import hmac
+import re
 from typing import Annotated, AsyncIterator
+from uuid import uuid4
 
 from fastapi import FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from concrete_console.config import load_settings
 from concrete_console.db import close_pool
+from concrete_console.log_config import bind_request_context, clear_context, configure_logging, logger
 from concrete_console.metrics import monotonic_seconds, observe_request, prometheus_text
 from concrete_console.readiness import run_ready_checks
 from concrete_console.routes_auth import router as auth_router
 from concrete_console.routes import router
+
+REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+SECURITY_HEADERS = {
+    "Strict-Transport-Security": "max-age=63072000; includeSubDomains; preload",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'; base-uri 'none'",
+    "Cross-Origin-Resource-Policy": "same-origin",
+}
+
+configure_logging()
+log = logger()
 
 
 @asynccontextmanager
@@ -27,32 +42,72 @@ app.include_router(router)
 
 
 @app.middleware("http")
-async def record_request_metrics(request: Request, call_next):
+async def request_context_middleware(request: Request, call_next):
+    request_id = resolve_request_id(request)
+    request.state.request_id = request_id
+    bind_request_context(request_id=request_id)
     started = monotonic_seconds()
     status = 500
     try:
         response = await call_next(request)
         status = response.status_code
+        apply_response_headers(request, response, request_id)
         return response
     finally:
         route = request.scope.get("route")
         route_label = getattr(route, "path", request.url.path)
+        duration_seconds = monotonic_seconds() - started
         observe_request(
             route=route_label,
             method=request.method,
             status=status,
-            duration_seconds=monotonic_seconds() - started,
+            duration_seconds=duration_seconds,
         )
+        log.info(
+            "request_completed",
+            route=route_label,
+            method=request.method,
+            status=status,
+            duration_ms=round(duration_seconds * 1000, 3),
+        )
+        clear_context()
 
 
 @app.exception_handler(HTTPException)
-async def http_exception_handler(_: Request, exc: HTTPException) -> JSONResponse:
+async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
+    request_id = getattr(request.state, "request_id", None)
     if isinstance(exc.detail, dict) and "error" in exc.detail:
-        return JSONResponse(status_code=exc.status_code, content=exc.detail)
+        detail = exc.detail.copy()
+        detail["error"] = {**detail["error"], "request_id": request_id}
+        return JSONResponse(status_code=exc.status_code, content=detail)
     return JSONResponse(
         status_code=exc.status_code,
-        content={"error": {"code": "ERROR", "message": str(exc.detail), "details": {}}},
+        content={
+            "error": {
+                "code": "ERROR",
+                "message": str(exc.detail),
+                "details": {},
+                "request_id": request_id,
+            }
+        },
     )
+
+
+def resolve_request_id(request: Request) -> str:
+    supplied = request.headers.get("x-request-id")
+    if supplied and REQUEST_ID_RE.fullmatch(supplied):
+        return supplied
+    return str(uuid4())
+
+
+def apply_response_headers(request: Request, response: Response, request_id: str) -> None:
+    response.headers["X-Request-Id"] = request_id
+    for name, value in SECURITY_HEADERS.items():
+        response.headers.setdefault(name, value)
+    if request.url.path in {"/healthz", "/readyz"}:
+        response.headers["Cache-Control"] = "public, max-age=60"
+    else:
+        response.headers.setdefault("Cache-Control", "no-store")
 
 
 @app.get("/healthz", include_in_schema=False)
