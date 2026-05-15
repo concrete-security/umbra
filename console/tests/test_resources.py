@@ -6,6 +6,7 @@ from concrete_console.resources import (
     entity_quota_resource,
     operation_resource,
     profile_resource,
+    security_cvm_attestation_resource,
     security_cvm_resource,
     ssh_key_resource,
     traffic_log_resource,
@@ -241,3 +242,47 @@ def test_security_cvm_resource_omits_secret_material() -> None:
     assert resource["attestation_verified_at"] is None
     assert "ca_cert_pem" not in resource
     assert "ca_export_token_plaintext" not in resource
+
+
+def test_security_cvm_attestation_resource_reports_persisted_verdict() -> None:
+    resource = security_cvm_attestation_resource(
+        {
+            "id": UUID("00000000-0000-4000-8000-000000000070"),
+            "fqdn": "sc.example.test",
+            "expected_image_measurement": "a" * 64,
+            "image_measurement": "a" * 64,
+            "rtmr3_digest": "c" * 96,
+            "attestation_verified_at": datetime(2026, 5, 15, 20, 13, tzinfo=timezone.utc),
+            "error_reason": None,
+        }
+    )
+
+    assert resource == {
+        "security_cvm_id": "00000000-0000-4000-8000-000000000070",
+        "fqdn": "sc.example.test",
+        "expected_image_measurement": "a" * 64,
+        "verdict": {
+            "verified": True,
+            "failure_reason": None,
+            "image_measurement_seen": "a" * 64,
+            "rtmr3_digest_seen": "c" * 96,
+            "verified_at": "2026-05-15T20:13:00Z",
+        },
+    }
+
+
+def test_security_cvm_attestation_resource_derives_image_mismatch() -> None:
+    resource = security_cvm_attestation_resource(
+        {
+            "id": UUID("00000000-0000-4000-8000-000000000070"),
+            "fqdn": "sc.example.test",
+            "expected_image_measurement": "a" * 64,
+            "image_measurement": "b" * 64,
+            "rtmr3_digest": "c" * 96,
+            "attestation_verified_at": datetime(2026, 5, 15, 20, 13, tzinfo=timezone.utc),
+            "error_reason": None,
+        }
+    )
+
+    assert resource["verdict"]["verified"] is False
+    assert resource["verdict"]["failure_reason"] == "ATTESTATION_IMAGE_MISMATCH"

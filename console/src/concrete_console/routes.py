@@ -36,6 +36,7 @@ from concrete_console.resources import (
     list_page,
     operation_resource,
     profile_resource,
+    security_cvm_attestation_resource,
     security_cvm_resource,
     ssh_key_resource,
     timestamp,
@@ -2571,34 +2572,68 @@ async def get_security_cvm(
         raise api_error(404, "NOT_FOUND", "resource not found")
     current_user.require_permission("SECURITY_CVM_CONFIGURE")
     async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            SELECT
-                id,
-                entity_id,
-                state::text AS state,
-                fqdn,
-                instance_type,
-                region,
-                error_reason,
-                policy_version,
-                expected_image_measurement,
-                image_measurement,
-                rtmr3_digest,
-                attestation_verified_at,
-                created_at,
-                updated_at
-            FROM security_cvms
-            WHERE entity_id = $1
-              AND deleted_at IS NULL
-            ORDER BY created_at DESC
-            LIMIT 1
-            """,
-            entity_id,
-        )
+        row = await fetch_security_cvm_row(conn, entity_id)
     if row is None:
         raise api_error(404, "NOT_FOUND", "resource not found")
     return security_cvm_resource(row)
+
+
+@router.get("/entities/{entity_id}/security-cvm/attestation")
+async def get_security_cvm_attestation(
+    entity_id: UUID,
+    probe: bool = False,
+    current_user: CurrentUser = Depends(require_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> dict:
+    if current_user.entity_id != entity_id:
+        raise api_error(404, "NOT_FOUND", "resource not found")
+    if "USER_MANAGE" not in current_user.permissions and "PLATFORM_OPERATOR" not in current_user.permissions:
+        raise api_error(
+            403,
+            "FORBIDDEN",
+            "missing required permission",
+            {"required": "USER_MANAGE|PLATFORM_OPERATOR"},
+        )
+    async with pool.acquire() as conn:
+        row = await fetch_security_cvm_row(conn, entity_id)
+    if row is None:
+        raise api_error(404, "NOT_FOUND", "resource not found")
+    if probe:
+        raise api_error(
+            503,
+            "SERVICE_UNAVAILABLE",
+            "security CVM attestation probe is not implemented",
+            {"component": "security_cvm_attestation_probe"},
+        )
+    return security_cvm_attestation_resource(row)
+
+
+async def fetch_security_cvm_row(conn: asyncpg.Connection, entity_id: UUID) -> asyncpg.Record | None:
+    return await conn.fetchrow(
+        """
+        SELECT
+            id,
+            entity_id,
+            state::text AS state,
+            fqdn,
+            instance_type,
+            region,
+            error_reason,
+            policy_version,
+            expected_image_measurement,
+            image_measurement,
+            rtmr3_digest,
+            attestation_verified_at,
+            created_at,
+            updated_at
+        FROM security_cvms
+        WHERE entity_id = $1
+          AND deleted_at IS NULL
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        entity_id,
+    )
 
 
 @router.get("/traffic-logs")

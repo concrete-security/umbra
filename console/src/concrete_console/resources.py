@@ -225,6 +225,44 @@ def security_cvm_resource(row: Any) -> dict[str, Any]:
     }
 
 
+def security_cvm_attestation_resource(row: Any) -> dict[str, Any]:
+    row = dict(row)
+    verified = (
+        row["error_reason"] is None
+        and row["expected_image_measurement"] is not None
+        and row["image_measurement"] == row["expected_image_measurement"]
+        and row["rtmr3_digest"] is not None
+        and row["attestation_verified_at"] is not None
+    )
+    failure_reason = security_cvm_attestation_failure_reason(row, verified=verified)
+    return {
+        "security_cvm_id": str(row["id"]),
+        "fqdn": row["fqdn"],
+        "expected_image_measurement": row["expected_image_measurement"],
+        "verdict": {
+            "verified": verified,
+            "failure_reason": failure_reason,
+            "image_measurement_seen": row["image_measurement"],
+            "rtmr3_digest_seen": row["rtmr3_digest"],
+            "verified_at": timestamp(row["attestation_verified_at"]) if row["attestation_verified_at"] else None,
+        },
+    }
+
+
+def security_cvm_attestation_failure_reason(row: dict[str, Any], *, verified: bool) -> str | None:
+    if verified:
+        return None
+    if row["error_reason"]:
+        return row["error_reason"]
+    if (
+        row["expected_image_measurement"] is not None
+        and row["image_measurement"] is not None
+        and row["image_measurement"] != row["expected_image_measurement"]
+    ):
+        return "ATTESTATION_IMAGE_MISMATCH"
+    return None
+
+
 def json_payload(value: Any) -> Any:
     if isinstance(value, str):
         return json.loads(value)
