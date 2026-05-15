@@ -1,4 +1,5 @@
 import asyncio
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
@@ -60,8 +61,10 @@ def test_run_ready_checks_includes_oidc_jwks(monkeypatch) -> None:
     monkeypatch.setattr(readiness, "_check_database", ok)
     monkeypatch.setattr(readiness, "_check_jwt_keys", ok)
     monkeypatch.setattr(readiness, "_check_oidc_jwks", ok)
+    monkeypatch.setattr(readiness, "_check_cloudflare_adapter", ok)
 
     assert asyncio.run(readiness.run_ready_checks()) == {
+        "cloudflare_adapter": "ok",
         "database": "ok",
         "jwt_keys": "ok",
         "oidc_jwks": "ok",
@@ -81,6 +84,45 @@ def test_oidc_jwks_readiness_requires_keys(monkeypatch) -> None:
         assert str(exc) == "OIDC JWKS did not return any keys"
     else:
         raise AssertionError("expected OIDC JWKS readiness failure")
+
+
+def test_cloudflare_readiness_probes_configured_zones(monkeypatch) -> None:
+    seen: list[tuple[str, str]] = []
+
+    monkeypatch.setenv("CLOUDFLARE_API_TOKEN", "cf-token")
+    monkeypatch.setenv("CLOUDFLARE_ZONE_ID", "dev-zone")
+    monkeypatch.setenv("SECURITY_CVM_ZONE_ID", "security-zone")
+
+    class FakeClient:
+        def __init__(self, *, timeout: float) -> None:
+            assert timeout == 0.5
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def get(self, url: str, *, headers: dict[str, str]):
+            seen.append((url, headers["Authorization"]))
+            return SimpleNamespace(status_code=200)
+
+    monkeypatch.setattr(readiness.httpx, "AsyncClient", FakeClient)
+
+    asyncio.run(readiness._check_cloudflare_adapter())
+
+    assert set(seen) == {
+        ("https://api.cloudflare.com/client/v4/zones/dev-zone", "Bearer cf-token"),
+        ("https://api.cloudflare.com/client/v4/zones/security-zone", "Bearer cf-token"),
+    }
+
+
+def test_cloudflare_readiness_skips_when_unconfigured(monkeypatch) -> None:
+    monkeypatch.delenv("CLOUDFLARE_API_TOKEN", raising=False)
+    monkeypatch.delenv("CLOUDFLARE_ZONE_ID", raising=False)
+    monkeypatch.delenv("SECURITY_CVM_ZONE_ID", raising=False)
+
+    asyncio.run(readiness._check_cloudflare_adapter())
 
 
 def test_metrics_requires_bearer_token(monkeypatch) -> None:

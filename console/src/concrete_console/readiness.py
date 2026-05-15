@@ -3,6 +3,9 @@ from __future__ import annotations
 import asyncio
 from typing import Literal
 
+import httpx
+
+from concrete_console.config import load_settings
 from concrete_console.db import get_pool
 from concrete_console.jwt_keys import get_jwt_manager
 from concrete_console.oidc import load_google_jwks
@@ -15,6 +18,7 @@ async def run_ready_checks() -> dict[str, CheckState]:
         _capped("database", _check_database(), timeout=1.0),
         _capped("jwt_keys", _check_jwt_keys(), timeout=1.0),
         _capped("oidc_jwks", _check_oidc_jwks(), timeout=1.0),
+        _capped("cloudflare_adapter", _check_cloudflare_adapter(), timeout=1.0),
     )
     return dict(results)
 
@@ -55,3 +59,28 @@ async def _check_oidc_jwks() -> None:
             raise RuntimeError("OIDC JWKS did not return any keys")
 
     await asyncio.wait_for(load_keys(), timeout=0.5)
+
+
+async def _check_cloudflare_adapter() -> None:
+    raw = load_settings().raw
+    api_token = raw.get("CLOUDFLARE_API_TOKEN", "").strip()
+    zone_ids = [
+        raw.get("CLOUDFLARE_ZONE_ID", "").strip(),
+        raw.get("SECURITY_CVM_ZONE_ID", "").strip(),
+    ]
+    configured_zone_ids = [zone_id for zone_id in zone_ids if zone_id]
+    if not api_token and not configured_zone_ids:
+        return
+    if not api_token or len(configured_zone_ids) != len(zone_ids):
+        raise RuntimeError("Cloudflare adapter is partially configured")
+
+    headers = {"Authorization": f"Bearer {api_token}"}
+    async with httpx.AsyncClient(timeout=0.5) as client:
+        responses = await asyncio.gather(
+            *(
+                client.get(f"https://api.cloudflare.com/client/v4/zones/{zone_id}", headers=headers)
+                for zone_id in configured_zone_ids
+            )
+        )
+    if any(response.status_code != 200 for response in responses):
+        raise RuntimeError("Cloudflare zone probe failed")
