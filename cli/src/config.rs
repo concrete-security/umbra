@@ -20,6 +20,7 @@ pub struct ResolvedConfig {
     pub console_url: Option<String>,
     pub console_url_source: ConfigSource,
     pub profile: Option<String>,
+    pub profile_flags: Vec<String>,
     pub oidc_client_id: String,
     pub oidc_client_id_source: ConfigSource,
     pub oidc_provider: String,
@@ -51,7 +52,7 @@ impl ResolvedConfig {
     pub fn resolve(
         config_dir_flag: Option<PathBuf>,
         console_url_flag: Option<String>,
-        profile_flag: Option<String>,
+        profile_flags: Vec<String>,
     ) -> Self {
         let (config_dir, config_dir_source) = if let Some(value) = config_dir_flag {
             (value, ConfigSource::Flag)
@@ -75,8 +76,10 @@ impl ResolvedConfig {
         };
         let console_url = console_url.map(|value| value.trim_end_matches('/').to_string());
 
-        let profile = if let Some(value) = profile_flag {
-            Some(value)
+        let profile = if profile_flags.len() == 1 {
+            Some(profile_flags[0].clone())
+        } else if profile_flags.len() > 1 {
+            None
         } else if let Some(value) = env::var("CONCRETE_DEFAULT_PROFILE")
             .ok()
             .filter(|value| !value.is_empty())
@@ -115,6 +118,7 @@ impl ResolvedConfig {
             console_url,
             console_url_source,
             profile,
+            profile_flags,
             oidc_client_id,
             oidc_client_id_source,
             oidc_provider,
@@ -129,6 +133,12 @@ impl ResolvedConfig {
     }
 
     pub fn require_profile(&self) -> Result<&str, String> {
+        if self.profile_flags.len() > 1 {
+            return Err(
+                "[usage] expected exactly one profile for this command; repeat --profile only where supported"
+                    .to_string(),
+            );
+        }
         self.profile.as_deref().ok_or_else(|| {
             "[usage] missing profile; set --profile, CONCRETE_DEFAULT_PROFILE, or config.toml default_profile".to_string()
         })

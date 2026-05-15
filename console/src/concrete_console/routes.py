@@ -572,14 +572,28 @@ async def fetch_user_row(conn: asyncpg.Connection, user_id: UUID) -> asyncpg.Rec
                 FROM user_permissions up
                 WHERE up.user_id = u.id
             ) AS permissions,
+            (
+                SELECT COALESCE(
+                    jsonb_agg(jsonb_build_object('id', ep.id, 'name', ep.name) ORDER BY ep.name),
+                    '[]'::jsonb
+                )
+                FROM profile_users pu
+                JOIN entity_profiles ep ON ep.id = pu.profile_id
+                WHERE pu.user_id = u.id
+                  AND ep.deleted_at IS NULL
+            ) AS profiles,
+            (
+                SELECT max(oi.last_login_at)
+                FROM oauth_identities oi
+                WHERE oi.user_id = u.id
+                  AND oi.deleted_at IS NULL
+            ) AS last_login_at,
             u.created_at,
             u.deactivated_at,
             u.deleted_at
         FROM users u
         JOIN entities e ON e.id = u.entity_id
-        LEFT JOIN user_permissions up ON up.user_id = u.id
         WHERE u.id = $1
-        GROUP BY u.id, e.name
         """,
         user_id,
     )
@@ -592,7 +606,7 @@ async def fetch_user_resource(conn: asyncpg.Connection, user_id: UUID, response:
     row = await fetch_user_row(conn, user_id)
     if response is not None:
         response.headers["ETag"] = user_etag(row)
-    return user_resource({**dict(row), "profiles": []})
+    return user_resource(row)
 
 
 @router.get("/me")
@@ -836,6 +850,22 @@ async def list_users(
                 e.name AS entity_name,
                 COALESCE(array_agg(up.permission::text ORDER BY up.permission::text)
                     FILTER (WHERE up.permission IS NOT NULL), ARRAY[]::text[]) AS permissions,
+                (
+                    SELECT COALESCE(
+                        jsonb_agg(jsonb_build_object('id', ep.id, 'name', ep.name) ORDER BY ep.name),
+                        '[]'::jsonb
+                    )
+                    FROM profile_users pu
+                    JOIN entity_profiles ep ON ep.id = pu.profile_id
+                    WHERE pu.user_id = u.id
+                      AND ep.deleted_at IS NULL
+                ) AS profiles,
+                (
+                    SELECT max(oi.last_login_at)
+                    FROM oauth_identities oi
+                    WHERE oi.user_id = u.id
+                      AND oi.deleted_at IS NULL
+                ) AS last_login_at,
                 u.created_at,
                 u.deactivated_at,
                 u.deleted_at
@@ -849,7 +879,7 @@ async def list_users(
             """,
             entity_id,
         )
-    return list_page([user_resource({**dict(row), "profiles": []}) for row in rows])
+    return list_page([user_resource(row) for row in rows])
 
 
 @router.get("/entities/{entity_id}/users/{user_id}")
@@ -867,7 +897,7 @@ async def get_user(
     if row["entity_id"] != entity_id or row["deleted_at"] is not None:
         raise api_error(404, "NOT_FOUND", "resource not found")
     response.headers["ETag"] = user_etag(row)
-    return user_resource({**dict(row), "profiles": []})
+    return user_resource(row)
 
 
 @router.get("/entities/{entity_id}/quotas")

@@ -31,9 +31,9 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub console_url: Option<String>,
 
-    /// Override the default profile for this invocation.
+    /// Override the default profile for this invocation. Repeat for commands that accept multiple profiles.
     #[arg(long, global = true)]
-    pub profile: Option<String>,
+    pub profile: Vec<String>,
 
     #[command(subcommand)]
     pub command: Command,
@@ -60,6 +60,10 @@ pub enum Command {
     /// Manage profiles and profile membership.
     #[command(subcommand)]
     Profile(ProfileCommand),
+
+    /// Manage users and user permissions.
+    #[command(subcommand)]
+    User(UserCommand),
 
     /// Print version, build commit, target triple, and build date.
     Version,
@@ -227,6 +231,86 @@ pub enum ProfileMembersCommand {
     Remove {
         /// User UUID to remove from the profile.
         user_id: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum UserCommand {
+    /// Add a user to the current entity.
+    Add(UserAddArgs),
+
+    /// List users in the current entity.
+    List,
+
+    /// Show one user.
+    Show {
+        /// User UUID.
+        user_id: String,
+    },
+
+    /// Deactivate a user.
+    Deactivate {
+        /// User UUID.
+        user_id: String,
+    },
+
+    /// Reactivate a user.
+    Reactivate {
+        /// User UUID.
+        user_id: String,
+    },
+
+    /// Irreversibly erase a user.
+    Erase {
+        /// User UUID.
+        user_id: String,
+    },
+
+    /// Manage user permission grants.
+    #[command(subcommand)]
+    Permissions(UserPermissionsCommand),
+}
+
+#[derive(clap::Args, Debug)]
+pub struct UserAddArgs {
+    /// User email address.
+    pub email: String,
+
+    /// User display name. Defaults to the email local-part.
+    #[arg(long)]
+    pub name: Option<String>,
+
+    /// Initial permission grant. Repeat for multiple permissions.
+    #[arg(long = "permission")]
+    pub permissions: Vec<String>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum UserPermissionsCommand {
+    /// List a user's permission grants.
+    List {
+        /// User UUID.
+        user_id: String,
+    },
+
+    /// Grant one or more permissions.
+    Grant {
+        /// User UUID.
+        user_id: String,
+
+        /// Permission symbols to grant.
+        #[arg(required = true)]
+        permissions: Vec<String>,
+    },
+
+    /// Revoke one or more permissions.
+    Revoke {
+        /// User UUID.
+        user_id: String,
+
+        /// Permission symbols to revoke.
+        #[arg(required = true)]
+        permissions: Vec<String>,
     },
 }
 

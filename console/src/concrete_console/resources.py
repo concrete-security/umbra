@@ -23,6 +23,7 @@ def entity_resource(row: Any) -> dict[str, Any]:
 
 def user_resource(row: Any) -> dict[str, Any]:
     row = dict(row)
+    profiles = json_payload(row.get("profiles", []))
     return {
         "id": str(row["id"]),
         "email": row["email"],
@@ -32,9 +33,10 @@ def user_resource(row: Any) -> dict[str, Any]:
             "name": row["entity_name"],
         },
         "permissions": sorted(row["permissions"]),
-        "profiles": row.get("profiles", []),
+        "profiles": [{"id": str(profile["id"]), "name": profile["name"]} for profile in profiles],
         "state": user_state(row),
         "deactivated_at": timestamp(row["deactivated_at"]) if row["deactivated_at"] else None,
+        "last_login_at": timestamp(row["last_login_at"]) if row.get("last_login_at") else None,
         "created_at": timestamp(row["created_at"]),
         "deleted_at": timestamp(row["deleted_at"]) if row["deleted_at"] else None,
     }

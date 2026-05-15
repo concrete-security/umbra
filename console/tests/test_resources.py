@@ -25,6 +25,7 @@ def user_row(**overrides):
         "entity_name": "Example",
         "permissions": ["USER_MANAGE"],
         "profiles": [],
+        "last_login_at": None,
         "deactivated_at": None,
         "created_at": datetime(2026, 5, 15, 18, 0, tzinfo=timezone.utc),
         "deleted_at": None,
@@ -38,6 +39,21 @@ def test_user_resource_marks_active_user() -> None:
 
     assert resource["state"] == "active"
     assert resource["deactivated_at"] is None
+    assert resource["last_login_at"] is None
+
+
+def test_user_resource_formats_profiles_and_last_login() -> None:
+    last_login_at = datetime(2026, 5, 15, 18, 30, tzinfo=timezone.utc)
+
+    resource = user_resource(
+        user_row(
+            profiles='[{"id":"00000000-0000-4000-8000-000000000010","name":"default"}]',
+            last_login_at=last_login_at,
+        )
+    )
+
+    assert resource["profiles"] == [{"id": "00000000-0000-4000-8000-000000000010", "name": "default"}]
+    assert resource["last_login_at"] == "2026-05-15T18:30:00Z"
 
 
 def test_user_resource_marks_deactivated_user() -> None:
