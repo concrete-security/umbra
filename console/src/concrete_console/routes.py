@@ -93,6 +93,32 @@ OPERATION_KIND_PERMISSIONS = {
     "cvm.terminate": "CVM_MANAGE",
     "security_cvm.provision": "SECURITY_CVM_CONFIGURE",
 }
+SECURITY_CVM_PROVISION_KIND = "security_cvm.provision"
+SECURITY_CVM_PROVISION_REDACTION = "<redacted-after-first-read>"
+SECURITY_CVM_PROVISION_SECRET_FIELDS = ("ingest_token", "ca_export_token")
+OPERATION_READ_SELECT = """
+    SELECT
+        o.id,
+        o.kind,
+        o.status::text AS status,
+        o.actor_id,
+        o.actor_email,
+        o.target_type,
+        o.target_id,
+        o.progress_step,
+        o.progress_percent,
+        o.result,
+        o.error,
+        o.result_disclosed_at,
+        o.created_at,
+        o.updated_at,
+        o.expires_at,
+        u.entity_id AS actor_entity_id
+    FROM operations o
+    LEFT JOIN users u ON u.id = o.actor_id
+    WHERE o.id = $1
+      AND (o.expires_at IS NULL OR o.expires_at > now())
+"""
 
 router = APIRouter(prefix="/api/v1")
 
@@ -3059,41 +3085,95 @@ async def get_operation(
     pool: asyncpg.Pool = Depends(get_pool),
 ) -> dict:
     async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            SELECT
-                o.id,
-                o.kind,
-                o.status::text AS status,
-                o.actor_id,
-                o.actor_email,
-                o.target_type,
-                o.target_id,
-                o.progress_step,
-                o.progress_percent,
-                o.result,
-                o.error,
-                o.created_at,
-                o.updated_at,
-                o.expires_at,
-                u.entity_id AS actor_entity_id
-            FROM operations o
-            LEFT JOIN users u ON u.id = o.actor_id
-            WHERE o.id = $1
-              AND (o.expires_at IS NULL OR o.expires_at > now())
-            """,
-            operation_id,
-        )
+        row = await fetch_operation_for_read(conn, operation_id)
     if row is None:
         raise api_error(404, "NOT_FOUND", "resource not found")
-    if row["actor_id"] != current_user.id:
-        if "PLATFORM_OPERATOR" not in current_user.permissions and row["actor_entity_id"] != current_user.entity_id:
-            raise api_error(404, "NOT_FOUND", "resource not found")
-        required_permission = OPERATION_KIND_PERMISSIONS.get(row["kind"])
-        if required_permission is None:
-            raise api_error(404, "NOT_FOUND", "resource not found")
-        current_user.require_permission(required_permission)
-    return operation_resource(row)
+    authorize_operation_read(row, current_user)
+    return await operation_resource_for_read(pool, row, current_user)
+
+
+async def fetch_operation_for_read(
+    conn: asyncpg.Connection,
+    operation_id: UUID,
+    *,
+    lock: bool = False,
+) -> asyncpg.Record | None:
+    query = OPERATION_READ_SELECT
+    if lock:
+        query = f"{query}\nFOR UPDATE OF o"
+    return await conn.fetchrow(query, operation_id)
+
+
+def authorize_operation_read(row: Any, current_user: CurrentUser) -> None:
+    if row["actor_id"] == current_user.id:
+        return
+    if "PLATFORM_OPERATOR" not in current_user.permissions and row["actor_entity_id"] != current_user.entity_id:
+        raise api_error(404, "NOT_FOUND", "resource not found")
+    required_permission = OPERATION_KIND_PERMISSIONS.get(row["kind"])
+    if required_permission is None:
+        raise api_error(404, "NOT_FOUND", "resource not found")
+    current_user.require_permission(required_permission)
+
+
+async def operation_resource_for_read(pool: asyncpg.Pool, row: Any, current_user: CurrentUser) -> dict:
+    if not operation_has_security_cvm_provision_result(row):
+        return operation_resource(row)
+    if row["actor_id"] == current_user.id and row["result_disclosed_at"] is None:
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                locked = await fetch_operation_for_read(conn, row["id"], lock=True)
+                if locked is None:
+                    raise api_error(404, "NOT_FOUND", "resource not found")
+                authorize_operation_read(locked, current_user)
+                if locked["actor_id"] == current_user.id and locked["result_disclosed_at"] is None:
+                    await conn.execute(
+                        "UPDATE operations SET result_disclosed_at = now() WHERE id = $1",
+                        locked["id"],
+                    )
+                    await insert_audit_event(
+                        conn,
+                        entity_id=current_user.entity_id,
+                        actor_id=current_user.id,
+                        actor_email=current_user.email,
+                        action="OPERATION_RESULT_DISCLOSED",
+                        target_type="operation",
+                        target_id=locked["id"],
+                        after=operation_result_disclosed_audit_payload(locked),
+                    )
+                    return operation_resource(locked)
+                row = locked
+    return operation_resource(operation_row_with_result(row, redacted_security_cvm_provision_result(row["result"])))
+
+
+def operation_has_security_cvm_provision_result(row: Any) -> bool:
+    return row["kind"] == SECURITY_CVM_PROVISION_KIND and row["status"] == "succeeded" and row["result"] is not None
+
+
+def redacted_security_cvm_provision_result(result: Any) -> Any:
+    result = json_payload(result)
+    if not isinstance(result, dict):
+        return result
+    redacted = dict(result)
+    for field in SECURITY_CVM_PROVISION_SECRET_FIELDS:
+        if field in redacted:
+            redacted[field] = SECURITY_CVM_PROVISION_REDACTION
+    return redacted
+
+
+def operation_row_with_result(row: Any, result: Any) -> dict[str, Any]:
+    updated = dict(row)
+    updated["result"] = result
+    return updated
+
+
+def operation_result_disclosed_audit_payload(row: Any) -> dict[str, Any]:
+    return {
+        "operation_id": str(row["id"]),
+        "kind": row["kind"],
+        "target_type": row["target_type"],
+        "target_id": str(row["target_id"]) if row["target_id"] else None,
+        "redacted_after_first_read": list(SECURITY_CVM_PROVISION_SECRET_FIELDS),
+    }
 
 
 def parse_audit_cursor(cursor: str | None) -> int | None:

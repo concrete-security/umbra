@@ -9,10 +9,12 @@ from fastapi import HTTPException
 from concrete_console.routes import (
     AdminKeysRotate,
     AuditExportCreate,
+    SECURITY_CVM_PROVISION_REDACTION,
     cvm_etag,
     erased_user_email,
     ensure_no_sandbox_env_conflict,
     policy_sha256,
+    redacted_security_cvm_provision_result,
     profile_etag,
     require_cvm_profile_mutable,
     require_idempotency_key,
@@ -212,6 +214,34 @@ def test_validate_audit_export_request_rejects_unknown_action() -> None:
 
     assert exc.value.status_code == 422
     assert exc.value.detail["error"]["details"]["errors"][0]["type"] == "unknown_action"
+
+
+def test_redacted_security_cvm_provision_result_redacts_one_shot_bearers() -> None:
+    result = {
+        "security_cvm": {"id": "00000000-0000-4000-8000-000000000040", "state": "RUNNING"},
+        "ingest_token": "ingest-plaintext",
+        "ca_export_token": "ca-plaintext",
+    }
+
+    redacted = redacted_security_cvm_provision_result(result)
+
+    assert redacted == {
+        "security_cvm": {"id": "00000000-0000-4000-8000-000000000040", "state": "RUNNING"},
+        "ingest_token": SECURITY_CVM_PROVISION_REDACTION,
+        "ca_export_token": SECURITY_CVM_PROVISION_REDACTION,
+    }
+    assert result["ingest_token"] == "ingest-plaintext"
+    assert result["ca_export_token"] == "ca-plaintext"
+
+
+def test_redacted_security_cvm_provision_result_accepts_json_payload() -> None:
+    redacted = redacted_security_cvm_provision_result(
+        '{"security_cvm":{"id":"sc-1"},"ingest_token":"ingest","ca_export_token":"ca"}'
+    )
+
+    assert redacted["security_cvm"] == {"id": "sc-1"}
+    assert redacted["ingest_token"] == SECURITY_CVM_PROVISION_REDACTION
+    assert redacted["ca_export_token"] == SECURITY_CVM_PROVISION_REDACTION
 
 
 def traffic_log(**overrides) -> TrafficLogIn:
