@@ -1,7 +1,13 @@
 from datetime import datetime, timezone
 from uuid import UUID
 
-from concrete_console.resources import entity_quota_resource, profile_resource, user_quota_resource, user_resource
+from concrete_console.resources import (
+    entity_quota_resource,
+    profile_resource,
+    ssh_key_resource,
+    user_quota_resource,
+    user_resource,
+)
 
 
 def user_row(**overrides):
@@ -63,6 +69,20 @@ def test_profile_resource_parses_json_policy() -> None:
 
     assert resource["policy"] == {"sandbox_env": {"PLACEHOLDER": "value"}}
     assert resource["assigned"] is True
+
+
+def test_ssh_key_resource_formats_created_at() -> None:
+    resource = ssh_key_resource(
+        {
+            "id": UUID("00000000-0000-4000-8000-000000000011"),
+            "label": "laptop",
+            "fingerprint": "SHA256:test",
+            "public_key": "ssh-ed25519 AAAA",
+            "created_at": datetime(2026, 5, 15, 18, 5, tzinfo=timezone.utc),
+        }
+    )
+
+    assert resource["created_at"] == "2026-05-15T18:05:00Z"
 
 
 def test_quota_resources_format_optional_setter() -> None:

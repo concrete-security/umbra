@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -8,6 +10,7 @@ from typing import Annotated, Any
 from uuid import UUID, uuid4
 
 import asyncpg
+from cryptography.hazmat.primitives.serialization import load_ssh_public_key
 from fastapi import APIRouter, Depends, Header, Query, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -31,6 +34,7 @@ from concrete_console.resources import (
     json_payload,
     list_page,
     profile_resource,
+    ssh_key_resource,
     timestamp,
     user_quota_resource,
     user_resource,
@@ -72,6 +76,7 @@ DEFAULT_USER_QUOTAS = {
     "ssh_keys": ("DEFAULT_QUOTA_SSH_KEYS_PER_USER", 10),
 }
 CREATE_ENTITY_ROUTE = "POST /api/v1/entities"
+CREATE_SSH_KEY_ROUTE = "POST /api/v1/me/keys"
 ADMIN_SESSIONS_REVOKE_ROUTE = "POST /api/v1/admin/sessions/revoke"
 
 router = APIRouter(prefix="/api/v1")
@@ -189,6 +194,25 @@ class ProfileUserAssign(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     user_id: UUID
+
+
+class SSHKeyCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    label: str = Field(min_length=1, max_length=100)
+    public_key: str = Field(min_length=1, max_length=20480)
+
+    @field_validator("label")
+    @classmethod
+    def no_control_chars(cls, value: str) -> str:
+        if any(char in value for char in "\r\n\t"):
+            raise ValueError("label must not contain CR, LF, or TAB")
+        return value.strip()
+
+    @field_validator("public_key")
+    @classmethod
+    def trim_public_key(cls, value: str) -> str:
+        return value.strip()
 
 
 def require_idempotency_key(value: str | None) -> str:
@@ -312,6 +336,37 @@ def validate_user_quota_resource(resource: str) -> None:
         )
 
 
+def ssh_key_fingerprint(public_key: str) -> str:
+    if any(char in public_key for char in "\r\n\t"):
+        raise api_error(
+            422,
+            "VALIDATION_ERROR",
+            "malformed SSH public key",
+            {"errors": [{"field": "public_key", "type": "malformed_public_key"}]},
+        )
+    parts = public_key.split()
+    if len(parts) < 2:
+        raise api_error(
+            422,
+            "VALIDATION_ERROR",
+            "malformed SSH public key",
+            {"errors": [{"field": "public_key", "type": "malformed_public_key"}]},
+        )
+    key_material = f"{parts[0]} {parts[1]}".encode("utf-8")
+    try:
+        load_ssh_public_key(key_material)
+        key_blob = base64.b64decode(parts[1], validate=True)
+    except (ValueError, binascii.Error):
+        raise api_error(
+            422,
+            "VALIDATION_ERROR",
+            "malformed SSH public key",
+            {"errors": [{"field": "public_key", "type": "malformed_public_key"}]},
+        ) from None
+    digest = base64.b64encode(hashlib.sha256(key_blob).digest()).decode("ascii").rstrip("=")
+    return f"SHA256:{digest}"
+
+
 def default_quota_limit(resource: str, *, scope: str) -> int:
     defaults = DEFAULT_USER_QUOTAS if scope == "user" else DEFAULT_ENTITY_QUOTAS
     env_name, fallback = defaults[resource]
@@ -364,10 +419,27 @@ async def entity_quota_usage(conn: asyncpg.Connection, entity_id: UUID, resource
             "SELECT count(*) FROM entity_profiles WHERE entity_id = $1 AND deleted_at IS NULL",
             entity_id,
         )
+    if resource == "ssh_keys":
+        return await conn.fetchval(
+            """
+            SELECT count(*)
+            FROM ssh_keys sk
+            JOIN users u ON u.id = sk.user_id
+            WHERE u.entity_id = $1
+              AND sk.deleted_at IS NULL
+              AND u.deleted_at IS NULL
+            """,
+            entity_id,
+        )
     return 0
 
 
 async def user_quota_usage(conn: asyncpg.Connection, user_id: UUID, resource: str) -> int:
+    if resource == "ssh_keys":
+        return await conn.fetchval(
+            "SELECT count(*) FROM ssh_keys WHERE user_id = $1 AND deleted_at IS NULL",
+            user_id,
+        )
     return 0
 
 
@@ -406,6 +478,18 @@ async def enforce_entity_quota(conn: asyncpg.Connection, entity_id: UUID, resour
             "QUOTA_EXCEEDED",
             "entity quota exceeded",
             {"resource": resource, "scope": "entity", "limit": limit, "current_usage": current_usage},
+        )
+
+
+async def enforce_user_quota(conn: asyncpg.Connection, user_id: UUID, resource: str) -> None:
+    limit, _, _, _ = await user_quota_limit(conn, user_id, resource)
+    current_usage = await user_quota_usage(conn, user_id, resource)
+    if current_usage >= limit:
+        raise api_error(
+            403,
+            "QUOTA_EXCEEDED",
+            "user quota exceeded",
+            {"resource": resource, "scope": "user", "limit": limit, "current_usage": current_usage},
         )
 
 
@@ -451,6 +535,135 @@ async def get_me(
 ) -> dict:
     async with pool.acquire() as conn:
         return await fetch_user_resource(conn, current_user.id, response)
+
+
+@router.get("/me/keys")
+async def list_ssh_keys(
+    limit: int = Query(default=100, ge=1, le=100),
+    cursor: str | None = Query(default=None, max_length=80),
+    current_user: CurrentUser = Depends(require_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> dict:
+    cursor_anchor = parse_ssh_key_cursor(cursor)
+    values: list[object] = [current_user.id]
+    clauses = ["user_id = $1", "deleted_at IS NULL"]
+    if cursor_anchor is not None:
+        values.extend([cursor_anchor[0], cursor_anchor[1]])
+        clauses.append("(created_at, id) < ($2, $3)")
+    values.append(limit + 1)
+    query = f"""
+        SELECT id, label, fingerprint, public_key, created_at
+        FROM ssh_keys
+        WHERE {' AND '.join(clauses)}
+        ORDER BY created_at DESC, id DESC
+        LIMIT ${len(values)}
+    """
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(query, *values)
+    next_cursor = ssh_key_cursor(rows[limit]) if len(rows) > limit else None
+    return list_page([ssh_key_resource(row) for row in rows[:limit]], next_cursor=next_cursor)
+
+
+@router.post("/me/keys", status_code=201)
+async def create_ssh_key(
+    request: Request,
+    body: SSHKeyCreate,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+    current_user: CurrentUser = Depends(require_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> Any:
+    idempotency_key_value = require_idempotency_key(idempotency_key)
+    body_sha256 = request_body_sha256(await request.body())
+    fingerprint = ssh_key_fingerprint(body.public_key)
+    key_id = uuid4()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await acquire_idempotency_lock(
+                conn,
+                credential_id=str(current_user.id),
+                idempotency_key=idempotency_key_value,
+                route=CREATE_SSH_KEY_ROUTE,
+            )
+            cached = await lookup_idempotency_response(
+                conn,
+                credential_id=str(current_user.id),
+                idempotency_key=idempotency_key_value,
+                route=CREATE_SSH_KEY_ROUTE,
+                body_sha256=body_sha256,
+            )
+            if cached is not None:
+                return JSONResponse(status_code=cached.status_code, content=cached.body, headers=cached.headers)
+
+            await enforce_user_quota(conn, current_user.id, "ssh_keys")
+            await enforce_entity_quota(conn, current_user.entity_id, "ssh_keys")
+            row = await conn.fetchrow(
+                """
+                INSERT INTO ssh_keys (id, user_id, label, public_key, fingerprint)
+                VALUES ($1, $2, $3, $4, $5)
+                RETURNING id, label, fingerprint, public_key, created_at
+                """,
+                key_id,
+                current_user.id,
+                body.label,
+                body.public_key,
+                fingerprint,
+            )
+            await insert_audit_event(
+                conn,
+                entity_id=current_user.entity_id,
+                actor_id=current_user.id,
+                actor_email=current_user.email,
+                action="SSH_KEY_ADDED",
+                target_type="ssh_key",
+                target_id=key_id,
+                after={"label": body.label, "fingerprint": fingerprint},
+            )
+            response_body = ssh_key_resource(row)
+            await store_idempotency_response(
+                conn,
+                credential_id=str(current_user.id),
+                idempotency_key=idempotency_key_value,
+                route=CREATE_SSH_KEY_ROUTE,
+                body_sha256=body_sha256,
+                status_code=201,
+                response_body=response_body,
+            )
+            return response_body
+
+
+@router.delete("/me/keys/{key_id}", status_code=204)
+async def delete_ssh_key(
+    key_id: UUID,
+    current_user: CurrentUser = Depends(require_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> Response:
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """
+                UPDATE ssh_keys
+                SET deleted_at = now(), deleted_by = $1
+                WHERE id = $2
+                  AND user_id = $1
+                  AND deleted_at IS NULL
+                RETURNING id, label, fingerprint
+                """,
+                current_user.id,
+                key_id,
+            )
+            if row is None:
+                raise api_error(404, "NOT_FOUND", "resource not found")
+            await insert_audit_event(
+                conn,
+                entity_id=current_user.entity_id,
+                actor_id=current_user.id,
+                actor_email=current_user.email,
+                action="SSH_KEY_REMOVED",
+                target_type="ssh_key",
+                target_id=key_id,
+                before={"label": row["label"], "fingerprint": row["fingerprint"]},
+            )
+    return Response(status_code=204)
 
 
 @router.post("/entities", status_code=201)
@@ -1779,6 +1992,27 @@ def parse_audit_cursor(cursor: str | None) -> int | None:
             {"errors": [{"type": "invalid_cursor", "field": "cursor"}]},
         )
     return value
+
+
+def ssh_key_cursor(row: asyncpg.Record) -> str:
+    return f"{timestamp(row['created_at'])}|{row['id']}"
+
+
+def parse_ssh_key_cursor(cursor: str | None) -> tuple[datetime, UUID] | None:
+    if cursor is None:
+        return None
+    try:
+        created_at_raw, key_id_raw = cursor.split("|", 1)
+        created_at = datetime.fromisoformat(created_at_raw.replace("Z", "+00:00"))
+        key_id = UUID(key_id_raw)
+    except (ValueError, TypeError):
+        raise api_error(
+            422,
+            "VALIDATION_ERROR",
+            "invalid cursor",
+            {"errors": [{"type": "invalid_cursor", "field": "cursor"}]},
+        ) from None
+    return created_at, key_id
 
 
 async def lock_user_for_lifecycle(conn: asyncpg.Connection, *, entity_id: UUID, user_id: UUID) -> asyncpg.Record:

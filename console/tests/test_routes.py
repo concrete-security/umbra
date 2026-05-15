@@ -2,6 +2,8 @@ from datetime import datetime, timezone
 from uuid import UUID
 
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ed25519
 from fastapi import HTTPException
 
 from concrete_console.routes import (
@@ -9,6 +11,7 @@ from concrete_console.routes import (
     profile_etag,
     require_idempotency_key,
     require_if_match,
+    ssh_key_fingerprint,
     user_etag,
     validate_permission_symbol,
     validate_profile_policy,
@@ -111,3 +114,24 @@ def test_validate_permission_symbol_rejects_unknown_permission() -> None:
 
     assert exc.value.status_code == 422
     assert exc.value.detail["error"]["code"] == "VALIDATION_ERROR"
+
+
+def test_ssh_key_fingerprint_accepts_openssh_public_key() -> None:
+    public_key = (
+        ed25519.Ed25519PrivateKey.generate()
+        .public_key()
+        .public_bytes(serialization.Encoding.OpenSSH, serialization.PublicFormat.OpenSSH)
+        .decode("utf-8")
+    )
+
+    fingerprint = ssh_key_fingerprint(f"{public_key} laptop")
+
+    assert fingerprint.startswith("SHA256:")
+
+
+def test_ssh_key_fingerprint_rejects_malformed_public_key() -> None:
+    with pytest.raises(HTTPException) as exc:
+        ssh_key_fingerprint("not-a-key")
+
+    assert exc.value.status_code == 422
+    assert exc.value.detail["error"]["details"]["errors"][0]["type"] == "malformed_public_key"

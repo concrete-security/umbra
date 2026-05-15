@@ -71,6 +71,17 @@ def profile_resource(row: Any) -> dict[str, Any]:
     }
 
 
+def ssh_key_resource(row: Any) -> dict[str, Any]:
+    row = dict(row)
+    return {
+        "id": str(row["id"]),
+        "label": row["label"],
+        "fingerprint": row["fingerprint"],
+        "public_key": row["public_key"],
+        "created_at": timestamp(row["created_at"]),
+    }
+
+
 def entity_quota_resource(row: Any) -> dict[str, Any]:
     row = dict(row)
     return {
