@@ -111,6 +111,14 @@ async def create_admin(
         entity_id,
         default_profile,
     )
+    await conn.execute(
+        """
+        INSERT INTO profile_users (profile_id, user_id)
+        VALUES ($1, $2)
+        """,
+        profile_id,
+        user_id,
+    )
 
     await insert_audit_event(
         conn,
@@ -142,6 +150,16 @@ async def create_admin(
         target_type="profile",
         target_id=profile_id,
         after={"name": default_profile},
+    )
+    await insert_audit_event(
+        conn,
+        entity_id=entity_id,
+        actor_id=None,
+        actor_email="system@bootstrap",
+        action="PROFILE_USER_ASSIGNED",
+        target_type="profile",
+        target_id=profile_id,
+        after={"user_id": str(user_id)},
     )
     return user_id
 

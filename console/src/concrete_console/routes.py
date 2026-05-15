@@ -13,7 +13,7 @@ from concrete_console.auth import CurrentUser, require_current_user
 from concrete_console.bootstrap import email_domain
 from concrete_console.db import get_pool
 from concrete_console.errors import api_error
-from concrete_console.resources import audit_event_resource, entity_resource, list_page, user_resource
+from concrete_console.resources import audit_event_resource, entity_resource, list_page, profile_resource, user_resource
 
 PERMISSIONS = {
     "CVM_LAUNCH",
@@ -71,6 +71,20 @@ class UserCreate(BaseModel):
         if "PLATFORM_OPERATOR" in value:
             raise ValueError("PLATFORM_OPERATOR cannot be granted through user creation")
         return sorted(set(value))
+
+
+class ProfileCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=100)
+    description: str = Field(default="", max_length=1000)
+
+    @field_validator("name", "description")
+    @classmethod
+    def no_control_chars(cls, value: str) -> str:
+        if any(char in value for char in "\r\n\t"):
+            raise ValueError("field must not contain CR, LF, or TAB")
+        return value.strip()
 
 
 def require_idempotency_key(value: str | None) -> None:
@@ -209,6 +223,84 @@ async def list_users(
     return list_page([user_resource({**dict(row), "profiles": []}) for row in rows])
 
 
+@router.get("/entities/{entity_id}/profiles")
+async def list_profiles(
+    entity_id: UUID,
+    current_user: CurrentUser = Depends(require_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> dict:
+    current_user.require_entity(entity_id)
+    can_manage = "USER_MANAGE" in current_user.permissions
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT
+                ep.id,
+                ep.entity_id,
+                ep.name,
+                ep.description,
+                ep.policy,
+                (pu.user_id IS NOT NULL) AS assigned,
+                ep.created_at,
+                ep.updated_at
+            FROM entity_profiles ep
+            LEFT JOIN profile_users pu
+              ON pu.profile_id = ep.id
+             AND pu.user_id = $2
+            WHERE ep.entity_id = $1
+              AND ep.deleted_at IS NULL
+              AND ($3 OR pu.user_id IS NOT NULL)
+            ORDER BY ep.name
+            """,
+            entity_id,
+            current_user.id,
+            can_manage,
+        )
+    return list_page([profile_resource({**dict(row), "attached_cvms": [], "attached_cvm_count": 0}) for row in rows])
+
+
+@router.post("/entities/{entity_id}/profiles", status_code=201)
+async def create_profile(
+    entity_id: UUID,
+    body: ProfileCreate,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+    current_user: CurrentUser = Depends(require_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> dict:
+    require_idempotency_key(idempotency_key)
+    current_user.require_entity(entity_id)
+    current_user.require_permission("USER_MANAGE")
+    profile_id = uuid4()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            try:
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO entity_profiles (id, entity_id, name, description, policy)
+                    VALUES ($1, $2, $3, $4, '{}'::jsonb)
+                    RETURNING id, entity_id, name, description, policy, false AS assigned,
+                              created_at, updated_at
+                    """,
+                    profile_id,
+                    entity_id,
+                    body.name,
+                    body.description,
+                )
+            except asyncpg.UniqueViolationError:
+                raise api_error(409, "CONFLICT", "profile name is already registered", {"state": "profile_name_taken"}) from None
+            await insert_audit_event(
+                conn,
+                entity_id=entity_id,
+                actor_id=current_user.id,
+                actor_email=current_user.email,
+                action="PROFILE_CREATED",
+                target_type="profile",
+                target_id=profile_id,
+                after={"name": body.name, "description": body.description},
+            )
+    return profile_resource({**dict(row), "attached_cvms": [], "attached_cvm_count": 0})
+
+
 @router.post("/entities/{entity_id}/users", status_code=201)
 async def create_user(
     entity_id: UUID,
@@ -289,6 +381,42 @@ async def create_user(
                     after={"permission": permission},
                 )
             return await fetch_user_resource(conn, user_id)
+
+
+@router.get("/profiles/{profile_id}")
+async def get_profile(
+    profile_id: UUID,
+    current_user: CurrentUser = Depends(require_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> dict:
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT
+                ep.id,
+                ep.entity_id,
+                ep.name,
+                ep.description,
+                ep.policy,
+                (pu.user_id IS NOT NULL) AS assigned,
+                ep.created_at,
+                ep.updated_at
+            FROM entity_profiles ep
+            LEFT JOIN profile_users pu
+              ON pu.profile_id = ep.id
+             AND pu.user_id = $2
+            WHERE ep.id = $1
+              AND ep.deleted_at IS NULL
+            """,
+            profile_id,
+            current_user.id,
+        )
+    if row is None:
+        raise api_error(404, "NOT_FOUND", "resource not found")
+    current_user.require_entity(row["entity_id"])
+    if "USER_MANAGE" not in current_user.permissions and not row["assigned"]:
+        raise api_error(404, "NOT_FOUND", "resource not found")
+    return profile_resource({**dict(row), "attached_cvms": [], "attached_cvm_count": 0})
 
 
 @router.post("/entities/{entity_id}/users/{user_id}/actions/deactivate")

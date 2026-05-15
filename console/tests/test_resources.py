@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from uuid import UUID
 
-from concrete_console.resources import user_resource
+from concrete_console.resources import profile_resource, user_resource
 
 
 def user_row(**overrides):
@@ -43,3 +43,23 @@ def test_user_resource_marks_erased_user() -> None:
     resource = user_resource(user_row(deleted_at=deleted_at))
 
     assert resource["state"] == "erased"
+
+
+def test_profile_resource_parses_json_policy() -> None:
+    resource = profile_resource(
+        {
+            "id": UUID("00000000-0000-4000-8000-000000000010"),
+            "entity_id": UUID("00000000-0000-4000-8000-000000000002"),
+            "name": "default",
+            "description": "",
+            "policy": '{"sandbox_env":{"PLACEHOLDER":"value"}}',
+            "assigned": True,
+            "attached_cvms": [],
+            "attached_cvm_count": 0,
+            "created_at": datetime(2026, 5, 15, 18, 3, tzinfo=timezone.utc),
+            "updated_at": datetime(2026, 5, 15, 18, 4, tzinfo=timezone.utc),
+        }
+    )
+
+    assert resource["policy"] == {"sandbox_env": {"PLACEHOLDER": "value"}}
+    assert resource["assigned"] is True

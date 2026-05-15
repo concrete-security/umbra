@@ -140,6 +140,15 @@ def upgrade() -> None:
     )
     op.execute(
         """
+        CREATE TABLE profile_users (
+            profile_id UUID NOT NULL REFERENCES entity_profiles(id) ON DELETE CASCADE,
+            user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            PRIMARY KEY (profile_id, user_id)
+        )
+        """
+    )
+    op.execute(
+        """
         CREATE TABLE audit_events (
             seq BIGSERIAL UNIQUE NOT NULL,
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -170,6 +179,7 @@ def downgrade() -> None:
     op.execute("DROP INDEX IF EXISTS ix_audit_events_target")
     op.execute("DROP INDEX IF EXISTS ix_audit_events_actor_id")
     op.execute("DROP TABLE IF EXISTS audit_events")
+    op.execute("DROP TABLE IF EXISTS profile_users")
     op.execute("DROP INDEX IF EXISTS ux_entity_profiles_entity_name_live")
     op.execute("DROP TABLE IF EXISTS entity_profiles")
     op.execute("DROP TABLE IF EXISTS user_permissions")

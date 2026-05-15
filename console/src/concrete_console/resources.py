@@ -55,6 +55,22 @@ def list_page(items: list[dict[str, Any]], *, next_cursor: str | None = None) ->
     }
 
 
+def profile_resource(row: Any) -> dict[str, Any]:
+    row = dict(row)
+    return {
+        "id": str(row["id"]),
+        "entity_id": str(row["entity_id"]),
+        "name": row["name"],
+        "description": row["description"],
+        "policy": json_payload(row["policy"]),
+        "assigned": bool(row.get("assigned", False)),
+        "attached_cvms": row.get("attached_cvms", []),
+        "attached_cvm_count": row.get("attached_cvm_count", 0),
+        "created_at": timestamp(row["created_at"]),
+        "updated_at": timestamp(row["updated_at"]),
+    }
+
+
 def audit_event_resource(row: Any) -> dict[str, Any]:
     row = dict(row)
     return {
