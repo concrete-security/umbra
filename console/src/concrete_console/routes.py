@@ -1721,7 +1721,7 @@ async def list_audit_events(
             {"errors": [{"type": "unknown_action", "field": "action"}]},
         )
     after_seq = parse_audit_cursor(cursor)
-    clauses = ["entity_id = $1"]
+    clauses = ["(entity_id = $1 OR actor_id IN (SELECT id FROM users WHERE entity_id = $1))"]
     values: list[object] = [current_user.entity_id]
 
     def bind(value: object) -> str:
