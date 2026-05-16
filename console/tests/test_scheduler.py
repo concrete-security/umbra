@@ -151,6 +151,7 @@ def test_provider_app_id_parses_json_metadata() -> None:
 
 
 def launch_snapshot(**overrides):
+    now = scheduler.datetime.now(scheduler.timezone.utc)
     row = {
         "cvm_id": UUID("00000000-0000-4000-8000-000000000031"),
         "fqdn": "cvm-abc.dev.example.com",
@@ -164,6 +165,9 @@ def launch_snapshot(**overrides):
         "security_cvm_expected_image_measurement": "b" * 64,
         "security_cvm_image_measurement": "b" * 64,
         "security_cvm_rtmr3_digest": "c" * 96,
+        "security_cvm_last_policy_pull_at": None,
+        "security_cvm_last_policy_pull_etag": None,
+        "proxy_token_created_at": now,
     }
     row.update(overrides)
     return row
@@ -451,6 +455,91 @@ def test_execute_cvm_launch_attestation_gate_advances_after_columns_exist(monkey
     query, args = conn.execute_calls[0]
     assert "progress_step = $2" in query
     assert args == (UUID("00000000-0000-4000-8000-000000000030"), "await_sc_pull", 70)
+
+
+def test_execute_cvm_launch_await_sc_pull_advances_after_observation(monkeypatch) -> None:
+    token_created_at = scheduler.datetime.now(scheduler.timezone.utc) - scheduler.timedelta(seconds=5)
+    snapshot = launch_snapshot(
+        operation_updated_at=scheduler.datetime.now(scheduler.timezone.utc),
+        actor_id=UUID("00000000-0000-4000-8000-000000000020"),
+        actor_email="dev@example.com",
+        entity_id=UUID("00000000-0000-4000-8000-000000000001"),
+        state="PROVISIONING",
+        metadata={},
+        policy_version=0,
+        security_cvm_id=UUID("00000000-0000-4000-8000-000000000041"),
+        proxy_token_created_at=token_created_at,
+        security_cvm_last_policy_pull_at=token_created_at + scheduler.timedelta(seconds=1),
+        security_cvm_last_policy_pull_etag='"abc"',
+    )
+    conn = AttestationGateConn(snapshot)
+
+    async def fake_get_pool():
+        return LaunchFakePool(conn)
+
+    monkeypatch.setattr(scheduler, "get_pool", fake_get_pool)
+
+    asyncio.run(scheduler.execute_cvm_launch_await_sc_pull_operation(UUID("00000000-0000-4000-8000-000000000030")))
+
+    assert len(conn.execute_calls) == 1
+    query, args = conn.execute_calls[0]
+    assert "progress_step = $2" in query
+    assert args == (UUID("00000000-0000-4000-8000-000000000030"), "policy_push", 80)
+
+
+def test_execute_cvm_launch_await_sc_pull_waits_before_timeout(monkeypatch) -> None:
+    token_created_at = scheduler.datetime.now(scheduler.timezone.utc)
+    snapshot = launch_snapshot(
+        operation_updated_at=token_created_at,
+        actor_id=UUID("00000000-0000-4000-8000-000000000020"),
+        actor_email="dev@example.com",
+        entity_id=UUID("00000000-0000-4000-8000-000000000001"),
+        state="PROVISIONING",
+        metadata={},
+        policy_version=0,
+        security_cvm_id=UUID("00000000-0000-4000-8000-000000000041"),
+        proxy_token_created_at=token_created_at,
+        security_cvm_last_policy_pull_at=None,
+    )
+    conn = AttestationGateConn(snapshot)
+
+    async def fake_get_pool():
+        return LaunchFakePool(conn)
+
+    monkeypatch.setattr(scheduler, "get_pool", fake_get_pool)
+
+    asyncio.run(scheduler.execute_cvm_launch_await_sc_pull_operation(UUID("00000000-0000-4000-8000-000000000030")))
+
+    assert conn.execute_calls == []
+
+
+def test_execute_cvm_launch_await_sc_pull_falls_forward_after_timeout(monkeypatch) -> None:
+    token_created_at = scheduler.datetime.now(scheduler.timezone.utc) - scheduler.timedelta(seconds=20)
+    snapshot = launch_snapshot(
+        operation_updated_at=token_created_at,
+        actor_id=UUID("00000000-0000-4000-8000-000000000020"),
+        actor_email="dev@example.com",
+        entity_id=UUID("00000000-0000-4000-8000-000000000001"),
+        state="PROVISIONING",
+        metadata={},
+        policy_version=0,
+        security_cvm_id=UUID("00000000-0000-4000-8000-000000000041"),
+        proxy_token_created_at=token_created_at,
+        security_cvm_last_policy_pull_at=token_created_at - scheduler.timedelta(seconds=1),
+    )
+    conn = AttestationGateConn(snapshot)
+
+    async def fake_get_pool():
+        return LaunchFakePool(conn)
+
+    monkeypatch.setattr(scheduler, "get_pool", fake_get_pool)
+
+    asyncio.run(scheduler.execute_cvm_launch_await_sc_pull_operation(UUID("00000000-0000-4000-8000-000000000030")))
+
+    assert len(conn.execute_calls) == 1
+    query, args = conn.execute_calls[0]
+    assert "progress_step = $2" in query
+    assert args == (UUID("00000000-0000-4000-8000-000000000030"), "policy_push", 80)
 
 
 class FinaliseConn:

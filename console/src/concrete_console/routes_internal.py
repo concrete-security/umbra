@@ -94,7 +94,6 @@ async def list_sc_control_cvms(
             """,
             current_principal.entity_id,
         )
-
     body = {
         "entries": [
             {
@@ -109,6 +108,14 @@ async def list_sc_control_cvms(
         ]
     }
     etag = sc_control_etag(body)
+    async with pool.acquire() as conn:
+        await record_sc_control_pull_observation(
+            conn,
+            security_cvm_id=current_principal.principal_id,
+            entity_id=current_principal.entity_id,
+            etag=etag,
+            entry_count=len(rows),
+        )
     if etag_matches(if_none_match, etag):
         return Response(status_code=304, headers={"ETag": etag})
     response.headers["ETag"] = etag
@@ -298,6 +305,31 @@ def merge_sandbox_env(policies: list[dict[str, Any]]) -> list[dict[str, str]]:
 
 def sc_control_etag(body: dict[str, Any]) -> str:
     return f'"{hashlib.sha256(canonical_json(body).encode("utf-8")).hexdigest()}"'
+
+
+async def record_sc_control_pull_observation(
+    conn: asyncpg.Connection,
+    *,
+    security_cvm_id: UUID,
+    entity_id: UUID,
+    etag: str,
+    entry_count: int,
+) -> None:
+    await conn.execute(
+        """
+        UPDATE security_cvms
+        SET last_policy_pull_at = now(),
+            last_policy_pull_etag = $3,
+            last_policy_pull_entry_count = $4
+        WHERE id = $1
+          AND entity_id = $2
+          AND deleted_at IS NULL
+        """,
+        security_cvm_id,
+        entity_id,
+        etag,
+        entry_count,
+    )
 
 
 def etag_matches(if_none_match: str | None, etag: str) -> bool:

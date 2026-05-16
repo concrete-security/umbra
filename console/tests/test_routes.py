@@ -50,6 +50,7 @@ from concrete_console.routes_internal import (
     TrafficLogIn,
     etag_matches,
     merge_profile_policies,
+    record_sc_control_pull_observation,
     sc_control_etag,
     validate_traffic_log_batch_shape,
     validate_traffic_log_timestamps,
@@ -764,6 +765,36 @@ def test_sc_control_etag_matches_quoted_and_bare_values() -> None:
     assert etag_matches(etag, etag)
     assert etag_matches(etag.strip('"'), etag)
     assert not etag_matches('"stale"', etag)
+
+
+class ExecuteRecorder:
+    def __init__(self) -> None:
+        self.execute_calls: list[tuple[str, tuple[object, ...]]] = []
+
+    async def execute(self, query, *args):
+        self.execute_calls.append((query, args))
+        return "UPDATE 1"
+
+
+def test_record_sc_control_pull_observation_updates_policy_pull_columns() -> None:
+    conn = ExecuteRecorder()
+    security_cvm_id = UUID("00000000-0000-4000-8000-000000000041")
+    entity_id = UUID("00000000-0000-4000-8000-000000000001")
+
+    asyncio.run(
+        record_sc_control_pull_observation(
+            conn,
+            security_cvm_id=security_cvm_id,
+            entity_id=entity_id,
+            etag='"abc"',
+            entry_count=2,
+        )
+    )
+
+    query, args = conn.execute_calls[0]
+    assert "last_policy_pull_at = now()" in query
+    assert "updated_at = now()" not in query
+    assert args == (security_cvm_id, entity_id, '"abc"', 2)
 
 
 def test_ssh_key_fingerprint_accepts_openssh_public_key() -> None:

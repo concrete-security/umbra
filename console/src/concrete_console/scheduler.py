@@ -488,6 +488,25 @@ async def execute_cvm_launch_await_sc_pull_operation(operation_id: Any) -> None:
     if snapshot is None:
         await mark_cvm_launch_failed(operation_id, code="CVM_NOT_FOUND", details={"state": "missing_target"})
         return
+    proxy_token_created_at = _row_value(snapshot, "proxy_token_created_at")
+    if proxy_token_created_at is None:
+        await mark_cvm_launch_failed(
+            operation_id,
+            code="PROXY_AUTH_MISSING",
+            details={"state": "missing_proxy_token"},
+        )
+        return
+    last_pull_at = _row_value(snapshot, "security_cvm_last_policy_pull_at")
+    if last_pull_at is not None and last_pull_at >= proxy_token_created_at:
+        log.info(
+            "cvm_launch_sc_pull_observed",
+            operation_id=str(operation_id),
+            cvm_id=str(_row_value(snapshot, "cvm_id")),
+            security_cvm_id=str(_row_value(snapshot, "security_cvm_id")),
+            pull_etag=_row_value(snapshot, "security_cvm_last_policy_pull_etag"),
+        )
+        await advance_cvm_launch_step(operation_id, "policy_push")
+        return
     elapsed = datetime.now(timezone.utc) - _row_value(snapshot, "operation_updated_at")
     timeout = timedelta(seconds=sc_pull_propagation_timeout_seconds())
     if elapsed < timeout:
@@ -495,14 +514,16 @@ async def execute_cvm_launch_await_sc_pull_operation(operation_id: Any) -> None:
             "cvm_launch_awaiting_sc_pull",
             operation_id=str(operation_id),
             cvm_id=str(_row_value(snapshot, "cvm_id")),
+            security_cvm_id=str(_row_value(snapshot, "security_cvm_id")),
             elapsed_seconds=int(elapsed.total_seconds()),
             timeout_seconds=int(timeout.total_seconds()),
         )
         return
     log.warning(
-        "cvm_launch_sc_pull_observation_unavailable",
+        "cvm_launch_sc_pull_observation_stale",
         operation_id=str(operation_id),
         cvm_id=str(_row_value(snapshot, "cvm_id")),
+        security_cvm_id=str(_row_value(snapshot, "security_cvm_id")),
     )
     await advance_cvm_launch_step(operation_id, "policy_push")
 
@@ -910,13 +931,27 @@ async def fetch_cvm_launch_snapshot(conn: Any, operation_id: Any) -> Any | None:
             sc.expected_image_measurement AS security_cvm_expected_image_measurement,
             sc.image_measurement AS security_cvm_image_measurement,
             sc.rtmr3_digest AS security_cvm_rtmr3_digest,
-            sc.compose_config AS security_cvm_compose_config
+            sc.compose_config AS security_cvm_compose_config,
+            sc.last_policy_pull_at AS security_cvm_last_policy_pull_at,
+            sc.last_policy_pull_etag AS security_cvm_last_policy_pull_etag,
+            proxy_token.created_at AS proxy_token_created_at
         FROM operations o
         JOIN cvms c ON c.id = o.target_id
         JOIN security_cvms sc
           ON sc.id = c.security_cvm_id
          AND sc.state = 'RUNNING'
          AND sc.deleted_at IS NULL
+        LEFT JOIN LATERAL (
+            SELECT spt.created_at
+            FROM service_principal_tokens spt
+            WHERE spt.principal_type = 'dev_cvm'
+              AND spt.principal_id = c.id
+              AND spt.purpose = 'PROXY_AUTH'
+              AND spt.deleted_at IS NULL
+              AND (spt.expires_at IS NULL OR spt.expires_at > now())
+            ORDER BY spt.created_at DESC
+            LIMIT 1
+        ) proxy_token ON true
         WHERE o.id = $1
           AND o.kind = 'cvm.launch'
           AND o.status = 'running'
