@@ -11,6 +11,7 @@ from concrete_security_cvm.control_loop import (
 )
 from concrete_security_cvm.enforcement import DLPScanTimeout, EnforcementResult, ProxyRequest, enforce_request
 from concrete_security_cvm.management import ManagementResponse, handle_ca_pem_request
+from concrete_security_cvm.mitmproxy_addon import FlowTranslationError, SecurityCVMProxyAddon, proxy_request_from_flow
 from concrete_security_cvm.policy import (
     EffectivePolicy,
     PolicyDecision,
@@ -37,6 +38,7 @@ __all__ = [
     "DevCVMControlEntry",
     "EffectivePolicy",
     "EnforcementResult",
+    "FlowTranslationError",
     "InMemoryRootCA",
     "ManagementResponse",
     "PolicyDecision",
@@ -44,6 +46,7 @@ __all__ = [
     "PollResult",
     "ProxyRequest",
     "SCControlClient",
+    "SecurityCVMProxyAddon",
     "TrafficLogBatch",
     "TrafficLogClient",
     "TrafficLogEmitter",
@@ -55,6 +58,7 @@ __all__ = [
     "handle_ca_pem_request",
     "parse_effective_policy",
     "poll_control_plane_once",
+    "proxy_request_from_flow",
     "run_control_plane_poll_loop",
     "run_traffic_log_emitter_loop",
 ]
