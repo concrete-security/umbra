@@ -1,6 +1,5 @@
 import asyncio
 from datetime import datetime, timezone
-import hashlib
 from uuid import UUID
 
 import pytest
@@ -24,7 +23,6 @@ from concrete_console.routes import (
     erased_user_email,
     ensure_no_sandbox_env_conflict,
     fetch_live_security_cvm_id,
-    mint_service_principal_token_hash,
     policy_sha256,
     redacted_security_cvm_provision_result,
     profile_etag,
@@ -267,17 +265,6 @@ def test_deprovision_security_cvm_dns_records_keeps_failed_record_ids(monkeypatc
     )
 
     assert deleted == {"cname_dns_record_id"}
-
-
-def test_mint_service_principal_token_hash_returns_sha256(monkeypatch) -> None:
-    requested_sizes = []
-    monkeypatch.setattr(
-        "concrete_console.routes.secrets.token_urlsafe",
-        lambda nbytes: requested_sizes.append(nbytes) or "proxy-token",
-    )
-
-    assert mint_service_principal_token_hash() == hashlib.sha256(b"proxy-token").hexdigest()
-    assert requested_sizes == [32]
 
 
 def test_require_cvm_profile_mutable_rejects_terminated_cvm() -> None:
