@@ -125,7 +125,7 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException) 
     if isinstance(exc.detail, dict) and "error" in exc.detail:
         detail = exc.detail.copy()
         detail["error"] = {**detail["error"], "request_id": request_id}
-        return JSONResponse(status_code=exc.status_code, content=detail)
+        return JSONResponse(status_code=exc.status_code, content=detail, headers=exc.headers)
     code = http_status_error_code(exc.status_code)
     return JSONResponse(
         status_code=exc.status_code,
@@ -137,6 +137,7 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException) 
                 "request_id": request_id,
             }
         },
+        headers=exc.headers,
     )
 
 

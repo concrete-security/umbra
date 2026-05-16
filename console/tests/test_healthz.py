@@ -3,6 +3,7 @@ import hashlib
 import json
 from types import SimpleNamespace
 
+from fastapi import HTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.testclient import TestClient
 
@@ -515,6 +516,27 @@ def test_framework_404_uses_not_found_envelope() -> None:
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "NOT_FOUND"
     assert response.json()["error"]["request_id"] == "missing-request"
+
+
+def test_http_exception_handler_preserves_headers() -> None:
+    request = SimpleNamespace(state=SimpleNamespace(request_id="limited-request"))
+    exc = HTTPException(
+        status_code=429,
+        detail={
+            "error": {
+                "code": "RATE_LIMITED",
+                "message": "rate limit exceeded",
+                "details": {"retry_after_seconds": 60, "limit": "traffic_log_principal_logs"},
+            }
+        },
+        headers={"Retry-After": "60"},
+    )
+
+    response = asyncio.run(app_module.http_exception_handler(request, exc))
+
+    assert response.status_code == 429
+    assert response.headers["retry-after"] == "60"
+    assert json.loads(response.body)["error"]["request_id"] == "limited-request"
 
 
 def test_metrics_exposes_prometheus_text(monkeypatch) -> None:

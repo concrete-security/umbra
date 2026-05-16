@@ -23,6 +23,8 @@ TRAFFIC_LOG_IDEMPOTENCY_KEY_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 TRAFFIC_LOG_ROUTE = "POST /internal/traffic-logs"
 TRAFFIC_LOG_MAX_BODY_BYTES = 4 * 1024 * 1024
 TRAFFIC_LOG_TIMESTAMP_SKEW = timedelta(minutes=10)
+TRAFFIC_LOG_PRINCIPAL_LOGS_PER_MINUTE = 5000
+TRAFFIC_LOG_VOLUME_LOCK_KEY = "traffic-log-volume"
 
 
 class TrafficLogIn(BaseModel):
@@ -172,6 +174,11 @@ async def ingest_traffic_logs(
 
             validate_traffic_log_timestamps(body.logs)
             await validate_traffic_log_cvms(conn, entity_id=current_principal.entity_id, logs=body.logs)
+            await enforce_traffic_log_volume_limit(
+                conn,
+                security_cvm_id=current_principal.principal_id,
+                row_count=len(body.logs),
+            )
             batch_id = await conn.fetchval(
                 """
                 INSERT INTO traffic_log_batches (
@@ -405,6 +412,39 @@ async def validate_traffic_log_cvms(
                     for cvm_id in missing
                 ]
             },
+        )
+
+
+async def enforce_traffic_log_volume_limit(
+    conn: asyncpg.Connection,
+    *,
+    security_cvm_id: UUID,
+    row_count: int,
+) -> None:
+    await conn.execute(
+        "SELECT pg_advisory_xact_lock($1)",
+        advisory_lock_key(
+            credential_id=str(security_cvm_id),
+            idempotency_key=TRAFFIC_LOG_VOLUME_LOCK_KEY,
+            route=TRAFFIC_LOG_ROUTE,
+        ),
+    )
+    current_count = await conn.fetchval(
+        """
+        SELECT COALESCE(sum(row_count), 0)::int
+        FROM traffic_log_batches
+        WHERE security_cvm_id = $1
+          AND accepted_at > now() - INTERVAL '1 minute'
+        """,
+        security_cvm_id,
+    )
+    if (current_count or 0) + row_count > TRAFFIC_LOG_PRINCIPAL_LOGS_PER_MINUTE:
+        raise api_error(
+            429,
+            "RATE_LIMITED",
+            "traffic log volume rate limit exceeded",
+            {"retry_after_seconds": 60, "limit": "traffic_log_principal_logs"},
+            headers={"Retry-After": "60"},
         )
 
 

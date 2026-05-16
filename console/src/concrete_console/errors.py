@@ -8,6 +8,7 @@ def api_error(
     code: str,
     message: str,
     details: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
 ) -> HTTPException:
     return HTTPException(
         status_code=status_code,
@@ -18,4 +19,5 @@ def api_error(
                 "details": details or {},
             }
         },
+        headers=headers,
     )

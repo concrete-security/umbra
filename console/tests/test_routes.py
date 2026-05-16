@@ -51,6 +51,7 @@ from concrete_console.tee_provider.phala import PhalaError
 from concrete_console.routes_internal import (
     TrafficLogBatch,
     TrafficLogIn,
+    enforce_traffic_log_volume_limit,
     etag_matches,
     merge_profile_policies,
     record_sc_control_pull_observation,
@@ -835,6 +836,46 @@ def test_validate_traffic_log_timestamps_rejects_skew() -> None:
 
     assert exc.value.status_code == 422
     assert exc.value.detail["error"]["details"]["errors"][0]["type"] == "timestamp_skew"
+
+
+class TrafficLogVolumeLimitConn:
+    def __init__(self, current_count: int):
+        self.current_count = current_count
+        self.execute_calls: list[tuple[str, tuple[object, ...]]] = []
+        self.fetchval_calls: list[tuple[str, tuple[object, ...]]] = []
+
+    async def execute(self, query: str, *args):
+        self.execute_calls.append((query, args))
+        return "SELECT 1"
+
+    async def fetchval(self, query: str, *args):
+        self.fetchval_calls.append((query, args))
+        return self.current_count
+
+
+def test_enforce_traffic_log_volume_limit_allows_within_budget() -> None:
+    security_cvm_id = UUID("00000000-0000-4000-8000-000000000041")
+    conn = TrafficLogVolumeLimitConn(current_count=4990)
+
+    asyncio.run(enforce_traffic_log_volume_limit(conn, security_cvm_id=security_cvm_id, row_count=10))
+
+    assert "pg_advisory_xact_lock" in conn.execute_calls[0][0]
+    assert conn.fetchval_calls[0][1] == (security_cvm_id,)
+
+
+def test_enforce_traffic_log_volume_limit_rejects_over_budget() -> None:
+    security_cvm_id = UUID("00000000-0000-4000-8000-000000000041")
+    conn = TrafficLogVolumeLimitConn(current_count=4991)
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(enforce_traffic_log_volume_limit(conn, security_cvm_id=security_cvm_id, row_count=10))
+
+    assert exc.value.status_code == 429
+    assert exc.value.headers == {"Retry-After": "60"}
+    assert exc.value.detail["error"]["details"] == {
+        "retry_after_seconds": 60,
+        "limit": "traffic_log_principal_logs",
+    }
 
 
 def test_merge_profile_policies_field_typed() -> None:
