@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import base64
 import binascii
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import re
@@ -17,6 +17,12 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from concrete_console.audit import AUDIT_ACTIONS, insert_audit_event, redact_user_audit_trail
+from concrete_console.audit_export import (
+    audit_export_object_key,
+    read_file_artifact,
+    serialize_audit_export,
+    write_file_artifact,
+)
 from concrete_console.auth import CurrentUser, require_current_user
 from concrete_console.bootstrap import email_domain
 from concrete_console.config import load_settings
@@ -93,6 +99,8 @@ CREATE_CVM_ROUTE = "POST /api/v1/cvms"
 ADMIN_SESSIONS_REVOKE_ROUTE = "POST /api/v1/admin/sessions/revoke"
 ADMIN_KEYS_ROTATE_ROUTE = "POST /api/v1/admin/keys/rotate"
 AUDIT_EXPORT_ROUTE = "POST /api/v1/audit/export"
+AUDIT_EXPORT_ROW_CAP = 1_000_000
+AUDIT_EXPORT_DOWNLOAD_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{32,256}$")
 OPERATION_KIND_PERMISSIONS = {
     "audit.export": "AUDIT_EXPORT",
     "cvm.launch": "CVM_LAUNCH",
@@ -2787,25 +2795,273 @@ async def list_audit_events(
 
 @router.post("/audit/export", status_code=202)
 async def create_audit_export(
+    request: Request,
     body: AuditExportCreate,
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
     current_user: CurrentUser = Depends(require_current_user),
-) -> dict:
-    require_idempotency_key(idempotency_key)
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> Any:
+    idempotency_key_value = require_idempotency_key(idempotency_key)
     current_user.require_permission("AUDIT_EXPORT")
     validate_audit_export_request(body)
-    if not load_settings().raw.get("AUDIT_EXPORT_BUCKET", "").strip():
+    settings = load_settings()
+    bucket_uri = settings.raw.get("AUDIT_EXPORT_BUCKET", "").strip()
+    if not bucket_uri:
         raise api_error(
             503,
             "SERVICE_UNAVAILABLE",
             "audit export bucket is not configured",
             {"component": "audit_export_bucket"},
         )
-    raise api_error(
-        503,
-        "SERVICE_UNAVAILABLE",
-        "audit export storage backend is not implemented",
-        {"component": "audit_export_store"},
+    if not bucket_uri.startswith("file://"):
+        raise api_error(
+            503,
+            "SERVICE_UNAVAILABLE",
+            "audit export storage backend is not configured for this build",
+            {"component": "audit_export_store"},
+        )
+
+    body_sha256 = request_body_sha256(await request.body())
+    operation_id = uuid4()
+    download_token = secrets.token_urlsafe(32)
+    download_token_hash = hashlib.sha256(download_token.encode("utf-8")).hexdigest()
+    download_expires_at = datetime.now(timezone.utc) + timedelta(minutes=5)
+    console_url = settings.raw.get("CONSOLE_URL", "http://localhost:8000").rstrip("/")
+
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await acquire_idempotency_lock(
+                conn,
+                credential_id=str(current_user.id),
+                idempotency_key=idempotency_key_value,
+                route=AUDIT_EXPORT_ROUTE,
+            )
+            cached = await lookup_idempotency_response(
+                conn,
+                credential_id=str(current_user.id),
+                idempotency_key=idempotency_key_value,
+                route=AUDIT_EXPORT_ROUTE,
+                body_sha256=body_sha256,
+            )
+            if cached is not None:
+                return JSONResponse(status_code=cached.status_code, content=cached.body, headers=cached.headers)
+
+            export_count = await audit_export_daily_count(conn, current_user.id)
+            if export_count >= 10:
+                raise api_error(
+                    429,
+                    "RATE_LIMITED",
+                    "daily audit export quota exhausted",
+                    {"limit": "audit_export_daily"},
+                )
+
+            rows = await fetch_audit_export_rows(conn, current_user.entity_id, body, limit=AUDIT_EXPORT_ROW_CAP + 1)
+            if len(rows) > AUDIT_EXPORT_ROW_CAP:
+                raise api_error(
+                    413,
+                    "PAYLOAD_TOO_LARGE",
+                    "audit export row cap exceeded",
+                    {"limit": AUDIT_EXPORT_ROW_CAP},
+                )
+            artifact = serialize_audit_export(list(rows), body.format)
+            object_key = audit_export_object_key(operation_id, body.format)
+            try:
+                storage_uri = write_file_artifact(bucket_uri, object_key, artifact.content)
+            except (OSError, ValueError) as exc:
+                raise api_error(
+                    503,
+                    "SERVICE_UNAVAILABLE",
+                    "audit export storage backend failed",
+                    {"component": "audit_export_store"},
+                ) from exc
+
+            result = {
+                "download_url": f"{console_url}/api/v1/audit/exports/{download_token}",
+                "expires_at": timestamp(download_expires_at),
+                "content_type": artifact.content_type,
+                "sha256": artifact.sha256,
+                "row_count": artifact.row_count,
+                "byte_size": artifact.byte_size,
+            }
+            row = await conn.fetchrow(
+                """
+                INSERT INTO operations (
+                    id,
+                    kind,
+                    status,
+                    actor_id,
+                    actor_email,
+                    target_type,
+                    target_id,
+                    idempotency_key,
+                    request_body_sha256,
+                    progress_step,
+                    progress_percent,
+                    result,
+                    expires_at
+                )
+                VALUES (
+                    $1, 'audit.export', 'succeeded', $2, $3, 'audit_export', $1, $4, $5,
+                    'completed', 100, $6::jsonb, $7
+                )
+                RETURNING
+                    id,
+                    kind,
+                    status::text AS status,
+                    actor_id,
+                    actor_email,
+                    target_type,
+                    target_id,
+                    progress_step,
+                    progress_percent,
+                    result,
+                    error,
+                    result_disclosed_at,
+                    created_at,
+                    updated_at,
+                    expires_at
+                """,
+                operation_id,
+                current_user.id,
+                current_user.email,
+                idempotency_key_value,
+                body_sha256,
+                json.dumps(result),
+                datetime.now(timezone.utc) + timedelta(days=operation_retention_days()),
+            )
+            await conn.execute(
+                """
+                INSERT INTO audit_export_artifacts (
+                    operation_id,
+                    storage_uri,
+                    download_token_hash,
+                    content_type,
+                    sha256,
+                    row_count,
+                    byte_size,
+                    expires_at
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                """,
+                operation_id,
+                storage_uri,
+                download_token_hash,
+                artifact.content_type,
+                artifact.sha256,
+                artifact.row_count,
+                artifact.byte_size,
+                download_expires_at,
+            )
+            await insert_audit_event(
+                conn,
+                entity_id=current_user.entity_id,
+                actor_id=current_user.id,
+                actor_email=current_user.email,
+                action="AUDIT_EXPORT_REQUESTED",
+                target_type="audit_export",
+                target_id=operation_id,
+                after=audit_export_filters_payload(body),
+            )
+            await insert_audit_event(
+                conn,
+                entity_id=current_user.entity_id,
+                actor_id=current_user.id,
+                actor_email=current_user.email,
+                action="AUDIT_EXPORT_ISSUED",
+                target_type="audit_export",
+                target_id=operation_id,
+                after={
+                    "row_count": artifact.row_count,
+                    "byte_size": artifact.byte_size,
+                    "sha256": artifact.sha256,
+                },
+            )
+            response_body = operation_resource(row)
+            await store_idempotency_response(
+                conn,
+                credential_id=str(current_user.id),
+                idempotency_key=idempotency_key_value,
+                route=AUDIT_EXPORT_ROUTE,
+                body_sha256=body_sha256,
+                status_code=202,
+                response_body=response_body,
+            )
+            return response_body
+
+
+@router.get("/audit/exports/{download_token}")
+async def download_audit_export(
+    download_token: str,
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> Response:
+    if not AUDIT_EXPORT_DOWNLOAD_TOKEN_RE.fullmatch(download_token):
+        raise api_error(404, "NOT_FOUND", "resource not found")
+    token_hash = hashlib.sha256(download_token.encode("utf-8")).hexdigest()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """
+                SELECT
+                    id,
+                    operation_id,
+                    storage_uri,
+                    content_type,
+                    sha256,
+                    expires_at,
+                    redeemed_at
+                FROM audit_export_artifacts
+                WHERE download_token_hash = $1
+                FOR UPDATE
+                """,
+                token_hash,
+            )
+            now = datetime.now(timezone.utc)
+            if row is None or row["expires_at"] <= now or row["redeemed_at"] is not None:
+                raise api_error(404, "NOT_FOUND", "resource not found")
+            try:
+                content = read_file_artifact(row["storage_uri"])
+            except (OSError, ValueError) as exc:
+                raise api_error(
+                    503,
+                    "SERVICE_UNAVAILABLE",
+                    "audit export storage backend failed",
+                    {"component": "audit_export_store"},
+                ) from exc
+            if hashlib.sha256(content).hexdigest() != row["sha256"]:
+                raise api_error(
+                    503,
+                    "SERVICE_UNAVAILABLE",
+                    "audit export artifact integrity check failed",
+                    {"component": "audit_export_store"},
+                )
+            redeemed_at = timestamp(now)
+            await conn.execute(
+                """
+                UPDATE audit_export_artifacts
+                SET redeemed_at = $2
+                WHERE id = $1
+                """,
+                row["id"],
+                now,
+            )
+            await conn.execute(
+                """
+                UPDATE operations
+                SET result = jsonb_set(COALESCE(result, '{}'::jsonb), '{redeemed_at}', to_jsonb($2::text), true),
+                    updated_at = now()
+                WHERE id = $1
+                """,
+                row["operation_id"],
+                redeemed_at,
+            )
+    extension = "csv" if row["content_type"].startswith("text/csv") else "ndjson"
+    return Response(
+        content=content,
+        media_type=row["content_type"],
+        headers={
+            "Content-Disposition": f'attachment; filename="audit-export-{row["operation_id"]}.{extension}"',
+            "Cache-Control": "no-store",
+        },
     )
 
 
@@ -2824,6 +3080,85 @@ def validate_audit_export_request(body: AuditExportCreate) -> None:
             "unknown audit action",
             {"errors": [{"type": "unknown_action", "field": "action"}]},
         )
+
+
+def operation_retention_days() -> int:
+    raw = load_settings().raw.get("OPERATION_RETENTION_DAYS", "30").strip() or "30"
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise api_error(
+            503,
+            "SERVICE_UNAVAILABLE",
+            "operation retention configuration is invalid",
+            {"component": "operation_retention"},
+        ) from exc
+    return min(max(value, 1), 365)
+
+
+async def audit_export_daily_count(conn: asyncpg.Connection, actor_id: UUID) -> int:
+    return await conn.fetchval(
+        """
+        SELECT count(*)
+        FROM operations
+        WHERE kind = 'audit.export'
+          AND actor_id = $1
+          AND created_at >= date_trunc('day', now())
+        """,
+        actor_id,
+    )
+
+
+async def fetch_audit_export_rows(
+    conn: asyncpg.Connection,
+    entity_id: UUID,
+    body: AuditExportCreate,
+    *,
+    limit: int,
+) -> list[asyncpg.Record]:
+    clauses = ["(entity_id = $1 OR actor_id IN (SELECT id FROM users WHERE entity_id = $1))"]
+    values: list[object] = [entity_id]
+
+    def bind(value: object) -> str:
+        values.append(value)
+        return f"${len(values)}"
+
+    if body.actor_id is not None:
+        clauses.append(f"actor_id = {bind(body.actor_id)}")
+    if body.target_type is not None:
+        clauses.append(f"target_type = {bind(body.target_type)}")
+    if body.target_id is not None:
+        clauses.append(f"target_id = {bind(body.target_id)}")
+    if body.action is not None:
+        clauses.append(f"action = {bind(body.action)}")
+    if body.from_ is not None:
+        clauses.append(f"timestamp >= {bind(body.from_)}")
+    if body.to is not None:
+        clauses.append(f"timestamp <= {bind(body.to)}")
+
+    values.append(limit)
+    query = f"""
+        SELECT
+            seq, id, entity_id, actor_id, actor_email, action, target_type, target_id,
+            before, after, ip_address, description, request_id, timestamp, prev_hash, row_hash
+        FROM audit_events
+        WHERE {' AND '.join(clauses)}
+        ORDER BY seq ASC
+        LIMIT ${len(values)}
+    """
+    return list(await conn.fetch(query, *values))
+
+
+def audit_export_filters_payload(body: AuditExportCreate) -> dict[str, Any]:
+    return {
+        "format": body.format,
+        "actor_id": str(body.actor_id) if body.actor_id else None,
+        "target_type": body.target_type,
+        "target_id": body.target_id,
+        "action": body.action,
+        "from": timestamp(body.from_) if body.from_ else None,
+        "to": timestamp(body.to) if body.to else None,
+    }
 
 
 @router.get("/cvms")
