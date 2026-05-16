@@ -431,6 +431,11 @@ def policy_sha256(policy: dict[str, Any]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def mint_service_principal_token_hash() -> str:
+    token = secrets.token_urlsafe(32)
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
 def sandbox_env_value_denylist() -> list[re.Pattern[str]]:
     raw = load_settings().raw.get("SANDBOX_ENV_VALUE_DENYLIST")
     patterns = raw.split(",") if raw is not None else list(DEFAULT_SANDBOX_ENV_VALUE_DENYLIST)
@@ -3324,6 +3329,21 @@ async def create_cvm(
                 VALUES ($1, $2)
                 """,
                 [(cvm_id, ssh_key_id) for ssh_key_id in body.ssh_key_ids],
+            )
+            await conn.execute(
+                """
+                INSERT INTO service_principal_tokens (
+                    id,
+                    principal_type,
+                    principal_id,
+                    purpose,
+                    token_hash
+                )
+                VALUES ($1, 'dev_cvm', $2, 'PROXY_AUTH', $3)
+                """,
+                uuid4(),
+                cvm_id,
+                mint_service_principal_token_hash(),
             )
             row = await conn.fetchrow(
                 """
