@@ -118,6 +118,42 @@ def build_dev_cvm_attestation_request(snapshot: Any) -> dict[str, Any]:
     }
 
 
+def build_security_cvm_attestation_request(
+    snapshot: Any,
+    *,
+    token_hashes: dict[str, str],
+    console_url: str,
+) -> dict[str, Any]:
+    ingest_hash = token_hashes.get("INGEST")
+    ca_export_hash = token_hashes.get("CA_EXPORT")
+    if not isinstance(ingest_hash, str) or not HEX64_RE.fullmatch(ingest_hash):
+        raise AttestationVerifierError(
+            "ATTESTATION_QUOTE_INVALID",
+            {"reason": "security_cvm_token_hash_missing", "purpose": "INGEST"},
+        )
+    if not isinstance(ca_export_hash, str) or not HEX64_RE.fullmatch(ca_export_hash):
+        raise AttestationVerifierError(
+            "ATTESTATION_QUOTE_INVALID",
+            {"reason": "security_cvm_token_hash_missing", "purpose": "CA_EXPORT"},
+        )
+    return {
+        "kind": "security_cvm",
+        "fqdn": _row_value(snapshot, "fqdn"),
+        "policy": {
+            "type": "dstack_tdx",
+            "expected_image_measurement": _row_value(snapshot, "expected_image_measurement"),
+            "app_compose": {"docker_compose_file": _row_value(snapshot, "compose_config")},
+            "rtmr3_binding": {
+                "CONSOLE_URL": console_url,
+                "entity_id": str(_row_value(snapshot, "entity_id")),
+                "sc_id": str(_row_value(snapshot, "id")),
+                "ingest_token_sha256": ingest_hash.lower(),
+                "ca_export_token_sha256": ca_export_hash.lower(),
+            },
+        },
+    }
+
+
 def verifier_error_from_output(stdout: bytes) -> AttestationVerifierError:
     try:
         payload = json.loads(stdout.decode("utf-8"))

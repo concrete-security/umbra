@@ -4572,13 +4572,187 @@ async def get_security_cvm_attestation(
     if row is None:
         raise api_error(404, "NOT_FOUND", "resource not found")
     if probe:
+        async with pool.acquire() as conn:
+            return await run_security_cvm_attestation_probe(conn, row, current_user=current_user)
+    return security_cvm_attestation_resource(row)
+
+
+async def run_security_cvm_attestation_probe(conn: asyncpg.Connection, row: Any, *, current_user: CurrentUser) -> dict[str, Any]:
+    from concrete_console.attestation import (
+        AtlasVerifierClient,
+        AttestationVerifierError,
+        AttestationVerifierUnavailable,
+        build_security_cvm_attestation_request,
+    )
+
+    try:
+        verifier = AtlasVerifierClient.from_settings()
+    except AttestationVerifierUnavailable:
         raise api_error(
             503,
             "SERVICE_UNAVAILABLE",
-            "security CVM attestation probe is not implemented",
+            "security CVM attestation probe is not configured",
             {"component": "security_cvm_attestation_probe"},
+        ) from None
+    except AttestationVerifierError as exc:
+        raise api_error(
+            502,
+            "UPSTREAM_ERROR",
+            "security CVM attestation verifier is unavailable",
+            {"adapter": "security_cvm", "attestation_error_code": exc.code, **exc.details},
+        ) from exc
+
+    token_hashes = await fetch_security_cvm_token_hashes(conn, row_value(row, "id"))
+    try:
+        request = build_security_cvm_attestation_request(
+            row,
+            token_hashes=token_hashes,
+            console_url=load_settings().raw.get("CONSOLE_URL", "http://localhost:8000"),
         )
-    return security_cvm_attestation_resource(row)
+        report = await verifier.verify(request, timeout_seconds=30)
+    except AttestationVerifierError as exc:
+        raise api_error(
+            502,
+            "UPSTREAM_ERROR",
+            "security CVM attestation probe failed",
+            {"adapter": "security_cvm", "attestation_error_code": exc.code, **exc.details},
+        ) from exc
+
+    drift_kind = security_cvm_attestation_drift_kind(row, report)
+    if drift_kind is not None:
+        await record_security_cvm_attestation_drift(conn, row, report, drift_kind=drift_kind, current_user=current_user)
+        raise api_error(
+            409,
+            "CONFLICT",
+            "Security CVM attestation drift detected",
+            {
+                "state": "attestation_drift",
+                "console_verdict": security_cvm_attestation_resource(row),
+                "fresh_report": {
+                    "image_measurement_seen": report.image_measurement,
+                    "rtmr3_digest_seen": report.rtmr3_digest,
+                    "drift_kind": drift_kind,
+                },
+            },
+        )
+    return await persist_security_cvm_attestation_probe(conn, row, report, current_user=current_user)
+
+
+async def fetch_security_cvm_token_hashes(conn: asyncpg.Connection, security_cvm_id: UUID) -> dict[str, str]:
+    rows = await conn.fetch(
+        """
+        SELECT purpose::text AS purpose, token_hash
+        FROM service_principal_tokens
+        WHERE principal_type = 'security_cvm'
+          AND principal_id = $1
+          AND purpose IN ('INGEST', 'CA_EXPORT')
+          AND deleted_at IS NULL
+        """,
+        security_cvm_id,
+    )
+    return {row["purpose"]: row["token_hash"] for row in rows}
+
+
+def row_value(row: Any, key: str) -> Any:
+    return row[key]
+
+
+def security_cvm_attestation_drift_kind(row: Any, report: Any) -> str | None:
+    image_drift = report.image_measurement != row_value(row, "expected_image_measurement")
+    persisted_image = row_value(row, "image_measurement")
+    if persisted_image is not None and persisted_image != report.image_measurement:
+        image_drift = True
+    persisted_rtmr3 = row_value(row, "rtmr3_digest")
+    rtmr3_drift = persisted_rtmr3 is not None and persisted_rtmr3 != report.rtmr3_digest
+    if image_drift and rtmr3_drift:
+        return "both"
+    if image_drift:
+        return "image"
+    if rtmr3_drift:
+        return "rtmr3"
+    return None
+
+
+async def record_security_cvm_attestation_drift(
+    conn: asyncpg.Connection,
+    row: Any,
+    report: Any,
+    *,
+    drift_kind: str,
+    current_user: CurrentUser,
+) -> None:
+    async with conn.transaction():
+        await insert_audit_event(
+            conn,
+            entity_id=row_value(row, "entity_id"),
+            actor_id=current_user.id,
+            actor_email=current_user.email,
+            action="SECURITY_CVM_ATTESTATION_DRIFT",
+            target_type="security_cvm",
+            target_id=row_value(row, "id"),
+            before={
+                "image_measurement": row_value(row, "image_measurement"),
+                "rtmr3_digest": row_value(row, "rtmr3_digest"),
+            },
+            after={
+                "image_measurement": report.image_measurement,
+                "rtmr3_digest": report.rtmr3_digest,
+                "drift_kind": drift_kind,
+                "source": "on_demand",
+            },
+        )
+
+
+async def persist_security_cvm_attestation_probe(
+    conn: asyncpg.Connection,
+    row: Any,
+    report: Any,
+    *,
+    current_user: CurrentUser,
+) -> dict[str, Any]:
+    verified_at = datetime.now(timezone.utc)
+    async with conn.transaction():
+        await conn.execute(
+            """
+            UPDATE security_cvms
+            SET image_measurement = $2,
+                rtmr3_digest = $3,
+                attestation_verified_at = $4,
+                error_reason = NULL,
+                updated_at = now()
+            WHERE id = $1
+              AND deleted_at IS NULL
+            """,
+            row_value(row, "id"),
+            report.image_measurement,
+            report.rtmr3_digest,
+            verified_at,
+        )
+        await insert_audit_event(
+            conn,
+            entity_id=row_value(row, "entity_id"),
+            actor_id=current_user.id,
+            actor_email=current_user.email,
+            action="SECURITY_CVM_ATTESTATION_VERIFIED",
+            target_type="security_cvm",
+            target_id=row_value(row, "id"),
+            before={
+                "image_measurement": row_value(row, "image_measurement"),
+                "rtmr3_digest": row_value(row, "rtmr3_digest"),
+            },
+            after={
+                "image_measurement": report.image_measurement,
+                "rtmr3_digest": report.rtmr3_digest,
+                "attestation_verified_at": verified_at.isoformat().replace("+00:00", "Z"),
+                "source": "on_demand",
+            },
+        )
+    updated = dict(row)
+    updated["image_measurement"] = report.image_measurement
+    updated["rtmr3_digest"] = report.rtmr3_digest
+    updated["attestation_verified_at"] = verified_at
+    updated["error_reason"] = None
+    return security_cvm_attestation_resource(updated)
 
 
 async def fetch_security_cvm_row(conn: asyncpg.Connection, entity_id: UUID) -> asyncpg.Record | None:
@@ -4593,6 +4767,7 @@ async def fetch_security_cvm_row(conn: asyncpg.Connection, entity_id: UUID) -> a
             region,
             error_reason,
             policy_version,
+            compose_config,
             expected_image_measurement,
             image_measurement,
             rtmr3_digest,

@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
@@ -8,6 +9,8 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 from fastapi import HTTPException
 from pydantic import ValidationError
 
+from concrete_console import attestation
+from concrete_console import routes as routes_module
 from concrete_console.routes import (
     AdminKeysRotate,
     AdminReconcile,
@@ -479,6 +482,130 @@ def test_render_security_cvm_compose_config_keeps_runtime_values_as_placeholders
     assert "${CONSOLE_INGEST_TOKEN}" in compose
     assert "${CA_EXPORT_TOKEN}" in compose
     assert "token_urlsafe" not in compose
+
+
+class AsyncContext:
+    def __init__(self, value=None):
+        self.value = value
+
+    async def __aenter__(self):
+        return self.value
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class SecurityCvmAttestationProbeConn:
+    def __init__(self):
+        self.execute_calls: list[tuple[str, tuple[object, ...]]] = []
+        self.audit_calls: list[dict[str, object]] = []
+
+    def transaction(self):
+        return AsyncContext()
+
+    async def fetch(self, query, *args):
+        if "FROM service_principal_tokens" in query:
+            return [
+                {"purpose": "INGEST", "token_hash": "b" * 64},
+                {"purpose": "CA_EXPORT", "token_hash": "c" * 64},
+            ]
+        raise AssertionError(f"unexpected fetch query: {query}")
+
+    async def execute(self, query, *args):
+        self.execute_calls.append((query, args))
+        return "UPDATE 1"
+
+
+def security_cvm_attestation_row(**overrides):
+    row = {
+        "id": UUID("00000000-0000-4000-8000-000000000041"),
+        "entity_id": UUID("00000000-0000-4000-8000-000000000001"),
+        "state": "RUNNING",
+        "fqdn": "sc.example.com",
+        "compose_config": "services: {}\n",
+        "expected_image_measurement": "a" * 64,
+        "image_measurement": None,
+        "rtmr3_digest": None,
+        "attestation_verified_at": None,
+        "error_reason": None,
+    }
+    row.update(overrides)
+    return row
+
+
+def current_user(**overrides):
+    row = {
+        "id": UUID("00000000-0000-4000-8000-000000000020"),
+        "email": "admin@example.com",
+    }
+    row.update(overrides)
+    return SimpleNamespace(**row)
+
+
+def test_run_security_cvm_attestation_probe_persists_success(monkeypatch) -> None:
+    conn = SecurityCvmAttestationProbeConn()
+    captured_request: dict[str, object] = {}
+
+    class FakeVerifier:
+        async def verify(self, request, *, timeout_seconds):
+            captured_request.update(request)
+            assert timeout_seconds == 30
+            return attestation.AttestationReport(image_measurement="a" * 64, rtmr3_digest="d" * 96)
+
+    async def fake_insert_audit_event(_conn, **kwargs):
+        conn.audit_calls.append(kwargs)
+
+    monkeypatch.setenv("CONSOLE_URL", "https://console.example.com")
+    monkeypatch.setattr(attestation.AtlasVerifierClient, "from_settings", classmethod(lambda cls: FakeVerifier()))
+    monkeypatch.setattr(routes_module, "insert_audit_event", fake_insert_audit_event)
+
+    result = asyncio.run(
+        routes_module.run_security_cvm_attestation_probe(
+            conn,
+            security_cvm_attestation_row(),
+            current_user=current_user(),
+        )
+    )
+
+    assert captured_request["kind"] == "security_cvm"
+    assert captured_request["policy"]["rtmr3_binding"]["ingest_token_sha256"] == "b" * 64
+    assert result["verdict"]["verified"] is True
+    security_cvm_updates = [args for query, args in conn.execute_calls if "UPDATE security_cvms" in query]
+    assert security_cvm_updates[0][:3] == (
+        UUID("00000000-0000-4000-8000-000000000041"),
+        "a" * 64,
+        "d" * 96,
+    )
+    assert conn.audit_calls[0]["action"] == "SECURITY_CVM_ATTESTATION_VERIFIED"
+    assert conn.audit_calls[0]["after"]["source"] == "on_demand"
+
+
+def test_run_security_cvm_attestation_probe_reports_drift_without_update(monkeypatch) -> None:
+    conn = SecurityCvmAttestationProbeConn()
+
+    class FakeVerifier:
+        async def verify(self, request, *, timeout_seconds):
+            return attestation.AttestationReport(image_measurement="e" * 64, rtmr3_digest="f" * 96)
+
+    async def fake_insert_audit_event(_conn, **kwargs):
+        conn.audit_calls.append(kwargs)
+
+    monkeypatch.setattr(attestation.AtlasVerifierClient, "from_settings", classmethod(lambda cls: FakeVerifier()))
+    monkeypatch.setattr(routes_module, "insert_audit_event", fake_insert_audit_event)
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            routes_module.run_security_cvm_attestation_probe(
+                conn,
+                security_cvm_attestation_row(image_measurement="a" * 64, rtmr3_digest="d" * 96),
+                current_user=current_user(),
+            )
+        )
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail["error"]["details"]["state"] == "attestation_drift"
+    assert conn.audit_calls[0]["action"] == "SECURITY_CVM_ATTESTATION_DRIFT"
+    assert not [query for query, _args in conn.execute_calls if "UPDATE security_cvms" in query]
 
 
 class FakeFetchValConn:

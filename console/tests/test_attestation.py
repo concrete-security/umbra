@@ -10,6 +10,7 @@ from concrete_console.attestation import (
     ATLAS_VERIFIER_CMD_ENV,
     AttestationVerifierError,
     build_dev_cvm_attestation_request,
+    build_security_cvm_attestation_request,
     parse_attestation_report,
     verifier_error_from_output,
 )
@@ -74,6 +75,37 @@ def test_build_dev_cvm_attestation_request_uses_policy_bundle() -> None:
             "os_image_hash": "c" * 64,
             "app_compose": {"docker_compose_file": "services: {}\n"},
             "rtmr3_binding": {"cvm_id": "00000000-0000-4000-8000-000000000031"},
+        },
+    }
+
+
+def test_build_security_cvm_attestation_request_uses_token_hashes() -> None:
+    request = build_security_cvm_attestation_request(
+        {
+            "id": UUID("00000000-0000-4000-8000-000000000041"),
+            "entity_id": UUID("00000000-0000-4000-8000-000000000001"),
+            "fqdn": "sc.example.com",
+            "expected_image_measurement": "a" * 64,
+            "compose_config": "services: {}\n",
+        },
+        token_hashes={"INGEST": "B" * 64, "CA_EXPORT": "C" * 64},
+        console_url="https://console.example.com",
+    )
+
+    assert request == {
+        "kind": "security_cvm",
+        "fqdn": "sc.example.com",
+        "policy": {
+            "type": "dstack_tdx",
+            "expected_image_measurement": "a" * 64,
+            "app_compose": {"docker_compose_file": "services: {}\n"},
+            "rtmr3_binding": {
+                "CONSOLE_URL": "https://console.example.com",
+                "entity_id": "00000000-0000-4000-8000-000000000001",
+                "sc_id": "00000000-0000-4000-8000-000000000041",
+                "ingest_token_sha256": "b" * 64,
+                "ca_export_token_sha256": "c" * 64,
+            },
         },
     }
 
