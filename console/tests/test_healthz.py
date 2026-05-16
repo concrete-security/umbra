@@ -430,8 +430,17 @@ def test_metrics_requires_bearer_token(monkeypatch) -> None:
     response = TestClient(app).get("/metrics", headers={"X-Request-Id": "metrics-request"})
 
     assert response.status_code == 401
+    assert response.json()["error"]["code"] == "UNAUTHORIZED"
     assert response.json()["error"]["request_id"] == "metrics-request"
     assert response.headers["cache-control"] == "no-store"
+
+
+def test_framework_404_uses_not_found_envelope() -> None:
+    response = TestClient(app).get("/missing", headers={"X-Request-Id": "missing-request"})
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "NOT_FOUND"
+    assert response.json()["error"]["request_id"] == "missing-request"
 
 
 def test_metrics_exposes_prometheus_text(monkeypatch) -> None:

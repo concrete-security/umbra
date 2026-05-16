@@ -11,6 +11,7 @@ from uuid import uuid4
 from fastapi import FastAPI, Header, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, PlainTextResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from concrete_console.audit_anchor import publish_audit_anchor_now
 from concrete_console.config import load_settings
@@ -106,24 +107,44 @@ async def request_context_middleware(request: Request, call_next):
         clear_context()
 
 
-@app.exception_handler(HTTPException)
-async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
     request_id = getattr(request.state, "request_id", None)
     if isinstance(exc.detail, dict) and "error" in exc.detail:
         detail = exc.detail.copy()
         detail["error"] = {**detail["error"], "request_id": request_id}
         return JSONResponse(status_code=exc.status_code, content=detail)
+    code = http_status_error_code(exc.status_code)
     return JSONResponse(
         status_code=exc.status_code,
         content={
             "error": {
-                "code": "ERROR",
+                "code": code,
                 "message": str(exc.detail),
                 "details": {},
                 "request_id": request_id,
             }
         },
     )
+
+
+def http_status_error_code(status_code: int) -> str:
+    return {
+        400: "BAD_REQUEST",
+        401: "UNAUTHORIZED",
+        403: "FORBIDDEN",
+        404: "NOT_FOUND",
+        409: "CONFLICT",
+        412: "PRECONDITION_FAILED",
+        413: "PAYLOAD_TOO_LARGE",
+        415: "UNSUPPORTED_MEDIA_TYPE",
+        422: "VALIDATION_ERROR",
+        428: "PRECONDITION_REQUIRED",
+        429: "RATE_LIMITED",
+        500: "INTERNAL",
+        502: "UPSTREAM_ERROR",
+        503: "SERVICE_UNAVAILABLE",
+    }.get(status_code, "INTERNAL" if status_code >= 500 else "BAD_REQUEST")
 
 
 @app.exception_handler(RequestValidationError)
