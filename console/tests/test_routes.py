@@ -417,7 +417,9 @@ def test_render_dev_cvm_compose_config_keeps_runtime_values_as_placeholders() ->
     assert "${SECURITY_CVM_PROXY_TOKEN}" in compose
     assert "${AUTHORIZED_SSH_KEYS_B64}" in compose
     assert "  dev-egress-forwarder:" in compose
+    assert "entrypoint: [\"concrete-dev-egress-forwarder\"]" in compose
     assert "  dev-tunnel:" in compose
+    assert "entrypoint: [\"concrete-dev-tunnel\"]" in compose
     assert "runtime: sysbox-runc" in compose
     assert "internal: true" in compose
     assert "no-new-privileges:true" in compose
