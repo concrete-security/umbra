@@ -129,6 +129,18 @@ async def http_exception_handler(request: Request, exc: HTTPException) -> JSONRe
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
     request_id = getattr(request.state, "request_id", None)
+    if any(error.get("type") == "json_invalid" for error in exc.errors()):
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": {
+                    "code": "BAD_REQUEST",
+                    "message": "malformed JSON request body",
+                    "details": {},
+                    "request_id": request_id,
+                }
+            },
+        )
     errors = [
         {
             "loc": list(error.get("loc", [])),

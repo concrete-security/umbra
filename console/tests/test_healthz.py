@@ -137,6 +137,32 @@ def test_validation_errors_use_error_envelope() -> None:
     ]
 
 
+def test_malformed_json_validation_error_maps_to_bad_request() -> None:
+    request = SimpleNamespace(state=SimpleNamespace(request_id="json-request"))
+    exc = RequestValidationError(
+        [
+            {
+                "loc": ("body", 1),
+                "msg": "JSON decode error",
+                "type": "json_invalid",
+            }
+        ]
+    )
+
+    response = asyncio.run(app_module.validation_exception_handler(request, exc))
+    body = json.loads(response.body)
+
+    assert response.status_code == 400
+    assert body == {
+        "error": {
+            "code": "BAD_REQUEST",
+            "message": "malformed JSON request body",
+            "details": {},
+            "request_id": "json-request",
+        }
+    }
+
+
 def test_forwarded_client_ip_prefers_leftmost_public(monkeypatch) -> None:
     monkeypatch.setenv("TRUST_FORWARDED_HEADERS", "true")
     app_module.clear_rate_limit_state()
