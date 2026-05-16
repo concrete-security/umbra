@@ -1,0 +1,15 @@
+app:
+  name: dev-cvm
+
+services:
+  dev-tunnel:
+    networks: [proxy]
+
+cvm:
+  domain: ${CVM_FQDN}
+  routes:
+    - path: /concrete/tunnel
+      service: dev-tunnel
+      port: 8090
+      websocket: true
+      cors: false

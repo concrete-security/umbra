@@ -416,6 +416,12 @@ def test_render_dev_cvm_compose_config_keeps_runtime_values_as_placeholders() ->
     assert "ghcr.io/concrete-security/dev-cvm/user-sandbox@sha256:abc" in compose
     assert "${SECURITY_CVM_PROXY_TOKEN}" in compose
     assert "${AUTHORIZED_SSH_KEYS_B64}" in compose
+    assert "  dev-egress-forwarder:" in compose
+    assert "  dev-tunnel:" in compose
+    assert "runtime: sysbox-runc" in compose
+    assert "internal: true" in compose
+    assert "no-new-privileges:true" in compose
+    assert "ports:" not in compose
     assert "token_urlsafe" not in compose
 
 

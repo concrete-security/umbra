@@ -324,6 +324,18 @@ def test_cvm_launch_provider_name_is_concrete_scoped() -> None:
     )
 
 
+def test_render_dev_cvm_shade_config_routes_tunnel_websocket() -> None:
+    shade = scheduler.render_dev_cvm_shade_config(launch_snapshot(), name="concrete-v0-cvm-test")
+
+    assert "name: concrete-v0-cvm-test" in shade
+    assert "domain: cvm-abc.dev.example.com" in shade
+    assert "instance_type: tdx.small" in shade
+    assert "region: FR-PARIS-1" in shade
+    assert "dev-tunnel:" in shade
+    assert "path: /concrete/tunnel" in shade
+    assert "websocket: true" in shade
+
+
 def test_security_cvm_provider_name_is_concrete_scoped() -> None:
     assert (
         scheduler.security_cvm_provider_name(UUID("00000000-0000-4000-8000-123456789abc"))

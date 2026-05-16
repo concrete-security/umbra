@@ -1,0 +1,108 @@
+services:
+  user-sandbox:
+    image: "${DEV_CVM_IMAGE:?set DEV_CVM_IMAGE to a digest-pinned GHCR image}"
+    runtime: sysbox-runc
+    read_only: false
+    tmpfs:
+      - /run
+    environment:
+      HTTP_PROXY: http://dev-egress-forwarder:3128
+      HTTPS_PROXY: http://dev-egress-forwarder:3128
+      http_proxy: http://dev-egress-forwarder:3128
+      https_proxy: http://dev-egress-forwarder:3128
+      NO_PROXY: localhost,127.0.0.1,user-sandbox,dev-tunnel,dev-egress-forwarder
+      no_proxy: localhost,127.0.0.1,user-sandbox,dev-tunnel,dev-egress-forwarder
+      NPM_CONFIG_IGNORE_SCRIPTS: "true"
+      NPM_CONFIG_AUDIT: "false"
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+      SECURITY_CVM_FQDN: ${SECURITY_CVM_FQDN}
+      SECURITY_CVM_PROXY_PORT: ${SECURITY_CVM_PROXY_PORT}
+      SECURITY_CVM_PROXY_TOKEN: ${SECURITY_CVM_PROXY_TOKEN}
+      SECURITY_CVM_CA_CERT_B64: ${SECURITY_CVM_CA_CERT_B64}
+      SECURITY_CVM_ATLS_POLICY_B64: ${SECURITY_CVM_ATLS_POLICY_B64}
+      AUTHORIZED_SSH_KEYS_B64: ${AUTHORIZED_SSH_KEYS_B64}
+      SANDBOX_ENV_PLACEHOLDERS_B64: ${SANDBOX_ENV_PLACEHOLDERS_B64}
+    volumes:
+      - dev-home:/home/dev
+      - dev-workspaces:/home/dev/workspaces
+      - dev-local:/home/dev/.local
+      - dev-claude:/home/dev/.claude
+      - dev-codex:/home/dev/.codex
+      - dev-cursor-server:/home/dev/.cursor-server
+      - dev-vscode-server:/home/dev/.vscode-server
+      - dev-docker-data:/var/lib/docker
+    expose:
+      - "22"
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -x sshd >/dev/null"]
+      interval: 500ms
+      timeout: 2s
+      start_period: 3s
+      retries: 5
+    networks:
+      - cvm-internal
+
+  dev-egress-forwarder:
+    image: "${DEV_CVM_IMAGE:?set DEV_CVM_IMAGE to a digest-pinned GHCR image}"
+    command: ["concrete-dev-egress-forwarder"]
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /run
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      SECURITY_CVM_FQDN: ${SECURITY_CVM_FQDN}
+      SECURITY_CVM_PROXY_PORT: ${SECURITY_CVM_PROXY_PORT}
+      SECURITY_CVM_ATLS_POLICY_B64: ${SECURITY_CVM_ATLS_POLICY_B64}
+      SECURITY_CVM_CA_CERT_B64: ${SECURITY_CVM_CA_CERT_B64}
+      SECURITY_CVM_PROXY_TOKEN: ${SECURITY_CVM_PROXY_TOKEN}
+    expose:
+      - "3128"
+    networks:
+      - cvm-internal
+      - egress-uplink
+
+  dev-tunnel:
+    image: "${DEV_CVM_IMAGE:?set DEV_CVM_IMAGE to a digest-pinned GHCR image}"
+    command: ["concrete-dev-tunnel"]
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      DEV_CVM_SSH_HOST: user-sandbox
+      DEV_CVM_SSH_PORT: "22"
+    depends_on:
+      user-sandbox:
+        condition: service_healthy
+    expose:
+      - "8090"
+    networks:
+      - cvm-internal
+      - proxy
+
+networks:
+  proxy:
+    driver: bridge
+  cvm-internal:
+    driver: bridge
+    internal: true
+  egress-uplink:
+    driver: bridge
+
+volumes:
+  dev-home:
+  dev-workspaces:
+  dev-local:
+  dev-claude:
+  dev-codex:
+  dev-cursor-server:
+  dev-vscode-server:
+  dev-docker-data:

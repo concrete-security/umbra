@@ -1639,10 +1639,21 @@ def render_dev_cvm_shade_config(snapshot: Any, *, name: str) -> str:
         [
             "app:",
             f"  name: {name}",
+            "",
+            "services:",
+            "  dev-tunnel:",
+            "    networks: [proxy]",
+            "",
             "cvm:",
             f"  domain: {_row_value(snapshot, 'fqdn')}",
             f"  instance_type: {_row_value(snapshot, 'instance_type')}",
             f"  region: {_row_value(snapshot, 'region')}",
+            "  routes:",
+            "    - path: /concrete/tunnel",
+            "      service: dev-tunnel",
+            "      port: 8090",
+            "      websocket: true",
+            "      cors: false",
             "",
         ]
     )
