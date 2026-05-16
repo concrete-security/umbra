@@ -1,7 +1,9 @@
 import asyncio
 import hashlib
+import json
 from types import SimpleNamespace
 
+from fastapi.exceptions import RequestValidationError
 from fastapi.testclient import TestClient
 
 from concrete_console import audit_anchor
@@ -105,6 +107,34 @@ def test_bodyless_api_request_does_not_require_content_type() -> None:
     response = asyncio.run(app_module.request_guard_response(request, "bodyless-request"))
 
     assert response is None
+
+
+def test_validation_errors_use_error_envelope() -> None:
+    request = SimpleNamespace(state=SimpleNamespace(request_id="validation-request"))
+    exc = RequestValidationError(
+        [
+            {
+                "loc": ("body", "grant_type"),
+                "msg": "Field required",
+                "type": "missing",
+            }
+        ]
+    )
+
+    response = asyncio.run(app_module.validation_exception_handler(request, exc))
+    body = json.loads(response.body)
+
+    assert response.status_code == 422
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+    assert body["error"]["message"] == "request validation failed"
+    assert body["error"]["request_id"] == "validation-request"
+    assert body["error"]["details"]["errors"] == [
+        {
+            "loc": ["body", "grant_type"],
+            "msg": "Field required",
+            "type": "missing",
+        }
+    ]
 
 
 def test_forwarded_client_ip_prefers_leftmost_public(monkeypatch) -> None:

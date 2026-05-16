@@ -9,6 +9,7 @@ from typing import Annotated, AsyncIterator
 from uuid import uuid4
 
 from fastapi import FastAPI, Header, HTTPException, Request, Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from concrete_console.audit_anchor import publish_audit_anchor_now
@@ -119,6 +120,30 @@ async def http_exception_handler(request: Request, exc: HTTPException) -> JSONRe
                 "code": "ERROR",
                 "message": str(exc.detail),
                 "details": {},
+                "request_id": request_id,
+            }
+        },
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    request_id = getattr(request.state, "request_id", None)
+    errors = [
+        {
+            "loc": list(error.get("loc", [])),
+            "msg": str(error.get("msg", "validation error")),
+            "type": str(error.get("type", "value_error")),
+        }
+        for error in exc.errors()
+    ]
+    return JSONResponse(
+        status_code=422,
+        content={
+            "error": {
+                "code": "VALIDATION_ERROR",
+                "message": "request validation failed",
+                "details": {"errors": errors},
                 "request_id": request_id,
             }
         },
