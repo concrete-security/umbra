@@ -3849,16 +3849,6 @@ async def lock_cvm_for_lifecycle_action(
     return row
 
 
-def require_local_cvm_lifecycle_action(row: asyncpg.Record | dict) -> None:
-    if cvm_provider_app_id(row) is not None:
-        raise api_error(
-            503,
-            "SERVICE_UNAVAILABLE",
-            "Dev CVM provider lifecycle actions are not implemented",
-            {"component": "phala_adapter"},
-        )
-
-
 def cvm_provider_app_id(row: asyncpg.Record | dict) -> str | None:
     metadata = json_payload(dict(row).get("metadata", {}))
     if not isinstance(metadata, dict):
@@ -3915,9 +3905,7 @@ async def apply_cvm_state_action(
                     {"state": cvm["state"]},
                 )
             app_id = cvm_provider_app_id(cvm)
-            if app_id is None:
-                require_local_cvm_lifecycle_action(cvm)
-            else:
+            if app_id is not None:
                 await apply_provider_cvm_lifecycle_action(app_id=app_id, action=action)
             await conn.execute(
                 """
