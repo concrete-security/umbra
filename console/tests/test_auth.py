@@ -14,8 +14,10 @@ from concrete_console.db import get_pool
 from concrete_console.internal_auth import parse_service_bearer_authorization
 from concrete_console import routes_auth
 from concrete_console.routes_auth import (
+    DevicePollRequest,
     DeviceStartRequest,
     RefreshRequest,
+    device_poll,
     device_poll_too_soon,
     device_start,
     refresh,
@@ -103,6 +105,42 @@ class AuthPruneConn:
         return "DELETE 1"
 
 
+class DevicePollMissingConn:
+    def __init__(self):
+        self.execute_calls: list[str] = []
+
+    def transaction(self):
+        return AsyncContext()
+
+    async def fetchrow(self, query, *args):
+        return None
+
+    async def execute(self, query, *args):
+        self.execute_calls.append(query)
+        return "DELETE 0"
+
+
+class DevicePollBadSecretConn:
+    def __init__(self):
+        self.execute_calls: list[str] = []
+
+    def transaction(self):
+        return AsyncContext()
+
+    async def fetchrow(self, query, *args):
+        return {
+            "device_code": "device-code",
+            "polling_secret_hash": routes_auth.sha256_hex("correct-secret-value"),
+            "expires_at": datetime.now(timezone.utc) + timedelta(minutes=5),
+            "interval_seconds": 5,
+            "last_polled_at": None,
+        }
+
+    async def execute(self, query, *args):
+        self.execute_calls.append(query)
+        return "DELETE 0"
+
+
 def test_require_permission_allows_granted_permission() -> None:
     current_user(permissions={"USER_MANAGE"}).require_permission("USER_MANAGE")
 
@@ -183,6 +221,42 @@ def test_device_poll_too_soon_honors_full_interval() -> None:
         interval_seconds=5,
     )
     assert not device_poll_too_soon(now=last_polled_at, last_polled_at=None, interval_seconds=5)
+
+
+def test_device_poll_prunes_expired_auth_rows_on_missing_code() -> None:
+    conn = DevicePollMissingConn()
+    request = SimpleNamespace(state=SimpleNamespace(request_id="poll-request"), headers={}, client=None)
+
+    response = asyncio.run(
+        device_poll(
+            DevicePollRequest(device_code="missing-device", polling_secret="s" * 20),
+            request=request,
+            pool=FakePool(conn),
+        )
+    )
+
+    assert response.status_code == 400
+    assert json.loads(response.body) == {"error": "access_denied"}
+    assert len(conn.execute_calls) == 2
+    assert all("FOR UPDATE SKIP LOCKED" in query for query in conn.execute_calls)
+
+
+def test_device_poll_prunes_expired_auth_rows_before_bad_secret_error() -> None:
+    conn = DevicePollBadSecretConn()
+    request = SimpleNamespace(state=SimpleNamespace(request_id="poll-request"), headers={}, client=None)
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            device_poll(
+                DevicePollRequest(device_code="device-code", polling_secret="wrong-secret-value-1"),
+                request=request,
+                pool=FakePool(conn),
+            )
+        )
+
+    assert exc.value.status_code == 401
+    assert len(conn.execute_calls) == 2
+    assert all("FOR UPDATE SKIP LOCKED" in query for query in conn.execute_calls)
 
 
 def test_logout_accepts_missing_body() -> None:

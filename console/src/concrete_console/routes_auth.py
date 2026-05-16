@@ -190,6 +190,7 @@ async def device_poll(
     pool: asyncpg.Pool = Depends(get_pool),
 ):
     now = datetime.now(timezone.utc)
+    invalid_polling_secret = False
     async with pool.acquire() as conn:
         async with conn.transaction():
             row = await conn.fetchrow(
@@ -202,22 +203,30 @@ async def device_poll(
                 body.device_code,
             )
             if row is None:
+                await prune_expired_auth_rows(conn)
                 return oauth_error("access_denied")
             if not hmac.compare_digest(row["polling_secret_hash"], sha256_hex(body.polling_secret)):
-                raise api_error(401, "UNAUTHORIZED", "invalid polling secret")
-            if row["expires_at"] <= now:
+                await prune_expired_auth_rows(conn)
+                invalid_polling_secret = True
+            elif row["expires_at"] <= now:
                 await conn.execute("DELETE FROM device_flow_pending WHERE device_code = $1", body.device_code)
+                await prune_expired_auth_rows(conn)
                 return oauth_error("expired_token")
-            if device_poll_too_soon(
+            elif device_poll_too_soon(
                 now=now,
                 last_polled_at=row["last_polled_at"],
                 interval_seconds=row["interval_seconds"],
             ):
+                await prune_expired_auth_rows(conn)
                 return oauth_error("slow_down")
-            await conn.execute(
-                "UPDATE device_flow_pending SET last_polled_at = now() WHERE device_code = $1",
-                body.device_code,
-            )
+            else:
+                await conn.execute(
+                    "UPDATE device_flow_pending SET last_polled_at = now() WHERE device_code = $1",
+                    body.device_code,
+                )
+                await prune_expired_auth_rows(conn)
+    if invalid_polling_secret:
+        raise api_error(401, "UNAUTHORIZED", "invalid polling secret")
 
     try:
         idp_tokens = await poll_device_code(body.device_code)
