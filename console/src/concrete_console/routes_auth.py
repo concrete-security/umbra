@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hmac
 import re
 from typing import Annotated
@@ -104,6 +104,17 @@ def request_id(request: Request) -> str | None:
     return value[:128] if value else None
 
 
+def device_poll_too_soon(
+    *,
+    now: datetime,
+    last_polled_at: datetime | None,
+    interval_seconds: int,
+) -> bool:
+    if last_polled_at is None:
+        return False
+    return now < last_polled_at + timedelta(seconds=max(interval_seconds, 1))
+
+
 @router.post("/device/start")
 async def device_start(
     body: DeviceStartRequest | None = Body(default=None),
@@ -181,10 +192,12 @@ async def device_poll(
             if row["expires_at"] <= now:
                 await conn.execute("DELETE FROM device_flow_pending WHERE device_code = $1", body.device_code)
                 return oauth_error("expired_token")
-            if row["last_polled_at"] is not None:
-                earliest = row["last_polled_at"].timestamp() + max(row["interval_seconds"] - 1, 0)
-                if now.timestamp() < earliest:
-                    return oauth_error("slow_down")
+            if device_poll_too_soon(
+                now=now,
+                last_polled_at=row["last_polled_at"],
+                interval_seconds=row["interval_seconds"],
+            ):
+                return oauth_error("slow_down")
             await conn.execute(
                 "UPDATE device_flow_pending SET last_polled_at = now() WHERE device_code = $1",
                 body.device_code,

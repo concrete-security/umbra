@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from uuid import UUID
 
@@ -7,7 +8,7 @@ from fastapi import HTTPException
 
 from concrete_console.auth import CurrentUser, require_current_user
 from concrete_console.internal_auth import parse_service_bearer_authorization
-from concrete_console.routes_auth import DeviceStartRequest, device_start, request_ip
+from concrete_console.routes_auth import DeviceStartRequest, device_poll_too_soon, device_start, request_ip
 
 
 def current_user(*, permissions: set[str] | None = None) -> CurrentUser:
@@ -73,6 +74,22 @@ def test_device_start_rejects_non_google_provider_before_provider_call() -> None
 
     assert exc.value.status_code == 400
     assert exc.value.detail["error"]["code"] == "BAD_REQUEST"
+
+
+def test_device_poll_too_soon_honors_full_interval() -> None:
+    last_polled_at = datetime(2026, 5, 16, 15, 10, 0, tzinfo=timezone.utc)
+
+    assert device_poll_too_soon(
+        now=last_polled_at + timedelta(seconds=4, milliseconds=999),
+        last_polled_at=last_polled_at,
+        interval_seconds=5,
+    )
+    assert not device_poll_too_soon(
+        now=last_polled_at + timedelta(seconds=5),
+        last_polled_at=last_polled_at,
+        interval_seconds=5,
+    )
+    assert not device_poll_too_soon(now=last_polled_at, last_polled_at=None, interval_seconds=5)
 
 
 def test_auth_request_ip_uses_forwarded_header_resolution(monkeypatch) -> None:
