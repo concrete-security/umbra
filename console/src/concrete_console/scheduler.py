@@ -1469,6 +1469,10 @@ def _row_value(row: Any, key: str) -> Any:
 async def run_reconciliation_pass(*, include_orphans: bool = True) -> ReconciliationSummary:
     pool = await get_pool()
     async with pool.acquire() as conn:
+        cvms_advanced = await reconcile_dev_cvm_provider_drift(conn)
+        security_cvms_advanced = await reconcile_security_cvm_provider_drift(conn)
+        orphans_cleaned = await cleanup_orphan_dns_records(conn) if include_orphans else []
+        orphans_cleaned.extend(await prune_expired_reconciler_rows(conn))
         await conn.execute(
             """
             DELETE FROM operations
@@ -1476,15 +1480,262 @@ async def run_reconciliation_pass(*, include_orphans: bool = True) -> Reconcilia
               AND expires_at < now()
             """
         )
-        orphans_cleaned = await cleanup_orphan_dns_records(conn) if include_orphans else []
-        orphans_cleaned.extend(await prune_expired_reconciler_rows(conn))
-        security_cvms_advanced = await reconcile_security_cvm_attestations(conn)
-        cvms_advanced = await reconcile_dev_cvm_attestations(conn)
+        security_cvms_advanced.extend(await reconcile_security_cvm_attestations(conn))
+        cvms_advanced.extend(await reconcile_dev_cvm_attestations(conn))
     return ReconciliationSummary(
         cvms_advanced=cvms_advanced,
         security_cvms_advanced=security_cvms_advanced,
         orphans_cleaned=orphans_cleaned,
     )
+
+
+async def reconcile_dev_cvm_provider_drift(conn: Any) -> list[str]:
+    from concrete_console.tee_provider.phala import PhalaClient, PhalaError
+
+    try:
+        client = PhalaClient.from_settings(timeout_seconds=30.0)
+    except PhalaError as exc:
+        log.warning("dev_cvm_provider_drift_skipped", reason=exc.code)
+        return []
+
+    advanced: list[str] = []
+    rows = await fetch_dev_cvm_provider_drift_candidates(conn)
+    for row in rows:
+        app_id = provider_app_id(_row_value(row, "metadata"))
+        if app_id is None:
+            continue
+        try:
+            provider_status = await client.status(app_id)
+        except PhalaError as exc:
+            log.warning(
+                "dev_cvm_provider_drift_status_failed",
+                cvm_id=str(_row_value(row, "id")),
+                reason=exc.code,
+            )
+            continue
+        target_state = provider_drift_target_state(provider_status)
+        if target_state is None:
+            continue
+        if await persist_dev_cvm_provider_drift(conn, row, provider_status=provider_status, target_state=target_state):
+            advanced.append(str(_row_value(row, "id")))
+    return advanced
+
+
+async def reconcile_security_cvm_provider_drift(conn: Any) -> list[str]:
+    from concrete_console.tee_provider.phala import PhalaClient, PhalaError
+
+    try:
+        client = PhalaClient.from_settings(timeout_seconds=30.0)
+    except PhalaError as exc:
+        log.warning("security_cvm_provider_drift_skipped", reason=exc.code)
+        return []
+
+    advanced: list[str] = []
+    rows = await fetch_security_cvm_provider_drift_candidates(conn)
+    for row in rows:
+        app_id = provider_app_id(_row_value(row, "metadata"))
+        if app_id is None:
+            continue
+        try:
+            provider_status = await client.status(app_id)
+        except PhalaError as exc:
+            log.warning(
+                "security_cvm_provider_drift_status_failed",
+                security_cvm_id=str(_row_value(row, "id")),
+                reason=exc.code,
+            )
+            continue
+        target_state = provider_drift_target_state(provider_status)
+        if target_state is None:
+            continue
+        if await persist_security_cvm_provider_drift(
+            conn,
+            row,
+            provider_status=provider_status,
+            target_state=target_state,
+        ):
+            advanced.append(str(_row_value(row, "id")))
+    return advanced
+
+
+async def fetch_dev_cvm_provider_drift_candidates(conn: Any) -> list[Any]:
+    async with conn.transaction():
+        return list(
+            await conn.fetch(
+                """
+                SELECT
+                    c.id,
+                    c.entity_id,
+                    c.state::text AS state,
+                    c.metadata,
+                    c.error_reason
+                FROM cvms c
+                WHERE c.state = 'RUNNING'
+                  AND c.deleted_at IS NULL
+                  AND c.metadata ? 'app_id'
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM operations o
+                    WHERE o.target_id = c.id
+                      AND o.status IN ('pending', 'running')
+                  )
+                ORDER BY c.created_at
+                LIMIT 10
+                FOR UPDATE SKIP LOCKED
+                """
+            )
+        )
+
+
+async def fetch_security_cvm_provider_drift_candidates(conn: Any) -> list[Any]:
+    async with conn.transaction():
+        return list(
+            await conn.fetch(
+                """
+                SELECT
+                    sc.id,
+                    sc.entity_id,
+                    sc.state::text AS state,
+                    sc.metadata,
+                    sc.error_reason
+                FROM security_cvms sc
+                WHERE sc.state = 'RUNNING'
+                  AND sc.deleted_at IS NULL
+                  AND sc.metadata ? 'app_id'
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM operations o
+                    WHERE o.target_id = sc.id
+                      AND o.status IN ('pending', 'running')
+                  )
+                ORDER BY sc.created_at
+                LIMIT 10
+                FOR UPDATE SKIP LOCKED
+                """
+            )
+        )
+
+
+def provider_drift_target_state(provider_status: str) -> str | None:
+    if provider_status in {"FAILED", "STOPPED"}:
+        return provider_status
+    return None
+
+
+async def persist_dev_cvm_provider_drift(
+    conn: Any,
+    row: Any,
+    *,
+    provider_status: str,
+    target_state: str,
+) -> bool:
+    if target_state not in {"FAILED", "STOPPED"}:
+        raise ValueError("unsupported provider drift state")
+    error_reason = "PHALA_OBSERVED_FAILED" if target_state == "FAILED" else None
+    action = "CVM_FAILED" if target_state == "FAILED" else "CVM_STOPPED"
+    async with conn.transaction():
+        result = await conn.execute(
+            """
+            UPDATE cvms
+            SET state = $2::cvm_state,
+                error_reason = $3,
+                updated_at = now()
+            WHERE id = $1
+              AND state = 'RUNNING'
+              AND deleted_at IS NULL
+              AND NOT EXISTS (
+                SELECT 1
+                FROM operations o
+                WHERE o.target_id = cvms.id
+                  AND o.status IN ('pending', 'running')
+              )
+            """,
+            _row_value(row, "id"),
+            target_state,
+            error_reason,
+        )
+        if result != "UPDATE 1":
+            return False
+        after: dict[str, Any] = {
+            "state": target_state,
+            "provider_status": provider_status,
+            "source": "reconciler",
+        }
+        if error_reason is not None:
+            after["error_reason"] = error_reason
+        await insert_audit_event(
+            conn,
+            entity_id=_row_value(row, "entity_id"),
+            actor_id=None,
+            actor_email="reconciler@concrete.system",
+            action=action,
+            target_type="cvm",
+            target_id=_row_value(row, "id"),
+            before={
+                "state": _row_value(row, "state"),
+                "error_reason": _row_value(row, "error_reason"),
+            },
+            after=after,
+        )
+    return True
+
+
+async def persist_security_cvm_provider_drift(
+    conn: Any,
+    row: Any,
+    *,
+    provider_status: str,
+    target_state: str,
+) -> bool:
+    if target_state not in {"FAILED", "STOPPED"}:
+        raise ValueError("unsupported provider drift state")
+    error_reason = "PHALA_OBSERVED_FAILED" if target_state == "FAILED" else None
+    action = "SECURITY_CVM_FAILED" if target_state == "FAILED" else "SECURITY_CVM_STOPPED"
+    async with conn.transaction():
+        result = await conn.execute(
+            """
+            UPDATE security_cvms
+            SET state = $2::cvm_state,
+                error_reason = $3,
+                updated_at = now()
+            WHERE id = $1
+              AND state = 'RUNNING'
+              AND deleted_at IS NULL
+              AND NOT EXISTS (
+                SELECT 1
+                FROM operations o
+                WHERE o.target_id = security_cvms.id
+                  AND o.status IN ('pending', 'running')
+              )
+            """,
+            _row_value(row, "id"),
+            target_state,
+            error_reason,
+        )
+        if result != "UPDATE 1":
+            return False
+        after: dict[str, Any] = {
+            "state": target_state,
+            "provider_status": provider_status,
+            "source": "reconciler",
+        }
+        if error_reason is not None:
+            after["error_reason"] = error_reason
+        await insert_audit_event(
+            conn,
+            entity_id=_row_value(row, "entity_id"),
+            actor_id=None,
+            actor_email="reconciler@concrete.system",
+            action=action,
+            target_type="security_cvm",
+            target_id=_row_value(row, "id"),
+            before={
+                "state": _row_value(row, "state"),
+                "error_reason": _row_value(row, "error_reason"),
+            },
+            after=after,
+        )
+    return True
 
 
 async def prune_expired_reconciler_rows(conn: Any) -> list[str]:
@@ -1820,7 +2071,7 @@ async def persist_security_cvm_attestation_refresh(conn: Any, row: Any, report: 
         conn,
         entity_id=_row_value(row, "entity_id"),
         actor_id=None,
-        actor_email="system@reconciler",
+        actor_email="reconciler@concrete.system",
         action="SECURITY_CVM_ATTESTATION_VERIFIED",
         target_type="security_cvm",
         target_id=_row_value(row, "id"),
@@ -1853,7 +2104,7 @@ async def record_security_cvm_attestation_refresh_drift(conn: Any, row: Any, rep
         conn,
         entity_id=_row_value(row, "entity_id"),
         actor_id=None,
-        actor_email="system@reconciler",
+        actor_email="reconciler@concrete.system",
         action="SECURITY_CVM_ATTESTATION_DRIFT",
         target_type="security_cvm",
         target_id=_row_value(row, "id"),
@@ -1893,7 +2144,7 @@ async def persist_dev_cvm_attestation_refresh(conn: Any, row: Any, report: Any) 
         conn,
         entity_id=_row_value(row, "entity_id"),
         actor_id=None,
-        actor_email="system@reconciler",
+        actor_email="reconciler@concrete.system",
         action="CVM_ATTESTATION_VERIFIED",
         target_type="cvm",
         target_id=_row_value(row, "cvm_id"),
@@ -1926,7 +2177,7 @@ async def record_dev_cvm_attestation_refresh_drift(conn: Any, row: Any, report: 
         conn,
         entity_id=_row_value(row, "entity_id"),
         actor_id=None,
-        actor_email="system@reconciler",
+        actor_email="reconciler@concrete.system",
         action="CVM_ATTESTATION_DRIFT",
         target_type="cvm",
         target_id=_row_value(row, "cvm_id"),

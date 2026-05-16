@@ -485,6 +485,121 @@ class MaintenancePruneConn:
         raise AssertionError(f"unexpected execute query: {query}")
 
 
+class ProviderDriftConn:
+    def __init__(self, *, dev_rows=None, security_rows=None, execute_result="UPDATE 1"):
+        self.dev_rows = dev_rows or []
+        self.security_rows = security_rows or []
+        self.execute_result = execute_result
+        self.fetch_calls: list[str] = []
+        self.execute_calls: list[tuple[str, tuple[object, ...]]] = []
+        self.audit_calls: list[dict[str, object]] = []
+
+    def transaction(self):
+        return AsyncContext()
+
+    async def fetch(self, query, *args):
+        self.fetch_calls.append(query)
+        if "FROM cvms c" in query:
+            return self.dev_rows
+        if "FROM security_cvms sc" in query:
+            return self.security_rows
+        raise AssertionError(f"unexpected fetch query: {query}")
+
+    async def execute(self, query, *args):
+        self.execute_calls.append((query, args))
+        return self.execute_result
+
+
+def test_reconcile_dev_cvm_provider_drift_marks_failed(monkeypatch) -> None:
+    cvm_id = UUID("00000000-0000-4000-8000-000000000031")
+    conn = ProviderDriftConn(
+        dev_rows=[
+            {
+                "id": cvm_id,
+                "entity_id": UUID("00000000-0000-4000-8000-000000000001"),
+                "state": "RUNNING",
+                "metadata": {"app_id": "app-123"},
+                "error_reason": None,
+            }
+        ]
+    )
+    status_calls: list[str] = []
+
+    class FakePhalaClient:
+        @classmethod
+        def from_settings(cls, *, timeout_seconds=None):
+            assert timeout_seconds == 30.0
+            return cls()
+
+        async def status(self, app_id):
+            status_calls.append(app_id)
+            return "FAILED"
+
+    async def fake_insert_audit_event(_conn, **kwargs):
+        conn.audit_calls.append(kwargs)
+
+    monkeypatch.setattr("concrete_console.tee_provider.phala.PhalaClient", FakePhalaClient)
+    monkeypatch.setattr(scheduler, "insert_audit_event", fake_insert_audit_event)
+
+    advanced = asyncio.run(scheduler.reconcile_dev_cvm_provider_drift(conn))
+
+    assert advanced == [str(cvm_id)]
+    assert status_calls == ["app-123"]
+    assert "FOR UPDATE SKIP LOCKED" in conn.fetch_calls[0]
+    assert "o.status IN ('pending', 'running')" in conn.fetch_calls[0]
+    update_calls = [args for query, args in conn.execute_calls if "UPDATE cvms" in query]
+    assert update_calls == [(cvm_id, "FAILED", "PHALA_OBSERVED_FAILED")]
+    assert conn.audit_calls[0]["actor_email"] == "reconciler@concrete.system"
+    assert conn.audit_calls[0]["action"] == "CVM_FAILED"
+    assert conn.audit_calls[0]["after"]["error_reason"] == "PHALA_OBSERVED_FAILED"
+    assert conn.audit_calls[0]["after"]["source"] == "reconciler"
+
+
+def test_reconcile_security_cvm_provider_drift_marks_stopped(monkeypatch) -> None:
+    security_cvm_id = UUID("00000000-0000-4000-8000-000000000041")
+    conn = ProviderDriftConn(
+        security_rows=[
+            {
+                "id": security_cvm_id,
+                "entity_id": UUID("00000000-0000-4000-8000-000000000001"),
+                "state": "RUNNING",
+                "metadata": {"app_id": "sc-app-123"},
+                "error_reason": None,
+            }
+        ]
+    )
+
+    class FakePhalaClient:
+        @classmethod
+        def from_settings(cls, *, timeout_seconds=None):
+            assert timeout_seconds == 30.0
+            return cls()
+
+        async def status(self, app_id):
+            assert app_id == "sc-app-123"
+            return "STOPPED"
+
+    async def fake_insert_audit_event(_conn, **kwargs):
+        conn.audit_calls.append(kwargs)
+
+    monkeypatch.setattr("concrete_console.tee_provider.phala.PhalaClient", FakePhalaClient)
+    monkeypatch.setattr(scheduler, "insert_audit_event", fake_insert_audit_event)
+
+    advanced = asyncio.run(scheduler.reconcile_security_cvm_provider_drift(conn))
+
+    assert advanced == [str(security_cvm_id)]
+    assert "FOR UPDATE SKIP LOCKED" in conn.fetch_calls[0]
+    update_calls = [args for query, args in conn.execute_calls if "UPDATE security_cvms" in query]
+    assert update_calls == [(security_cvm_id, "STOPPED", None)]
+    assert conn.audit_calls[0]["action"] == "SECURITY_CVM_STOPPED"
+    assert conn.audit_calls[0]["target_type"] == "security_cvm"
+    assert conn.audit_calls[0]["after"] == {
+        "state": "STOPPED",
+        "provider_status": "STOPPED",
+        "source": "reconciler",
+    }
+
+
 def test_execute_cvm_launch_attestation_gate_waits_for_real_verifier(monkeypatch) -> None:
     snapshot = launch_snapshot(
         operation_updated_at=scheduler.datetime.now(scheduler.timezone.utc),
