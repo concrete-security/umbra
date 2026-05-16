@@ -31,6 +31,18 @@ ANONYMOUS_IP_RPM = 60
 AUTHENTICATED_IP_RPM = 600
 CREDENTIAL_RPM = 1200
 ROUTE_CREDENTIAL_RPM = 1200
+AUTH_AUTHORIZE_IP_RPM = 30
+AUTH_CALLBACK_IP_RPM = 30
+AUTH_TOKEN_IP_RPM = 60
+AUTH_DEVICE_IP_RPM = 30
+AUTH_REFRESH_IP_RPM = 60
+METRICS_IP_RPM = 60
+AUDIT_EVENTS_CREDENTIAL_RPM = 60
+TRAFFIC_LOGS_READ_CREDENTIAL_RPM = 30
+ADMIN_RECONCILE_CREDENTIAL_RPM = 6
+POLICY_BUNDLE_CVM_RPM = 30
+CVM_PROFILE_MUTATION_RPM = 12
+TRAFFIC_LOG_INGEST_PRINCIPAL_RPM = 120
 SC_CONTROL_RPM = 60
 API_BODY_LIMIT_BYTES = 1024 * 1024
 TRAFFIC_LOG_BODY_LIMIT_BYTES = 4 * 1024 * 1024
@@ -301,22 +313,91 @@ def rate_limit_dimensions(request: Request) -> list[tuple[RateLimitKey, int, str
     dimensions: list[tuple[RateLimitKey, int, str]] = [
         (("ip", ip_key), AUTHENTICATED_IP_RPM if credential else ANONYMOUS_IP_RPM, "ip"),
     ]
-    if credential is not None:
-        dimensions.append((("credential", credential), CREDENTIAL_RPM, "credential"))
+    route_ip_budget_value = route_ip_budget(request.method, request.url.path)
+    if route_ip_budget_value is not None:
         dimensions.append(
             (
-                ("route_credential", f"{route_key}:{credential}"),
-                route_credential_budget(request.url.path),
+                ("route_ip", f"{route_key}:{ip_key}"),
+                route_ip_budget_value,
+                "route_ip",
+            )
+        )
+    if credential is not None:
+        dimensions.append((("credential", credential), CREDENTIAL_RPM, "credential"))
+        route_credential_key, route_credential_budget_value = route_credential_dimension(
+            request.method,
+            request.url.path,
+        )
+        dimensions.append(
+            (
+                ("route_credential", f"{route_credential_key}:{credential}"),
+                route_credential_budget_value,
                 "route_credential",
             )
         )
     return dimensions
 
 
-def route_credential_budget(path: str) -> int:
-    if path == "/internal/sc-control/cvms":
-        return SC_CONTROL_RPM
-    return ROUTE_CREDENTIAL_RPM
+def route_ip_budget(method: str, path: str) -> int | None:
+    if method == "GET" and path == "/api/v1/auth/authorize":
+        return AUTH_AUTHORIZE_IP_RPM
+    if method == "GET" and path == "/api/v1/auth/oidc/callback":
+        return AUTH_CALLBACK_IP_RPM
+    if method == "POST" and path == "/api/v1/auth/token":
+        return AUTH_TOKEN_IP_RPM
+    if method == "POST" and path in {"/api/v1/auth/device/start", "/api/v1/auth/device/poll"}:
+        return AUTH_DEVICE_IP_RPM
+    if method == "POST" and path == "/api/v1/auth/refresh":
+        return AUTH_REFRESH_IP_RPM
+    if method == "GET" and path == "/metrics":
+        return METRICS_IP_RPM
+    return None
+
+
+def route_credential_dimension(method: str, path: str) -> tuple[str, int]:
+    if method == "GET" and path == "/api/v1/audit/events":
+        return f"{method} {path}", AUDIT_EVENTS_CREDENTIAL_RPM
+    if method == "GET" and path == "/api/v1/traffic-logs":
+        return f"{method} {path}", TRAFFIC_LOGS_READ_CREDENTIAL_RPM
+    if method == "POST" and path == "/api/v1/admin/reconcile":
+        return f"{method} {path}", ADMIN_RECONCILE_CREDENTIAL_RPM
+    if method == "POST" and path == "/internal/traffic-logs":
+        return f"{method} {path}", TRAFFIC_LOG_INGEST_PRINCIPAL_RPM
+    if method == "GET" and path == "/internal/sc-control/cvms":
+        return f"{method} {path}", SC_CONTROL_RPM
+
+    cvm_id = cvm_policy_bundle_route_id(method, path)
+    if cvm_id is not None:
+        return f"GET /api/v1/cvms/{{cvm_id}}/policy-bundle:{cvm_id}", POLICY_BUNDLE_CVM_RPM
+
+    cvm_id = cvm_profile_mutation_route_id(method, path)
+    if cvm_id is not None:
+        return f"{method} /api/v1/cvms/{{cvm_id}}/profiles:{cvm_id}", CVM_PROFILE_MUTATION_RPM
+
+    return f"{method} {path}", ROUTE_CREDENTIAL_RPM
+
+
+UUID_SEGMENT_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+
+
+def cvm_policy_bundle_route_id(method: str, path: str) -> str | None:
+    if method != "GET":
+        return None
+    match = re.fullmatch(rf"/api/v1/cvms/({UUID_SEGMENT_RE.pattern})/policy-bundle", path)
+    return match.group(1).lower() if match else None
+
+
+def cvm_profile_mutation_route_id(method: str, path: str) -> str | None:
+    if method == "POST":
+        match = re.fullmatch(rf"/api/v1/cvms/({UUID_SEGMENT_RE.pattern})/profiles", path)
+        return match.group(1).lower() if match else None
+    if method == "DELETE":
+        match = re.fullmatch(
+            rf"/api/v1/cvms/({UUID_SEGMENT_RE.pattern})/profiles/{UUID_SEGMENT_RE.pattern}",
+            path,
+        )
+        return match.group(1).lower() if match else None
+    return None
 
 
 def prune_rate_limit_events(events: deque[float], now: float) -> None:

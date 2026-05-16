@@ -58,6 +58,80 @@ def test_rate_limit_returns_retry_after(monkeypatch) -> None:
         app_module.clear_rate_limit_state()
 
 
+def test_route_ip_rate_limit_applies_auth_route_budget(monkeypatch) -> None:
+    app_module.clear_rate_limit_state()
+    monkeypatch.setattr(app_module, "AUTH_DEVICE_IP_RPM", 1)
+    request = SimpleNamespace(
+        client=SimpleNamespace(host="127.0.0.1"),
+        headers={},
+        method="POST",
+        url=SimpleNamespace(path="/api/v1/auth/device/start"),
+    )
+
+    try:
+        assert asyncio.run(app_module.request_guard_response(request, "auth-route-1")) is None
+        response = asyncio.run(app_module.request_guard_response(request, "auth-route-2"))
+
+        assert response.status_code == 429
+        assert json.loads(response.body)["error"]["details"]["limit"] == "route_ip"
+    finally:
+        app_module.clear_rate_limit_state()
+
+
+def test_route_credential_rate_limit_applies_reconcile_budget(monkeypatch) -> None:
+    app_module.clear_rate_limit_state()
+    monkeypatch.setattr(app_module, "ADMIN_RECONCILE_CREDENTIAL_RPM", 1)
+    request = SimpleNamespace(
+        client=SimpleNamespace(host="127.0.0.1"),
+        headers={"authorization": "Bearer reconcile-token"},
+        method="POST",
+        url=SimpleNamespace(path="/api/v1/admin/reconcile"),
+    )
+
+    try:
+        assert asyncio.run(app_module.request_guard_response(request, "reconcile-1")) is None
+        response = asyncio.run(app_module.request_guard_response(request, "reconcile-2"))
+
+        assert response.status_code == 429
+        assert json.loads(response.body)["error"]["details"]["limit"] == "route_credential"
+    finally:
+        app_module.clear_rate_limit_state()
+
+
+def test_route_credential_dimension_uses_spec_specific_budgets() -> None:
+    cvm_id = "00000000-0000-4000-8000-000000000030"
+    profile_id = "00000000-0000-4000-8000-000000000031"
+
+    assert app_module.route_credential_dimension("GET", "/api/v1/audit/events") == (
+        "GET /api/v1/audit/events",
+        60,
+    )
+    assert app_module.route_credential_dimension("GET", "/api/v1/traffic-logs") == (
+        "GET /api/v1/traffic-logs",
+        30,
+    )
+    assert app_module.route_credential_dimension("GET", f"/api/v1/cvms/{cvm_id.upper()}/policy-bundle") == (
+        f"GET /api/v1/cvms/{{cvm_id}}/policy-bundle:{cvm_id}",
+        30,
+    )
+    assert app_module.route_credential_dimension("POST", f"/api/v1/cvms/{cvm_id}/profiles") == (
+        f"POST /api/v1/cvms/{{cvm_id}}/profiles:{cvm_id}",
+        12,
+    )
+    assert app_module.route_credential_dimension("DELETE", f"/api/v1/cvms/{cvm_id}/profiles/{profile_id}") == (
+        f"DELETE /api/v1/cvms/{{cvm_id}}/profiles:{cvm_id}",
+        12,
+    )
+    assert app_module.route_credential_dimension("GET", "/internal/sc-control/cvms") == (
+        "GET /internal/sc-control/cvms",
+        60,
+    )
+    assert app_module.route_credential_dimension("POST", "/internal/traffic-logs") == (
+        "POST /internal/traffic-logs",
+        120,
+    )
+
+
 def test_api_body_limit_rejects_before_route_parsing(monkeypatch) -> None:
     app_module.clear_rate_limit_state()
     monkeypatch.setattr(app_module, "API_BODY_LIMIT_BYTES", 8)
