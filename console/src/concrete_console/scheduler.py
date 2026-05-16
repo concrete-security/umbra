@@ -84,6 +84,17 @@ def sc_pull_propagation_timeout_seconds() -> int:
     return timeout
 
 
+def dev_cvm_attestation_timeout_seconds() -> int:
+    raw = load_settings().raw.get("DEV_CVM_ATTESTATION_TIMEOUT_SECONDS", "180").strip() or "180"
+    try:
+        timeout = int(raw)
+    except ValueError as exc:
+        raise RuntimeError("DEV_CVM_ATTESTATION_TIMEOUT_SECONDS must be an integer") from exc
+    if timeout < 30 or timeout > 600:
+        raise RuntimeError("DEV_CVM_ATTESTATION_TIMEOUT_SECONDS must be between 30 and 600")
+    return timeout
+
+
 def start_operation_scheduler() -> asyncio.Task[None]:
     return asyncio.create_task(operation_scheduler_loop(), name="operation-scheduler")
 
@@ -455,11 +466,15 @@ async def execute_cvm_launch_attestation_gate_operation(operation_id: Any) -> No
         await mark_cvm_launch_failed(operation_id, code="CVM_NOT_FOUND", details={"state": "missing_target"})
         return
     if _row_value(snapshot, "image_measurement") is None or _row_value(snapshot, "attestation_verified_at") is None:
-        log.info(
-            "cvm_launch_attestation_waiting",
-            operation_id=str(operation_id),
-            cvm_id=str(_row_value(snapshot, "cvm_id")),
-        )
+        verified = await run_cvm_launch_attestation_verifier(operation_id, snapshot)
+        if verified:
+            return
+        if _row_value(snapshot, "image_measurement") is None or _row_value(snapshot, "attestation_verified_at") is None:
+            log.info(
+                "cvm_launch_attestation_waiting",
+                operation_id=str(operation_id),
+                cvm_id=str(_row_value(snapshot, "cvm_id")),
+            )
         return
     if _row_value(snapshot, "image_measurement") != _row_value(snapshot, "expected_image_measurement"):
         await mark_cvm_launch_failed(
@@ -479,6 +494,79 @@ async def execute_cvm_launch_attestation_gate_operation(operation_id: Any) -> No
         )
         return
     await advance_cvm_launch_step(operation_id, "await_sc_pull")
+
+
+async def run_cvm_launch_attestation_verifier(operation_id: Any, snapshot: Any) -> bool:
+    from concrete_console.attestation import (
+        AtlasVerifierClient,
+        AttestationVerifierError,
+        AttestationVerifierUnavailable,
+        build_dev_cvm_attestation_request,
+    )
+
+    try:
+        verifier = AtlasVerifierClient.from_settings()
+        request = build_dev_cvm_attestation_request(snapshot)
+        report = await verifier.verify(request, timeout_seconds=dev_cvm_attestation_timeout_seconds())
+    except AttestationVerifierUnavailable:
+        return False
+    except AttestationVerifierError as exc:
+        await compensate_cvm_launch_resources(snapshot)
+        await mark_cvm_launch_failed(operation_id, code=exc.code, details=exc.details)
+        return True
+
+    if report.image_measurement != _row_value(snapshot, "expected_image_measurement"):
+        await compensate_cvm_launch_resources(snapshot)
+        await mark_cvm_launch_failed(
+            operation_id,
+            code="ATTESTATION_IMAGE_MISMATCH",
+            details={
+                "expected_image_measurement": _row_value(snapshot, "expected_image_measurement"),
+                "reported_image_measurement": report.image_measurement,
+            },
+        )
+        return True
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            verified_at = datetime.now(timezone.utc)
+            await conn.execute(
+                """
+                UPDATE cvms
+                SET image_measurement = $2,
+                    rtmr3_digest = $3,
+                    attestation_verified_at = $4,
+                    updated_at = now()
+                WHERE id = $1
+                  AND state = 'PROVISIONING'
+                """,
+                _row_value(snapshot, "cvm_id"),
+                report.image_measurement,
+                report.rtmr3_digest,
+                verified_at,
+            )
+            await insert_audit_event(
+                conn,
+                entity_id=_row_value(snapshot, "entity_id"),
+                actor_id=_row_value(snapshot, "actor_id"),
+                actor_email=_row_value(snapshot, "actor_email"),
+                action="CVM_ATTESTATION_VERIFIED",
+                target_type="cvm",
+                target_id=_row_value(snapshot, "cvm_id"),
+                before={
+                    "image_measurement": _row_value(snapshot, "image_measurement"),
+                    "rtmr3_digest": _row_value(snapshot, "rtmr3_digest"),
+                },
+                after={
+                    "image_measurement": report.image_measurement,
+                    "rtmr3_digest": report.rtmr3_digest,
+                    "attestation_verified_at": verified_at.isoformat().replace("+00:00", "Z"),
+                    "source": "launch",
+                },
+            )
+            await advance_cvm_launch_step_with_conn(conn, operation_id, "await_sc_pull")
+    return True
 
 
 async def execute_cvm_launch_await_sc_pull_operation(operation_id: Any) -> None:

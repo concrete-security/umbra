@@ -5,6 +5,7 @@ import json
 from types import SimpleNamespace
 from uuid import UUID
 
+from concrete_console import attestation
 from concrete_console import scheduler
 
 
@@ -398,6 +399,19 @@ class AttestationGateConn:
         return "UPDATE 1"
 
 
+class AttestationPersistConn:
+    def __init__(self):
+        self.execute_calls: list[tuple[str, tuple[object, ...]]] = []
+        self.audit_calls: list[dict[str, object]] = []
+
+    def transaction(self):
+        return AsyncContext()
+
+    async def execute(self, query, *args):
+        self.execute_calls.append((query, args))
+        return "UPDATE 1"
+
+
 def test_execute_cvm_launch_attestation_gate_waits_for_real_verifier(monkeypatch) -> None:
     snapshot = launch_snapshot(
         operation_updated_at=scheduler.datetime.now(scheduler.timezone.utc),
@@ -455,6 +469,63 @@ def test_execute_cvm_launch_attestation_gate_advances_after_columns_exist(monkey
     query, args = conn.execute_calls[0]
     assert "progress_step = $2" in query
     assert args == (UUID("00000000-0000-4000-8000-000000000030"), "await_sc_pull", 70)
+
+
+def test_run_cvm_launch_attestation_verifier_persists_report_and_audit(monkeypatch) -> None:
+    policy_bundle = {
+        "compose_template": "services: {}\n",
+        "expected_bootchain": {"mrtd": "d" * 64},
+        "os_image_hash": "e" * 64,
+        "rtmr3_binding": {"cvm_id": "00000000-0000-4000-8000-000000000031"},
+    }
+    snapshot = launch_snapshot(
+        operation_updated_at=scheduler.datetime.now(scheduler.timezone.utc),
+        actor_id=UUID("00000000-0000-4000-8000-000000000020"),
+        actor_email="dev@example.com",
+        entity_id=UUID("00000000-0000-4000-8000-000000000001"),
+        state="PROVISIONING",
+        metadata={"policy_bundle": policy_bundle},
+        image_measurement=None,
+        rtmr3_digest=None,
+        attestation_verified_at=None,
+        policy_version=0,
+        security_cvm_id=UUID("00000000-0000-4000-8000-000000000041"),
+    )
+    conn = AttestationPersistConn()
+    captured_request: dict[str, object] = {}
+
+    async def fake_get_pool():
+        return LaunchFakePool(conn)
+
+    class FakeVerifier:
+        async def verify(self, request, *, timeout_seconds):
+            captured_request.update(request)
+            assert timeout_seconds == 180
+            return attestation.AttestationReport(image_measurement="a" * 64, rtmr3_digest="d" * 96)
+
+    async def fake_insert_audit_event(_conn, **kwargs):
+        conn.audit_calls.append(kwargs)
+
+    monkeypatch.setattr(scheduler, "get_pool", fake_get_pool)
+    monkeypatch.setattr(attestation.AtlasVerifierClient, "from_settings", classmethod(lambda cls: FakeVerifier()))
+    monkeypatch.setattr(scheduler, "insert_audit_event", fake_insert_audit_event)
+
+    handled = asyncio.run(
+        scheduler.run_cvm_launch_attestation_verifier(UUID("00000000-0000-4000-8000-000000000030"), snapshot)
+    )
+
+    assert handled is True
+    assert captured_request["kind"] == "dev_cvm"
+    cvm_updates = [args for query, args in conn.execute_calls if "UPDATE cvms" in query]
+    assert cvm_updates[0][:3] == (
+        UUID("00000000-0000-4000-8000-000000000031"),
+        "a" * 64,
+        "d" * 96,
+    )
+    assert conn.audit_calls[0]["action"] == "CVM_ATTESTATION_VERIFIED"
+    assert conn.audit_calls[0]["after"]["source"] == "launch"
+    operation_updates = [args for query, args in conn.execute_calls if "UPDATE operations" in query]
+    assert operation_updates == [(UUID("00000000-0000-4000-8000-000000000030"), "await_sc_pull", 70)]
 
 
 def test_execute_cvm_launch_await_sc_pull_advances_after_observation(monkeypatch) -> None:
