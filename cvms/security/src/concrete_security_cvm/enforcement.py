@@ -1,0 +1,170 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timezone
+import re
+from typing import Mapping
+
+from concrete_security_cvm.control import ControlMap, DevCVMControlEntry
+from concrete_security_cvm.policy import PolicyValidationError
+from concrete_security_cvm.traffic import TrafficLogRecord
+
+
+DLP_SCAN_BODY_LIMIT_BYTES = 10 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class ProxyRequest:
+    source_ip: str
+    destination_ip: str
+    scheme: str
+    host: str
+    port: int
+    method: str
+    path: str
+    headers: Mapping[str, str]
+    body: bytes = b""
+    timestamp: datetime | None = None
+
+
+@dataclass(frozen=True)
+class EnforcementResult:
+    allowed: bool
+    response_code: int | None
+    reason: str
+    cvm: DevCVMControlEntry | None
+    upstream_headers: dict[str, str]
+    traffic_log: TrafficLogRecord | None
+    matched_policy_id: str | None = None
+
+
+def enforce_request(request: ProxyRequest, control_map: ControlMap) -> EnforcementResult:
+    headers = normalize_headers(request.headers)
+    token = extract_proxy_bearer(headers)
+    if token is None:
+        return EnforcementResult(
+            allowed=False,
+            response_code=407,
+            reason="proxy_auth_missing",
+            cvm=None,
+            upstream_headers={},
+            traffic_log=None,
+        )
+    cvm = control_map.lookup_proxy_token(token)
+    if cvm is None:
+        return EnforcementResult(
+            allowed=False,
+            response_code=407,
+            reason="proxy_auth_unknown",
+            cvm=None,
+            upstream_headers={},
+            traffic_log=None,
+        )
+
+    upstream_headers = strip_proxy_authorization(headers)
+    decision = cvm.merged_policy.decide(
+        scheme=request.scheme,
+        host=request.host,
+        port=request.port,
+        method=request.method,
+        path=request.path,
+    )
+    if not decision.allowed:
+        return _blocked_result(request, cvm, upstream_headers, decision.reason, decision.rule_id)
+
+    dlp_match = find_dlp_match(cvm.merged_policy.secret_patterns, upstream_headers, request.body)
+    if dlp_match is not None:
+        return _blocked_result(request, cvm, upstream_headers, "dlp_secret_detected", dlp_match)
+
+    try:
+        injection_headers = cvm.merged_policy.render_injection_headers(
+            scheme=request.scheme,
+            host=request.host,
+            port=request.port,
+            method=request.method,
+            path=request.path,
+        )
+    except PolicyValidationError:
+        return _blocked_result(request, cvm, upstream_headers, "policy_secret_injection_conflict", None)
+    upstream_headers.update(injection_headers)
+    return EnforcementResult(
+        allowed=True,
+        response_code=None,
+        reason="allowed",
+        cvm=cvm,
+        upstream_headers=upstream_headers,
+        traffic_log=traffic_log_record(request, cvm, response_code=None),
+        matched_policy_id=decision.rule_id,
+    )
+
+
+def extract_proxy_bearer(headers: Mapping[str, str]) -> str | None:
+    raw = headers.get("proxy-authorization")
+    if raw is None:
+        return None
+    match = re.fullmatch(r"Bearer ([^\s]+)", raw)
+    if match is None:
+        return None
+    return match.group(1)
+
+
+def strip_proxy_authorization(headers: Mapping[str, str]) -> dict[str, str]:
+    return {name: value for name, value in headers.items() if name != "proxy-authorization"}
+
+
+def normalize_headers(headers: Mapping[str, str]) -> dict[str, str]:
+    normalized: dict[str, str] = {}
+    for name, value in headers.items():
+        normalized[name.lower()] = value
+    return normalized
+
+
+def find_dlp_match(patterns: object, headers: Mapping[str, str], body: bytes) -> str | None:
+    header_blob = "\n".join(f"{name}: {value}" for name, value in sorted(headers.items()))
+    body_text = body[:DLP_SCAN_BODY_LIMIT_BYTES].decode("utf-8", errors="ignore")
+    for pattern in patterns:  # type: ignore[assignment]
+        if pattern.scan_headers and pattern.compiled.search(header_blob):
+            return pattern.pattern_id
+        if pattern.scan_body and pattern.compiled.search(body_text):
+            return pattern.pattern_id
+    return None
+
+
+def traffic_log_record(
+    request: ProxyRequest,
+    cvm: DevCVMControlEntry,
+    *,
+    response_code: int | None,
+    bytes_transferred: int = 0,
+) -> TrafficLogRecord:
+    return TrafficLogRecord(
+        timestamp=request.timestamp or datetime.now(timezone.utc),
+        cvm_id=cvm.cvm_id,
+        source_ip=request.source_ip,
+        destination_ip=request.destination_ip,
+        destination_host=request.host,
+        protocol=request.scheme,
+        port=request.port,
+        method=request.method.upper(),
+        path=request.path,
+        response_code=response_code,
+        bytes_transferred=bytes_transferred,
+    )
+
+
+def _blocked_result(
+    request: ProxyRequest,
+    cvm: DevCVMControlEntry,
+    upstream_headers: dict[str, str],
+    reason: str,
+    matched_policy_id: str | None,
+) -> EnforcementResult:
+    return EnforcementResult(
+        allowed=False,
+        response_code=403,
+        reason=reason,
+        cvm=cvm,
+        upstream_headers=upstream_headers,
+        traffic_log=traffic_log_record(request, cvm, response_code=403),
+        matched_policy_id=matched_policy_id,
+    )

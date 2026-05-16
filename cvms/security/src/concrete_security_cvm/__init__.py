@@ -2,6 +2,7 @@
 
 from concrete_security_cvm.binding import BootBinding
 from concrete_security_cvm.control import ControlMap, DevCVMControlEntry, PollResult, SCControlClient
+from concrete_security_cvm.enforcement import EnforcementResult, ProxyRequest, enforce_request
 from concrete_security_cvm.policy import (
     EffectivePolicy,
     PolicyDecision,
@@ -15,13 +16,16 @@ __all__ = [
     "ControlMap",
     "DevCVMControlEntry",
     "EffectivePolicy",
+    "EnforcementResult",
     "PolicyDecision",
     "PolicyValidationError",
     "PollResult",
+    "ProxyRequest",
     "SCControlClient",
     "TrafficLogBatch",
     "TrafficLogClient",
     "TrafficLogQueue",
     "TrafficLogRecord",
+    "enforce_request",
     "parse_effective_policy",
 ]
