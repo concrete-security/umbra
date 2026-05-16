@@ -13,7 +13,7 @@ use serde_json::{json, Map, Value};
 use uuid::Uuid;
 
 use crate::{
-    cli::{ProfileCommand, ProfileConfigureArgs, ProfileMembersCommand},
+    cli::{ProfileCommand, ProfileConfigureArgs, ProfileCreateArgs, ProfileMembersCommand},
     commands::auth,
     config::ResolvedConfig,
     exit::ExitStatus,
@@ -74,11 +74,44 @@ struct ProfileMemberOutput<'a> {
 
 pub fn run(command: ProfileCommand, config: &ResolvedConfig, json: bool) -> ExitStatus {
     match command {
+        ProfileCommand::Create(args) => create(config, args, json),
         ProfileCommand::List => list(config, json),
         ProfileCommand::Show => show(config, json),
         ProfileCommand::Configure(args) => configure(config, args, json),
         ProfileCommand::Members(command) => members(config, command, json),
     }
+}
+
+fn create(config: &ResolvedConfig, args: ProfileCreateArgs, json_output: bool) -> ExitStatus {
+    let name = args.name.trim();
+    if name.is_empty() {
+        eprintln!("[usage] NAME must not be empty");
+        return ExitStatus::Usage;
+    }
+    let description = args.description.unwrap_or_default();
+    let (console_url, session) = match console_session(config) {
+        Ok(value) => value,
+        Err((status, message)) => {
+            eprintln!("{message}");
+            return status;
+        }
+    };
+    let profile = match create_profile(console_url, &session, name, &description) {
+        Ok(value) => value.profile,
+        Err((status, message)) => {
+            eprintln!("{message}");
+            return status;
+        }
+    };
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&profile).expect("profile create output serializes")
+        );
+    } else {
+        println!("created profile {} {}", profile.id, profile.name);
+    }
+    ExitStatus::Ok
 }
 
 fn list(config: &ResolvedConfig, json_output: bool) -> ExitStatus {
@@ -360,6 +393,30 @@ fn fetch_profiles(
             )
         })?;
     read_json_response(response, "list profiles")
+}
+
+fn create_profile(
+    console_url: &str,
+    session: &Session,
+    name: &str,
+    description: &str,
+) -> Result<ProfileWithEtag, (ExitStatus, String)> {
+    let response = Client::new()
+        .post(format!(
+            "{console_url}/api/v1/entities/{}/profiles",
+            session.entity.id
+        ))
+        .bearer_auth(&session.access_token)
+        .header("Idempotency-Key", Uuid::new_v4().to_string())
+        .json(&json!({ "name": name, "description": description }))
+        .send()
+        .map_err(|err| {
+            (
+                ExitStatus::Error,
+                format!("[error] failed to create profile: {err}"),
+            )
+        })?;
+    read_profile_with_etag(response, "create profile")
 }
 
 fn fetch_profile(

@@ -405,6 +405,9 @@ pub struct KeyAddArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum ProfileCommand {
+    /// Create a profile in the current entity.
+    Create(ProfileCreateArgs),
+
     /// List profiles visible to the current user.
     List,
 
@@ -417,6 +420,16 @@ pub enum ProfileCommand {
     /// Manage users assigned to the selected profile.
     #[command(subcommand)]
     Members(ProfileMembersCommand),
+}
+
+#[derive(clap::Args, Debug)]
+pub struct ProfileCreateArgs {
+    /// Human-readable profile name.
+    pub name: String,
+
+    /// Free-text profile description.
+    #[arg(long)]
+    pub description: Option<String>,
 }
 
 #[derive(clap::Args, Debug)]
