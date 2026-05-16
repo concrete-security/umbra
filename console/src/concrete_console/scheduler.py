@@ -2630,13 +2630,9 @@ async def run_reconciliation_pass(*, include_orphans: bool = True) -> Reconcilia
         security_cvms_advanced = await reconcile_security_cvm_provider_drift(conn)
         orphans_cleaned = await cleanup_orphan_dns_records(conn) if include_orphans else []
         orphans_cleaned.extend(await prune_expired_reconciler_rows(conn))
-        await conn.execute(
-            """
-            DELETE FROM operations
-            WHERE expires_at IS NOT NULL
-              AND expires_at < now()
-            """
-        )
+        operation_prune_count = await prune_expired_operations(conn)
+        if operation_prune_count:
+            orphans_cleaned.append(f"maintenance:operations:{operation_prune_count}")
         security_cvms_advanced.extend(await reconcile_security_cvm_attestations(conn))
         cvms_advanced.extend(await reconcile_dev_cvm_attestations(conn))
         await publish_audit_anchor_if_due(conn)
@@ -2898,17 +2894,48 @@ async def persist_security_cvm_provider_drift(
 
 async def prune_expired_reconciler_rows(conn: Any) -> list[str]:
     cleaned: list[str] = []
-    for table in ("revoked_tokens", "idempotency_keys", "device_flow_pending"):
+    for table, key_column in (
+        ("revoked_tokens", "jti"),
+        ("idempotency_keys", "id"),
+        ("device_flow_pending", "device_code"),
+    ):
         status = await conn.execute(
             f"""
+            WITH expired AS (
+                SELECT {key_column}
+                FROM {table}
+                WHERE expires_at < now() - INTERVAL '1 day'
+                ORDER BY expires_at
+                LIMIT 1000
+                FOR UPDATE SKIP LOCKED
+            )
             DELETE FROM {table}
-            WHERE expires_at < now() - INTERVAL '1 day'
+            WHERE {key_column} IN (SELECT {key_column} FROM expired)
             """
         )
         count = deleted_row_count(status)
         if count:
             cleaned.append(f"maintenance:{table}:{count}")
     return cleaned
+
+
+async def prune_expired_operations(conn: Any) -> int:
+    status = await conn.execute(
+        """
+        WITH expired AS (
+            SELECT id
+            FROM operations
+            WHERE expires_at IS NOT NULL
+              AND expires_at < now()
+            ORDER BY expires_at
+            LIMIT 1000
+            FOR UPDATE SKIP LOCKED
+        )
+        DELETE FROM operations
+        WHERE id IN (SELECT id FROM expired)
+        """
+    )
+    return deleted_row_count(status)
 
 
 def deleted_row_count(status: str) -> int:

@@ -1031,6 +1031,8 @@ class MaintenancePruneConn:
             return "DELETE 0"
         if "device_flow_pending" in query:
             return "DELETE 1"
+        if "operations" in query:
+            return "DELETE 3"
         raise AssertionError(f"unexpected execute query: {query}")
 
 
@@ -1396,11 +1398,26 @@ def test_prune_expired_reconciler_rows_uses_one_day_grace() -> None:
 
     assert cleaned == ["maintenance:revoked_tokens:2", "maintenance:device_flow_pending:1"]
     assert [query for query in conn.execute_calls if "INTERVAL '1 day'" in query]
+    assert all("FOR UPDATE SKIP LOCKED" in query for query in conn.execute_calls)
     assert any("DELETE FROM revoked_tokens" in query for query in conn.execute_calls)
     assert any("DELETE FROM idempotency_keys" in query for query in conn.execute_calls)
     assert any("DELETE FROM device_flow_pending" in query for query in conn.execute_calls)
     assert scheduler.deleted_row_count("DELETE 12") == 12
     assert scheduler.deleted_row_count("UPDATE 12") == 0
+
+
+def test_prune_expired_operations_uses_skip_locked_without_grace() -> None:
+    conn = MaintenancePruneConn()
+
+    count = asyncio.run(scheduler.prune_expired_operations(conn))
+
+    assert count == 3
+    query = conn.execute_calls[0]
+    assert "FROM operations" in query
+    assert "expires_at IS NOT NULL" in query
+    assert "expires_at < now()" in query
+    assert "INTERVAL '1 day'" not in query
+    assert "FOR UPDATE SKIP LOCKED" in query
 
 
 def test_execute_cvm_launch_await_sc_pull_advances_after_observation(monkeypatch) -> None:
