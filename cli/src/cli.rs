@@ -114,6 +114,9 @@ pub enum Command {
     /// Show a summary of the current entity and visible resources.
     Status,
 
+    /// Open SSH to the selected Dev CVM over an aTLS-verified tunnel.
+    Ssh(SshArgs),
+
     /// Query egress traffic logs.
     TrafficLogs(TrafficLogsArgs),
 
@@ -381,6 +384,24 @@ pub struct CvmTerminateArgs {
     /// Maximum seconds to wait for termination completion.
     #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u32).range(1..=86400))]
     pub wait_timeout_seconds: u32,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct SshArgs {
+    /// Dev CVM UUID. Defaults to --cvm, CONCRETE_DEFAULT_CVM, or default_cvm.
+    pub cvm_id: Option<String>,
+
+    /// Start or attach the named dtach session.
+    #[arg(long)]
+    pub name: Option<String>,
+
+    /// Private SSH key to pass to ssh(1).
+    #[arg(long)]
+    pub identity_file: Option<PathBuf>,
+
+    /// Remote command to execute directly instead of opening a dtach shell.
+    #[arg(long)]
+    pub command: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]

@@ -156,8 +156,9 @@ ENV
   chmod 0644 "$output"
 }
 
-mkdir -p /run/ssh/authorized_keys /run/ssh/user-ssh /run/sshd /run/concrete
-chown dev:dev /run/ssh/user-ssh
+mkdir -p /run/ssh/authorized_keys /run/ssh/user-ssh /run/sshd /run/concrete/sessions
+chown dev:dev /run/ssh/user-ssh /run/concrete/sessions
+chmod 0700 /run/concrete/sessions
 
 export HTTP_PROXY='http://dev-egress-forwarder:3128'
 export HTTPS_PROXY='http://dev-egress-forwarder:3128'

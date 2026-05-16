@@ -9,6 +9,7 @@ pub mod profile;
 pub mod quota;
 pub mod reconcile;
 pub mod security_cvm;
+pub mod ssh;
 pub mod status;
 pub mod traffic_logs;
 pub mod tunnel;

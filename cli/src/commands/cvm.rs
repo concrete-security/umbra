@@ -117,7 +117,7 @@ struct CvmLaunchResult {
 }
 
 #[derive(Debug, Deserialize)]
-struct PolicyBundle {
+pub(crate) struct PolicyBundle {
     cvm_id: String,
     compose_template: String,
     expected_bootchain: Value,
@@ -789,7 +789,7 @@ fn read_cvm_with_etag(
     Ok(CvmWithEtag { cvm, etag })
 }
 
-fn read_json_response<T: for<'de> Deserialize<'de>>(
+pub(crate) fn read_json_response<T: for<'de> Deserialize<'de>>(
     response: Response,
     action: &str,
 ) -> Result<T, (ExitStatus, String)> {
@@ -840,7 +840,7 @@ fn operation_cvm_result(operation: &Operation) -> Result<Cvm, String> {
         .map_err(|err| format!("[error] malformed CVM result: {err}"))
 }
 
-fn write_policy_file(
+pub(crate) fn write_policy_file(
     config_dir: &Path,
     bundle: &PolicyBundle,
     cvm_id: &str,
