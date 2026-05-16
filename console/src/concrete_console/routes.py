@@ -361,6 +361,12 @@ def require_idempotency_key(value: str | None) -> str:
     return value
 
 
+def optional_idempotency_key(value: str | None) -> str | None:
+    if value is None:
+        return None
+    return require_idempotency_key(value)
+
+
 def profile_etag(row: asyncpg.Record | dict) -> str:
     row = dict(row)
     updated_at = row["updated_at"]
@@ -2958,6 +2964,193 @@ async def get_cvm(
     return cvm_resource(rows[0])
 
 
+@router.post("/cvms/{cvm_id}/actions/start")
+async def start_cvm(
+    cvm_id: UUID,
+    response: Response,
+    if_match: Annotated[str | None, Header(alias="If-Match")] = None,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+    current_user: CurrentUser = Depends(require_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> dict:
+    optional_idempotency_key(idempotency_key)
+    return await apply_cvm_state_action(
+        pool,
+        cvm_id=cvm_id,
+        action="start",
+        source_state="STOPPED",
+        target_state="RUNNING",
+        audit_action="CVM_STARTED",
+        if_match=if_match,
+        current_user=current_user,
+        response=response,
+    )
+
+
+@router.post("/cvms/{cvm_id}/actions/stop")
+async def stop_cvm(
+    cvm_id: UUID,
+    response: Response,
+    if_match: Annotated[str | None, Header(alias="If-Match")] = None,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+    current_user: CurrentUser = Depends(require_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> dict:
+    optional_idempotency_key(idempotency_key)
+    return await apply_cvm_state_action(
+        pool,
+        cvm_id=cvm_id,
+        action="stop",
+        source_state="RUNNING",
+        target_state="STOPPED",
+        audit_action="CVM_STOPPED",
+        if_match=if_match,
+        current_user=current_user,
+        response=response,
+    )
+
+
+@router.post("/cvms/{cvm_id}/actions/terminate", status_code=202)
+async def terminate_cvm(
+    cvm_id: UUID,
+    request: Request,
+    if_match: Annotated[str | None, Header(alias="If-Match")] = None,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+    current_user: CurrentUser = Depends(require_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> Any:
+    current_user.require_permission("CVM_MANAGE")
+    idempotency_key_value = optional_idempotency_key(idempotency_key)
+    route = f"POST /api/v1/cvms/{cvm_id}/actions/terminate"
+    body_sha256 = request_body_sha256(await request.body())
+    operation_id = uuid4()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            if idempotency_key_value is not None:
+                await acquire_idempotency_lock(
+                    conn,
+                    credential_id=str(current_user.id),
+                    idempotency_key=idempotency_key_value,
+                    route=route,
+                )
+                cached = await lookup_idempotency_response(
+                    conn,
+                    credential_id=str(current_user.id),
+                    idempotency_key=idempotency_key_value,
+                    route=route,
+                    body_sha256=body_sha256,
+                )
+                if cached is not None:
+                    return JSONResponse(status_code=cached.status_code, content=cached.body, headers=cached.headers)
+
+            cvm = await lock_cvm_for_lifecycle_action(conn, cvm_id=cvm_id, current_user=current_user)
+            if if_match is not None:
+                require_matching_etag(cvm_etag(cvm), if_match)
+            if cvm["state"] == "TERMINATED":
+                cvm_payload = await fetch_cvm_resource_for_operation(conn, cvm_id)
+            else:
+                if cvm["state"] not in {"RUNNING", "STOPPED", "FAILED"}:
+                    raise api_error(
+                        409,
+                        "CONFLICT",
+                        "illegal CVM lifecycle transition",
+                        {"state": cvm["state"]},
+                    )
+                require_local_cvm_lifecycle_action(cvm)
+                await conn.execute(
+                    """
+                    UPDATE service_principal_tokens
+                    SET deleted_at = now(),
+                        deleted_by = $1
+                    WHERE principal_type = 'dev_cvm'
+                      AND principal_id = $2
+                      AND deleted_at IS NULL
+                    """,
+                    current_user.id,
+                    cvm_id,
+                )
+                await conn.execute(
+                    """
+                    UPDATE cvms
+                    SET state = 'TERMINATED',
+                        deleted_at = now(),
+                        deleted_by = $1,
+                        updated_at = now(),
+                        txt_dns_record_id = NULL,
+                        cname_dns_record_id = NULL
+                    WHERE id = $2
+                    """,
+                    current_user.id,
+                    cvm_id,
+                )
+                cvm_payload = await fetch_cvm_resource_for_operation(conn, cvm_id)
+                await insert_audit_event(
+                    conn,
+                    entity_id=current_user.entity_id,
+                    actor_id=current_user.id,
+                    actor_email=current_user.email,
+                    action="CVM_TERMINATED",
+                    target_type="cvm",
+                    target_id=cvm_id,
+                    before={"state": cvm["state"]},
+                    after={"state": "TERMINATED"},
+                )
+            row = await conn.fetchrow(
+                """
+                INSERT INTO operations (
+                    id,
+                    kind,
+                    status,
+                    actor_id,
+                    actor_email,
+                    target_type,
+                    target_id,
+                    idempotency_key,
+                    request_body_sha256,
+                    result,
+                    progress_step,
+                    progress_percent
+                )
+                VALUES ($1, 'cvm.terminate', 'succeeded', $2, $3, 'cvm', $4, $5, $6, $7::jsonb, 'finalise', 100)
+                RETURNING
+                    id,
+                    kind,
+                    status::text AS status,
+                    actor_id,
+                    actor_email,
+                    target_type,
+                    target_id,
+                    progress_step,
+                    progress_percent,
+                    result,
+                    error,
+                    result_disclosed_at,
+                    created_at,
+                    updated_at,
+                    expires_at
+                """,
+                operation_id,
+                current_user.id,
+                current_user.email,
+                cvm_id,
+                idempotency_key_value,
+                body_sha256 if idempotency_key_value is not None else None,
+                json.dumps(cvm_payload),
+            )
+            response_body = operation_resource(row)
+            if idempotency_key_value is not None:
+                await store_idempotency_response(
+                    conn,
+                    credential_id=str(current_user.id),
+                    idempotency_key=idempotency_key_value,
+                    route=route,
+                    body_sha256=body_sha256,
+                    status_code=202,
+                    response_body=response_body,
+                )
+            return response_body
+
+
 @router.post("/cvms/{cvm_id}/profiles")
 async def attach_cvm_profile(
     cvm_id: UUID,
@@ -3124,6 +3317,92 @@ async def lock_cvm_for_policy_mutation(
     if row is None:
         raise api_error(404, "NOT_FOUND", "resource not found")
     return row
+
+
+async def lock_cvm_for_lifecycle_action(
+    conn: asyncpg.Connection,
+    *,
+    cvm_id: UUID,
+    current_user: CurrentUser,
+) -> asyncpg.Record:
+    row = await conn.fetchrow(
+        """
+        SELECT id, entity_id, state::text AS state, metadata, policy_version, updated_at
+        FROM cvms
+        WHERE id = $1
+          AND entity_id = $2
+          AND deleted_at IS NULL
+        FOR UPDATE
+        """,
+        cvm_id,
+        current_user.entity_id,
+    )
+    if row is None:
+        raise api_error(404, "NOT_FOUND", "resource not found")
+    return row
+
+
+def require_local_cvm_lifecycle_action(row: asyncpg.Record | dict) -> None:
+    metadata = json_payload(dict(row).get("metadata", {}))
+    if isinstance(metadata, dict) and metadata.get("app_id"):
+        raise api_error(
+            503,
+            "SERVICE_UNAVAILABLE",
+            "Dev CVM provider lifecycle actions are not implemented",
+            {"component": "phala_adapter"},
+        )
+
+
+async def apply_cvm_state_action(
+    pool: asyncpg.Pool,
+    *,
+    cvm_id: UUID,
+    action: str,
+    source_state: str,
+    target_state: str,
+    audit_action: str,
+    if_match: str | None,
+    current_user: CurrentUser,
+    response: Response,
+) -> dict:
+    current_user.require_permission("CVM_MANAGE")
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            cvm = await lock_cvm_for_lifecycle_action(conn, cvm_id=cvm_id, current_user=current_user)
+            if if_match is not None:
+                require_matching_etag(cvm_etag(cvm), if_match)
+            if cvm["state"] == target_state:
+                return await fetch_cvm_resource_for_operation(conn, cvm_id)
+            if cvm["state"] != source_state:
+                raise api_error(
+                    409,
+                    "CONFLICT",
+                    f"cannot {action} CVM from current state",
+                    {"state": cvm["state"]},
+                )
+            require_local_cvm_lifecycle_action(cvm)
+            await conn.execute(
+                """
+                UPDATE cvms
+                SET state = $1,
+                    updated_at = now()
+                WHERE id = $2
+                """,
+                target_state,
+                cvm_id,
+            )
+            await insert_audit_event(
+                conn,
+                entity_id=current_user.entity_id,
+                actor_id=current_user.id,
+                actor_email=current_user.email,
+                action=audit_action,
+                target_type="cvm",
+                target_id=cvm_id,
+                before={"state": cvm["state"]},
+                after={"state": target_state},
+            )
+    return await fetch_visible_cvm_resource(pool, cvm_id=cvm_id, current_user=current_user, response=response)
 
 
 async def bump_cvm_policy_version(conn: asyncpg.Connection, cvm_id: UUID) -> None:
@@ -3326,6 +3605,23 @@ async def fetch_cvm_rows(
     where_clause: str,
     values: list[object],
 ) -> list[asyncpg.Record]:
+    async with pool.acquire() as conn:
+        return await fetch_cvm_rows_from_conn(conn, where_clause=where_clause, values=values)
+
+
+async def fetch_cvm_resource_for_operation(conn: asyncpg.Connection, cvm_id: UUID) -> dict:
+    rows = await fetch_cvm_rows_from_conn(conn, where_clause="c.id = $1", values=[cvm_id])
+    if not rows:
+        raise api_error(404, "NOT_FOUND", "resource not found")
+    return cvm_resource(rows[0])
+
+
+async def fetch_cvm_rows_from_conn(
+    conn: asyncpg.Connection,
+    *,
+    where_clause: str,
+    values: list[object],
+) -> list[asyncpg.Record]:
     query = f"""
         SELECT
             c.id,
@@ -3375,8 +3671,7 @@ async def fetch_cvm_rows(
         WHERE {where_clause}
         ORDER BY c.created_at DESC, c.id
     """
-    async with pool.acquire() as conn:
-        return await conn.fetch(query, *values)
+    return await conn.fetch(query, *values)
 
 
 @router.post("/entities/{entity_id}/security-cvm", status_code=202)
