@@ -1477,6 +1477,7 @@ async def run_reconciliation_pass(*, include_orphans: bool = True) -> Reconcilia
             """
         )
         orphans_cleaned = await cleanup_orphan_dns_records(conn) if include_orphans else []
+        orphans_cleaned.extend(await prune_expired_reconciler_rows(conn))
         security_cvms_advanced = await reconcile_security_cvm_attestations(conn)
         cvms_advanced = await reconcile_dev_cvm_attestations(conn)
     return ReconciliationSummary(
@@ -1484,6 +1485,34 @@ async def run_reconciliation_pass(*, include_orphans: bool = True) -> Reconcilia
         security_cvms_advanced=security_cvms_advanced,
         orphans_cleaned=orphans_cleaned,
     )
+
+
+async def prune_expired_reconciler_rows(conn: Any) -> list[str]:
+    cleaned: list[str] = []
+    for table in ("revoked_tokens", "idempotency_keys", "device_flow_pending"):
+        status = await conn.execute(
+            f"""
+            DELETE FROM {table}
+            WHERE expires_at < now() - INTERVAL '1 day'
+            """
+        )
+        count = deleted_row_count(status)
+        if count:
+            cleaned.append(f"maintenance:{table}:{count}")
+    return cleaned
+
+
+def deleted_row_count(status: str) -> int:
+    try:
+        command, count = status.rsplit(" ", 1)
+    except ValueError:
+        return 0
+    if command != "DELETE":
+        return 0
+    try:
+        return int(count)
+    except ValueError:
+        return 0
 
 
 async def cleanup_orphan_dns_records(conn: Any) -> list[str]:

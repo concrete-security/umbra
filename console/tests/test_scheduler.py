@@ -470,6 +470,21 @@ class OrphanDnsConn:
         return "UPDATE 1"
 
 
+class MaintenancePruneConn:
+    def __init__(self):
+        self.execute_calls: list[str] = []
+
+    async def execute(self, query, *args):
+        self.execute_calls.append(query)
+        if "revoked_tokens" in query:
+            return "DELETE 2"
+        if "idempotency_keys" in query:
+            return "DELETE 0"
+        if "device_flow_pending" in query:
+            return "DELETE 1"
+        raise AssertionError(f"unexpected execute query: {query}")
+
+
 def test_execute_cvm_launch_attestation_gate_waits_for_real_verifier(monkeypatch) -> None:
     snapshot = launch_snapshot(
         operation_updated_at=scheduler.datetime.now(scheduler.timezone.utc),
@@ -708,6 +723,20 @@ def test_cleanup_orphan_dns_records_uses_component_zones(monkeypatch) -> None:
     ]
     assert len(conn.execute_calls) == 3
     assert all("SET " in query and "= NULL" in query for query, _args in conn.execute_calls)
+
+
+def test_prune_expired_reconciler_rows_uses_one_day_grace() -> None:
+    conn = MaintenancePruneConn()
+
+    cleaned = asyncio.run(scheduler.prune_expired_reconciler_rows(conn))
+
+    assert cleaned == ["maintenance:revoked_tokens:2", "maintenance:device_flow_pending:1"]
+    assert [query for query in conn.execute_calls if "INTERVAL '1 day'" in query]
+    assert any("DELETE FROM revoked_tokens" in query for query in conn.execute_calls)
+    assert any("DELETE FROM idempotency_keys" in query for query in conn.execute_calls)
+    assert any("DELETE FROM device_flow_pending" in query for query in conn.execute_calls)
+    assert scheduler.deleted_row_count("DELETE 12") == 12
+    assert scheduler.deleted_row_count("UPDATE 12") == 0
 
 
 def test_execute_cvm_launch_await_sc_pull_advances_after_observation(monkeypatch) -> None:
