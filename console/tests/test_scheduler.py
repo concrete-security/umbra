@@ -114,8 +114,17 @@ def test_executable_running_operation_recognizes_terminate_step() -> None:
     assert scheduler.executable_running_operation(
         operation_row(kind="cvm.launch", status="running", progress_step="cf_cname_create")
     )
-    assert not scheduler.executable_running_operation(
+    assert scheduler.executable_running_operation(
         operation_row(kind="cvm.launch", status="running", progress_step="verify_attestation")
+    )
+    assert scheduler.executable_running_operation(
+        operation_row(kind="cvm.launch", status="running", progress_step="await_sc_pull")
+    )
+    assert scheduler.executable_running_operation(
+        operation_row(kind="cvm.launch", status="running", progress_step="policy_push")
+    )
+    assert scheduler.executable_running_operation(
+        operation_row(kind="cvm.launch", status="running", progress_step="finalise")
     )
 
 
@@ -162,6 +171,32 @@ def launch_snapshot(**overrides):
 
 def decode_env(value: str) -> str:
     return base64.b64decode(value.encode("ascii")).decode("utf-8")
+
+
+def cvm_resource_row(**overrides):
+    now = scheduler.datetime.now(scheduler.timezone.utc)
+    row = {
+        "id": UUID("00000000-0000-4000-8000-000000000031"),
+        "owner_id": UUID("00000000-0000-4000-8000-000000000020"),
+        "owner_email": "dev@example.com",
+        "entity_id": UUID("00000000-0000-4000-8000-000000000001"),
+        "state": "RUNNING",
+        "instance_type": "tdx.small",
+        "region": "FR-PARIS-1",
+        "fqdn": "cvm-abc.dev.example.com",
+        "expected_image_measurement": "a" * 64,
+        "image_measurement": "a" * 64,
+        "rtmr3_digest": "d" * 96,
+        "attestation_verified_at": now,
+        "error_reason": None,
+        "policy_version": 1,
+        "created_at": now,
+        "updated_at": now,
+        "profiles": [{"id": UUID("00000000-0000-4000-8000-000000000050"), "name": "Default"}],
+        "ssh_keys": [{"id": UUID("00000000-0000-4000-8000-000000000060"), "label": "laptop"}],
+    }
+    row.update(overrides)
+    return row
 
 
 def test_build_cvm_launch_env_binds_runtime_material() -> None:
@@ -342,3 +377,153 @@ def test_execute_cvm_launch_phala_deploy_persists_hash_only(monkeypatch) -> None
             40,
         )
     ]
+
+
+class AttestationGateConn:
+    def __init__(self, snapshot):
+        self.snapshot = snapshot
+        self.execute_calls: list[tuple[str, tuple[object, ...]]] = []
+
+    async def fetchrow(self, query, *args):
+        if "FROM operations o" in query:
+            return self.snapshot
+        return None
+
+    async def execute(self, query, *args):
+        self.execute_calls.append((query, args))
+        return "UPDATE 1"
+
+
+def test_execute_cvm_launch_attestation_gate_waits_for_real_verifier(monkeypatch) -> None:
+    snapshot = launch_snapshot(
+        operation_updated_at=scheduler.datetime.now(scheduler.timezone.utc),
+        actor_id=UUID("00000000-0000-4000-8000-000000000020"),
+        actor_email="dev@example.com",
+        entity_id=UUID("00000000-0000-4000-8000-000000000001"),
+        state="PROVISIONING",
+        metadata={},
+        txt_dns_record_id="txt-1",
+        cname_dns_record_id="cname-1",
+        image_measurement=None,
+        rtmr3_digest=None,
+        attestation_verified_at=None,
+        policy_version=0,
+        security_cvm_id=UUID("00000000-0000-4000-8000-000000000041"),
+    )
+    conn = AttestationGateConn(snapshot)
+
+    async def fake_get_pool():
+        return LaunchFakePool(conn)
+
+    monkeypatch.setattr(scheduler, "get_pool", fake_get_pool)
+
+    asyncio.run(scheduler.execute_cvm_launch_attestation_gate_operation(UUID("00000000-0000-4000-8000-000000000030")))
+
+    assert conn.execute_calls == []
+
+
+def test_execute_cvm_launch_attestation_gate_advances_after_columns_exist(monkeypatch) -> None:
+    snapshot = launch_snapshot(
+        operation_updated_at=scheduler.datetime.now(scheduler.timezone.utc),
+        actor_id=UUID("00000000-0000-4000-8000-000000000020"),
+        actor_email="dev@example.com",
+        entity_id=UUID("00000000-0000-4000-8000-000000000001"),
+        state="PROVISIONING",
+        metadata={},
+        txt_dns_record_id="txt-1",
+        cname_dns_record_id="cname-1",
+        image_measurement="a" * 64,
+        rtmr3_digest="d" * 96,
+        attestation_verified_at=scheduler.datetime.now(scheduler.timezone.utc),
+        policy_version=0,
+        security_cvm_id=UUID("00000000-0000-4000-8000-000000000041"),
+    )
+    conn = AttestationGateConn(snapshot)
+
+    async def fake_get_pool():
+        return LaunchFakePool(conn)
+
+    monkeypatch.setattr(scheduler, "get_pool", fake_get_pool)
+
+    asyncio.run(scheduler.execute_cvm_launch_attestation_gate_operation(UUID("00000000-0000-4000-8000-000000000030")))
+
+    assert len(conn.execute_calls) == 1
+    query, args = conn.execute_calls[0]
+    assert "progress_step = $2" in query
+    assert args == (UUID("00000000-0000-4000-8000-000000000030"), "await_sc_pull", 70)
+
+
+class FinaliseConn:
+    def __init__(self, snapshot):
+        self.snapshot = snapshot
+        self.execute_calls: list[tuple[str, tuple[object, ...]]] = []
+        self.audit_calls: list[dict[str, object]] = []
+
+    def transaction(self):
+        return AsyncContext()
+
+    async def fetchrow(self, query, *args):
+        if "FROM operations o" in query:
+            return self.snapshot
+        if "FROM cvms c" in query and "JOIN users owner" in query:
+            return cvm_resource_row()
+        return None
+
+    async def fetch(self, query, *args):
+        if "ep.name AS profile_name" in query:
+            return [{"profile_id": UUID("00000000-0000-4000-8000-000000000050"), "profile_name": "Default"}]
+        return []
+
+    async def fetchval(self, query, *args):
+        if "SELECT policy_version" in query:
+            return 1
+        return None
+
+    async def execute(self, query, *args):
+        self.execute_calls.append((query, args))
+        return "UPDATE 1"
+
+
+def test_execute_cvm_launch_finalise_materializes_result_and_audit(monkeypatch) -> None:
+    policy_bundle = {
+        "cvm_id": "00000000-0000-4000-8000-000000000031",
+        "rtmr3_binding": {"cvm_id": "00000000-0000-4000-8000-000000000031"},
+    }
+    snapshot = launch_snapshot(
+        operation_updated_at=scheduler.datetime.now(scheduler.timezone.utc),
+        actor_id=UUID("00000000-0000-4000-8000-000000000020"),
+        actor_email="dev@example.com",
+        entity_id=UUID("00000000-0000-4000-8000-000000000001"),
+        state="PROVISIONING",
+        metadata={"policy_bundle": policy_bundle},
+        txt_dns_record_id="txt-1",
+        cname_dns_record_id="cname-1",
+        image_measurement="a" * 64,
+        rtmr3_digest="d" * 96,
+        attestation_verified_at=scheduler.datetime.now(scheduler.timezone.utc),
+        policy_version=1,
+        security_cvm_id=UUID("00000000-0000-4000-8000-000000000041"),
+    )
+    conn = FinaliseConn(snapshot)
+
+    async def fake_get_pool():
+        return LaunchFakePool(conn)
+
+    async def fake_insert_audit_event(_conn, **kwargs):
+        conn.audit_calls.append(kwargs)
+
+    monkeypatch.setattr(scheduler, "get_pool", fake_get_pool)
+    monkeypatch.setattr(scheduler, "insert_audit_event", fake_insert_audit_event)
+
+    asyncio.run(scheduler.execute_cvm_launch_finalise_operation(UUID("00000000-0000-4000-8000-000000000030")))
+
+    assert [call["action"] for call in conn.audit_calls] == [
+        "CVM_LAUNCHED",
+        "SUBDOMAIN_PROVISIONED",
+        "CVM_PROFILE_ATTACHED",
+    ]
+    operation_updates = [args for query, args in conn.execute_calls if "UPDATE operations" in query]
+    assert len(operation_updates) == 1
+    result = json.loads(operation_updates[0][1])
+    assert result["cvm"]["state"] == "RUNNING"
+    assert result["policy_bundle"] == policy_bundle

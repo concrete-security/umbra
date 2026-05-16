@@ -25,11 +25,22 @@ OPERATION_START_STEPS = {
     "cvm.terminate": ("phala_terminate", 25),
     "security_cvm.provision": ("phala_deploy", 20),
 }
-CVM_LAUNCH_EXECUTABLE_STEPS = {"phala_deploy", "cf_txt_create", "cf_cname_create"}
+CVM_LAUNCH_EXECUTABLE_STEPS = {
+    "phala_deploy",
+    "cf_txt_create",
+    "cf_cname_create",
+    "verify_attestation",
+    "await_sc_pull",
+    "policy_push",
+    "finalise",
+}
 CVM_LAUNCH_PROGRESS = {
     "cf_txt_create": 40,
     "cf_cname_create": 50,
     "verify_attestation": 60,
+    "await_sc_pull": 70,
+    "policy_push": 80,
+    "finalise": 90,
 }
 
 
@@ -60,6 +71,17 @@ def operation_scheduler_batch_size() -> int:
     if batch_size < 1:
         raise RuntimeError("OPERATION_SCHEDULER_BATCH_SIZE must be at least 1")
     return batch_size
+
+
+def sc_pull_propagation_timeout_seconds() -> int:
+    raw = load_settings().raw.get("SC_PULL_PROPAGATION_TIMEOUT_SECONDS", "15").strip() or "15"
+    try:
+        timeout = int(raw)
+    except ValueError as exc:
+        raise RuntimeError("SC_PULL_PROPAGATION_TIMEOUT_SECONDS must be an integer") from exc
+    if timeout < 0 or timeout > 300:
+        raise RuntimeError("SC_PULL_PROPAGATION_TIMEOUT_SECONDS must be between 0 and 300")
+    return timeout
 
 
 def start_operation_scheduler() -> asyncio.Task[None]:
@@ -250,6 +272,18 @@ async def execute_cvm_launch_operation(operation_id: Any, step: str) -> None:
     if step == "cf_cname_create":
         await execute_cvm_launch_cname_operation(operation_id)
         return
+    if step == "verify_attestation":
+        await execute_cvm_launch_attestation_gate_operation(operation_id)
+        return
+    if step == "await_sc_pull":
+        await execute_cvm_launch_await_sc_pull_operation(operation_id)
+        return
+    if step == "policy_push":
+        await execute_cvm_launch_policy_push_operation(operation_id)
+        return
+    if step == "finalise":
+        await execute_cvm_launch_finalise_operation(operation_id)
+        return
 
 
 async def execute_cvm_launch_phala_deploy_operation(operation_id: Any) -> None:
@@ -411,6 +445,200 @@ async def execute_cvm_launch_cname_operation(operation_id: Any) -> None:
         field="cname",
         record_id=record_id,
     )
+
+
+async def execute_cvm_launch_attestation_gate_operation(operation_id: Any) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        snapshot = await fetch_cvm_launch_snapshot(conn, operation_id)
+    if snapshot is None:
+        await mark_cvm_launch_failed(operation_id, code="CVM_NOT_FOUND", details={"state": "missing_target"})
+        return
+    if _row_value(snapshot, "image_measurement") is None or _row_value(snapshot, "attestation_verified_at") is None:
+        log.info(
+            "cvm_launch_attestation_waiting",
+            operation_id=str(operation_id),
+            cvm_id=str(_row_value(snapshot, "cvm_id")),
+        )
+        return
+    if _row_value(snapshot, "image_measurement") != _row_value(snapshot, "expected_image_measurement"):
+        await mark_cvm_launch_failed(
+            operation_id,
+            code="ATTESTATION_IMAGE_MISMATCH",
+            details={
+                "expected": _row_value(snapshot, "expected_image_measurement"),
+                "actual": _row_value(snapshot, "image_measurement"),
+            },
+        )
+        return
+    if _row_value(snapshot, "rtmr3_digest") is None:
+        await mark_cvm_launch_failed(
+            operation_id,
+            code="ATTESTATION_RTMR_MISMATCH",
+            details={"state": "missing_rtmr3_digest"},
+        )
+        return
+    await advance_cvm_launch_step(operation_id, "await_sc_pull")
+
+
+async def execute_cvm_launch_await_sc_pull_operation(operation_id: Any) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        snapshot = await fetch_cvm_launch_snapshot(conn, operation_id)
+    if snapshot is None:
+        await mark_cvm_launch_failed(operation_id, code="CVM_NOT_FOUND", details={"state": "missing_target"})
+        return
+    elapsed = datetime.now(timezone.utc) - _row_value(snapshot, "operation_updated_at")
+    timeout = timedelta(seconds=sc_pull_propagation_timeout_seconds())
+    if elapsed < timeout:
+        log.info(
+            "cvm_launch_awaiting_sc_pull",
+            operation_id=str(operation_id),
+            cvm_id=str(_row_value(snapshot, "cvm_id")),
+            elapsed_seconds=int(elapsed.total_seconds()),
+            timeout_seconds=int(timeout.total_seconds()),
+        )
+        return
+    log.warning(
+        "cvm_launch_sc_pull_observation_unavailable",
+        operation_id=str(operation_id),
+        cvm_id=str(_row_value(snapshot, "cvm_id")),
+    )
+    await advance_cvm_launch_step(operation_id, "policy_push")
+
+
+async def execute_cvm_launch_policy_push_operation(operation_id: Any) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        snapshot = await fetch_cvm_launch_snapshot(conn, operation_id)
+    if snapshot is None:
+        await mark_cvm_launch_failed(operation_id, code="CVM_NOT_FOUND", details={"state": "missing_target"})
+        return
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            metadata = json_payload(_row_value(snapshot, "metadata") or {})
+            if not isinstance(metadata, dict):
+                metadata = {}
+            if metadata.get("launch_policy_pushed") is not True:
+                await conn.execute(
+                    """
+                    UPDATE cvms
+                    SET policy_version = policy_version + 1,
+                        metadata = jsonb_set(metadata, '{launch_policy_pushed}', 'true'::jsonb, true),
+                        updated_at = now()
+                    WHERE id = $1
+                    """,
+                    _row_value(snapshot, "cvm_id"),
+                )
+                await conn.execute(
+                    """
+                    UPDATE security_cvms
+                    SET policy_version = policy_version + 1,
+                        updated_at = now()
+                    WHERE id = $1
+                    """,
+                    _row_value(snapshot, "security_cvm_id"),
+                )
+            await advance_cvm_launch_step_with_conn(conn, operation_id, "finalise")
+
+
+async def execute_cvm_launch_finalise_operation(operation_id: Any) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        snapshot = await fetch_cvm_launch_snapshot(conn, operation_id)
+    if snapshot is None:
+        await mark_cvm_launch_failed(operation_id, code="CVM_NOT_FOUND", details={"state": "missing_target"})
+        return
+    metadata = json_payload(_row_value(snapshot, "metadata") or {})
+    if not isinstance(metadata, dict) or not isinstance(metadata.get("policy_bundle"), dict):
+        await mark_cvm_launch_failed(
+            operation_id,
+            code="POLICY_BUNDLE_MISSING",
+            details={"field": "metadata.policy_bundle"},
+        )
+        return
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                """
+                UPDATE cvms
+                SET state = 'RUNNING',
+                    error_reason = NULL,
+                    updated_at = now()
+                WHERE id = $1
+                  AND state = 'PROVISIONING'
+                """,
+                _row_value(snapshot, "cvm_id"),
+            )
+            cvm_payload = await fetch_cvm_resource_for_scheduler(conn, _row_value(snapshot, "cvm_id"))
+            policy_version = await conn.fetchval(
+                """
+                SELECT policy_version
+                FROM cvms
+                WHERE id = $1
+                """,
+                _row_value(snapshot, "cvm_id"),
+            )
+            result = {"cvm": cvm_payload, "policy_bundle": metadata["policy_bundle"]}
+            await insert_audit_event(
+                conn,
+                entity_id=_row_value(snapshot, "entity_id"),
+                actor_id=_row_value(snapshot, "actor_id"),
+                actor_email=_row_value(snapshot, "actor_email"),
+                action="CVM_LAUNCHED",
+                target_type="cvm",
+                target_id=_row_value(snapshot, "cvm_id"),
+                before={"state": _row_value(snapshot, "state")},
+                after={"state": "RUNNING"},
+            )
+            await insert_audit_event(
+                conn,
+                entity_id=_row_value(snapshot, "entity_id"),
+                actor_id=_row_value(snapshot, "actor_id"),
+                actor_email=_row_value(snapshot, "actor_email"),
+                action="SUBDOMAIN_PROVISIONED",
+                target_type="cvm",
+                target_id=_row_value(snapshot, "cvm_id"),
+                before={"txt_dns_record_id": None, "cname_dns_record_id": None},
+                after={
+                    "txt_dns_record_id": _row_value(snapshot, "txt_dns_record_id"),
+                    "cname_dns_record_id": _row_value(snapshot, "cname_dns_record_id"),
+                },
+            )
+            for profile in await fetch_cvm_launch_profiles_for_audit(conn, _row_value(snapshot, "cvm_id")):
+                await insert_audit_event(
+                    conn,
+                    entity_id=_row_value(snapshot, "entity_id"),
+                    actor_id=_row_value(snapshot, "actor_id"),
+                    actor_email=_row_value(snapshot, "actor_email"),
+                    action="CVM_PROFILE_ATTACHED",
+                    target_type="cvm_profile",
+                    target_id=profile["profile_id"],
+                    before=None,
+                    after={
+                        "cvm_id": str(_row_value(snapshot, "cvm_id")),
+                        "profile_id": str(profile["profile_id"]),
+                        "profile_name": profile["profile_name"],
+                        "policy_version": policy_version,
+                    },
+                )
+            await conn.execute(
+                """
+                UPDATE operations
+                SET status = 'succeeded',
+                    progress_step = 'finalise',
+                    progress_percent = 100,
+                    result = $2::jsonb,
+                    error = NULL,
+                    updated_at = now(),
+                    expires_at = $3
+                WHERE id = $1
+                  AND status = 'running'
+                """,
+                operation_id,
+                json.dumps(result),
+                operation_expiry(),
+            )
 
 
 async def execute_cvm_terminate_operation(operation_id: Any) -> None:
@@ -659,6 +887,7 @@ async def fetch_cvm_launch_snapshot(conn: Any, operation_id: Any) -> Any | None:
             o.id AS operation_id,
             o.actor_id,
             o.actor_email,
+            o.updated_at AS operation_updated_at,
             o.target_id AS cvm_id,
             c.entity_id,
             c.state::text AS state,
@@ -670,6 +899,10 @@ async def fetch_cvm_launch_snapshot(conn: Any, operation_id: Any) -> Any | None:
             c.txt_dns_record_id,
             c.cname_dns_record_id,
             c.expected_image_measurement,
+            c.image_measurement,
+            c.rtmr3_digest,
+            c.attestation_verified_at,
+            c.policy_version,
             c.security_cvm_id,
             sc.fqdn AS security_cvm_fqdn,
             COALESCE(sc.proxy_port, 8080) AS security_cvm_proxy_port,
@@ -689,6 +922,23 @@ async def fetch_cvm_launch_snapshot(conn: Any, operation_id: Any) -> Any | None:
           AND o.status = 'running'
         """,
         operation_id,
+    )
+
+
+async def fetch_cvm_launch_profiles_for_audit(conn: Any, cvm_id: Any) -> list[Any]:
+    return list(
+        await conn.fetch(
+            """
+            SELECT
+                cp.profile_id,
+                ep.name AS profile_name
+            FROM cvm_profiles cp
+            JOIN entity_profiles ep ON ep.id = cp.profile_id
+            WHERE cp.cvm_id = $1
+            ORDER BY ep.name, cp.profile_id
+            """,
+            cvm_id,
+        )
     )
 
 
