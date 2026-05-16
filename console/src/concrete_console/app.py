@@ -196,6 +196,23 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     )
 
 
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    log.error("unhandled_exception", error_type=type(exc).__name__)
+    request_id = getattr(request.state, "request_id", None)
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": {
+                "code": "INTERNAL",
+                "message": "internal server error",
+                "details": {},
+                "request_id": request_id,
+            }
+        },
+    )
+
+
 def resolve_request_id(request: Request) -> str:
     supplied = request.headers.get("x-request-id")
     if supplied and REQUEST_ID_RE.fullmatch(supplied):

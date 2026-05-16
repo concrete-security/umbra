@@ -564,6 +564,22 @@ def test_http_exception_handler_preserves_headers() -> None:
     assert json.loads(response.body)["error"]["request_id"] == "limited-request"
 
 
+def test_unhandled_exception_handler_uses_internal_envelope() -> None:
+    request = SimpleNamespace(state=SimpleNamespace(request_id="internal-request"))
+
+    response = asyncio.run(app_module.unhandled_exception_handler(request, RuntimeError("boom")))
+
+    assert response.status_code == 500
+    assert json.loads(response.body) == {
+        "error": {
+            "code": "INTERNAL",
+            "message": "internal server error",
+            "details": {},
+            "request_id": "internal-request",
+        }
+    }
+
+
 def test_metrics_exposes_prometheus_text(monkeypatch) -> None:
     monkeypatch.setenv("METRICS_TOKEN", "metrics-token")
 
