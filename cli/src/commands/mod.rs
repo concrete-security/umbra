@@ -1,6 +1,7 @@
 pub mod admin;
 pub mod audit;
 pub mod auth;
+pub mod config;
 pub mod cvm;
 pub mod entity;
 pub mod key;

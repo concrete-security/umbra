@@ -31,9 +31,29 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub console_url: Option<String>,
 
+    /// Override the target Dev CVM for session verbs.
+    #[arg(long, global = true)]
+    pub cvm: Option<String>,
+
     /// Override the default profile for this invocation. Repeat for commands that accept multiple profiles.
     #[arg(long, global = true)]
     pub profile: Vec<String>,
+
+    /// Override the request id sent on Console calls.
+    #[arg(long, global = true)]
+    pub request_id: Option<String>,
+
+    /// Skip If-Match on mutation routes that normally use optimistic concurrency.
+    #[arg(long, global = true)]
+    pub force: bool,
+
+    /// Override the aTLS policy file used for tunnels.
+    #[arg(long, global = true)]
+    pub atls_policy: Option<PathBuf>,
+
+    /// Skip aTLS policy evaluation for this invocation. Dev-only.
+    #[arg(long, global = true)]
+    pub insecure_skip_atls_policy: bool,
 
     #[command(subcommand)]
     pub command: Command,
@@ -48,6 +68,17 @@ pub enum Command {
     /// Authenticate and inspect the local Console session.
     #[command(subcommand)]
     Auth(AuthCommand),
+
+    /// Print a shell-completion script.
+    Completions {
+        /// Shell to generate completions for.
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
+
+    /// Inspect resolved local configuration.
+    #[command(subcommand)]
+    Config(ConfigCommand),
 
     /// Query and verify Console audit records.
     #[command(subcommand)]
@@ -130,6 +161,12 @@ pub struct AdminSessionsRevokeArgs {
 pub enum AdminKeysCommand {
     /// Rotate the Console JWT signing key.
     Rotate(AdminKeysRotateArgs),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ConfigCommand {
+    /// Show the fully resolved configuration.
+    Show,
 }
 
 #[derive(clap::Args, Debug)]

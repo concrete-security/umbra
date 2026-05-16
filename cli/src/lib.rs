@@ -1,6 +1,9 @@
-use std::process::ExitCode;
+use std::{
+    io::{self, ErrorKind, Write},
+    process::ExitCode,
+};
 
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 
 mod cli;
 mod commands;
@@ -25,32 +28,55 @@ pub fn run() -> ExitCode {
             };
         }
     };
-    let config = config::ResolvedConfig::resolve(
-        args.config.clone(),
-        args.console_url.clone(),
-        args.profile.clone(),
-    );
+    let config = config::ResolvedConfig::resolve(config::ConfigOverrides {
+        config_dir: args.config.clone(),
+        console_url: args.console_url.clone(),
+        cvm: args.cvm.clone(),
+        profile: args.profile.clone(),
+        atls_policy: args.atls_policy.clone(),
+        insecure_skip_atls_policy: args.insecure_skip_atls_policy,
+        request_id: args.request_id.clone(),
+        force: args.force,
+        json: args.json,
+        no_color: args.no_color,
+        verbose: args.verbose,
+    });
+    let json_output = config.output == config::OutputFormat::Json;
     let status = match args.command {
-        cli::Command::Admin(command) => commands::admin::run(command, &config, args.json),
-        cli::Command::Audit(command) => commands::audit::run(command, &config, args.json),
-        cli::Command::Auth(command) => commands::auth::run(command, &config, args.json),
-        cli::Command::Cvm(command) => commands::cvm::run(command, &config, args.json),
-        cli::Command::Entity(command) => commands::entity::run(command, &config, args.json),
-        cli::Command::Key(command) => commands::key::run(command, &config, args.json),
-        cli::Command::Profile(command) => commands::profile::run(command, &config, args.json),
-        cli::Command::Quota(command) => commands::quota::run(command, &config, args.json),
+        cli::Command::Admin(command) => commands::admin::run(command, &config, json_output),
+        cli::Command::Audit(command) => commands::audit::run(command, &config, json_output),
+        cli::Command::Auth(command) => commands::auth::run(command, &config, json_output),
+        cli::Command::Completions { shell } => {
+            let mut command = cli::Cli::command();
+            let mut output = Vec::new();
+            clap_complete::generate(shell, &mut command, "concrete", &mut output);
+            match io::stdout().write_all(&output) {
+                Ok(()) => ExitStatus::Ok,
+                Err(err) if err.kind() == ErrorKind::BrokenPipe => ExitStatus::Ok,
+                Err(err) => {
+                    eprintln!("[error] failed to write completions: {err}");
+                    ExitStatus::Error
+                }
+            }
+        }
+        cli::Command::Config(command) => commands::config::run(command, &config, json_output),
+        cli::Command::Cvm(command) => commands::cvm::run(command, &config, json_output),
+        cli::Command::Entity(command) => commands::entity::run(command, &config, json_output),
+        cli::Command::Key(command) => commands::key::run(command, &config, json_output),
+        cli::Command::Profile(command) => commands::profile::run(command, &config, json_output),
+        cli::Command::Quota(command) => commands::quota::run(command, &config, json_output),
         cli::Command::Reconcile(reconcile_args) => {
-            commands::reconcile::run(reconcile_args, &config, args.json)
+            commands::reconcile::run(reconcile_args, &config, json_output)
         }
         cli::Command::SecurityCvm(command) => {
-            commands::security_cvm::run(command, &config, args.json)
+            commands::security_cvm::run(command, &config, json_output)
         }
-        cli::Command::Status => commands::status::run(&config, args.json),
+        cli::Command::Status => commands::status::run(&config, json_output),
         cli::Command::TrafficLogs(traffic_args) => {
-            commands::traffic_logs::run(traffic_args, &config, args.json)
+            commands::traffic_logs::run(traffic_args, &config, json_output)
         }
-        cli::Command::User(command) => commands::user::run(command, &config, args.json),
-        cli::Command::Version => commands::version::run(args.json),
+        cli::Command::User(command) => commands::user::run(command, &config, json_output),
+        cli::Command::Version => commands::version::run(json_output),
     };
     ExitCode::from(status)
 }
