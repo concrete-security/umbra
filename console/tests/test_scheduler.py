@@ -437,6 +437,39 @@ class ReconcileAttestationConn:
         return "UPDATE 1"
 
 
+class OrphanDnsConn:
+    def __init__(self):
+        self.dev_rows = [
+            {
+                "id": UUID("00000000-0000-4000-8000-000000000031"),
+                "txt_dns_record_id": "dev-txt",
+                "cname_dns_record_id": "dev-cname",
+            }
+        ]
+        self.security_rows = [
+            {
+                "id": UUID("00000000-0000-4000-8000-000000000041"),
+                "txt_dns_record_id": "sc-txt",
+                "cname_dns_record_id": None,
+            }
+        ]
+        self.execute_calls: list[tuple[str, tuple[object, ...]]] = []
+
+    def transaction(self):
+        return AsyncContext()
+
+    async def fetch(self, query, *args):
+        if "FROM cvms" in query:
+            return self.dev_rows
+        if "FROM security_cvms" in query:
+            return self.security_rows
+        raise AssertionError(f"unexpected fetch query: {query}")
+
+    async def execute(self, query, *args):
+        self.execute_calls.append((query, args))
+        return "UPDATE 1"
+
+
 def test_execute_cvm_launch_attestation_gate_waits_for_real_verifier(monkeypatch) -> None:
     snapshot = launch_snapshot(
         operation_updated_at=scheduler.datetime.now(scheduler.timezone.utc),
@@ -643,6 +676,38 @@ def test_reconcile_dev_cvm_attestation_refresh_records_drift(monkeypatch) -> Non
     assert drift_updates == [(cvm_id,)]
     assert conn.audit_calls[0]["action"] == "CVM_ATTESTATION_DRIFT"
     assert conn.audit_calls[0]["after"]["drift_kind"] == "both"
+
+
+def test_cleanup_orphan_dns_records_uses_component_zones(monkeypatch) -> None:
+    conn = OrphanDnsConn()
+    calls: list[tuple[str, str]] = []
+
+    class FakeCloudflareClient:
+        def __init__(self, zone_id_key: str):
+            self.zone_id_key = zone_id_key
+
+        async def delete_record(self, record_id: str) -> None:
+            calls.append((self.zone_id_key, record_id))
+
+    monkeypatch.setattr(
+        "concrete_console.dns_provider.cloudflare.CloudflareClient.from_settings",
+        classmethod(lambda cls, *, zone_id_key="CLOUDFLARE_ZONE_ID": FakeCloudflareClient(zone_id_key)),
+    )
+
+    cleaned = asyncio.run(scheduler.cleanup_orphan_dns_records(conn))
+
+    assert cleaned == [
+        "cvm:00000000-0000-4000-8000-000000000031:txt_dns_record_id",
+        "cvm:00000000-0000-4000-8000-000000000031:cname_dns_record_id",
+        "security_cvm:00000000-0000-4000-8000-000000000041:txt_dns_record_id",
+    ]
+    assert calls == [
+        ("CLOUDFLARE_ZONE_ID", "dev-txt"),
+        ("CLOUDFLARE_ZONE_ID", "dev-cname"),
+        ("SECURITY_CVM_ZONE_ID", "sc-txt"),
+    ]
+    assert len(conn.execute_calls) == 3
+    assert all("SET " in query and "= NULL" in query for query, _args in conn.execute_calls)
 
 
 def test_execute_cvm_launch_await_sc_pull_advances_after_observation(monkeypatch) -> None:

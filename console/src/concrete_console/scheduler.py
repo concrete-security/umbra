@@ -1476,12 +1476,108 @@ async def run_reconciliation_pass(*, include_orphans: bool = True) -> Reconcilia
               AND expires_at < now()
             """
         )
+        orphans_cleaned = await cleanup_orphan_dns_records(conn) if include_orphans else []
         security_cvms_advanced = await reconcile_security_cvm_attestations(conn)
         cvms_advanced = await reconcile_dev_cvm_attestations(conn)
     return ReconciliationSummary(
         cvms_advanced=cvms_advanced,
         security_cvms_advanced=security_cvms_advanced,
-        orphans_cleaned=[],
+        orphans_cleaned=orphans_cleaned,
+    )
+
+
+async def cleanup_orphan_dns_records(conn: Any) -> list[str]:
+    from concrete_console.dns_provider.cloudflare import CloudflareClient, CloudflareError
+
+    cleaned: list[str] = []
+    async with conn.transaction():
+        dev_rows = await conn.fetch(
+            """
+            SELECT id, txt_dns_record_id, cname_dns_record_id
+            FROM cvms
+            WHERE deleted_at IS NOT NULL
+              AND deleted_at < now() - INTERVAL '5 minutes'
+              AND (txt_dns_record_id IS NOT NULL OR cname_dns_record_id IS NOT NULL)
+            ORDER BY deleted_at
+            LIMIT 50
+            FOR UPDATE SKIP LOCKED
+            """
+        )
+        security_rows = await conn.fetch(
+            """
+            SELECT id, txt_dns_record_id, cname_dns_record_id
+            FROM security_cvms
+            WHERE deleted_at IS NOT NULL
+              AND deleted_at < now() - INTERVAL '5 minutes'
+              AND (txt_dns_record_id IS NOT NULL OR cname_dns_record_id IS NOT NULL)
+            ORDER BY deleted_at
+            LIMIT 50
+            FOR UPDATE SKIP LOCKED
+            """
+        )
+        if dev_rows:
+            try:
+                client = CloudflareClient.from_settings()
+            except CloudflareError as exc:
+                log.warning("orphan_dev_dns_cleanup_skipped", reason=exc.code)
+            else:
+                cleaned.extend(await cleanup_orphan_dns_rows(conn, dev_rows, table="cvms", resource="cvm", client=client))
+        if security_rows:
+            try:
+                client = CloudflareClient.from_settings(zone_id_key="SECURITY_CVM_ZONE_ID")
+            except CloudflareError as exc:
+                log.warning("orphan_security_cvm_dns_cleanup_skipped", reason=exc.code)
+            else:
+                cleaned.extend(
+                    await cleanup_orphan_dns_rows(
+                        conn,
+                        security_rows,
+                        table="security_cvms",
+                        resource="security_cvm",
+                        client=client,
+                    )
+            )
+    return cleaned
+
+
+async def cleanup_orphan_dns_rows(conn: Any, rows: list[Any], *, table: str, resource: str, client: Any) -> list[str]:
+    from concrete_console.dns_provider.cloudflare import CloudflareError
+
+    cleaned: list[str] = []
+    for row in rows:
+        for field in ("txt_dns_record_id", "cname_dns_record_id"):
+            record_id = _row_value(row, field)
+            if not isinstance(record_id, str) or not record_id:
+                continue
+            try:
+                await client.delete_record(record_id)
+            except CloudflareError as exc:
+                log.warning(
+                    "orphan_dns_cleanup_failed",
+                    resource=resource,
+                    resource_id=str(_row_value(row, "id")),
+                    record_id=record_id,
+                    reason=exc.code,
+                )
+                continue
+            await null_orphan_dns_record(conn, table=table, field=field, row_id=_row_value(row, "id"))
+            cleaned.append(f"{resource}:{_row_value(row, 'id')}:{field}")
+    return cleaned
+
+
+async def null_orphan_dns_record(conn: Any, *, table: str, field: str, row_id: Any) -> None:
+    if table not in {"cvms", "security_cvms"}:
+        raise ValueError("unsupported orphan DNS table")
+    if field not in {"txt_dns_record_id", "cname_dns_record_id"}:
+        raise ValueError("unsupported orphan DNS field")
+    await conn.execute(
+        f"""
+        UPDATE {table}
+        SET {field} = NULL,
+            updated_at = now()
+        WHERE id = $1
+        """,
+        row_id,
     )
 
 
