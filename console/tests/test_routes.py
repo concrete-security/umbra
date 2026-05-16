@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -5,22 +6,28 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 from fastapi import HTTPException
+from pydantic import ValidationError
 
 from concrete_console.routes import (
     AdminKeysRotate,
     AdminReconcile,
     AuditExportCreate,
+    CVMCreate,
     SECURITY_CVM_PROVISION_REDACTION,
     cvm_etag,
+    entity_quota_usage,
     erased_user_email,
     ensure_no_sandbox_env_conflict,
+    fetch_live_security_cvm_id,
     policy_sha256,
     redacted_security_cvm_provision_result,
     profile_etag,
     require_cvm_profile_mutable,
     require_idempotency_key,
     require_if_match,
+    resolve_cvm_launch_config,
     ssh_key_fingerprint,
+    user_quota_usage,
     user_etag,
     validate_audit_export_request,
     validate_permission_symbol,
@@ -72,6 +79,15 @@ def cvm_row(**overrides):
     }
     row.update(overrides)
     return row
+
+
+def cvm_create(**overrides) -> CVMCreate:
+    body = {
+        "profile_ids": [UUID("00000000-0000-4000-8000-000000000031")],
+        "ssh_key_ids": [UUID("00000000-0000-4000-8000-000000000032")],
+    }
+    body.update(overrides)
+    return CVMCreate(**body)
 
 
 def test_profile_etag_uses_updated_at_microseconds() -> None:
@@ -143,6 +159,96 @@ def test_require_idempotency_key_rejects_invalid_header() -> None:
 
     assert exc.value.status_code == 400
     assert exc.value.detail["error"]["details"]["errors"][0]["type"] == "invalid_idempotency_key"
+
+
+def test_cvm_create_rejects_duplicate_profile_ids() -> None:
+    profile_id = UUID("00000000-0000-4000-8000-000000000031")
+
+    with pytest.raises(ValidationError):
+        cvm_create(profile_ids=[profile_id, profile_id])
+
+
+def test_resolve_cvm_launch_config_uses_defaults(monkeypatch) -> None:
+    monkeypatch.delenv("DEV_CVM_DEFAULT_INSTANCE_TYPE", raising=False)
+    monkeypatch.setenv("DEV_CVM_DEFAULT_REGION", "FR-PARIS-1")
+    monkeypatch.setenv("DEV_CVM_IMAGE", "ghcr.io/concrete-security/dev-cvm/user-sandbox@sha256:abc")
+    monkeypatch.setenv("DEV_CVM_IMAGE_MEASUREMENT", "A" * 64)
+
+    resolved = resolve_cvm_launch_config(cvm_create())
+
+    assert resolved["instance_type"] == "tdx.small"
+    assert resolved["region"] == "FR-PARIS-1"
+    assert resolved["expected_image_measurement"] == "a" * 64
+
+
+def test_resolve_cvm_launch_config_requires_region(monkeypatch) -> None:
+    monkeypatch.delenv("DEV_CVM_DEFAULT_REGION", raising=False)
+
+    with pytest.raises(HTTPException) as exc:
+        resolve_cvm_launch_config(cvm_create())
+
+    assert exc.value.status_code == 422
+    assert exc.value.detail["error"]["details"]["errors"][0]["field"] == "region"
+
+
+def test_resolve_cvm_launch_config_requires_image(monkeypatch) -> None:
+    monkeypatch.setenv("DEV_CVM_DEFAULT_REGION", "FR-PARIS-1")
+    monkeypatch.delenv("DEV_CVM_IMAGE", raising=False)
+
+    with pytest.raises(HTTPException) as exc:
+        resolve_cvm_launch_config(cvm_create())
+
+    assert exc.value.status_code == 503
+    assert exc.value.detail["error"]["details"]["component"] == "dev_cvm_image"
+
+
+def test_resolve_cvm_launch_config_requires_image_measurement(monkeypatch) -> None:
+    monkeypatch.setenv("DEV_CVM_DEFAULT_REGION", "FR-PARIS-1")
+    monkeypatch.setenv("DEV_CVM_IMAGE", "ghcr.io/concrete-security/dev-cvm/user-sandbox@sha256:abc")
+    monkeypatch.setenv("DEV_CVM_IMAGE_MEASUREMENT", "not-hex")
+
+    with pytest.raises(HTTPException) as exc:
+        resolve_cvm_launch_config(cvm_create())
+
+    assert exc.value.status_code == 503
+    assert exc.value.detail["error"]["details"]["component"] == "dev_cvm_image_measurement"
+
+
+class FakeFetchValConn:
+    def __init__(self, value):
+        self.value = value
+        self.queries: list[str] = []
+
+    async def fetchval(self, query, *args):
+        self.queries.append(query)
+        return self.value
+
+
+def test_dev_cvm_quota_usage_counts_non_terminated_rows() -> None:
+    entity_conn = FakeFetchValConn(3)
+    user_conn = FakeFetchValConn(2)
+
+    entity_usage = asyncio.run(
+        entity_quota_usage(entity_conn, UUID("00000000-0000-4000-8000-000000000001"), "dev_cvms")
+    )
+    user_usage = asyncio.run(
+        user_quota_usage(user_conn, UUID("00000000-0000-4000-8000-000000000002"), "dev_cvms")
+    )
+
+    assert entity_usage == 3
+    assert user_usage == 2
+    assert "state <> 'TERMINATED'" in entity_conn.queries[0]
+    assert "state <> 'TERMINATED'" in user_conn.queries[0]
+
+
+def test_fetch_live_security_cvm_id_requires_running_security_cvm() -> None:
+    conn = FakeFetchValConn(None)
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(fetch_live_security_cvm_id(conn, UUID("00000000-0000-4000-8000-000000000001")))
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail["error"]["details"]["state"] == "no_security_cvm"
 
 
 def test_policy_sha256_is_canonical() -> None:

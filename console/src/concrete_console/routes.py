@@ -64,6 +64,8 @@ SANDBOX_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 SANDBOX_ENV_RESERVED_NAMES = {"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "PATH", "HOME"}
 SANDBOX_ENV_RESERVED_PREFIXES = ("CONCRETE_", "SECURITY_CVM_", "AUTHORIZED_SSH_", "SANDBOX_ENV_")
 IDEMPOTENCY_KEY_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+CVM_CONFIG_VALUE_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+HEX64_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 DEFAULT_SANDBOX_ENV_VALUE_DENYLIST = (
     r"^sk-ant-[A-Za-z0-9_-]+$",
     r"^sk-[A-Za-z0-9]{32,}$",
@@ -85,6 +87,7 @@ DEFAULT_USER_QUOTAS = {
 }
 CREATE_ENTITY_ROUTE = "POST /api/v1/entities"
 CREATE_SSH_KEY_ROUTE = "POST /api/v1/me/keys"
+CREATE_CVM_ROUTE = "POST /api/v1/cvms"
 ADMIN_SESSIONS_REVOKE_ROUTE = "POST /api/v1/admin/sessions/revoke"
 ADMIN_KEYS_ROTATE_ROUTE = "POST /api/v1/admin/keys/rotate"
 AUDIT_EXPORT_ROUTE = "POST /api/v1/audit/export"
@@ -267,6 +270,32 @@ class CVMProfileAttach(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     profile_id: UUID
+
+
+class CVMCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    profile_ids: list[UUID] = Field(min_length=1, max_length=16)
+    instance_type: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9._-]+$",
+    )
+    ssh_key_ids: list[UUID] = Field(min_length=1, max_length=16)
+    region: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9._-]+$",
+    )
+
+    @field_validator("profile_ids", "ssh_key_ids")
+    @classmethod
+    def reject_duplicate_ids(cls, value: list[UUID]) -> list[UUID]:
+        if len(set(value)) != len(value):
+            raise ValueError("ids must be unique")
+        return value
 
 
 class SSHKeyCreate(BaseModel):
@@ -471,6 +500,64 @@ def default_quota_limit(resource: str, *, scope: str) -> int:
     return int(load_settings().raw.get(env_name, fallback))
 
 
+def resolve_cvm_launch_config(body: CVMCreate) -> dict[str, str]:
+    raw = load_settings().raw
+    instance_type = (body.instance_type or raw.get("DEV_CVM_DEFAULT_INSTANCE_TYPE", "tdx.small")).strip()
+    if not instance_type:
+        raise api_error(
+            422,
+            "VALIDATION_ERROR",
+            "Dev CVM instance type is required",
+            {"errors": [{"field": "instance_type", "type": "missing_default"}]},
+        )
+    if not CVM_CONFIG_VALUE_RE.fullmatch(instance_type):
+        raise api_error(
+            503,
+            "SERVICE_UNAVAILABLE",
+            "Dev CVM default instance type is invalid",
+            {"component": "dev_cvm_default_instance_type"},
+        )
+
+    region = (body.region or raw.get("DEV_CVM_DEFAULT_REGION", "")).strip()
+    if not region:
+        raise api_error(
+            422,
+            "VALIDATION_ERROR",
+            "Dev CVM region is required",
+            {"errors": [{"field": "region", "type": "missing_default"}]},
+        )
+    if not CVM_CONFIG_VALUE_RE.fullmatch(region):
+        raise api_error(
+            503,
+            "SERVICE_UNAVAILABLE",
+            "Dev CVM default region is invalid",
+            {"component": "dev_cvm_default_region"},
+        )
+
+    image = raw.get("DEV_CVM_IMAGE", "").strip()
+    if not image:
+        raise api_error(
+            503,
+            "SERVICE_UNAVAILABLE",
+            "Dev CVM image is not configured",
+            {"component": "dev_cvm_image"},
+        )
+    expected_image_measurement = raw.get("DEV_CVM_IMAGE_MEASUREMENT", "").strip()
+    if not expected_image_measurement or not HEX64_RE.fullmatch(expected_image_measurement):
+        raise api_error(
+            503,
+            "SERVICE_UNAVAILABLE",
+            "Dev CVM image measurement is not configured",
+            {"component": "dev_cvm_image_measurement"},
+        )
+    return {
+        "instance_type": instance_type,
+        "region": region,
+        "image": image,
+        "expected_image_measurement": expected_image_measurement.lower(),
+    }
+
+
 async def entity_quota_limit(conn: asyncpg.Connection, entity_id: UUID, resource: str) -> tuple[int, str, UUID | None, datetime | None]:
     row = await conn.fetchrow(
         """
@@ -529,6 +616,17 @@ async def entity_quota_usage(conn: asyncpg.Connection, entity_id: UUID, resource
             """,
             entity_id,
         )
+    if resource == "dev_cvms":
+        return await conn.fetchval(
+            """
+            SELECT count(*)
+            FROM cvms
+            WHERE entity_id = $1
+              AND deleted_at IS NULL
+              AND state <> 'TERMINATED'
+            """,
+            entity_id,
+        )
     return 0
 
 
@@ -536,6 +634,17 @@ async def user_quota_usage(conn: asyncpg.Connection, user_id: UUID, resource: st
     if resource == "ssh_keys":
         return await conn.fetchval(
             "SELECT count(*) FROM ssh_keys WHERE user_id = $1 AND deleted_at IS NULL",
+            user_id,
+        )
+    if resource == "dev_cvms":
+        return await conn.fetchval(
+            """
+            SELECT count(*)
+            FROM cvms
+            WHERE owner_id = $1
+              AND deleted_at IS NULL
+              AND state <> 'TERMINATED'
+            """,
             user_id,
         )
     return 0
@@ -2640,6 +2749,95 @@ async def list_cvms(
     return list_page([cvm_resource(row) for row in rows])
 
 
+@router.post("/cvms", status_code=202)
+async def create_cvm(
+    request: Request,
+    body: CVMCreate,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+    current_user: CurrentUser = Depends(require_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> Any:
+    idempotency_key_value = require_idempotency_key(idempotency_key)
+    current_user.require_permission("CVM_LAUNCH")
+    body_sha256 = request_body_sha256(await request.body())
+    operation_id = uuid4()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await acquire_idempotency_lock(
+                conn,
+                credential_id=str(current_user.id),
+                idempotency_key=idempotency_key_value,
+                route=CREATE_CVM_ROUTE,
+            )
+            cached = await lookup_idempotency_response(
+                conn,
+                credential_id=str(current_user.id),
+                idempotency_key=idempotency_key_value,
+                route=CREATE_CVM_ROUTE,
+                body_sha256=body_sha256,
+            )
+            if cached is not None:
+                return JSONResponse(status_code=cached.status_code, content=cached.body, headers=cached.headers)
+
+            resolve_cvm_launch_config(body)
+            profile_rows = await fetch_cvm_launch_profiles(conn, body.profile_ids, current_user)
+            await ensure_cvm_launch_profile_memberships(conn, body.profile_ids, current_user)
+            ensure_no_sandbox_env_conflict(profile_rows)
+            await ensure_cvm_launch_ssh_keys(conn, body.ssh_key_ids, current_user)
+            await fetch_live_security_cvm_id(conn, current_user.entity_id)
+            await enforce_user_quota(conn, current_user.id, "dev_cvms")
+            await enforce_entity_quota(conn, current_user.entity_id, "dev_cvms")
+            row = await conn.fetchrow(
+                """
+                INSERT INTO operations (
+                    id,
+                    kind,
+                    status,
+                    actor_id,
+                    actor_email,
+                    target_type,
+                    idempotency_key,
+                    request_body_sha256,
+                    progress_step,
+                    progress_percent
+                )
+                VALUES ($1, 'cvm.launch', 'pending', $2, $3, 'cvm', $4, $5, 'queued', 0)
+                RETURNING
+                    id,
+                    kind,
+                    status::text AS status,
+                    actor_id,
+                    actor_email,
+                    target_type,
+                    target_id,
+                    progress_step,
+                    progress_percent,
+                    result,
+                    error,
+                    result_disclosed_at,
+                    created_at,
+                    updated_at,
+                    expires_at
+                """,
+                operation_id,
+                current_user.id,
+                current_user.email,
+                idempotency_key_value,
+                body_sha256,
+            )
+            response_body = operation_resource(row)
+            await store_idempotency_response(
+                conn,
+                credential_id=str(current_user.id),
+                idempotency_key=idempotency_key_value,
+                route=CREATE_CVM_ROUTE,
+                body_sha256=body_sha256,
+                status_code=202,
+                response_body=response_body,
+            )
+            return response_body
+
+
 @router.get("/cvms/{cvm_id}")
 async def get_cvm(
     cvm_id: UUID,
@@ -2912,6 +3110,97 @@ def ensure_no_sandbox_env_conflict(profile_rows: list[Any]) -> None:
                     },
                 )
             merged[name] = (value, str(row["profile_id"]))
+
+
+async def fetch_cvm_launch_profiles(
+    conn: asyncpg.Connection,
+    profile_ids: list[UUID],
+    current_user: CurrentUser,
+) -> list[asyncpg.Record]:
+    rows = await conn.fetch(
+        """
+        SELECT id AS profile_id, entity_id, name, policy
+        FROM entity_profiles
+        WHERE id = ANY($1::uuid[])
+          AND entity_id = $2
+          AND deleted_at IS NULL
+        ORDER BY name, id
+        """,
+        profile_ids,
+        current_user.entity_id,
+    )
+    if len(rows) != len(profile_ids):
+        raise api_error(404, "NOT_FOUND", "resource not found")
+    return list(rows)
+
+
+async def ensure_cvm_launch_profile_memberships(
+    conn: asyncpg.Connection,
+    profile_ids: list[UUID],
+    current_user: CurrentUser,
+) -> None:
+    rows = await conn.fetch(
+        """
+        SELECT profile_id
+        FROM profile_users
+        WHERE profile_id = ANY($1::uuid[])
+          AND user_id = $2
+        """,
+        profile_ids,
+        current_user.id,
+    )
+    member_profile_ids = {row["profile_id"] for row in rows}
+    for profile_id in profile_ids:
+        if profile_id not in member_profile_ids:
+            raise api_error(
+                403,
+                "FORBIDDEN",
+                "profile membership is required",
+                {"required": "profile_member", "profile_id": str(profile_id)},
+            )
+
+
+async def ensure_cvm_launch_ssh_keys(
+    conn: asyncpg.Connection,
+    ssh_key_ids: list[UUID],
+    current_user: CurrentUser,
+) -> None:
+    rows = await conn.fetch(
+        """
+        SELECT id
+        FROM ssh_keys
+        WHERE id = ANY($1::uuid[])
+          AND user_id = $2
+          AND deleted_at IS NULL
+        """,
+        ssh_key_ids,
+        current_user.id,
+    )
+    if len(rows) != len(ssh_key_ids):
+        raise api_error(404, "NOT_FOUND", "resource not found")
+
+
+async def fetch_live_security_cvm_id(conn: asyncpg.Connection, entity_id: UUID) -> UUID:
+    security_cvm_id = await conn.fetchval(
+        """
+        SELECT id
+        FROM security_cvms
+        WHERE entity_id = $1
+          AND state = 'RUNNING'
+          AND deleted_at IS NULL
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        entity_id,
+    )
+    if security_cvm_id is None:
+        raise api_error(
+            409,
+            "CONFLICT",
+            "entity has no live Security CVM",
+            {"state": "no_security_cvm"},
+        )
+    return security_cvm_id
 
 
 async def fetch_visible_cvm_resource(
