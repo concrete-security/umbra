@@ -141,3 +141,21 @@ def test_invalid_destination_host_is_rejected() -> None:
         parse_effective_policy(raw)
 
     assert exc.value.errors[0].type == "invalid_host"
+
+
+def test_secret_patterns_are_compiled_with_re2() -> None:
+    raw = sample_policy()
+    raw["secret_patterns"] = [
+        {
+            "id": "backref",
+            "name": "Backreference",
+            "pattern": r"(a)\1",
+            "scan_headers": True,
+            "scan_body": True,
+        }
+    ]
+
+    with pytest.raises(PolicyValidationError) as exc:
+        parse_effective_policy(raw)
+
+    assert exc.value.errors[0].type == "invalid_regex"

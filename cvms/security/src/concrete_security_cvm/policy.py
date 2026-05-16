@@ -4,6 +4,8 @@ from dataclasses import dataclass
 import re
 from typing import Any
 
+import re2
+
 
 TOP_LEVEL_FIELDS = {
     "allowed_destinations",
@@ -81,7 +83,7 @@ class SecretPattern:
     pattern: str
     scan_headers: bool
     scan_body: bool
-    compiled: re.Pattern[str]
+    compiled: Any
 
 
 @dataclass(frozen=True)
@@ -286,8 +288,8 @@ def _parse_secret_patterns(raw: Any, errors: list[PolicyError]) -> list[SecretPa
             errors.append(PolicyError(field, "invalid_scan_flags", "scan flags must be booleans"))
             continue
         try:
-            compiled = re.compile(pattern)
-        except re.error as exc:
+            compiled = re2.compile(pattern)
+        except Exception as exc:
             errors.append(PolicyError(f"{field}.pattern", "invalid_regex", str(exc)))
             continue
         patterns.append(SecretPattern(pattern_id, name, pattern, scan_headers, scan_body, compiled))
