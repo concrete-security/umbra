@@ -28,6 +28,7 @@ from concrete_console.oidc import (
     start_device_flow,
     verify_google_id_token,
 )
+from concrete_console.request_context import resolved_client_ip
 from concrete_console.sessions import issue_token_pair
 
 router = APIRouter(prefix="/api/v1/auth")
@@ -92,7 +93,7 @@ async def prune_expired_auth_rows(conn: asyncpg.Connection) -> None:
 
 
 def request_ip(request: Request) -> str | None:
-    return request.client.host if request.client else None
+    return resolved_client_ip(request)
 
 
 def request_id(request: Request) -> str | None:

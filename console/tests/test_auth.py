@@ -1,4 +1,5 @@
 import asyncio
+from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
@@ -6,7 +7,7 @@ from fastapi import HTTPException
 
 from concrete_console.auth import CurrentUser, require_current_user
 from concrete_console.internal_auth import parse_service_bearer_authorization
-from concrete_console.routes_auth import DeviceStartRequest, device_start
+from concrete_console.routes_auth import DeviceStartRequest, device_start, request_ip
 
 
 def current_user(*, permissions: set[str] | None = None) -> CurrentUser:
@@ -72,3 +73,13 @@ def test_device_start_rejects_non_google_provider_before_provider_call() -> None
 
     assert exc.value.status_code == 400
     assert exc.value.detail["error"]["code"] == "BAD_REQUEST"
+
+
+def test_auth_request_ip_uses_forwarded_header_resolution(monkeypatch) -> None:
+    monkeypatch.setenv("TRUST_FORWARDED_HEADERS", "true")
+    request = SimpleNamespace(
+        client=SimpleNamespace(host="10.0.0.5"),
+        headers={"x-forwarded-for": "10.0.0.1, 8.8.4.4"},
+    )
+
+    assert request_ip(request) == "8.8.4.4"
