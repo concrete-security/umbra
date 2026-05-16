@@ -88,6 +88,9 @@ pub enum Command {
     /// Launch or attach a Codex session on a Dev CVM.
     Codex(AgentSessionArgs),
 
+    /// Open VS Code connected to the selected Dev CVM.
+    Code(CodeArgs),
+
     /// Inspect resolved local configuration.
     #[command(subcommand)]
     Config(ConfigCommand),
@@ -103,6 +106,9 @@ pub enum Command {
     /// Manage Dev CVMs.
     #[command(subcommand)]
     Cvm(CvmCommand),
+
+    /// Open Cursor connected to the selected Dev CVM.
+    Cursor(CursorArgs),
 
     /// Manage SSH public keys registered with the Console.
     #[command(subcommand)]
@@ -434,6 +440,20 @@ pub struct AgentSessionArgs {
     /// Private SSH key to pass to ssh(1).
     #[arg(long)]
     pub identity_file: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct CodeArgs {
+    /// VS Code binary to invoke. Defaults to code on PATH.
+    #[arg(long)]
+    pub code_bin: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct CursorArgs {
+    /// Cursor binary to invoke. Defaults to cursor on PATH.
+    #[arg(long)]
+    pub cursor_bin: Option<PathBuf>,
 }
 
 #[derive(clap::Args, Debug)]

@@ -1,10 +1,11 @@
 use std::{
     collections::BTreeMap,
     env,
+    ffi::OsString,
     fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
 };
 
 use chrono::Utc;
@@ -16,7 +17,10 @@ use serde_json::json;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 use crate::{
-    cli::{AgentSessionArgs, AliasArgs, SessionListArgs, SessionTargetArgs, SshArgs},
+    cli::{
+        AgentSessionArgs, AliasArgs, CodeArgs, CursorArgs, SessionListArgs, SessionTargetArgs,
+        SshArgs,
+    },
     commands::auth,
     config::ResolvedConfig,
     exit::ExitStatus,
@@ -38,6 +42,7 @@ struct SshInvocation<'a> {
 }
 
 struct PreparedSsh {
+    cvm_id: String,
     fqdn: String,
     proxy_command: String,
 }
@@ -102,6 +107,16 @@ pub fn run_agent(
         },
         config,
     )
+}
+
+pub fn run_code(args: CodeArgs, config: &ResolvedConfig) -> ExitStatus {
+    let bin = args.code_bin.unwrap_or_else(|| PathBuf::from("code"));
+    run_editor(&bin, config)
+}
+
+pub fn run_cursor(args: CursorArgs, config: &ResolvedConfig) -> ExitStatus {
+    let bin = args.cursor_bin.unwrap_or_else(|| PathBuf::from("cursor"));
+    run_editor(&bin, config)
 }
 
 pub fn run_ps(args: SessionListArgs, config: &ResolvedConfig, json_output: bool) -> ExitStatus {
@@ -309,6 +324,40 @@ fn run_ssh(invocation: SshInvocation<'_>, config: &ResolvedConfig) -> ExitStatus
     }
 }
 
+fn run_editor(editor_bin: &Path, config: &ResolvedConfig) -> ExitStatus {
+    let prepared = match prepare_ssh(None, config) {
+        Ok(value) => value,
+        Err((status, message)) => {
+            eprintln!("{message}");
+            return status;
+        }
+    };
+    let launch = match write_editor_ssh_files(config, &prepared) {
+        Ok(value) => value,
+        Err(message) => {
+            eprintln!("{message}");
+            return ExitStatus::Error;
+        }
+    };
+    let mut editor = Command::new(editor_bin);
+    editor
+        .arg("--folder-uri")
+        .arg(editor_remote_uri(&launch.host_alias))
+        .env("PATH", path_with_prefix(&launch.wrapper_dir))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null());
+    match editor.spawn() {
+        Ok(_) => ExitStatus::Ok,
+        Err(err) => {
+            eprintln!(
+                "[error] failed to launch editor binary {}: {err}",
+                editor_bin.display()
+            );
+            ExitStatus::Error
+        }
+    }
+}
+
 fn run_ssh_capture(
     invocation: SshInvocation<'_>,
     config: &ResolvedConfig,
@@ -395,6 +444,7 @@ fn prepare_ssh(
         }
     };
     Ok(PreparedSsh {
+        cvm_id: cvm.id,
         fqdn,
         proxy_command,
     })
@@ -522,6 +572,155 @@ fn proxy_command(
         shell_quote(&policy_path.display().to_string()),
         shell_quote(fqdn),
     ))
+}
+
+struct EditorLaunch {
+    host_alias: String,
+    wrapper_dir: PathBuf,
+}
+
+fn write_editor_ssh_files(
+    config: &ResolvedConfig,
+    prepared: &PreparedSsh,
+) -> Result<EditorLaunch, String> {
+    validate_ssh_config_token(&prepared.fqdn, "Dev CVM FQDN")?;
+    if prepared.proxy_command.contains(['\n', '\r']) {
+        return Err("[error] tunnel ProxyCommand contains a newline".to_string());
+    }
+    let host_alias = editor_host_alias(&prepared.cvm_id);
+    let base_dir = config.config_dir.join("editor-ssh").join(&host_alias);
+    let wrapper_dir = base_dir.join("bin");
+    fs::create_dir_all(&wrapper_dir)
+        .map_err(|err| format!("[error] failed to create editor SSH config directory: {err}"))?;
+    #[cfg(unix)]
+    {
+        fs::set_permissions(&base_dir, fs::Permissions::from_mode(0o700)).map_err(|err| {
+            format!("[error] failed to tighten editor SSH config directory: {err}")
+        })?;
+        fs::set_permissions(&wrapper_dir, fs::Permissions::from_mode(0o700)).map_err(|err| {
+            format!("[error] failed to tighten editor SSH wrapper directory: {err}")
+        })?;
+    }
+
+    let config_path = base_dir.join("config");
+    let ssh_config = format!(
+        "Host {host_alias}\n  HostName {}\n  User dev\n  ProxyCommand {}\n  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null\n  LogLevel ERROR\n  BatchMode yes\n  ConnectTimeout 30\n",
+        prepared.fqdn, prepared.proxy_command,
+    );
+    write_atomic_file(&config_path, ssh_config.as_bytes(), 0o600)?;
+
+    let ssh_bin = find_ssh_binary()
+        .ok_or_else(|| "[error] failed to find ssh on PATH for editor launch".to_string())?;
+    let wrapper_path = wrapper_dir.join("ssh");
+    let wrapper = format!(
+        "#!/bin/sh\nexec {} -F {} \"$@\"\n",
+        shell_quote(&ssh_bin.display().to_string()),
+        shell_quote(&config_path.display().to_string()),
+    );
+    write_atomic_file(&wrapper_path, wrapper.as_bytes(), 0o700)?;
+
+    Ok(EditorLaunch {
+        host_alias,
+        wrapper_dir,
+    })
+}
+
+fn write_atomic_file(path: &Path, data: &[u8], mode: u32) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "[error] editor SSH path has no parent directory".to_string())?;
+    fs::create_dir_all(parent)
+        .map_err(|err| format!("[error] failed to create editor SSH directory: {err}"))?;
+    let tmp = parent.join(format!(
+        ".{}.{}.tmp",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("concrete"),
+        std::process::id()
+    ));
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        options.mode(mode).custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = options
+        .open(&tmp)
+        .map_err(|err| format!("[error] failed to create temporary editor SSH file: {err}"))?;
+    file.write_all(data)
+        .and_then(|_| file.sync_all())
+        .map_err(|err| format!("[error] failed to write editor SSH file: {err}"))?;
+    fs::rename(&tmp, path)
+        .map_err(|err| format!("[error] failed to install editor SSH file: {err}"))?;
+    #[cfg(unix)]
+    {
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))
+            .map_err(|err| format!("[error] failed to set editor SSH file mode: {err}"))?;
+    }
+    Ok(())
+}
+
+fn find_ssh_binary() -> Option<PathBuf> {
+    env::var_os("PATH").and_then(|paths| {
+        env::split_paths(&paths)
+            .map(|path| path.join("ssh"))
+            .find(|candidate| candidate.is_file() && is_executable(candidate))
+    })
+}
+
+fn is_executable(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        fs::metadata(path)
+            .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        path.is_file()
+    }
+}
+
+fn path_with_prefix(prefix: &Path) -> OsString {
+    let mut paths = vec![prefix.to_path_buf()];
+    if let Some(existing) = env::var_os("PATH") {
+        paths.extend(env::split_paths(&existing));
+    }
+    env::join_paths(paths).unwrap_or_else(|_| prefix.as_os_str().to_os_string())
+}
+
+fn editor_host_alias(cvm_id: &str) -> String {
+    let suffix: String = cvm_id
+        .bytes()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_') {
+                byte as char
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let suffix = suffix.trim_matches('-');
+    if suffix.is_empty() {
+        "concrete-cvm".to_string()
+    } else {
+        format!("concrete-{suffix}")
+    }
+}
+
+fn editor_remote_uri(host_alias: &str) -> String {
+    format!("vscode-remote://ssh-remote+{host_alias}/home/dev")
+}
+
+fn validate_ssh_config_token(value: &str, label: &str) -> Result<(), String> {
+    if value.is_empty()
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+    {
+        return Err(format!("[error] {label} is not safe for SSH config output"));
+    }
+    Ok(())
 }
 
 fn ssh_remote_command(args: &SshArgs) -> Result<String, String> {
@@ -759,5 +958,23 @@ mod tests {
         assert!(validate_session_name("bad/name").is_err());
         assert!(validate_session_name("bad name").is_err());
         assert!(validate_session_name("bad;name").is_err());
+    }
+
+    #[test]
+    fn editor_host_alias_sanitizes_cvm_ids() {
+        assert_eq!(
+            editor_host_alias("9a7f6b4a-1111-2222-3333-444444444444"),
+            "concrete-9a7f6b4a-1111-2222-3333-444444444444"
+        );
+        assert_eq!(editor_host_alias("../bad id"), "concrete-bad-id");
+        assert_eq!(editor_host_alias("///"), "concrete-cvm");
+    }
+
+    #[test]
+    fn editor_remote_uri_targets_dev_home() {
+        assert_eq!(
+            editor_remote_uri("concrete-cvm-1"),
+            "vscode-remote://ssh-remote+concrete-cvm-1/home/dev"
+        );
     }
 }

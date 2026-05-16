@@ -49,6 +49,7 @@ pub fn run() -> ExitCode {
         cli::Command::Audit(command) => commands::audit::run(command, &config, json_output),
         cli::Command::Auth(command) => commands::auth::run(command, &config, json_output),
         cli::Command::Claude(args) => commands::ssh::run_agent(args, &config, "claude"),
+        cli::Command::Code(args) => commands::ssh::run_code(args, &config),
         cli::Command::Completions { shell } => {
             let mut command = cli::Cli::command();
             let mut output = Vec::new();
@@ -65,6 +66,7 @@ pub fn run() -> ExitCode {
         cli::Command::Codex(args) => commands::ssh::run_agent(args, &config, "codex"),
         cli::Command::Config(command) => commands::config::run(command, &config, json_output),
         cli::Command::Cvm(command) => commands::cvm::run(command, &config, json_output),
+        cli::Command::Cursor(args) => commands::ssh::run_cursor(args, &config),
         cli::Command::Entity(command) => commands::entity::run(command, &config, json_output),
         cli::Command::Key(command) => commands::key::run(command, &config, json_output),
         cli::Command::Kill(args) => commands::ssh::run_kill(args, &config, json_output),
