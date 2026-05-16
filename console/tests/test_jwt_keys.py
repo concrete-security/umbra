@@ -177,6 +177,20 @@ def test_access_token_rejects_caller_supplied_key_headers(tmp_path) -> None:
         manager.verify_access_token(token)
 
 
+def test_access_token_rejects_unexpected_header_fields(tmp_path) -> None:
+    manager = JwtManager(settings_for(tmp_path))
+    now = datetime.now(timezone.utc)
+    token = jwt.encode(
+        access_claims(now),
+        manager.private_key,
+        algorithm="EdDSA",
+        headers={"kid": "test-key", "typ": "at+JWT", "cty": "JWT"},
+    )
+
+    with pytest.raises(jwt.InvalidTokenError, match="unexpected token header"):
+        manager.verify_access_token(token)
+
+
 def test_access_token_rejects_non_base64url_segments(tmp_path) -> None:
     manager = JwtManager(settings_for(tmp_path))
 

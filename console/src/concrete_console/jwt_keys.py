@@ -16,6 +16,7 @@ from concrete_console.config import load_settings
 
 KID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 TOKEN_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+ALLOWED_ACCESS_TOKEN_HEADERS = {"alg", "kid", "typ"}
 FORBIDDEN_KEY_HEADERS = {"jku", "jwk", "x5u", "x5c"}
 FORBIDDEN_ACCESS_TOKEN_CLAIMS = {"email", "permissions", "profiles"}
 ALLOWED_ALGORITHMS = {"EdDSA", "RS256"}
@@ -207,6 +208,8 @@ class JwtManager:
 
         if FORBIDDEN_KEY_HEADERS.intersection(header):
             raise jwt.InvalidTokenError("caller-supplied key headers are forbidden")
+        if set(header) - ALLOWED_ACCESS_TOKEN_HEADERS:
+            raise jwt.InvalidTokenError("unexpected token header")
         alg = header.get("alg")
         if not isinstance(alg, str) or alg.lower() == "none" or alg not in ALLOWED_ALGORITHMS:
             raise jwt.InvalidTokenError("unsupported algorithm")
