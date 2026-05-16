@@ -15,6 +15,7 @@ name = "concrete_cli"
 path = "src/lib.rs"
 
 [dependencies]
+atlas-rs = "=0.2.0"
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 clap = { version = "4.5", features = ["derive"] }
@@ -25,7 +26,9 @@ libc = "0.2"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha1 = "0.10"
 sha2 = "0.10"
+tokio = { version = "1", features = ["io-std", "io-util", "macros", "net", "rt-multi-thread"] }
 toml = "0.9"
 url = "2"
 uuid = { version = "1", features = ["v4"] }

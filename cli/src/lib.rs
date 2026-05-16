@@ -75,6 +75,7 @@ pub fn run() -> ExitCode {
         cli::Command::TrafficLogs(traffic_args) => {
             commands::traffic_logs::run(traffic_args, &config, json_output)
         }
+        cli::Command::Tunnel { target } => commands::tunnel::run(&target, &config),
         cli::Command::User(command) => commands::user::run(command, &config, json_output),
         cli::Command::Version => commands::version::run(json_output),
     };

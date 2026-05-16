@@ -11,5 +11,6 @@ pub mod reconcile;
 pub mod security_cvm;
 pub mod status;
 pub mod traffic_logs;
+pub mod tunnel;
 pub mod user;
 pub mod version;

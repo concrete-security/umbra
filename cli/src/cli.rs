@@ -117,6 +117,12 @@ pub enum Command {
     /// Query egress traffic logs.
     TrafficLogs(TrafficLogsArgs),
 
+    /// Pipe an attested WebSocket tunnel to a Dev CVM.
+    Tunnel {
+        /// Dev CVM FQDN to connect to.
+        target: String,
+    },
+
     /// Manage users and user permissions.
     #[command(subcommand)]
     User(UserCommand),
