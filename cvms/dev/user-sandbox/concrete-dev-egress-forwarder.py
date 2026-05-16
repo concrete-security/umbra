@@ -51,6 +51,13 @@ class ProxyRequest:
     headers: list[tuple[str, str]]
 
 
+@dataclass
+class VerifiedUpstream:
+    reader: asyncio.StreamReader
+    writer: asyncio.StreamWriter
+    process: asyncio.subprocess.Process
+
+
 def log(message: str) -> None:
     print(f"dev-egress-forwarder: {message}", file=sys.stderr, flush=True)
 
@@ -179,7 +186,7 @@ def encode_request_line_and_headers(request: ProxyRequest, proxy_token: str) -> 
     return ("\r\n".join(lines) + "\r\n\r\n").encode("iso-8859-1")
 
 
-async def open_verified_upstream(config: ForwarderConfig) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+async def open_verified_upstream(config: ForwarderConfig) -> VerifiedUpstream:
     payload = {
         "fqdn": config.security_cvm_fqdn,
         "port": config.security_cvm_public_port,
@@ -194,27 +201,54 @@ async def open_verified_upstream(config: ForwarderConfig) -> tuple[asyncio.Strea
         stderr=asyncio.subprocess.PIPE,
         env=env,
     )
+    if process.stdin is None or process.stdout is None or process.stderr is None:
+        raise ConnectionError("aTLS connect helper pipes unavailable")
     try:
-        stdout, stderr = await asyncio.wait_for(
-            process.communicate(json.dumps(payload, separators=(",", ":")).encode("utf-8")),
-            timeout=config.atls_connect_timeout_seconds,
-        )
+        process.stdin.write(json.dumps(payload, separators=(",", ":")).encode("utf-8") + b"\n")
+        await process.stdin.drain()
+        process.stdin.close()
+        await process.stdin.wait_closed()
+        stdout_line = await asyncio.wait_for(process.stdout.readline(), timeout=config.atls_connect_timeout_seconds)
     except TimeoutError as exc:
         process.kill()
         await process.wait()
         raise ConnectionError("aTLS connect helper timed out") from exc
-    if process.returncode != 0:
+    if not stdout_line:
+        stderr = await process.stderr.read(4096)
+        await process.wait()
         reason = stderr.decode("utf-8", errors="replace").strip().splitlines()[:1]
         raise ConnectionError(f"aTLS connect helper failed: {reason[0] if reason else 'no diagnostic'}")
     try:
-        response = json.loads(stdout.decode("utf-8"))
+        response = json.loads(stdout_line.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        process.kill()
+        await process.wait()
         raise ConnectionError("aTLS connect helper returned malformed JSON") from exc
     host = response.get("host")
     port = response.get("port")
     if not isinstance(host, str) or not host or not isinstance(port, int) or not 1 <= port <= 65535:
+        process.kill()
+        await process.wait()
         raise ConnectionError("aTLS connect helper returned invalid relay address")
-    return await asyncio.open_connection(host, port)
+    try:
+        reader, writer = await asyncio.open_connection(host, port)
+    except OSError:
+        process.terminate()
+        await process.wait()
+        raise
+    return VerifiedUpstream(reader=reader, writer=writer, process=process)
+
+
+async def close_verified_upstream(upstream: VerifiedUpstream) -> None:
+    upstream.writer.close()
+    await upstream.writer.wait_closed()
+    if upstream.process.returncode is None:
+        upstream.process.terminate()
+        try:
+            await asyncio.wait_for(upstream.process.wait(), timeout=2)
+        except TimeoutError:
+            upstream.process.kill()
+            await upstream.process.wait()
 
 
 async def write_response(writer: asyncio.StreamWriter, status: str, body: bytes = b"") -> None:
@@ -266,7 +300,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
     peer = writer.get_extra_info("peername")
     started = time.monotonic()
     destination = "-"
-    upstream_writer: asyncio.StreamWriter | None = None
+    upstream: VerifiedUpstream | None = None
     client_bytes = 0
     upstream_bytes = 0
     try:
@@ -281,27 +315,26 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             validate_absolute_target(request.target)
             destination = request.target
 
-        upstream_reader, upstream_writer = await open_verified_upstream(config)
-        upstream_writer.write(encode_request_line_and_headers(request, config.proxy_token))
-        await upstream_writer.drain()
+        upstream = await open_verified_upstream(config)
+        upstream.writer.write(encode_request_line_and_headers(request, config.proxy_token))
+        await upstream.writer.drain()
 
         if request.method == "CONNECT":
-            response = await upstream_reader.readuntil(b"\r\n\r\n")
+            response = await upstream.reader.readuntil(b"\r\n\r\n")
             writer.write(response)
             await writer.drain()
             status_parts = response.split(b"\r\n", 1)[0].split()
             status_code = status_parts[1] if len(status_parts) >= 2 and response.startswith(b"HTTP/") else b"000"
             if status_code != b"200":
                 return
-        client_bytes, upstream_bytes = await bridge(reader, writer, upstream_reader, upstream_writer)
+        client_bytes, upstream_bytes = await bridge(reader, writer, upstream.reader, upstream.writer)
     except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, ConnectionError, ValueError, OSError) as exc:
         log(f"connection_error peer={peer!r} destination={destination!r} reason={exc}")
         if not writer.is_closing():
             await write_response(writer, "502 Bad Gateway", b"egress forwarder failed closed\n")
     finally:
-        if upstream_writer is not None:
-            upstream_writer.close()
-            await upstream_writer.wait_closed()
+        if upstream is not None:
+            await close_verified_upstream(upstream)
         writer.close()
         await writer.wait_closed()
         duration_ms = int((time.monotonic() - started) * 1000)

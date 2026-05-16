@@ -1,0 +1,20 @@
+[package]
+name = "concrete-atls-connect"
+version = "0.1.0"
+edition = "2021"
+license = "Proprietary"
+publish = false
+description = "Dev CVM aTLS loopback relay helper"
+
+[[bin]]
+name = "concrete-atls-connect"
+path = "src/main.rs"
+
+[dependencies]
+atlas-rs = "=0.2.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["io-std", "io-util", "macros", "net", "rt-multi-thread"] }
+
+[dev-dependencies]
+tempfile = "3"

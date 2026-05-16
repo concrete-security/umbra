@@ -1,3 +1,12 @@
+FROM rust:1-bookworm AS atls-connect-builder
+
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY cli/Cargo.toml cli/Cargo.toml
+COPY cvms/dev/user-sandbox/atls-connect/Cargo.toml cvms/dev/user-sandbox/atls-connect/Cargo.toml
+COPY cvms/dev/user-sandbox/atls-connect/src cvms/dev/user-sandbox/atls-connect/src
+RUN cargo build --locked --release -p concrete-atls-connect --target-dir /tmp/atls-connect-target
+
 FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -44,7 +53,7 @@ RUN install -m 0755 -d /etc/apt/keyrings \
       docker-compose-plugin \
     && rm -rf /var/lib/apt/lists/*
 
-COPY docker-daemon.json /etc/docker/daemon.json
+COPY cvms/dev/user-sandbox/docker-daemon.json /etc/docker/daemon.json
 
 RUN echo 'dev:100000:65536' >/etc/subuid \
     && echo 'dev:100000:65536' >/etc/subgid \
@@ -58,12 +67,13 @@ RUN echo 'dev:100000:65536' >/etc/subuid \
       /home/dev/.codex \
     && chown -R dev:dev /home/dev
 
-COPY sshd_config /etc/ssh/sshd_config
-COPY entrypoint.sh /entrypoint.sh
-COPY concrete-dev-tunnel.py /usr/local/bin/concrete-dev-tunnel
-COPY concrete-dev-egress-forwarder.py /usr/local/bin/concrete-dev-egress-forwarder
+COPY cvms/dev/user-sandbox/sshd_config /etc/ssh/sshd_config
+COPY cvms/dev/user-sandbox/entrypoint.sh /entrypoint.sh
+COPY cvms/dev/user-sandbox/concrete-dev-tunnel.py /usr/local/bin/concrete-dev-tunnel
+COPY cvms/dev/user-sandbox/concrete-dev-egress-forwarder.py /usr/local/bin/concrete-dev-egress-forwarder
+COPY --from=atls-connect-builder /tmp/atls-connect-target/release/concrete-atls-connect /usr/local/bin/concrete-atls-connect
 
-RUN chmod +x /entrypoint.sh /usr/local/bin/concrete-dev-tunnel /usr/local/bin/concrete-dev-egress-forwarder
+RUN chmod +x /entrypoint.sh /usr/local/bin/concrete-dev-tunnel /usr/local/bin/concrete-dev-egress-forwarder /usr/local/bin/concrete-atls-connect
 
 EXPOSE 22
 
