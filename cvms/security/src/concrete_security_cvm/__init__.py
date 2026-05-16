@@ -19,6 +19,7 @@ from concrete_security_cvm.policy import (
     PolicyValidationError,
     parse_effective_policy,
 )
+from concrete_security_cvm.runtime import SecurityCVMRuntime, SecurityCVMRuntimeConfig
 from concrete_security_cvm.traffic import (
     TrafficLogBatch,
     TrafficLogClient,
@@ -48,6 +49,8 @@ __all__ = [
     "ProxyRequest",
     "SCControlClient",
     "SecurityCVMProxyAddon",
+    "SecurityCVMRuntime",
+    "SecurityCVMRuntimeConfig",
     "TrafficLogBatch",
     "TrafficLogClient",
     "TrafficLogEmitter",
