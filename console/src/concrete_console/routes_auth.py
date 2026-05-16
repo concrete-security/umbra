@@ -508,7 +508,7 @@ async def refresh(
 
 @router.post("/logout", status_code=204)
 async def logout(
-    body: LogoutRequest,
+    body: LogoutRequest | None = Body(default=None),
     authorization: Annotated[str | None, Header()] = None,
     pool: asyncpg.Pool = Depends(get_pool),
 ) -> Response:
@@ -542,7 +542,7 @@ async def logout(
                     access_exp,
                     actor["id"] if actor else None,
                 )
-            if body.refresh_token:
+            if body is not None and body.refresh_token:
                 await conn.execute(
                     """
                     UPDATE refresh_tokens

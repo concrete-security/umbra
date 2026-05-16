@@ -5,8 +5,11 @@ from uuid import UUID
 
 import pytest
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 
 from concrete_console.auth import CurrentUser, require_current_user
+from concrete_console.app import app
+from concrete_console.db import get_pool
 from concrete_console.internal_auth import parse_service_bearer_authorization
 from concrete_console.routes_auth import DeviceStartRequest, device_poll_too_soon, device_start, request_ip
 
@@ -20,6 +23,36 @@ def current_user(*, permissions: set[str] | None = None) -> CurrentUser:
         entity_name="Example",
         permissions=frozenset(permissions or set()),
     )
+
+
+class AsyncContext:
+    def __init__(self, value=None):
+        self.value = value
+
+    async def __aenter__(self):
+        return self.value
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return None
+
+
+class LogoutNoBodyConn:
+    def transaction(self):
+        return AsyncContext()
+
+    async def fetchrow(self, query, *args):
+        raise AssertionError("logout without credentials should not fetch actor rows")
+
+    async def execute(self, query, *args):
+        raise AssertionError("logout without credentials should not write rows")
+
+
+class FakePool:
+    def __init__(self, conn):
+        self.conn = conn
+
+    def acquire(self):
+        return AsyncContext(self.conn)
 
 
 def test_require_permission_allows_granted_permission() -> None:
@@ -90,6 +123,17 @@ def test_device_poll_too_soon_honors_full_interval() -> None:
         interval_seconds=5,
     )
     assert not device_poll_too_soon(now=last_polled_at, last_polled_at=None, interval_seconds=5)
+
+
+def test_logout_accepts_missing_body() -> None:
+    app.dependency_overrides[get_pool] = lambda: FakePool(LogoutNoBodyConn())
+    try:
+        response = TestClient(app).post("/api/v1/auth/logout")
+    finally:
+        app.dependency_overrides.pop(get_pool, None)
+
+    assert response.status_code == 204
+    assert response.content == b""
 
 
 def test_auth_request_ip_uses_forwarded_header_resolution(monkeypatch) -> None:
