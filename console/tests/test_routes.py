@@ -16,6 +16,7 @@ from concrete_console.routes import (
     CVMCreate,
     SECURITY_CVM_PROVISION_REDACTION,
     SecurityCVMCreate,
+    apply_provider_cvm_lifecycle_action,
     cvm_etag,
     cvm_provider_app_id,
     entity_quota_usage,
@@ -41,6 +42,7 @@ from concrete_console.routes import (
     validate_profile_policy,
     validate_reconcile_dependencies,
 )
+from concrete_console.tee_provider.phala import PhalaError
 from concrete_console.routes_internal import (
     TrafficLogBatch,
     TrafficLogIn,
@@ -112,6 +114,55 @@ def test_cvm_etag_includes_policy_version() -> None:
 def test_cvm_provider_app_id_reads_phala_metadata() -> None:
     assert cvm_provider_app_id(cvm_row(metadata={"app_id": "app-123"})) == "app-123"
     assert cvm_provider_app_id(cvm_row(metadata={})) is None
+
+
+def test_apply_provider_cvm_lifecycle_action_calls_phala(monkeypatch) -> None:
+    calls = []
+
+    class FakePhalaClient:
+        async def start(self, app_id: str) -> None:
+            calls.append(("start", app_id))
+
+        async def stop(self, app_id: str) -> None:
+            calls.append(("stop", app_id))
+
+    fake = FakePhalaClient()
+    monkeypatch.setattr(
+        "concrete_console.tee_provider.phala.PhalaClient.from_settings",
+        classmethod(lambda cls, *, timeout_seconds=None: calls.append(("timeout", timeout_seconds)) or fake),
+    )
+
+    asyncio.run(apply_provider_cvm_lifecycle_action(app_id="app-123", action="start"))
+    asyncio.run(apply_provider_cvm_lifecycle_action(app_id="app-123", action="stop"))
+
+    assert calls == [
+        ("timeout", 30.0),
+        ("start", "app-123"),
+        ("timeout", 30.0),
+        ("stop", "app-123"),
+    ]
+
+
+def test_apply_provider_cvm_lifecycle_action_wraps_phala_error(monkeypatch) -> None:
+    class FailingPhalaClient:
+        async def start(self, app_id: str) -> None:
+            raise PhalaError("cli_failed")
+
+        async def stop(self, app_id: str) -> None:
+            raise AssertionError("unexpected stop call")
+
+    fake = FailingPhalaClient()
+    monkeypatch.setattr(
+        "concrete_console.tee_provider.phala.PhalaClient.from_settings",
+        classmethod(lambda cls, *, timeout_seconds=None: fake),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(apply_provider_cvm_lifecycle_action(app_id="app-123", action="start"))
+
+    assert exc.value.status_code == 502
+    assert exc.value.detail["error"]["code"] == "UPSTREAM_ERROR"
+    assert exc.value.detail["error"]["details"] == {"adapter": "phala", "reason": "cli_failed"}
 
 
 def test_mint_service_principal_token_hash_returns_sha256(monkeypatch) -> None:

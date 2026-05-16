@@ -74,7 +74,7 @@ class PhalaClient:
     timeout_seconds: float = 300.0
 
     @classmethod
-    def from_settings(cls) -> PhalaClient:
+    def from_settings(cls, *, timeout_seconds: float | None = None) -> PhalaClient:
         raw = load_settings().raw
         api_token = raw.get("PHALA_API_TOKEN", "").strip()
         if not api_token:
@@ -84,6 +84,7 @@ class PhalaClient:
             cli_path=raw.get("PHALA_CLI_PATH", DEFAULT_PHALA_CLI_PATH).strip() or DEFAULT_PHALA_CLI_PATH,
             api_token=api_token,
             redaction_patterns=patterns,
+            timeout_seconds=300.0 if timeout_seconds is None else timeout_seconds,
         )
 
     async def deploy(self, *, name: str, compose_yaml: str, env: dict[str, str]) -> PhalaDeployResult:

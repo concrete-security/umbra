@@ -101,6 +101,7 @@ ADMIN_KEYS_ROTATE_ROUTE = "POST /api/v1/admin/keys/rotate"
 AUDIT_EXPORT_ROUTE = "POST /api/v1/audit/export"
 AUDIT_EXPORT_ROW_CAP = 1_000_000
 AUDIT_EXPORT_DOWNLOAD_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{32,256}$")
+PROVIDER_CVM_SYNC_ACTION_TIMEOUT_SECONDS = 30.0
 OPERATION_KIND_PERMISSIONS = {
     "audit.export": "AUDIT_EXPORT",
     "cvm.launch": "CVM_LAUNCH",
@@ -3884,6 +3885,26 @@ def cvm_provider_app_id(row: asyncpg.Record | dict) -> str | None:
     return app_id if isinstance(app_id, str) and app_id else None
 
 
+async def apply_provider_cvm_lifecycle_action(*, app_id: str, action: str) -> None:
+    from concrete_console.tee_provider.phala import PhalaClient, PhalaError
+
+    try:
+        client = PhalaClient.from_settings(timeout_seconds=PROVIDER_CVM_SYNC_ACTION_TIMEOUT_SECONDS)
+        if action == "start":
+            await client.start(app_id)
+        elif action == "stop":
+            await client.stop(app_id)
+        else:
+            raise RuntimeError(f"unsupported provider CVM action: {action}")
+    except PhalaError as exc:
+        raise api_error(
+            502,
+            "UPSTREAM_ERROR",
+            "Dev CVM provider lifecycle action failed",
+            {"adapter": "phala", "reason": exc.code},
+        ) from exc
+
+
 async def apply_cvm_state_action(
     pool: asyncpg.Pool,
     *,
@@ -3911,7 +3932,11 @@ async def apply_cvm_state_action(
                     f"cannot {action} CVM from current state",
                     {"state": cvm["state"]},
                 )
-            require_local_cvm_lifecycle_action(cvm)
+            app_id = cvm_provider_app_id(cvm)
+            if app_id is None:
+                require_local_cvm_lifecycle_action(cvm)
+            else:
+                await apply_provider_cvm_lifecycle_action(app_id=app_id, action=action)
             await conn.execute(
                 """
                 UPDATE cvms

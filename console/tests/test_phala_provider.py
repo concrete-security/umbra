@@ -52,6 +52,16 @@ def test_phala_subprocess_env_is_allowlisted(monkeypatch) -> None:
     assert "GOOGLE_OIDC_CLIENT_SECRET" not in env
 
 
+def test_from_settings_accepts_timeout_override(monkeypatch) -> None:
+    monkeypatch.setenv("PHALA_API_TOKEN", "phala-token")
+    monkeypatch.setenv("PHALA_CLI_PATH", "/tmp/phala")
+
+    client = PhalaClient.from_settings(timeout_seconds=30.0)
+
+    assert client.timeout_seconds == 30.0
+    assert client.cli_path == "/tmp/phala"
+
+
 def test_render_env_file_rejects_smuggleable_values() -> None:
     with pytest.raises(PhalaError) as exc:
         render_env_file({"SECURITY_CVM_PROXY_TOKEN": "line1\nline2"})
