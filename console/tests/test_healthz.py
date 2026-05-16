@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
+from concrete_console import audit_anchor
 from concrete_console import app as app_module
 from concrete_console import readiness
 from concrete_console import scheduler
@@ -225,35 +226,32 @@ def test_phala_readiness_skips_when_unconfigured(monkeypatch) -> None:
     asyncio.run(readiness._check_phala_adapter())
 
 
-def test_audit_anchor_readiness_heads_configured_target(monkeypatch) -> None:
-    seen: list[str] = []
+def test_audit_anchor_readiness_probes_configured_postgres_target(monkeypatch) -> None:
+    seen: list[tuple[str, float | None]] = []
+    queries: list[str] = []
 
-    monkeypatch.setenv("AUDIT_ANCHOR_TARGET", "https://anchors.example/healthz")
+    monkeypatch.setenv(
+        "AUDIT_ANCHOR_TARGET",
+        "postgresql://anchor:secret@anchor-db:5432/audit?sslmode=require&table=anchors",
+    )
 
-    class FakeClient:
-        def __init__(self, *, timeout: float, follow_redirects: bool) -> None:
-            assert timeout == 0.5
-            assert follow_redirects is True
+    class FakeConn:
+        async def execute(self, query: str) -> None:
+            queries.append(query)
 
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb) -> None:
+        async def close(self) -> None:
             return None
 
-        async def head(self, url: str):
-            seen.append(url)
+    async def connect(dsn: str, *, timeout: float | None = None):
+        seen.append((dsn, timeout))
+        return FakeConn()
 
-            def raise_for_status() -> None:
-                return None
-
-            return SimpleNamespace(raise_for_status=raise_for_status)
-
-    monkeypatch.setattr(readiness.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(audit_anchor.asyncpg, "connect", connect)
 
     asyncio.run(readiness._check_audit_anchor_target())
 
-    assert seen == ["https://anchors.example/healthz"]
+    assert seen == [("postgresql://anchor:secret@anchor-db:5432/audit?sslmode=require", 0.5)]
+    assert queries == ['SELECT 1 FROM "anchors" LIMIT 0']
 
 
 def test_audit_anchor_readiness_skips_when_unconfigured(monkeypatch) -> None:

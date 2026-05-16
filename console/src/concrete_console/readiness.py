@@ -8,6 +8,7 @@ from typing import Literal
 
 import httpx
 
+from concrete_console.audit_anchor import check_audit_anchor_target
 from concrete_console.config import load_settings
 from concrete_console.db import get_pool
 from concrete_console.jwt_keys import get_jwt_manager
@@ -99,13 +100,7 @@ async def _check_phala_adapter() -> None:
 
 
 async def _check_audit_anchor_target() -> None:
-    target = load_settings().raw.get("AUDIT_ANCHOR_TARGET", "").strip()
-    if not target:
-        return
-
-    async with httpx.AsyncClient(timeout=0.5, follow_redirects=True) as client:
-        response = await client.head(target)
-    response.raise_for_status()
+    await check_audit_anchor_target()
 
 
 async def _check_operation_scheduler() -> None:

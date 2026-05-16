@@ -11,6 +11,7 @@ import secrets
 import time
 from typing import Any
 
+from concrete_console.audit_anchor import publish_audit_anchor_if_due
 from concrete_console.audit import insert_audit_event
 from concrete_console.config import load_settings
 from concrete_console.db import get_pool
@@ -2297,6 +2298,7 @@ async def run_reconciliation_pass(*, include_orphans: bool = True) -> Reconcilia
         )
         security_cvms_advanced.extend(await reconcile_security_cvm_attestations(conn))
         cvms_advanced.extend(await reconcile_dev_cvm_attestations(conn))
+        await publish_audit_anchor_if_due(conn)
     return ReconciliationSummary(
         cvms_advanced=cvms_advanced,
         security_cvms_advanced=security_cvms_advanced,

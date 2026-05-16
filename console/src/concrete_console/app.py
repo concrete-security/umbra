@@ -7,6 +7,7 @@ from uuid import uuid4
 from fastapi import FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
 
+from concrete_console.audit_anchor import publish_audit_anchor_now
 from concrete_console.config import load_settings
 from concrete_console.db import close_pool
 from concrete_console.log_config import bind_request_context, clear_context, configure_logging, logger
@@ -38,6 +39,10 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         await stop_operation_scheduler(scheduler_task)
+        try:
+            await publish_audit_anchor_now()
+        except Exception as exc:  # noqa: BLE001
+            log.error("audit_anchor_shutdown_publish_failed", error_type=type(exc).__name__)
         await close_pool()
 
 
