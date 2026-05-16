@@ -124,6 +124,20 @@ def test_google_id_token_rejects_caller_supplied_key_headers_before_jwks(monkeyp
         asyncio.run(verify_google_id_token(token, nonce=None, access_token=None, settings=settings))
 
 
+def test_google_id_token_rejects_non_base64url_segments_before_jwks(monkeypatch) -> None:
+    settings = oidc_test_settings()
+
+    async def fail_load_google_jwks(*, settings=None, force=False):
+        raise AssertionError("invalid token shape should fail before JWKS lookup")
+
+    monkeypatch.setattr("concrete_console.oidc.load_google_jwks", fail_load_google_jwks)
+
+    with pytest.raises(jwt.InvalidTokenError, match="invalid token shape"):
+        import asyncio
+
+        asyncio.run(verify_google_id_token("abc.def*.ghi", nonce=None, access_token=None, settings=settings))
+
+
 def test_google_id_token_requires_azp_for_audience_array(monkeypatch) -> None:
     settings = oidc_test_settings()
     token, jwks = signed_google_token(claims_override={"aud": ["google-client"]})

@@ -15,6 +15,7 @@ from concrete_console.config import load_settings
 from concrete_console.crypto import b64url
 
 FORBIDDEN_KEY_HEADERS = {"jku", "jwk", "x5u", "x5c"}
+TOKEN_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_DEVICE_CODE_URL = "https://oauth2.googleapis.com/device/code"
@@ -172,9 +173,10 @@ async def poll_device_code(device_code: str, *, settings: OidcSettings | None = 
 
 
 def _decode_header(token: str) -> dict[str, Any]:
-    if token.count(".") != 2:
+    parts = token.split(".")
+    if len(parts) != 3 or any(not part or not TOKEN_SEGMENT_RE.fullmatch(part) for part in parts):
         raise jwt.InvalidTokenError("invalid token shape")
-    header_segment = token.split(".", 1)[0]
+    header_segment = parts[0]
     try:
         header_bytes = base64.urlsafe_b64decode(header_segment + "=" * (-len(header_segment) % 4))
         header = json.loads(header_bytes)
