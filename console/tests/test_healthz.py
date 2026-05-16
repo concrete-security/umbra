@@ -32,6 +32,57 @@ def test_invalid_request_id_is_replaced() -> None:
     assert response.headers["x-request-id"] != "bad request id"
 
 
+def test_rate_limit_returns_retry_after(monkeypatch) -> None:
+    app_module.clear_rate_limit_state()
+    monkeypatch.setattr(app_module, "ANONYMOUS_IP_RPM", 2)
+    try:
+        client = TestClient(app)
+        assert client.get("/healthz").status_code == 200
+        assert client.get("/healthz").status_code == 200
+        response = client.get("/healthz", headers={"X-Request-Id": "limited-request"})
+
+        assert response.status_code == 429
+        assert response.headers["retry-after"] == "60"
+        assert response.headers["x-request-id"] == "limited-request"
+        assert response.json() == {
+            "error": {
+                "code": "RATE_LIMITED",
+                "message": "rate limit exceeded",
+                "details": {"retry_after_seconds": 60, "limit": "ip"},
+                "request_id": "limited-request",
+            }
+        }
+    finally:
+        app_module.clear_rate_limit_state()
+
+
+def test_api_body_limit_rejects_before_route_parsing(monkeypatch) -> None:
+    app_module.clear_rate_limit_state()
+    monkeypatch.setattr(app_module, "API_BODY_LIMIT_BYTES", 8)
+
+    response = TestClient(app).post(
+        "/api/v1/auth/token",
+        content=b"x" * 9,
+        headers={"X-Request-Id": "large-request"},
+    )
+
+    assert response.status_code == 413
+    assert response.headers["x-request-id"] == "large-request"
+    assert response.json()["error"]["code"] == "PAYLOAD_TOO_LARGE"
+    assert response.json()["error"]["details"] == {"limit_bytes": 8}
+
+
+def test_forwarded_client_ip_prefers_leftmost_public(monkeypatch) -> None:
+    monkeypatch.setenv("TRUST_FORWARDED_HEADERS", "true")
+    app_module.clear_rate_limit_state()
+    request = SimpleNamespace(
+        client=SimpleNamespace(host="10.0.0.5"),
+        headers={"x-forwarded-for": "10.0.0.1, 8.8.8.8, 1.1.1.1"},
+    )
+
+    assert app_module.resolved_client_ip(request) == "8.8.8.8"
+
+
 def test_readyz_renders_checks(monkeypatch) -> None:
     async def fake_checks():
         return {"database": "ok", "jwt_keys": "ok"}
