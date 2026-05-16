@@ -590,12 +590,48 @@ def resolve_cvm_launch_config(body: CVMCreate) -> dict[str, str]:
             "Dev CVM image measurement is not configured",
             {"component": "dev_cvm_image_measurement"},
         )
+    base_domain = raw.get("CLOUDFLARE_BASE_DOMAIN", "").strip().strip(".").lower()
+    if not base_domain:
+        raise api_error(
+            503,
+            "SERVICE_UNAVAILABLE",
+            "Dev CVM base domain is not configured",
+            {"component": "cloudflare_base_domain"},
+        )
+    if len(f"cvm-{'0' * 32}.{base_domain}") > 253 or not re.fullmatch(r"[a-z0-9][a-z0-9.-]*[a-z0-9]", base_domain):
+        raise api_error(
+            503,
+            "SERVICE_UNAVAILABLE",
+            "Dev CVM base domain is invalid",
+            {"component": "cloudflare_base_domain"},
+        )
     return {
         "instance_type": instance_type,
         "region": region,
         "image": image,
         "expected_image_measurement": expected_image_measurement.lower(),
+        "base_domain": base_domain,
     }
+
+
+def render_dev_cvm_compose_config(resolved: dict[str, str]) -> str:
+    image = json.dumps(resolved["image"])
+    return "\n".join(
+        [
+            "services:",
+            "  user-sandbox:",
+            f"    image: {image}",
+            "    environment:",
+            "      SECURITY_CVM_FQDN: ${SECURITY_CVM_FQDN}",
+            "      SECURITY_CVM_PROXY_PORT: ${SECURITY_CVM_PROXY_PORT}",
+            "      SECURITY_CVM_PROXY_TOKEN: ${SECURITY_CVM_PROXY_TOKEN}",
+            "      SECURITY_CVM_CA_CERT_B64: ${SECURITY_CVM_CA_CERT_B64}",
+            "      SECURITY_CVM_ATLS_POLICY_B64: ${SECURITY_CVM_ATLS_POLICY_B64}",
+            "      AUTHORIZED_SSH_KEYS_B64: ${AUTHORIZED_SSH_KEYS_B64}",
+            "      SANDBOX_ENV_PLACEHOLDERS_B64: ${SANDBOX_ENV_PLACEHOLDERS_B64}",
+            "",
+        ]
+    )
 
 
 def resolve_security_cvm_provision_config(body: SecurityCVMCreate) -> dict[str, str]:
@@ -3203,6 +3239,7 @@ async def create_cvm(
     current_user.require_permission("CVM_LAUNCH")
     body_sha256 = request_body_sha256(await request.body())
     operation_id = uuid4()
+    cvm_id = uuid4()
     async with pool.acquire() as conn:
         async with conn.transaction():
             await acquire_idempotency_lock(
@@ -3221,14 +3258,56 @@ async def create_cvm(
             if cached is not None:
                 return JSONResponse(status_code=cached.status_code, content=cached.body, headers=cached.headers)
 
-            resolve_cvm_launch_config(body)
+            resolved = resolve_cvm_launch_config(body)
             profile_rows = await fetch_cvm_launch_profiles(conn, body.profile_ids, current_user)
             await ensure_cvm_launch_profile_memberships(conn, body.profile_ids, current_user)
             ensure_no_sandbox_env_conflict(profile_rows)
             await ensure_cvm_launch_ssh_keys(conn, body.ssh_key_ids, current_user)
-            await fetch_live_security_cvm_id(conn, current_user.entity_id)
+            security_cvm_id = await fetch_live_security_cvm_id(conn, current_user.entity_id)
             await enforce_user_quota(conn, current_user.id, "dev_cvms")
             await enforce_entity_quota(conn, current_user.entity_id, "dev_cvms")
+            fqdn = f"cvm-{secrets.token_hex(16)}.{resolved['base_domain']}"
+            compose_config = render_dev_cvm_compose_config(resolved)
+            await conn.execute(
+                """
+                INSERT INTO cvms (
+                    id,
+                    entity_id,
+                    state,
+                    fqdn,
+                    instance_type,
+                    region,
+                    compose_config,
+                    expected_image_measurement,
+                    owner_id,
+                    security_cvm_id
+                )
+                VALUES ($1, $2, 'PROVISIONING', $3, $4, $5, $6, $7, $8, $9)
+                """,
+                cvm_id,
+                current_user.entity_id,
+                fqdn,
+                resolved["instance_type"],
+                resolved["region"],
+                compose_config,
+                resolved["expected_image_measurement"],
+                current_user.id,
+                security_cvm_id,
+            )
+            await conn.executemany(
+                """
+                INSERT INTO cvm_profiles (cvm_id, profile_id, attached_by)
+                VALUES ($1, $2, $3)
+                """,
+                [(cvm_id, profile_id, current_user.id) for profile_id in body.profile_ids],
+            )
+            await conn.executemany(
+                """
+                INSERT INTO cvm_ssh_keys (cvm_id, ssh_key_id)
+                VALUES ($1, $2)
+                """,
+                [(cvm_id, ssh_key_id) for ssh_key_id in body.ssh_key_ids],
+            )
             row = await conn.fetchrow(
                 """
                 INSERT INTO operations (
@@ -3238,12 +3317,13 @@ async def create_cvm(
                     actor_id,
                     actor_email,
                     target_type,
+                    target_id,
                     idempotency_key,
                     request_body_sha256,
                     progress_step,
                     progress_percent
                 )
-                VALUES ($1, 'cvm.launch', 'pending', $2, $3, 'cvm', $4, $5, 'queued', 0)
+                VALUES ($1, 'cvm.launch', 'pending', $2, $3, 'cvm', $4, $5, $6, 'persist_stub', 10)
                 RETURNING
                     id,
                     kind,
@@ -3264,6 +3344,7 @@ async def create_cvm(
                 operation_id,
                 current_user.id,
                 current_user.email,
+                cvm_id,
                 idempotency_key_value,
                 body_sha256,
             )

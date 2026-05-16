@@ -26,6 +26,7 @@ from concrete_console.routes import (
     require_cvm_profile_mutable,
     require_idempotency_key,
     require_if_match,
+    render_dev_cvm_compose_config,
     resolve_cvm_launch_config,
     resolve_security_cvm_provision_config,
     ssh_key_fingerprint,
@@ -179,12 +180,14 @@ def test_resolve_cvm_launch_config_uses_defaults(monkeypatch) -> None:
     monkeypatch.setenv("DEV_CVM_DEFAULT_REGION", "FR-PARIS-1")
     monkeypatch.setenv("DEV_CVM_IMAGE", "ghcr.io/concrete-security/dev-cvm/user-sandbox@sha256:abc")
     monkeypatch.setenv("DEV_CVM_IMAGE_MEASUREMENT", "A" * 64)
+    monkeypatch.setenv("CLOUDFLARE_BASE_DOMAIN", "dev.example.com")
 
     resolved = resolve_cvm_launch_config(cvm_create())
 
     assert resolved["instance_type"] == "tdx.small"
     assert resolved["region"] == "FR-PARIS-1"
     assert resolved["expected_image_measurement"] == "a" * 64
+    assert resolved["base_domain"] == "dev.example.com"
 
 
 def test_resolve_cvm_launch_config_requires_region(monkeypatch) -> None:
@@ -218,6 +221,36 @@ def test_resolve_cvm_launch_config_requires_image_measurement(monkeypatch) -> No
 
     assert exc.value.status_code == 503
     assert exc.value.detail["error"]["details"]["component"] == "dev_cvm_image_measurement"
+
+
+def test_resolve_cvm_launch_config_requires_base_domain(monkeypatch) -> None:
+    monkeypatch.setenv("DEV_CVM_DEFAULT_REGION", "FR-PARIS-1")
+    monkeypatch.setenv("DEV_CVM_IMAGE", "ghcr.io/concrete-security/dev-cvm/user-sandbox@sha256:abc")
+    monkeypatch.setenv("DEV_CVM_IMAGE_MEASUREMENT", "a" * 64)
+    monkeypatch.delenv("CLOUDFLARE_BASE_DOMAIN", raising=False)
+
+    with pytest.raises(HTTPException) as exc:
+        resolve_cvm_launch_config(cvm_create())
+
+    assert exc.value.status_code == 503
+    assert exc.value.detail["error"]["details"]["component"] == "cloudflare_base_domain"
+
+
+def test_render_dev_cvm_compose_config_keeps_runtime_values_as_placeholders() -> None:
+    compose = render_dev_cvm_compose_config(
+        {
+            "image": "ghcr.io/concrete-security/dev-cvm/user-sandbox@sha256:abc",
+            "instance_type": "tdx.small",
+            "region": "FR-PARIS-1",
+            "expected_image_measurement": "a" * 64,
+            "base_domain": "dev.example.com",
+        }
+    )
+
+    assert "ghcr.io/concrete-security/dev-cvm/user-sandbox@sha256:abc" in compose
+    assert "${SECURITY_CVM_PROXY_TOKEN}" in compose
+    assert "${AUTHORIZED_SSH_KEYS_B64}" in compose
+    assert "token_urlsafe" not in compose
 
 
 def test_resolve_security_cvm_provision_config_uses_defaults(monkeypatch) -> None:
