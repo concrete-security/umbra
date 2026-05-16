@@ -412,6 +412,31 @@ class AttestationPersistConn:
         return "UPDATE 1"
 
 
+class ReconcileAttestationConn:
+    def __init__(self, *, security_rows=None, dev_rows=None, token_rows=None):
+        self.security_rows = security_rows or []
+        self.dev_rows = dev_rows or []
+        self.token_rows = token_rows or []
+        self.execute_calls: list[tuple[str, tuple[object, ...]]] = []
+        self.audit_calls: list[dict[str, object]] = []
+
+    def transaction(self):
+        return AsyncContext()
+
+    async def fetch(self, query, *args):
+        if "FROM security_cvms sc" in query:
+            return self.security_rows
+        if "FROM cvms c" in query:
+            return self.dev_rows
+        if "FROM service_principal_tokens" in query:
+            return self.token_rows
+        raise AssertionError(f"unexpected fetch query: {query}")
+
+    async def execute(self, query, *args):
+        self.execute_calls.append((query, args))
+        return "UPDATE 1"
+
+
 def test_execute_cvm_launch_attestation_gate_waits_for_real_verifier(monkeypatch) -> None:
     snapshot = launch_snapshot(
         operation_updated_at=scheduler.datetime.now(scheduler.timezone.utc),
@@ -526,6 +551,98 @@ def test_run_cvm_launch_attestation_verifier_persists_report_and_audit(monkeypat
     assert conn.audit_calls[0]["after"]["source"] == "launch"
     operation_updates = [args for query, args in conn.execute_calls if "UPDATE operations" in query]
     assert operation_updates == [(UUID("00000000-0000-4000-8000-000000000030"), "await_sc_pull", 70)]
+
+
+def test_reconcile_security_cvm_attestation_refresh_persists_success(monkeypatch) -> None:
+    security_cvm_id = UUID("00000000-0000-4000-8000-000000000041")
+    conn = ReconcileAttestationConn(
+        security_rows=[
+            {
+                "id": security_cvm_id,
+                "entity_id": UUID("00000000-0000-4000-8000-000000000001"),
+                "fqdn": "sc.example.com",
+                "compose_config": "services: {}\n",
+                "expected_image_measurement": "a" * 64,
+                "image_measurement": None,
+                "rtmr3_digest": None,
+                "attestation_verified_at": None,
+                "error_reason": None,
+            }
+        ],
+        token_rows=[
+            {"purpose": "INGEST", "token_hash": "b" * 64},
+            {"purpose": "CA_EXPORT", "token_hash": "c" * 64},
+        ],
+    )
+    captured_request: dict[str, object] = {}
+
+    class FakeVerifier:
+        async def verify(self, request, *, timeout_seconds):
+            captured_request.update(request)
+            assert timeout_seconds == 30
+            return attestation.AttestationReport(image_measurement="a" * 64, rtmr3_digest="d" * 96)
+
+    async def fake_insert_audit_event(_conn, **kwargs):
+        conn.audit_calls.append(kwargs)
+
+    monkeypatch.setenv("CONSOLE_URL", "https://console.example.com")
+    monkeypatch.setattr(attestation.AtlasVerifierClient, "from_settings", classmethod(lambda cls: FakeVerifier()))
+    monkeypatch.setattr(scheduler, "insert_audit_event", fake_insert_audit_event)
+
+    advanced = asyncio.run(scheduler.reconcile_security_cvm_attestations(conn))
+
+    assert advanced == [str(security_cvm_id)]
+    assert captured_request["kind"] == "security_cvm"
+    assert captured_request["policy"]["rtmr3_binding"]["CONSOLE_URL"] == "https://console.example.com"
+    security_updates = [args for query, args in conn.execute_calls if "UPDATE security_cvms" in query]
+    assert security_updates[0][:3] == (security_cvm_id, "a" * 64, "d" * 96)
+    assert conn.audit_calls[0]["action"] == "SECURITY_CVM_ATTESTATION_VERIFIED"
+    assert conn.audit_calls[0]["after"]["source"] == "reconciler"
+
+
+def test_reconcile_dev_cvm_attestation_refresh_records_drift(monkeypatch) -> None:
+    cvm_id = UUID("00000000-0000-4000-8000-000000000031")
+    policy_bundle = {
+        "compose_template": "services: {}\n",
+        "expected_bootchain": {"mrtd": "d" * 64},
+        "os_image_hash": "e" * 64,
+        "rtmr3_binding": {"cvm_id": str(cvm_id)},
+    }
+    conn = ReconcileAttestationConn(
+        dev_rows=[
+            {
+                "cvm_id": cvm_id,
+                "entity_id": UUID("00000000-0000-4000-8000-000000000001"),
+                "fqdn": "cvm.example.com",
+                "metadata": {"policy_bundle": policy_bundle},
+                "expected_image_measurement": "a" * 64,
+                "image_measurement": "a" * 64,
+                "rtmr3_digest": "d" * 96,
+                "attestation_verified_at": scheduler.datetime.now(scheduler.timezone.utc)
+                - scheduler.timedelta(seconds=90_000),
+                "error_reason": None,
+            }
+        ]
+    )
+
+    class FakeVerifier:
+        async def verify(self, request, *, timeout_seconds):
+            assert request["kind"] == "dev_cvm"
+            return attestation.AttestationReport(image_measurement="e" * 64, rtmr3_digest="f" * 96)
+
+    async def fake_insert_audit_event(_conn, **kwargs):
+        conn.audit_calls.append(kwargs)
+
+    monkeypatch.setattr(attestation.AtlasVerifierClient, "from_settings", classmethod(lambda cls: FakeVerifier()))
+    monkeypatch.setattr(scheduler, "insert_audit_event", fake_insert_audit_event)
+
+    advanced = asyncio.run(scheduler.reconcile_dev_cvm_attestations(conn))
+
+    assert advanced == [str(cvm_id)]
+    drift_updates = [args for query, args in conn.execute_calls if "SET error_reason = 'ATTESTATION_DRIFT'" in query]
+    assert drift_updates == [(cvm_id,)]
+    assert conn.audit_calls[0]["action"] == "CVM_ATTESTATION_DRIFT"
+    assert conn.audit_calls[0]["after"]["drift_kind"] == "both"
 
 
 def test_execute_cvm_launch_await_sc_pull_advances_after_observation(monkeypatch) -> None:

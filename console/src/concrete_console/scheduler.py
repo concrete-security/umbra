@@ -95,6 +95,17 @@ def dev_cvm_attestation_timeout_seconds() -> int:
     return timeout
 
 
+def reconciler_attestation_interval_seconds() -> int:
+    raw = load_settings().raw.get("RECONCILER_ATTESTATION_INTERVAL_SECONDS", "21600").strip() or "21600"
+    try:
+        interval = int(raw)
+    except ValueError as exc:
+        raise RuntimeError("RECONCILER_ATTESTATION_INTERVAL_SECONDS must be an integer") from exc
+    if interval < 3600 or interval > 86400:
+        raise RuntimeError("RECONCILER_ATTESTATION_INTERVAL_SECONDS must be between 3600 and 86400")
+    return interval
+
+
 def start_operation_scheduler() -> asyncio.Task[None]:
     return asyncio.create_task(operation_scheduler_loop(), name="operation-scheduler")
 
@@ -1465,7 +1476,346 @@ async def run_reconciliation_pass(*, include_orphans: bool = True) -> Reconcilia
               AND expires_at < now()
             """
         )
-    return ReconciliationSummary(cvms_advanced=[], security_cvms_advanced=[], orphans_cleaned=[])
+        security_cvms_advanced = await reconcile_security_cvm_attestations(conn)
+        cvms_advanced = await reconcile_dev_cvm_attestations(conn)
+    return ReconciliationSummary(
+        cvms_advanced=cvms_advanced,
+        security_cvms_advanced=security_cvms_advanced,
+        orphans_cleaned=[],
+    )
+
+
+async def reconcile_security_cvm_attestations(conn: Any) -> list[str]:
+    from concrete_console.attestation import (
+        AtlasVerifierClient,
+        AttestationVerifierError,
+        AttestationVerifierUnavailable,
+        build_security_cvm_attestation_request,
+    )
+
+    try:
+        verifier = AtlasVerifierClient.from_settings()
+    except AttestationVerifierUnavailable:
+        return []
+    interval = reconciler_attestation_interval_seconds()
+    advanced: list[str] = []
+    async with conn.transaction():
+        rows = await conn.fetch(
+            """
+            SELECT
+                sc.id,
+                sc.entity_id,
+                sc.fqdn,
+                sc.compose_config,
+                sc.expected_image_measurement,
+                sc.image_measurement,
+                sc.rtmr3_digest,
+                sc.attestation_verified_at,
+                sc.error_reason
+            FROM security_cvms sc
+            WHERE sc.state = 'RUNNING'
+              AND sc.deleted_at IS NULL
+              AND (
+                sc.attestation_verified_at IS NULL
+                OR sc.attestation_verified_at < now() - ($1::int * INTERVAL '1 second')
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM operations o
+                WHERE o.target_id = sc.id
+                  AND o.status IN ('pending', 'running')
+              )
+            ORDER BY sc.created_at
+            LIMIT 10
+            FOR UPDATE SKIP LOCKED
+            """,
+            interval,
+        )
+        for row in rows:
+            token_hashes = await fetch_security_cvm_token_hashes(conn, _row_value(row, "id"))
+            try:
+                request = build_security_cvm_attestation_request(
+                    row,
+                    token_hashes=token_hashes,
+                    console_url=load_settings().raw.get("CONSOLE_URL", "http://localhost:8000"),
+                )
+                report = await verifier.verify(request, timeout_seconds=30)
+            except AttestationVerifierError as exc:
+                log.warning(
+                    "security_cvm_attestation_refresh_failed",
+                    security_cvm_id=str(_row_value(row, "id")),
+                    code=exc.code,
+                )
+                continue
+
+            drift_kind = attestation_drift_kind(
+                expected_image_measurement=_row_value(row, "expected_image_measurement"),
+                persisted_image_measurement=_row_value(row, "image_measurement"),
+                persisted_rtmr3_digest=_row_value(row, "rtmr3_digest"),
+                reported_image_measurement=report.image_measurement,
+                reported_rtmr3_digest=report.rtmr3_digest,
+            )
+            if drift_kind is None:
+                await persist_security_cvm_attestation_refresh(conn, row, report)
+            else:
+                await record_security_cvm_attestation_refresh_drift(conn, row, report, drift_kind=drift_kind)
+            advanced.append(str(_row_value(row, "id")))
+    return advanced
+
+
+async def reconcile_dev_cvm_attestations(conn: Any) -> list[str]:
+    from concrete_console.attestation import (
+        AtlasVerifierClient,
+        AttestationVerifierError,
+        AttestationVerifierUnavailable,
+        build_dev_cvm_attestation_request,
+    )
+
+    try:
+        verifier = AtlasVerifierClient.from_settings()
+    except AttestationVerifierUnavailable:
+        return []
+    interval = reconciler_attestation_interval_seconds()
+    advanced: list[str] = []
+    async with conn.transaction():
+        rows = await conn.fetch(
+            """
+            SELECT
+                c.id AS cvm_id,
+                c.entity_id,
+                c.fqdn,
+                c.metadata,
+                c.expected_image_measurement,
+                c.image_measurement,
+                c.rtmr3_digest,
+                c.attestation_verified_at,
+                c.error_reason
+            FROM cvms c
+            WHERE c.state = 'RUNNING'
+              AND c.deleted_at IS NULL
+              AND (
+                c.attestation_verified_at IS NULL
+                OR c.attestation_verified_at < now() - ($1::int * INTERVAL '1 second')
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM operations o
+                WHERE o.target_id = c.id
+                  AND o.status IN ('pending', 'running')
+              )
+            ORDER BY c.created_at
+            LIMIT 10
+            FOR UPDATE SKIP LOCKED
+            """,
+            interval,
+        )
+        for row in rows:
+            try:
+                request = build_dev_cvm_attestation_request(row)
+                report = await verifier.verify(request, timeout_seconds=30)
+            except AttestationVerifierError as exc:
+                log.warning(
+                    "dev_cvm_attestation_refresh_failed",
+                    cvm_id=str(_row_value(row, "cvm_id")),
+                    code=exc.code,
+                )
+                continue
+
+            drift_kind = attestation_drift_kind(
+                expected_image_measurement=_row_value(row, "expected_image_measurement"),
+                persisted_image_measurement=_row_value(row, "image_measurement"),
+                persisted_rtmr3_digest=_row_value(row, "rtmr3_digest"),
+                reported_image_measurement=report.image_measurement,
+                reported_rtmr3_digest=report.rtmr3_digest,
+            )
+            if drift_kind is None:
+                await persist_dev_cvm_attestation_refresh(conn, row, report)
+            else:
+                await record_dev_cvm_attestation_refresh_drift(conn, row, report, drift_kind=drift_kind)
+            advanced.append(str(_row_value(row, "cvm_id")))
+    return advanced
+
+
+async def fetch_security_cvm_token_hashes(conn: Any, security_cvm_id: Any) -> dict[str, str]:
+    rows = await conn.fetch(
+        """
+        SELECT purpose::text AS purpose, token_hash
+        FROM service_principal_tokens
+        WHERE principal_type = 'security_cvm'
+          AND principal_id = $1
+          AND purpose IN ('INGEST', 'CA_EXPORT')
+          AND deleted_at IS NULL
+        """,
+        security_cvm_id,
+    )
+    return {row["purpose"]: row["token_hash"] for row in rows}
+
+
+def attestation_drift_kind(
+    *,
+    expected_image_measurement: str,
+    persisted_image_measurement: str | None,
+    persisted_rtmr3_digest: str | None,
+    reported_image_measurement: str,
+    reported_rtmr3_digest: str,
+) -> str | None:
+    image_drift = reported_image_measurement != expected_image_measurement
+    if persisted_image_measurement is not None and persisted_image_measurement != reported_image_measurement:
+        image_drift = True
+    rtmr3_drift = persisted_rtmr3_digest is not None and persisted_rtmr3_digest != reported_rtmr3_digest
+    if image_drift and rtmr3_drift:
+        return "both"
+    if image_drift:
+        return "image"
+    if rtmr3_drift:
+        return "rtmr3"
+    return None
+
+
+async def persist_security_cvm_attestation_refresh(conn: Any, row: Any, report: Any) -> None:
+    verified_at = datetime.now(timezone.utc)
+    await conn.execute(
+        """
+        UPDATE security_cvms
+        SET image_measurement = $2,
+            rtmr3_digest = $3,
+            attestation_verified_at = $4,
+            error_reason = NULL,
+            updated_at = now()
+        WHERE id = $1
+          AND state = 'RUNNING'
+          AND deleted_at IS NULL
+        """,
+        _row_value(row, "id"),
+        report.image_measurement,
+        report.rtmr3_digest,
+        verified_at,
+    )
+    await insert_audit_event(
+        conn,
+        entity_id=_row_value(row, "entity_id"),
+        actor_id=None,
+        actor_email="system@reconciler",
+        action="SECURITY_CVM_ATTESTATION_VERIFIED",
+        target_type="security_cvm",
+        target_id=_row_value(row, "id"),
+        before={
+            "image_measurement": _row_value(row, "image_measurement"),
+            "rtmr3_digest": _row_value(row, "rtmr3_digest"),
+        },
+        after={
+            "image_measurement": report.image_measurement,
+            "rtmr3_digest": report.rtmr3_digest,
+            "attestation_verified_at": verified_at.isoformat().replace("+00:00", "Z"),
+            "source": "reconciler",
+        },
+    )
+
+
+async def record_security_cvm_attestation_refresh_drift(conn: Any, row: Any, report: Any, *, drift_kind: str) -> None:
+    await conn.execute(
+        """
+        UPDATE security_cvms
+        SET error_reason = 'ATTESTATION_DRIFT',
+            updated_at = now()
+        WHERE id = $1
+          AND state = 'RUNNING'
+          AND deleted_at IS NULL
+        """,
+        _row_value(row, "id"),
+    )
+    await insert_audit_event(
+        conn,
+        entity_id=_row_value(row, "entity_id"),
+        actor_id=None,
+        actor_email="system@reconciler",
+        action="SECURITY_CVM_ATTESTATION_DRIFT",
+        target_type="security_cvm",
+        target_id=_row_value(row, "id"),
+        before={
+            "image_measurement": _row_value(row, "image_measurement"),
+            "rtmr3_digest": _row_value(row, "rtmr3_digest"),
+        },
+        after={
+            "image_measurement": report.image_measurement,
+            "rtmr3_digest": report.rtmr3_digest,
+            "drift_kind": drift_kind,
+            "source": "reconciler",
+        },
+    )
+
+
+async def persist_dev_cvm_attestation_refresh(conn: Any, row: Any, report: Any) -> None:
+    verified_at = datetime.now(timezone.utc)
+    await conn.execute(
+        """
+        UPDATE cvms
+        SET image_measurement = $2,
+            rtmr3_digest = $3,
+            attestation_verified_at = $4,
+            error_reason = NULL,
+            updated_at = now()
+        WHERE id = $1
+          AND state = 'RUNNING'
+          AND deleted_at IS NULL
+        """,
+        _row_value(row, "cvm_id"),
+        report.image_measurement,
+        report.rtmr3_digest,
+        verified_at,
+    )
+    await insert_audit_event(
+        conn,
+        entity_id=_row_value(row, "entity_id"),
+        actor_id=None,
+        actor_email="system@reconciler",
+        action="CVM_ATTESTATION_VERIFIED",
+        target_type="cvm",
+        target_id=_row_value(row, "cvm_id"),
+        before={
+            "image_measurement": _row_value(row, "image_measurement"),
+            "rtmr3_digest": _row_value(row, "rtmr3_digest"),
+        },
+        after={
+            "image_measurement": report.image_measurement,
+            "rtmr3_digest": report.rtmr3_digest,
+            "attestation_verified_at": verified_at.isoformat().replace("+00:00", "Z"),
+            "source": "reconciler",
+        },
+    )
+
+
+async def record_dev_cvm_attestation_refresh_drift(conn: Any, row: Any, report: Any, *, drift_kind: str) -> None:
+    await conn.execute(
+        """
+        UPDATE cvms
+        SET error_reason = 'ATTESTATION_DRIFT',
+            updated_at = now()
+        WHERE id = $1
+          AND state = 'RUNNING'
+          AND deleted_at IS NULL
+        """,
+        _row_value(row, "cvm_id"),
+    )
+    await insert_audit_event(
+        conn,
+        entity_id=_row_value(row, "entity_id"),
+        actor_id=None,
+        actor_email="system@reconciler",
+        action="CVM_ATTESTATION_DRIFT",
+        target_type="cvm",
+        target_id=_row_value(row, "cvm_id"),
+        before={
+            "image_measurement": _row_value(row, "image_measurement"),
+            "rtmr3_digest": _row_value(row, "rtmr3_digest"),
+        },
+        after={
+            "image_measurement": report.image_measurement,
+            "rtmr3_digest": report.rtmr3_digest,
+            "drift_kind": drift_kind,
+            "source": "reconciler",
+        },
+    )
 
 
 def mark_scheduler_tick_success(*, now: float | None = None) -> None:
