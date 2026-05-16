@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -5,7 +6,10 @@ from concrete_console.audit_export import (
     audit_export_object_key,
     csv_safe_cell,
     file_bucket_root,
+    postgres_export_target,
+    read_audit_export_artifact,
     serialize_audit_export,
+    write_audit_export_artifact,
     write_file_artifact,
 )
 
@@ -68,3 +72,53 @@ def test_file_bucket_requires_absolute_file_uri(tmp_path) -> None:
     assert file_bucket_root(bucket) == tmp_path
     assert storage_uri.endswith("/audit-exports/00000000-0000-4000-8000-000000000001.csv")
     assert (tmp_path / key).read_bytes() == b"payload"
+
+
+def test_postgres_export_target_strips_credentials_from_public_uri() -> None:
+    target = postgres_export_target(
+        "postgresql://export:secret@db.example:5432/audit?sslmode=require&table=exports"
+    )
+
+    assert target.dsn == "postgresql://export:secret@db.example:5432/audit?sslmode=require"
+    assert target.table == "exports"
+    assert target.public_uri == "postgresql://db.example:5432/audit?table=exports"
+
+
+def test_postgres_export_store_writes_and_reads_artifact(monkeypatch) -> None:
+    artifact = serialize_audit_export([audit_row()], "ndjson")
+    stored: dict[str, bytes] = {}
+    queries: list[str] = []
+
+    class FakeConn:
+        async def execute(self, query: str, *args):
+            queries.append(query)
+            stored[args[0]] = bytes(args[1])
+
+        async def fetchval(self, query: str, *args):
+            queries.append(query)
+            return stored.get(args[0])
+
+        async def close(self) -> None:
+            return None
+
+    async def connect(dsn: str, *, timeout: float):
+        assert dsn == "postgresql://export:secret@db.example/audit"
+        assert timeout == 5.0
+        return FakeConn()
+
+    from concrete_console import audit_export
+
+    monkeypatch.setattr(audit_export.asyncpg, "connect", connect)
+    bucket = "postgresql://export:secret@db.example/audit?table=exports"
+    key = audit_export_object_key("00000000-0000-4000-8000-000000000001", "ndjson")
+
+    storage_uri = asyncio.run(write_audit_export_artifact(bucket, key, artifact))
+    content = asyncio.run(read_audit_export_artifact(bucket, storage_uri))
+
+    assert storage_uri == (
+        "postgresql://db.example/audit?table=exports"
+        "#objects/audit-exports%2F00000000-0000-4000-8000-000000000001.ndjson"
+    )
+    assert content == artifact.content
+    assert 'INSERT INTO "exports"' in queries[0]
+    assert 'FROM "exports"' in queries[1]

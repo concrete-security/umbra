@@ -18,10 +18,11 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from concrete_console.audit import AUDIT_ACTIONS, insert_audit_event, redact_user_audit_trail
 from concrete_console.audit_export import (
+    AuditExportStorageError,
     audit_export_object_key,
-    read_file_artifact,
+    read_audit_export_artifact,
     serialize_audit_export,
-    write_file_artifact,
+    write_audit_export_artifact,
 )
 from concrete_console.auth import CurrentUser, require_current_user
 from concrete_console.bootstrap import email_domain
@@ -2990,13 +2991,6 @@ async def create_audit_export(
             "audit export bucket is not configured",
             {"component": "audit_export_bucket"},
         )
-    if not bucket_uri.startswith("file://"):
-        raise api_error(
-            503,
-            "SERVICE_UNAVAILABLE",
-            "audit export storage backend is not configured for this build",
-            {"component": "audit_export_store"},
-        )
 
     body_sha256 = request_body_sha256(await request.body())
     operation_id = uuid4()
@@ -3043,8 +3037,8 @@ async def create_audit_export(
             artifact = serialize_audit_export(list(rows), body.format)
             object_key = audit_export_object_key(operation_id, body.format)
             try:
-                storage_uri = write_file_artifact(bucket_uri, object_key, artifact.content)
-            except (OSError, ValueError) as exc:
+                storage_uri = await write_audit_export_artifact(bucket_uri, object_key, artifact)
+            except AuditExportStorageError as exc:
                 raise api_error(
                     503,
                     "SERVICE_UNAVAILABLE",
@@ -3196,8 +3190,9 @@ async def download_audit_export(
             if row is None or row["expires_at"] <= now or row["redeemed_at"] is not None:
                 raise api_error(404, "NOT_FOUND", "resource not found")
             try:
-                content = read_file_artifact(row["storage_uri"])
-            except (OSError, ValueError) as exc:
+                bucket_uri = load_settings().raw.get("AUDIT_EXPORT_BUCKET", "").strip()
+                content = await read_audit_export_artifact(bucket_uri, row["storage_uri"])
+            except AuditExportStorageError as exc:
                 raise api_error(
                     503,
                     "SERVICE_UNAVAILABLE",
