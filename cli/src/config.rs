@@ -9,6 +9,8 @@ use serde::Deserialize;
 struct ConfigFile {
     console_url: Option<String>,
     default_profile: Option<String>,
+    default_instance_type: Option<String>,
+    default_region: Option<String>,
     oidc_client_id: Option<String>,
     oidc_provider: Option<String>,
 }
@@ -21,6 +23,8 @@ pub struct ResolvedConfig {
     pub console_url_source: ConfigSource,
     pub profile: Option<String>,
     pub profile_flags: Vec<String>,
+    pub default_instance_type: Option<String>,
+    pub default_region: Option<String>,
     pub oidc_client_id: String,
     pub oidc_client_id_source: ConfigSource,
     pub oidc_provider: String,
@@ -89,6 +93,15 @@ impl ResolvedConfig {
             file.default_profile
         };
 
+        let default_instance_type = env::var("CONCRETE_DEFAULT_INSTANCE_TYPE")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .or(file.default_instance_type);
+        let default_region = env::var("CONCRETE_DEFAULT_REGION")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .or(file.default_region);
+
         let (oidc_client_id, oidc_client_id_source) = if let Some(value) =
             env::var("CONCRETE_OIDC_CLIENT_ID")
                 .ok()
@@ -119,6 +132,8 @@ impl ResolvedConfig {
             console_url_source,
             profile,
             profile_flags,
+            default_instance_type,
+            default_region,
             oidc_client_id,
             oidc_client_id_source,
             oidc_provider,

@@ -269,6 +269,9 @@ pub enum CvmCommand {
     /// List Dev CVMs visible to the current user.
     List,
 
+    /// Launch a Dev CVM.
+    Launch(CvmLaunchArgs),
+
     /// Attach a profile to a Dev CVM.
     Attach {
         /// Dev CVM UUID.
@@ -280,6 +283,58 @@ pub enum CvmCommand {
         /// Dev CVM UUID.
         cvm_id: String,
     },
+
+    /// Start a stopped Dev CVM.
+    Start {
+        /// Dev CVM UUID.
+        cvm_id: String,
+    },
+
+    /// Stop a running Dev CVM.
+    Stop {
+        /// Dev CVM UUID.
+        cvm_id: String,
+    },
+
+    /// Terminate a Dev CVM.
+    Terminate(CvmTerminateArgs),
+}
+
+#[derive(clap::Args, Debug)]
+pub struct CvmLaunchArgs {
+    /// SSH key UUID to install. Repeat for multiple keys.
+    #[arg(long = "ssh-key", required = true)]
+    pub ssh_keys: Vec<String>,
+
+    /// Phala instance type. Defaults to config or Console defaults.
+    #[arg(long)]
+    pub instance_type: Option<String>,
+
+    /// Phala region. Defaults to config or Console defaults.
+    #[arg(long)]
+    pub region: Option<String>,
+
+    /// Submit the launch and return the operation handle without polling.
+    #[arg(long)]
+    pub no_wait: bool,
+
+    /// Maximum seconds to wait for launch completion.
+    #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u32).range(1..=86400))]
+    pub wait_timeout_seconds: u32,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct CvmTerminateArgs {
+    /// Dev CVM UUID.
+    pub cvm_id: String,
+
+    /// Submit the terminate request and return the operation handle without polling.
+    #[arg(long)]
+    pub no_wait: bool,
+
+    /// Maximum seconds to wait for termination completion.
+    #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u32).range(1..=86400))]
+    pub wait_timeout_seconds: u32,
 }
 
 #[derive(Subcommand, Debug)]
