@@ -10,13 +10,20 @@ import json
 import secrets
 import time
 from typing import Any
+from uuid import UUID
 
 from concrete_console.audit_anchor import publish_audit_anchor_if_due
 from concrete_console.audit import insert_audit_event
+from concrete_console.audit_export import (
+    AuditExportStorageError,
+    audit_export_object_key,
+    serialize_audit_export,
+    write_audit_export_artifact,
+)
 from concrete_console.config import load_settings
 from concrete_console.db import get_pool
 from concrete_console.log_config import logger
-from concrete_console.resources import cvm_resource, json_payload, security_cvm_resource
+from concrete_console.resources import cvm_resource, json_payload, security_cvm_resource, timestamp
 
 log = logger()
 _last_successful_tick_monotonic: float | None = None
@@ -58,6 +65,8 @@ SECURITY_CVM_PROVISION_PROGRESS = {
     "fetch_ca": 80,
     "finalise": 90,
 }
+AUDIT_EXPORT_EXECUTABLE_STEPS = {"materialize"}
+AUDIT_EXPORT_ROW_CAP = 1_000_000
 SECURITY_CVM_TOKEN_PLAINTEXT_TTL_SECONDS = 3600
 
 
@@ -280,6 +289,8 @@ def executable_running_operation(row: Any) -> bool:
         kind == "cvm.launch" and step in CVM_LAUNCH_EXECUTABLE_STEPS
     ) or (
         kind == "security_cvm.provision" and step in SECURITY_CVM_PROVISION_EXECUTABLE_STEPS
+    ) or (
+        kind == "audit.export" and step in AUDIT_EXPORT_EXECUTABLE_STEPS
     )
 
 
@@ -334,6 +345,14 @@ async def execute_running_operation(operation_id: Any) -> bool:
             kind=kind,
             step=step,
             handler=lambda: execute_security_cvm_provision_operation(operation_id, step),
+        )
+        return True
+    if kind == "audit.export" and step in AUDIT_EXPORT_EXECUTABLE_STEPS:
+        await execute_operation_step_with_logging(
+            operation_id,
+            kind=kind,
+            step=step,
+            handler=lambda: execute_audit_export_operation(operation_id),
         )
         return True
     return False
@@ -419,6 +438,220 @@ async def execute_security_cvm_provision_operation(operation_id: Any, step: str)
     if step == "finalise":
         await execute_security_cvm_finalise_operation(operation_id)
         return
+
+
+async def execute_audit_export_operation(operation_id: Any) -> None:
+    pool = await get_pool()
+    settings = load_settings()
+    bucket_uri = settings.raw.get("AUDIT_EXPORT_BUCKET", "").strip()
+    if not bucket_uri:
+        await mark_operation_failed(
+            operation_id,
+            code="AUDIT_EXPORT_BUCKET_UNCONFIGURED",
+            details={"component": "audit_export_bucket"},
+        )
+        return
+
+    async with pool.acquire() as conn:
+        snapshot = await fetch_audit_export_snapshot(conn, operation_id)
+        if snapshot is None:
+            await mark_operation_failed(
+                operation_id,
+                code="AUDIT_EXPORT_REQUEST_NOT_FOUND",
+                details={"state": "missing_export_request"},
+            )
+            return
+        request_filters = json_payload(_row_value(snapshot, "filters") or {})
+        if not isinstance(request_filters, dict):
+            await mark_operation_failed(
+                operation_id,
+                code="AUDIT_EXPORT_REQUEST_INVALID",
+                details={"field": "filters"},
+            )
+            return
+        export_format = request_filters.get("format")
+        if export_format not in {"csv", "ndjson"}:
+            await mark_operation_failed(
+                operation_id,
+                code="AUDIT_EXPORT_REQUEST_INVALID",
+                details={"field": "format"},
+            )
+            return
+        try:
+            rows = await fetch_audit_export_rows_for_filters(
+                conn,
+                _row_value(snapshot, "entity_id"),
+                request_filters,
+                limit=AUDIT_EXPORT_ROW_CAP + 1,
+            )
+        except ValueError as exc:
+            await mark_operation_failed(
+                operation_id,
+                code="AUDIT_EXPORT_REQUEST_INVALID",
+                details={"message": str(exc)},
+            )
+            return
+        if len(rows) > AUDIT_EXPORT_ROW_CAP:
+            await mark_operation_failed(
+                operation_id,
+                code="AUDIT_EXPORT_ROW_CAP_EXCEEDED",
+                details={"limit": AUDIT_EXPORT_ROW_CAP},
+            )
+            return
+        artifact = serialize_audit_export(rows, str(export_format))
+
+    object_key = audit_export_object_key(operation_id, str(export_format))
+    try:
+        storage_uri = await write_audit_export_artifact(bucket_uri, object_key, artifact)
+    except AuditExportStorageError:
+        await mark_operation_failed(
+            operation_id,
+            code="AUDIT_EXPORT_STORE_FAILED",
+            details={"component": "audit_export_store"},
+        )
+        return
+
+    download_token = secrets.token_urlsafe(32)
+    download_token_hash = hashlib.sha256(download_token.encode("utf-8")).hexdigest()
+    download_expires_at = datetime.now(timezone.utc) + timedelta(minutes=5)
+    console_url = settings.raw.get("CONSOLE_URL", "http://localhost:8000").rstrip("/")
+    result = {
+        "download_url": f"{console_url}/api/v1/audit/exports/{download_token}",
+        "expires_at": timestamp(download_expires_at),
+        "content_type": artifact.content_type,
+        "sha256": artifact.sha256,
+        "row_count": artifact.row_count,
+        "byte_size": artifact.byte_size,
+    }
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                """
+                INSERT INTO audit_export_artifacts (
+                    operation_id,
+                    storage_uri,
+                    download_token_hash,
+                    content_type,
+                    sha256,
+                    row_count,
+                    byte_size,
+                    expires_at
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                ON CONFLICT (operation_id) DO NOTHING
+                """,
+                operation_id,
+                storage_uri,
+                download_token_hash,
+                artifact.content_type,
+                artifact.sha256,
+                artifact.row_count,
+                artifact.byte_size,
+                download_expires_at,
+            )
+            await insert_audit_event(
+                conn,
+                entity_id=_row_value(snapshot, "entity_id"),
+                actor_id=_row_value(snapshot, "actor_id"),
+                actor_email=_row_value(snapshot, "actor_email"),
+                action="AUDIT_EXPORT_ISSUED",
+                target_type="audit_export",
+                target_id=operation_id,
+                after={
+                    "row_count": artifact.row_count,
+                    "byte_size": artifact.byte_size,
+                    "sha256": artifact.sha256,
+                },
+            )
+            await conn.execute(
+                """
+                UPDATE operations
+                SET status = 'succeeded',
+                    progress_step = 'completed',
+                    progress_percent = 100,
+                    result = $2::jsonb,
+                    error = NULL,
+                    updated_at = now(),
+                    expires_at = $3
+                WHERE id = $1
+                  AND kind = 'audit.export'
+                  AND status = 'running'
+                """,
+                operation_id,
+                json.dumps(result),
+                operation_expiry(),
+            )
+
+
+async def fetch_audit_export_snapshot(conn: Any, operation_id: Any) -> Any | None:
+    return await conn.fetchrow(
+        """
+        SELECT
+            o.id,
+            o.actor_id,
+            o.actor_email,
+            r.entity_id,
+            r.filters
+        FROM operations o
+        JOIN audit_export_requests r ON r.operation_id = o.id
+        WHERE o.id = $1
+          AND o.kind = 'audit.export'
+          AND o.status = 'running'
+        """,
+        operation_id,
+    )
+
+
+async def fetch_audit_export_rows_for_filters(
+    conn: Any,
+    entity_id: Any,
+    filters: dict[str, Any],
+    *,
+    limit: int,
+) -> list[Any]:
+    clauses = ["(entity_id = $1 OR actor_id IN (SELECT id FROM users WHERE entity_id = $1))"]
+    values: list[Any] = [entity_id]
+
+    def bind(value: Any) -> str:
+        values.append(value)
+        return f"${len(values)}"
+
+    if filters.get("actor_id") is not None:
+        clauses.append(f"actor_id = {bind(UUID(str(filters['actor_id'])))}")
+    if filters.get("target_type") is not None:
+        clauses.append(f"target_type = {bind(str(filters['target_type']))}")
+    if filters.get("target_id") is not None:
+        clauses.append(f"target_id = {bind(str(filters['target_id']))}")
+    if filters.get("action") is not None:
+        clauses.append(f"action = {bind(str(filters['action']))}")
+    if filters.get("from") is not None:
+        clauses.append(f"timestamp >= {bind(audit_export_datetime_filter(filters['from']))}")
+    if filters.get("to") is not None:
+        clauses.append(f"timestamp <= {bind(audit_export_datetime_filter(filters['to']))}")
+
+    values.append(limit)
+    query = f"""
+        SELECT
+            seq, id, entity_id, actor_id, actor_email, action, target_type, target_id,
+            before, after, ip_address, description, request_id, timestamp, prev_hash, row_hash
+        FROM audit_events
+        WHERE {' AND '.join(clauses)}
+        ORDER BY seq ASC
+        LIMIT ${len(values)}
+    """
+    return list(await conn.fetch(query, *values))
+
+
+def audit_export_datetime_filter(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        return _as_utc(value)
+    if not isinstance(value, str):
+        raise ValueError("timestamp filter must be a string")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("timestamp filter is invalid") from exc
+    return _as_utc(parsed)
 
 
 async def execute_security_cvm_phala_deploy_operation(operation_id: Any) -> None:

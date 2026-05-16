@@ -10,15 +10,21 @@ from concrete_console import scheduler
 
 
 class FakeConn:
-    def __init__(self, *, fetch_rows=None, execute_result="UPDATE 1"):
+    def __init__(self, *, fetch_rows=None, fetchrow_row=None, execute_result="UPDATE 1"):
         self.fetch_rows = fetch_rows or []
+        self.fetchrow_row = fetchrow_row
         self.execute_result = execute_result
         self.fetch_calls: list[tuple[str, tuple[object, ...]]] = []
+        self.fetchrow_calls: list[tuple[str, tuple[object, ...]]] = []
         self.execute_calls: list[tuple[str, tuple[object, ...]]] = []
 
     async def fetch(self, query, *args):
         self.fetch_calls.append((query, args))
         return self.fetch_rows
+
+    async def fetchrow(self, query, *args):
+        self.fetchrow_calls.append((query, args))
+        return self.fetchrow_row
 
     async def execute(self, query, *args):
         self.execute_calls.append((query, args))
@@ -136,6 +142,9 @@ def test_executable_running_operation_recognizes_terminate_step() -> None:
     assert scheduler.executable_running_operation(
         operation_row(kind="security_cvm.provision", status="running", progress_step="fetch_ca")
     )
+    assert scheduler.executable_running_operation(
+        operation_row(kind="audit.export", status="running", progress_step="materialize")
+    )
 
 
 def test_pending_operation_start_is_executable_for_live_sagas() -> None:
@@ -144,7 +153,7 @@ def test_pending_operation_start_is_executable_for_live_sagas() -> None:
         operation_row(kind="security_cvm.provision", progress_step="persist_tokens_and_stub")
     )
     assert scheduler.pending_operation_start_is_executable(operation_row(kind="cvm.terminate", progress_step="queued"))
-    assert not scheduler.pending_operation_start_is_executable(
+    assert scheduler.pending_operation_start_is_executable(
         operation_row(kind="audit.export", progress_step="queued", progress_percent=0)
     )
 
@@ -183,6 +192,121 @@ def test_run_operation_scheduler_pass_executes_newly_started_pending_row(monkeyp
 
     assert claimed == ["00000000-0000-4000-8000-000000000030"]
     assert executed == [UUID("00000000-0000-4000-8000-000000000030")]
+
+
+def test_execute_running_operation_dispatches_audit_export(monkeypatch) -> None:
+    operation_id = UUID("00000000-0000-4000-8000-000000000030")
+    conn = FakeConn(
+        fetchrow_row=operation_row(
+            id=operation_id,
+            kind="audit.export",
+            status="running",
+            progress_step="materialize",
+        )
+    )
+    executed: list[object] = []
+
+    async def fake_get_pool():
+        return LaunchFakePool(conn)
+
+    async def fake_execute_audit_export_operation(dispatched_operation_id):
+        executed.append(dispatched_operation_id)
+
+    monkeypatch.setattr(scheduler, "get_pool", fake_get_pool)
+    monkeypatch.setattr(scheduler, "execute_audit_export_operation", fake_execute_audit_export_operation)
+
+    assert asyncio.run(scheduler.execute_running_operation(operation_id)) is True
+    assert executed == [operation_id]
+
+
+def audit_event_row(**overrides):
+    now = scheduler.datetime.now(scheduler.timezone.utc)
+    row = {
+        "seq": 1,
+        "id": UUID("00000000-0000-4000-8000-000000000071"),
+        "entity_id": UUID("00000000-0000-4000-8000-000000000001"),
+        "actor_id": UUID("00000000-0000-4000-8000-000000000020"),
+        "actor_email": "dev@example.com",
+        "action": "USER_REGISTERED",
+        "target_type": "user",
+        "target_id": "00000000-0000-4000-8000-000000000020",
+        "before": None,
+        "after": {"email": "dev@example.com"},
+        "ip_address": None,
+        "description": "user registered",
+        "request_id": "req-1",
+        "timestamp": now,
+        "prev_hash": "0" * 64,
+        "row_hash": "1" * 64,
+    }
+    row.update(overrides)
+    return row
+
+
+class AuditExportConn:
+    def __init__(self):
+        self.operation_id = UUID("00000000-0000-4000-8000-000000000030")
+        self.entity_id = UUID("00000000-0000-4000-8000-000000000001")
+        self.actor_id = UUID("00000000-0000-4000-8000-000000000020")
+        self.execute_calls: list[tuple[str, tuple[object, ...]]] = []
+        self.audit_calls: list[dict[str, object]] = []
+
+    def transaction(self):
+        return AsyncContext()
+
+    async def fetchrow(self, query, *args):
+        assert "JOIN audit_export_requests" in query
+        return {
+            "id": self.operation_id,
+            "actor_id": self.actor_id,
+            "actor_email": "dev@example.com",
+            "entity_id": self.entity_id,
+            "filters": {"format": "ndjson", "action": "USER_REGISTERED"},
+        }
+
+    async def fetch(self, query, *args):
+        assert "FROM audit_events" in query
+        assert "action = $2" in query
+        assert args == (self.entity_id, "USER_REGISTERED", scheduler.AUDIT_EXPORT_ROW_CAP + 1)
+        return [audit_event_row(entity_id=self.entity_id, actor_id=self.actor_id)]
+
+    async def execute(self, query, *args):
+        self.execute_calls.append((query, args))
+        return "UPDATE 1"
+
+
+def test_execute_audit_export_operation_materializes_artifact_and_result(monkeypatch) -> None:
+    conn = AuditExportConn()
+    written: list[tuple[str, str, object]] = []
+
+    async def fake_get_pool():
+        return LaunchFakePool(conn)
+
+    async def fake_write_artifact(bucket_uri, object_key, artifact):
+        written.append((bucket_uri, object_key, artifact))
+        return f"file:///tmp/{object_key}"
+
+    async def fake_insert_audit_event(_conn, **kwargs):
+        conn.audit_calls.append(kwargs)
+
+    monkeypatch.setenv("AUDIT_EXPORT_BUCKET", "file:///tmp/concrete-audit-exports")
+    monkeypatch.setenv("CONSOLE_URL", "https://console.example.com")
+    monkeypatch.setattr(scheduler, "get_pool", fake_get_pool)
+    monkeypatch.setattr(scheduler, "write_audit_export_artifact", fake_write_artifact)
+    monkeypatch.setattr(scheduler, "insert_audit_event", fake_insert_audit_event)
+
+    asyncio.run(scheduler.execute_audit_export_operation(conn.operation_id))
+
+    assert written[0][0] == "file:///tmp/concrete-audit-exports"
+    assert written[0][1] == "audit-exports/00000000-0000-4000-8000-000000000030.ndjson"
+    assert written[0][2].row_count == 1
+    assert conn.audit_calls[0]["action"] == "AUDIT_EXPORT_ISSUED"
+    operation_updates = [args for query, args in conn.execute_calls if "UPDATE operations" in query]
+    assert len(operation_updates) == 1
+    result = json.loads(operation_updates[0][1])
+    assert result["download_url"].startswith("https://console.example.com/api/v1/audit/exports/")
+    assert result["content_type"] == "application/x-ndjson"
+    assert result["row_count"] == 1
 
 
 def test_execute_operation_step_with_logging_records_elapsed(monkeypatch) -> None:
