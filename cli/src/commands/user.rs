@@ -111,6 +111,12 @@ fn add(config: &ResolvedConfig, args: UserAddArgs, json_output: bool) -> ExitSta
             return ExitStatus::Usage;
         }
     };
+    if let Some(entity_id) = &args.entity {
+        if let Err(message) = validate_uuid("--entity", entity_id) {
+            eprintln!("{message}");
+            return ExitStatus::Usage;
+        }
+    }
     let (console_url, session) = match console_session(config) {
         Ok(value) => value,
         Err((status, message)) => {
@@ -118,7 +124,21 @@ fn add(config: &ResolvedConfig, args: UserAddArgs, json_output: bool) -> ExitSta
             return status;
         }
     };
-    let created = match create_user(console_url, &session, &args.email, &name, &args.permissions) {
+    let target_entity_id = match target_entity_id(args.entity.as_ref(), &session.entity.id) {
+        Ok(value) => value,
+        Err(message) => {
+            eprintln!("{message}");
+            return ExitStatus::Usage;
+        }
+    };
+    let created = match create_user(
+        console_url,
+        &session.access_token,
+        &target_entity_id,
+        &args.email,
+        &name,
+        &args.permissions,
+    ) {
         Ok(value) => value.user,
         Err((status, message)) => {
             eprintln!("{message}");
@@ -148,7 +168,7 @@ fn add(config: &ResolvedConfig, args: UserAddArgs, json_output: bool) -> ExitSta
     let output = if profile_ids.is_empty() {
         created
     } else {
-        match fetch_user_with_etag(console_url, &session, &created.id) {
+        match fetch_user_with_etag(console_url, &session, &target_entity_id, &created.id) {
             Ok(value) => value.user,
             Err((status, message)) => {
                 eprintln!("{message}");
@@ -217,7 +237,7 @@ fn show(config: &ResolvedConfig, user_id: &str, json_output: bool) -> ExitStatus
             return status;
         }
     };
-    let user = match fetch_user_with_etag(console_url, &session, user_id) {
+    let user = match fetch_user_with_etag(console_url, &session, &session.entity.id, user_id) {
         Ok(value) => value.user,
         Err((status, message)) => {
             eprintln!("{message}");
@@ -324,7 +344,7 @@ fn permissions_list(config: &ResolvedConfig, user_id: &str, json_output: bool) -
             return status;
         }
     };
-    let user = match fetch_user_with_etag(console_url, &session, user_id) {
+    let user = match fetch_user_with_etag(console_url, &session, &session.entity.id, user_id) {
         Ok(value) => value.user,
         Err((status, message)) => {
             eprintln!("{message}");
@@ -364,7 +384,7 @@ fn permissions_grant(
             return status;
         }
     };
-    let user = match fetch_user_with_etag(console_url, &session, user_id) {
+    let user = match fetch_user_with_etag(console_url, &session, &session.entity.id, user_id) {
         Ok(value) => value,
         Err((status, message)) => {
             eprintln!("{message}");
@@ -421,7 +441,7 @@ fn permissions_revoke(
         }
     };
     for permission in &permissions {
-        let user = match fetch_user_with_etag(console_url, &session, user_id) {
+        let user = match fetch_user_with_etag(console_url, &session, &session.entity.id, user_id) {
             Ok(value) => value,
             Err((status, message)) => {
                 eprintln!("{message}");
@@ -485,12 +505,12 @@ fn fetch_users(console_url: &str, session: &Session) -> Result<UserListPage, (Ex
 fn fetch_user_with_etag(
     console_url: &str,
     session: &Session,
+    entity_id: &str,
     user_id: &str,
 ) -> Result<UserWithEtag, (ExitStatus, String)> {
     let response = Client::new()
         .get(format!(
-            "{console_url}/api/v1/entities/{}/users/{user_id}",
-            session.entity.id
+            "{console_url}/api/v1/entities/{entity_id}/users/{user_id}"
         ))
         .bearer_auth(&session.access_token)
         .send()
@@ -505,17 +525,15 @@ fn fetch_user_with_etag(
 
 fn create_user(
     console_url: &str,
-    session: &Session,
+    access_token: &str,
+    entity_id: &str,
     email: &str,
     name: &str,
     permissions: &[String],
 ) -> Result<UserWithEtag, (ExitStatus, String)> {
     let response = Client::new()
-        .post(format!(
-            "{console_url}/api/v1/entities/{}/users",
-            session.entity.id
-        ))
-        .bearer_auth(&session.access_token)
+        .post(format!("{console_url}/api/v1/entities/{entity_id}/users"))
+        .bearer_auth(access_token)
         .header("Idempotency-Key", Uuid::new_v4().to_string())
         .json(&json!({ "email": email, "name": name, "permissions": permissions }))
         .send()
@@ -783,6 +801,19 @@ fn validate_uuid(name: &str, value: &str) -> Result<(), String> {
         .map_err(|_| format!("[usage] {name} must be a UUID"))
 }
 
+fn target_entity_id(
+    entity_arg: Option<&String>,
+    session_entity_id: &str,
+) -> Result<String, String> {
+    match entity_arg {
+        Some(entity_id) => {
+            validate_uuid("--entity", entity_id)?;
+            Ok(entity_id.clone())
+        }
+        None => Ok(session_entity_id.to_string()),
+    }
+}
+
 fn validate_email(value: &str) -> Result<(), String> {
     let (local, domain) = value
         .split_once('@')
@@ -880,6 +911,35 @@ mod tests {
         assert_eq!(
             validate_email("jane@").expect_err("missing domain is rejected"),
             "[usage] EMAIL must be a valid email address"
+        );
+    }
+
+    #[test]
+    fn target_entity_id_defaults_to_session_entity() {
+        assert_eq!(
+            target_entity_id(None, "00000000-0000-4000-8000-000000000001").as_deref(),
+            Ok("00000000-0000-4000-8000-000000000001")
+        );
+    }
+
+    #[test]
+    fn target_entity_id_accepts_entity_override() {
+        let entity_id = "00000000-0000-4000-8000-000000000002".to_string();
+
+        assert_eq!(
+            target_entity_id(Some(&entity_id), "00000000-0000-4000-8000-000000000001").as_deref(),
+            Ok("00000000-0000-4000-8000-000000000002")
+        );
+    }
+
+    #[test]
+    fn target_entity_id_rejects_bad_entity_override() {
+        let entity_id = "not-a-uuid".to_string();
+
+        assert_eq!(
+            target_entity_id(Some(&entity_id), "00000000-0000-4000-8000-000000000001")
+                .expect_err("bad entity id is rejected"),
+            "[usage] --entity must be a UUID"
         );
     }
 

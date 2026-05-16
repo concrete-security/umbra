@@ -566,7 +566,7 @@ pub struct TrafficLogsArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum UserCommand {
-    /// Add a user to the current entity.
+    /// Add a user to an entity.
     Add(UserAddArgs),
 
     /// List users in the current entity.
@@ -605,6 +605,10 @@ pub enum UserCommand {
 pub struct UserAddArgs {
     /// User email address.
     pub email: String,
+
+    /// Entity UUID to add the user to. Defaults to the current session entity.
+    #[arg(long)]
+    pub entity: Option<String>,
 
     /// User display name. Defaults to the email local-part.
     #[arg(long)]
