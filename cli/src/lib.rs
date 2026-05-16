@@ -44,6 +44,8 @@ pub fn run() -> ExitCode {
     let json_output = config.output == config::OutputFormat::Json;
     let status = match args.command {
         cli::Command::Admin(command) => commands::admin::run(command, &config, json_output),
+        cli::Command::Alias(args) => commands::ssh::run_alias(args, &config, json_output),
+        cli::Command::Attach(args) => commands::ssh::run_attach(args, &config),
         cli::Command::Audit(command) => commands::audit::run(command, &config, json_output),
         cli::Command::Auth(command) => commands::auth::run(command, &config, json_output),
         cli::Command::Claude(args) => commands::ssh::run_agent(args, &config, "claude"),
@@ -65,7 +67,9 @@ pub fn run() -> ExitCode {
         cli::Command::Cvm(command) => commands::cvm::run(command, &config, json_output),
         cli::Command::Entity(command) => commands::entity::run(command, &config, json_output),
         cli::Command::Key(command) => commands::key::run(command, &config, json_output),
+        cli::Command::Kill(args) => commands::ssh::run_kill(args, &config, json_output),
         cli::Command::Profile(command) => commands::profile::run(command, &config, json_output),
+        cli::Command::Ps(args) => commands::ssh::run_ps(args, &config, json_output),
         cli::Command::Quota(command) => commands::quota::run(command, &config, json_output),
         cli::Command::Reconcile(reconcile_args) => {
             commands::reconcile::run(reconcile_args, &config, json_output)

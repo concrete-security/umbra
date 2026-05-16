@@ -65,9 +65,15 @@ pub enum Command {
     #[command(subcommand)]
     Admin(AdminCommand),
 
+    /// Assign a local alias to a remote dtach session.
+    Alias(AliasArgs),
+
     /// Authenticate and inspect the local Console session.
     #[command(subcommand)]
     Auth(AuthCommand),
+
+    /// Attach to a dtach session on a Dev CVM.
+    Attach(SessionTargetArgs),
 
     /// Launch or attach a Claude session on a Dev CVM.
     Claude(AgentSessionArgs),
@@ -102,9 +108,15 @@ pub enum Command {
     #[command(subcommand)]
     Key(KeyCommand),
 
+    /// Kill a dtach session on a Dev CVM.
+    Kill(SessionTargetArgs),
+
     /// Manage profiles and profile membership.
     #[command(subcommand)]
     Profile(ProfileCommand),
+
+    /// List active dtach sessions on a Dev CVM.
+    Ps(SessionListArgs),
 
     /// Manage entity and user quotas.
     #[command(subcommand)]
@@ -420,6 +432,36 @@ pub struct AgentSessionArgs {
     pub name: Option<String>,
 
     /// Private SSH key to pass to ssh(1).
+    #[arg(long)]
+    pub identity_file: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct SessionListArgs {
+    /// Private SSH key to pass to ssh(1).
+    #[arg(long)]
+    pub identity_file: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct SessionTargetArgs {
+    /// dtach session name or client-side alias.
+    pub target: String,
+
+    /// Private SSH key to pass to ssh(1).
+    #[arg(long)]
+    pub identity_file: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct AliasArgs {
+    /// dtach session name as reported by concrete ps.
+    pub name: String,
+
+    /// Client-side alias to assign.
+    pub alias: String,
+
+    /// Private SSH key to pass to ssh(1) while checking remote session names.
     #[arg(long)]
     pub identity_file: Option<PathBuf>,
 }

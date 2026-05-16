@@ -1,15 +1,22 @@
 use std::{
+    collections::BTreeMap,
     env,
+    fs::{self, OpenOptions},
+    io::Write,
     path::{Path, PathBuf},
     process::Command,
 };
 
 use chrono::Utc;
 use reqwest::blocking::Client;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 use crate::{
-    cli::{AgentSessionArgs, SshArgs},
+    cli::{AgentSessionArgs, AliasArgs, SessionListArgs, SessionTargetArgs, SshArgs},
     commands::auth,
     config::ResolvedConfig,
     exit::ExitStatus,
@@ -28,6 +35,19 @@ struct SshInvocation<'a> {
     identity_file: Option<&'a Path>,
     remote_command: String,
     allocate_tty: bool,
+}
+
+struct PreparedSsh {
+    fqdn: String,
+    proxy_command: String,
+}
+
+#[derive(Debug, Serialize)]
+struct SessionRow {
+    name: String,
+    attached: bool,
+    alias: Option<String>,
+    created_at: String,
 }
 
 pub fn run(args: SshArgs, config: &ResolvedConfig) -> ExitStatus {
@@ -84,76 +104,197 @@ pub fn run_agent(
     )
 }
 
-fn run_ssh(invocation: SshInvocation<'_>, config: &ResolvedConfig) -> ExitStatus {
-    let cvm_id = match selected_cvm_id(invocation.cvm_id, config) {
+pub fn run_ps(args: SessionListArgs, config: &ResolvedConfig, json_output: bool) -> ExitStatus {
+    let cvm_id = match selected_cvm_id(None, config) {
         Ok(value) => value,
         Err(message) => {
             eprintln!("{message}");
             return ExitStatus::Usage;
         }
     };
-    let (console_url, session) = match console_session(config) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            eprintln!("{message}");
-            return status;
-        }
-    };
-    let cvm = match fetch_cvm(console_url, &session, &cvm_id) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            eprintln!("{message}");
-            return status;
-        }
-    };
-    if cvm.state != "RUNNING" {
-        eprintln!(
-            "[error] Dev CVM {} is in state {}, expected RUNNING",
-            cvm.id, cvm.state
-        );
-        return ExitStatus::Error;
-    }
-    let fqdn = match cvm.fqdn.as_deref() {
-        Some(value) if !value.is_empty() => value,
-        _ => {
-            eprintln!("[error] Dev CVM {} does not have an FQDN yet", cvm.id);
-            return ExitStatus::Error;
-        }
-    };
-    let policy_path = match resolve_policy_path(config, console_url, &session, &cvm.id) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            eprintln!("{message}");
-            return status;
-        }
-    };
-    let proxy_command = match proxy_command(config, &policy_path, fqdn) {
+    let aliases = match aliases_by_session(&config.config_dir, &cvm_id) {
         Ok(value) => value,
         Err(message) => {
             eprintln!("{message}");
             return ExitStatus::Error;
         }
     };
-    let mut ssh = Command::new("ssh");
-    ssh.arg("-o")
-        .arg(format!("ProxyCommand={proxy_command}"))
-        .arg("-o")
-        .arg("StrictHostKeyChecking=no")
-        .arg("-o")
-        .arg("UserKnownHostsFile=/dev/null")
-        .arg("-o")
-        .arg("LogLevel=ERROR")
-        .arg("-o")
-        .arg("BatchMode=yes")
-        .arg("-o")
-        .arg("ConnectTimeout=30");
-    if let Some(identity_file) = invocation.identity_file {
-        ssh.arg("-i").arg(identity_file);
+    let output = match run_ssh_capture(
+        SshInvocation {
+            cvm_id: Some(&cvm_id),
+            identity_file: args.identity_file.as_deref(),
+            remote_command: ps_remote_command(),
+            allocate_tty: false,
+        },
+        config,
+    ) {
+        Ok(value) => value,
+        Err((status, message)) => {
+            eprintln!("{message}");
+            return status;
+        }
+    };
+    let rows = match parse_session_rows(&output, &aliases) {
+        Ok(value) => value,
+        Err(message) => {
+            eprintln!("{message}");
+            return ExitStatus::Error;
+        }
+    };
+    print_session_rows(&rows, json_output);
+    ExitStatus::Ok
+}
+
+pub fn run_attach(args: SessionTargetArgs, config: &ResolvedConfig) -> ExitStatus {
+    let cvm_id = match selected_cvm_id(None, config) {
+        Ok(value) => value,
+        Err(message) => {
+            eprintln!("{message}");
+            return ExitStatus::Usage;
+        }
+    };
+    let session_name = match resolve_target(&config.config_dir, &cvm_id, &args.target) {
+        Ok(value) => value,
+        Err(message) => {
+            eprintln!("{message}");
+            return ExitStatus::Error;
+        }
+    };
+    run_ssh(
+        SshInvocation {
+            cvm_id: Some(&cvm_id),
+            identity_file: args.identity_file.as_deref(),
+            remote_command: attach_remote_command(&session_name),
+            allocate_tty: true,
+        },
+        config,
+    )
+}
+
+pub fn run_kill(args: SessionTargetArgs, config: &ResolvedConfig, json_output: bool) -> ExitStatus {
+    let cvm_id = match selected_cvm_id(None, config) {
+        Ok(value) => value,
+        Err(message) => {
+            eprintln!("{message}");
+            return ExitStatus::Usage;
+        }
+    };
+    let session_name = match resolve_target(&config.config_dir, &cvm_id, &args.target) {
+        Ok(value) => value,
+        Err(message) => {
+            eprintln!("{message}");
+            return ExitStatus::Error;
+        }
+    };
+    match run_ssh_capture(
+        SshInvocation {
+            cvm_id: Some(&cvm_id),
+            identity_file: args.identity_file.as_deref(),
+            remote_command: kill_remote_command(&session_name),
+            allocate_tty: false,
+        },
+        config,
+    ) {
+        Ok(_) => {
+            if json_output {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "cvm_id": cvm_id,
+                        "session_name": session_name,
+                    }))
+                    .expect("kill output serializes")
+                );
+            } else {
+                println!("killed session {session_name} on {cvm_id}");
+            }
+            ExitStatus::Ok
+        }
+        Err((status, message)) => {
+            eprintln!("{message}");
+            status
+        }
     }
-    if invocation.allocate_tty {
-        ssh.arg("-t");
+}
+
+pub fn run_alias(args: AliasArgs, config: &ResolvedConfig, json_output: bool) -> ExitStatus {
+    let cvm_id = match selected_cvm_id(None, config) {
+        Ok(value) => value,
+        Err(message) => {
+            eprintln!("{message}");
+            return ExitStatus::Usage;
+        }
+    };
+    if let Err(message) = validate_session_name(&args.name) {
+        eprintln!("{message}");
+        return ExitStatus::Usage;
     }
-    ssh.arg(format!("dev@{fqdn}"));
+    if let Err(message) = validate_session_name(&args.alias) {
+        eprintln!("{message}");
+        return ExitStatus::Usage;
+    }
+    let output = match run_ssh_capture(
+        SshInvocation {
+            cvm_id: Some(&cvm_id),
+            identity_file: args.identity_file.as_deref(),
+            remote_command: ps_remote_command(),
+            allocate_tty: false,
+        },
+        config,
+    ) {
+        Ok(value) => value,
+        Err((status, message)) => {
+            eprintln!("{message}");
+            return status;
+        }
+    };
+    let rows = match parse_session_rows(&output, &BTreeMap::new()) {
+        Ok(value) => value,
+        Err(message) => {
+            eprintln!("{message}");
+            return ExitStatus::Error;
+        }
+    };
+    if rows.iter().any(|row| row.name == args.alias) {
+        eprintln!(
+            "[error] alias {} collides with an existing dtach session name",
+            args.alias
+        );
+        return ExitStatus::Error;
+    }
+    if !rows.iter().any(|row| row.name == args.name) {
+        eprintln!("[error] session {} was not found on {}", args.name, cvm_id);
+        return ExitStatus::Error;
+    }
+    if let Err(message) = write_alias(&config.config_dir, &cvm_id, &args.name, &args.alias) {
+        eprintln!("{message}");
+        return ExitStatus::Error;
+    }
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "cvm_id": cvm_id,
+                "session_name": args.name,
+                "alias": args.alias,
+            }))
+            .expect("alias output serializes")
+        );
+    } else {
+        println!("alias {} -> {} on {}", args.alias, args.name, cvm_id);
+    }
+    ExitStatus::Ok
+}
+
+fn run_ssh(invocation: SshInvocation<'_>, config: &ResolvedConfig) -> ExitStatus {
+    let prepared = match prepare_ssh(invocation.cvm_id, config) {
+        Ok(value) => value,
+        Err((status, message)) => {
+            eprintln!("{message}");
+            return status;
+        }
+    };
+    let mut ssh = base_ssh_command(&prepared, invocation.identity_file, invocation.allocate_tty);
     ssh.arg(invocation.remote_command);
     match ssh.status() {
         Ok(status) if status.success() => ExitStatus::Ok,
@@ -166,6 +307,125 @@ fn run_ssh(invocation: SshInvocation<'_>, config: &ResolvedConfig) -> ExitStatus
             ExitStatus::Error
         }
     }
+}
+
+fn run_ssh_capture(
+    invocation: SshInvocation<'_>,
+    config: &ResolvedConfig,
+) -> Result<String, (ExitStatus, String)> {
+    let prepared = prepare_ssh(invocation.cvm_id, config)?;
+    let mut ssh = base_ssh_command(&prepared, invocation.identity_file, invocation.allocate_tty);
+    ssh.arg(invocation.remote_command);
+    let output = ssh.output().map_err(|err| {
+        (
+            ExitStatus::Error,
+            format!("[error] failed to invoke ssh: {err}"),
+        )
+    })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let detail = if stderr.is_empty() {
+            format!("{}", output.status)
+        } else {
+            format!("{}: {}", output.status, stderr)
+        };
+        return Err((
+            ExitStatus::Error,
+            format!("[error] ssh exited with {detail}"),
+        ));
+    }
+    String::from_utf8(output.stdout).map_err(|err| {
+        (
+            ExitStatus::Error,
+            format!("[error] SSH output was not UTF-8: {err}"),
+        )
+    })
+}
+
+fn prepare_ssh(
+    cvm_id_arg: Option<&str>,
+    config: &ResolvedConfig,
+) -> Result<PreparedSsh, (ExitStatus, String)> {
+    let cvm_id = match selected_cvm_id(cvm_id_arg, config) {
+        Ok(value) => value,
+        Err(message) => {
+            return Err((ExitStatus::Usage, message));
+        }
+    };
+    let (console_url, session) = match console_session(config) {
+        Ok(value) => value,
+        Err((status, message)) => {
+            return Err((status, message));
+        }
+    };
+    let cvm = match fetch_cvm(console_url, &session, &cvm_id) {
+        Ok(value) => value,
+        Err((status, message)) => {
+            return Err((status, message));
+        }
+    };
+    if cvm.state != "RUNNING" {
+        return Err((
+            ExitStatus::Error,
+            format!(
+                "[error] Dev CVM {} is in state {}, expected RUNNING",
+                cvm.id, cvm.state
+            ),
+        ));
+    }
+    let fqdn = match cvm.fqdn.as_deref() {
+        Some(value) if !value.is_empty() => value.to_string(),
+        _ => {
+            return Err((
+                ExitStatus::Error,
+                format!("[error] Dev CVM {} does not have an FQDN yet", cvm.id),
+            ));
+        }
+    };
+    let policy_path = match resolve_policy_path(config, console_url, &session, &cvm.id) {
+        Ok(value) => value,
+        Err((status, message)) => {
+            return Err((status, message));
+        }
+    };
+    let proxy_command = match proxy_command(config, &policy_path, &fqdn) {
+        Ok(value) => value,
+        Err(message) => {
+            return Err((ExitStatus::Error, message));
+        }
+    };
+    Ok(PreparedSsh {
+        fqdn,
+        proxy_command,
+    })
+}
+
+fn base_ssh_command(
+    prepared: &PreparedSsh,
+    identity_file: Option<&Path>,
+    allocate_tty: bool,
+) -> Command {
+    let mut ssh = Command::new("ssh");
+    ssh.arg("-o")
+        .arg(format!("ProxyCommand={}", prepared.proxy_command))
+        .arg("-o")
+        .arg("StrictHostKeyChecking=no")
+        .arg("-o")
+        .arg("UserKnownHostsFile=/dev/null")
+        .arg("-o")
+        .arg("LogLevel=ERROR")
+        .arg("-o")
+        .arg("BatchMode=yes")
+        .arg("-o")
+        .arg("ConnectTimeout=30");
+    if let Some(identity_file) = identity_file {
+        ssh.arg("-i").arg(identity_file);
+    }
+    if allocate_tty {
+        ssh.arg("-t");
+    }
+    ssh.arg(format!("dev@{}", prepared.fqdn));
+    ssh
 }
 
 fn selected_cvm_id(arg: Option<&str>, config: &ResolvedConfig) -> Result<String, String> {
@@ -286,6 +546,163 @@ fn dtach_remote_command(session_name: &str, program_command: &str) -> String {
         shell_quote(&socket),
         program_command,
     )
+}
+
+fn ps_remote_command() -> String {
+    "dir=/run/concrete/sessions; [ -d \"$dir\" ] || exit 0; for sock in \"$dir\"/*.sock; do [ -e \"$sock\" ] || continue; name=${sock##*/}; name=${name%.sock}; if fuser \"$sock\" >/dev/null 2>&1 || lsof \"$sock\" >/dev/null 2>&1; then attached=true; else attached=false; fi; created=$(stat -c %Y \"$sock\" 2>/dev/null || stat -f %m \"$sock\"); printf '%s\\t%s\\t%s\\n' \"$name\" \"$attached\" \"$created\"; done".to_string()
+}
+
+fn attach_remote_command(session_name: &str) -> String {
+    let socket = format!("/run/concrete/sessions/{session_name}.sock");
+    format!(
+        "sock={}; [ -S \"$sock\" ] || {{ echo \"missing session\" >&2; exit 1; }}; exec dtach -a \"$sock\" -r winch",
+        shell_quote(&socket),
+    )
+}
+
+fn kill_remote_command(session_name: &str) -> String {
+    let socket = format!("/run/concrete/sessions/{session_name}.sock");
+    format!(
+        "sock={}; [ -S \"$sock\" ] || {{ echo \"missing session\" >&2; exit 1; }}; pids=$(fuser \"$sock\" 2>/dev/null || true); if [ -z \"$pids\" ] && command -v lsof >/dev/null 2>&1; then pids=$(lsof -t \"$sock\" 2>/dev/null || true); fi; if [ -n \"$pids\" ]; then kill -TERM $pids 2>/dev/null || true; sleep 1; for pid in $pids; do kill -0 \"$pid\" 2>/dev/null && kill -KILL \"$pid\" 2>/dev/null || true; done; fi; rm -f \"$sock\"",
+        shell_quote(&socket),
+    )
+}
+
+fn parse_session_rows(
+    output: &str,
+    aliases_by_session: &BTreeMap<String, String>,
+) -> Result<Vec<SessionRow>, String> {
+    let mut rows = Vec::new();
+    for line in output.lines().filter(|line| !line.trim().is_empty()) {
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() != 3 {
+            return Err("[error] malformed session listing returned by Dev CVM".to_string());
+        }
+        let created_epoch = parts[2].parse::<i64>().map_err(|_| {
+            "[error] malformed session creation time returned by Dev CVM".to_string()
+        })?;
+        rows.push(SessionRow {
+            name: parts[0].to_string(),
+            attached: parts[1] == "true",
+            alias: aliases_by_session.get(parts[0]).cloned(),
+            created_at: format_epoch(created_epoch),
+        });
+    }
+    rows.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(rows)
+}
+
+fn print_session_rows(rows: &[SessionRow], json_output: bool) {
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(rows).expect("session rows serialize")
+        );
+        return;
+    }
+    if rows.is_empty() {
+        println!("sessions none");
+        return;
+    }
+    for row in rows {
+        println!(
+            "session {} attached={} alias={} created_at={}",
+            row.name,
+            row.attached,
+            row.alias.as_deref().unwrap_or("-"),
+            row.created_at
+        );
+    }
+}
+
+fn format_epoch(value: i64) -> String {
+    chrono::DateTime::<Utc>::from_timestamp(value, 0)
+        .map(|timestamp| timestamp.to_rfc3339())
+        .unwrap_or_else(|| value.to_string())
+}
+
+type AliasMap = BTreeMap<String, BTreeMap<String, String>>;
+
+fn aliases_path(config_dir: &Path) -> PathBuf {
+    config_dir.join("aliases.toml")
+}
+
+fn load_alias_file(config_dir: &Path) -> Result<AliasMap, String> {
+    let path = aliases_path(config_dir);
+    if !path.exists() {
+        return Ok(BTreeMap::new());
+    }
+    let data = fs::read_to_string(&path)
+        .map_err(|err| format!("[error] failed to read aliases file: {err}"))?;
+    toml::from_str(&data).map_err(|err| format!("[error] malformed aliases file: {err}"))
+}
+
+fn aliases_for_cvm(config_dir: &Path, cvm_id: &str) -> Result<BTreeMap<String, String>, String> {
+    Ok(load_alias_file(config_dir)?
+        .remove(cvm_id)
+        .unwrap_or_default())
+}
+
+fn aliases_by_session(config_dir: &Path, cvm_id: &str) -> Result<BTreeMap<String, String>, String> {
+    let mut by_session = BTreeMap::new();
+    for (alias, session_name) in aliases_for_cvm(config_dir, cvm_id)? {
+        by_session.entry(session_name).or_insert(alias);
+    }
+    Ok(by_session)
+}
+
+fn resolve_target(config_dir: &Path, cvm_id: &str, target: &str) -> Result<String, String> {
+    validate_session_name(target)?;
+    let aliases = aliases_for_cvm(config_dir, cvm_id)?;
+    Ok(aliases
+        .get(target)
+        .cloned()
+        .unwrap_or_else(|| target.to_string()))
+}
+
+fn write_alias(
+    config_dir: &Path,
+    cvm_id: &str,
+    session_name: &str,
+    alias: &str,
+) -> Result<(), String> {
+    let mut aliases = load_alias_file(config_dir)?;
+    aliases
+        .entry(cvm_id.to_string())
+        .or_default()
+        .insert(alias.to_string(), session_name.to_string());
+    fs::create_dir_all(config_dir)
+        .map_err(|err| format!("[error] failed to create config directory: {err}"))?;
+    #[cfg(unix)]
+    {
+        fs::set_permissions(config_dir, fs::Permissions::from_mode(0o700)).map_err(|err| {
+            format!("[error] failed to tighten config directory permissions: {err}")
+        })?;
+    }
+    let data = toml::to_string_pretty(&aliases)
+        .map_err(|err| format!("[error] failed to serialize aliases file: {err}"))?;
+    let target = aliases_path(config_dir);
+    let tmp = config_dir.join(format!(".aliases.{}.tmp", std::process::id()));
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = options
+        .open(&tmp)
+        .map_err(|err| format!("[error] failed to create temporary aliases file: {err}"))?;
+    file.write_all(data.as_bytes())
+        .and_then(|_| file.sync_all())
+        .map_err(|err| format!("[error] failed to write aliases file: {err}"))?;
+    fs::rename(&tmp, &target)
+        .map_err(|err| format!("[error] failed to install aliases file: {err}"))?;
+    #[cfg(unix)]
+    {
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o600))
+            .map_err(|err| format!("[error] failed to tighten aliases file permissions: {err}"))?;
+    }
+    Ok(())
 }
 
 fn validate_session_name(value: &str) -> Result<&str, String> {
