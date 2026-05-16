@@ -195,6 +195,26 @@ def test_cors_preflight_is_rejected_without_cors_headers() -> None:
     }
 
 
+def test_uppercase_uuid_path_segment_is_rejected_before_route_parsing() -> None:
+    app_module.clear_rate_limit_state()
+
+    response = TestClient(app).get(
+        "/api/v1/cvms/00000000-0000-4000-8000-0000000000AA",
+        headers={"X-Request-Id": "uuid-request"},
+    )
+
+    assert response.status_code == 400
+    assert response.headers["x-request-id"] == "uuid-request"
+    assert response.json() == {
+        "error": {
+            "code": "BAD_REQUEST",
+            "message": "path UUIDs must use canonical lowercase form",
+            "details": {},
+            "request_id": "uuid-request",
+        }
+    }
+
+
 def test_bodyless_api_request_does_not_require_content_type() -> None:
     app_module.clear_rate_limit_state()
     request = SimpleNamespace(

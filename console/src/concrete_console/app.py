@@ -26,6 +26,12 @@ from concrete_console.routes import router
 from concrete_console.scheduler import start_operation_scheduler, stop_operation_scheduler
 
 REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+UUID_PATH_SEGMENT_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+CANONICAL_UUID_PATH_SEGMENT_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
 RATE_LIMIT_WINDOW_SECONDS = 60.0
 ANONYMOUS_IP_RPM = 60
 AUTHENTICATED_IP_RPM = 600
@@ -230,6 +236,15 @@ async def request_guard_response(request: Request, request_id: str) -> JSONRespo
             request_id,
         )
 
+    if has_noncanonical_uuid_path_segment(request.url.path):
+        return error_response(
+            400,
+            "BAD_REQUEST",
+            "path UUIDs must use canonical lowercase form",
+            {},
+            request_id,
+        )
+
     body_limit = request_body_limit(request.url.path)
     if body_limit is not None:
         raw_length = request.headers.get("content-length")
@@ -274,6 +289,14 @@ def is_cors_preflight(request: Request) -> bool:
         request.method == "OPTIONS"
         and "origin" in request.headers
         and "access-control-request-method" in request.headers
+    )
+
+
+def has_noncanonical_uuid_path_segment(path: str) -> bool:
+    return any(
+        UUID_PATH_SEGMENT_RE.fullmatch(segment)
+        and CANONICAL_UUID_PATH_SEGMENT_RE.fullmatch(segment) is None
+        for segment in path.split("/")
     )
 
 
