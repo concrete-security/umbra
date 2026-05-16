@@ -88,8 +88,24 @@ def browser_error() -> HTMLResponse:
 
 
 async def prune_expired_auth_rows(conn: asyncpg.Connection) -> None:
-    await conn.execute("DELETE FROM loopback_auth_pending WHERE expires_at < now()")
-    await conn.execute("DELETE FROM device_flow_pending WHERE expires_at < now()")
+    for table, key_column in (
+        ("loopback_auth_pending", "state"),
+        ("device_flow_pending", "device_code"),
+    ):
+        await conn.execute(
+            f"""
+            WITH expired AS (
+                SELECT {key_column}
+                FROM {table}
+                WHERE expires_at < now()
+                ORDER BY expires_at
+                LIMIT 1000
+                FOR UPDATE SKIP LOCKED
+            )
+            DELETE FROM {table}
+            WHERE {key_column} IN (SELECT {key_column} FROM expired)
+            """
+        )
 
 
 def request_ip(request: Request) -> str | None:

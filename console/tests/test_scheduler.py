@@ -1029,6 +1029,8 @@ class MaintenancePruneConn:
             return "DELETE 2"
         if "idempotency_keys" in query:
             return "DELETE 0"
+        if "loopback_auth_pending" in query:
+            return "DELETE 4"
         if "device_flow_pending" in query:
             return "DELETE 1"
         if "operations" in query:
@@ -1396,14 +1398,26 @@ def test_prune_expired_reconciler_rows_uses_one_day_grace() -> None:
 
     cleaned = asyncio.run(scheduler.prune_expired_reconciler_rows(conn))
 
-    assert cleaned == ["maintenance:revoked_tokens:2", "maintenance:device_flow_pending:1"]
+    assert cleaned == ["maintenance:revoked_tokens:2"]
     assert [query for query in conn.execute_calls if "INTERVAL '1 day'" in query]
     assert all("FOR UPDATE SKIP LOCKED" in query for query in conn.execute_calls)
     assert any("DELETE FROM revoked_tokens" in query for query in conn.execute_calls)
     assert any("DELETE FROM idempotency_keys" in query for query in conn.execute_calls)
-    assert any("DELETE FROM device_flow_pending" in query for query in conn.execute_calls)
+    assert not any("DELETE FROM device_flow_pending" in query for query in conn.execute_calls)
     assert scheduler.deleted_row_count("DELETE 12") == 12
     assert scheduler.deleted_row_count("UPDATE 12") == 0
+
+
+def test_prune_expired_auth_flow_rows_uses_now_cutoff_and_skip_locked() -> None:
+    conn = MaintenancePruneConn()
+
+    cleaned = asyncio.run(scheduler.prune_expired_auth_flow_rows(conn))
+
+    assert cleaned == ["maintenance:loopback_auth_pending:4", "maintenance:device_flow_pending:1"]
+    assert len(conn.execute_calls) == 2
+    assert all("expires_at < now()" in query for query in conn.execute_calls)
+    assert all("INTERVAL '1 day'" not in query for query in conn.execute_calls)
+    assert all("FOR UPDATE SKIP LOCKED" in query for query in conn.execute_calls)
 
 
 def test_prune_expired_operations_uses_skip_locked_without_grace() -> None:

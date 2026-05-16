@@ -94,6 +94,15 @@ class RefreshReplayConn:
         return "INSERT 0 1"
 
 
+class AuthPruneConn:
+    def __init__(self):
+        self.execute_calls: list[str] = []
+
+    async def execute(self, query, *args):
+        self.execute_calls.append(query)
+        return "DELETE 1"
+
+
 def test_require_permission_allows_granted_permission() -> None:
     current_user(permissions={"USER_MANAGE"}).require_permission("USER_MANAGE")
 
@@ -146,6 +155,18 @@ def test_device_start_rejects_non_google_provider_before_provider_call() -> None
 
     assert exc.value.status_code == 400
     assert exc.value.detail["error"]["code"] == "BAD_REQUEST"
+
+
+def test_prune_expired_auth_rows_uses_skip_locked_now_cutoff() -> None:
+    conn = AuthPruneConn()
+
+    asyncio.run(routes_auth.prune_expired_auth_rows(conn))
+
+    assert len(conn.execute_calls) == 2
+    assert all("expires_at < now()" in query for query in conn.execute_calls)
+    assert all("FOR UPDATE SKIP LOCKED" in query for query in conn.execute_calls)
+    assert any("DELETE FROM loopback_auth_pending" in query for query in conn.execute_calls)
+    assert any("DELETE FROM device_flow_pending" in query for query in conn.execute_calls)
 
 
 def test_device_poll_too_soon_honors_full_interval() -> None:

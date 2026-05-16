@@ -2629,6 +2629,7 @@ async def run_reconciliation_pass(*, include_orphans: bool = True) -> Reconcilia
         cvms_advanced = await reconcile_dev_cvm_provider_drift(conn)
         security_cvms_advanced = await reconcile_security_cvm_provider_drift(conn)
         orphans_cleaned = await cleanup_orphan_dns_records(conn) if include_orphans else []
+        orphans_cleaned.extend(await prune_expired_auth_flow_rows(conn))
         orphans_cleaned.extend(await prune_expired_reconciler_rows(conn))
         operation_prune_count = await prune_expired_operations(conn)
         if operation_prune_count:
@@ -2897,7 +2898,6 @@ async def prune_expired_reconciler_rows(conn: Any) -> list[str]:
     for table, key_column in (
         ("revoked_tokens", "jti"),
         ("idempotency_keys", "id"),
-        ("device_flow_pending", "device_code"),
     ):
         status = await conn.execute(
             f"""
@@ -2905,6 +2905,32 @@ async def prune_expired_reconciler_rows(conn: Any) -> list[str]:
                 SELECT {key_column}
                 FROM {table}
                 WHERE expires_at < now() - INTERVAL '1 day'
+                ORDER BY expires_at
+                LIMIT 1000
+                FOR UPDATE SKIP LOCKED
+            )
+            DELETE FROM {table}
+            WHERE {key_column} IN (SELECT {key_column} FROM expired)
+            """
+        )
+        count = deleted_row_count(status)
+        if count:
+            cleaned.append(f"maintenance:{table}:{count}")
+    return cleaned
+
+
+async def prune_expired_auth_flow_rows(conn: Any) -> list[str]:
+    cleaned: list[str] = []
+    for table, key_column in (
+        ("loopback_auth_pending", "state"),
+        ("device_flow_pending", "device_code"),
+    ):
+        status = await conn.execute(
+            f"""
+            WITH expired AS (
+                SELECT {key_column}
+                FROM {table}
+                WHERE expires_at < now()
                 ORDER BY expires_at
                 LIMIT 1000
                 FOR UPDATE SKIP LOCKED
