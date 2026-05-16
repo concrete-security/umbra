@@ -8,6 +8,7 @@ from concrete_security_cvm.policy import (
     PolicyValidationError,
     parse_effective_policy,
 )
+from concrete_security_cvm.traffic import TrafficLogBatch, TrafficLogClient, TrafficLogQueue, TrafficLogRecord
 
 __all__ = [
     "BootBinding",
@@ -18,5 +19,9 @@ __all__ = [
     "PolicyValidationError",
     "PollResult",
     "SCControlClient",
+    "TrafficLogBatch",
+    "TrafficLogClient",
+    "TrafficLogQueue",
+    "TrafficLogRecord",
     "parse_effective_policy",
 ]
