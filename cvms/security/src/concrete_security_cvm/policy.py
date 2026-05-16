@@ -1,0 +1,423 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+import re
+from typing import Any
+
+
+TOP_LEVEL_FIELDS = {
+    "allowed_destinations",
+    "blocked_destinations",
+    "secret_patterns",
+    "secret_injections",
+    "sandbox_env",
+}
+DESTINATION_FIELDS = {"id", "scheme", "host", "ports", "methods", "path_prefixes"}
+DESTINATION_MATCH_FIELDS = {"scheme", "host", "ports", "methods", "path_prefixes"}
+SECRET_PATTERN_FIELDS = {"id", "name", "pattern", "scan_headers", "scan_body"}
+SECRET_INJECTION_FIELDS = {"id", "match", "type", "header", "value", "value_template"}
+SANDBOX_ENV_FIELDS = {"name", "value"}
+
+ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,100}$")
+DNS_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+HEADER_RE = re.compile(r"^[a-z][a-z0-9-]{0,126}$")
+HEX_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+HOP_BY_HOP_HEADERS = {
+    "connection",
+    "content-length",
+    "host",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+}
+
+
+@dataclass(frozen=True)
+class PolicyError:
+    field: str
+    type: str
+    message: str
+
+
+class PolicyValidationError(ValueError):
+    def __init__(self, errors: list[PolicyError]) -> None:
+        self.errors = errors
+        super().__init__("; ".join(f"{error.field}: {error.message}" for error in errors))
+
+
+@dataclass(frozen=True)
+class DestinationRule:
+    rule_id: str | None
+    scheme: str
+    host: str
+    ports: tuple[int, ...]
+    methods: tuple[str, ...]
+    path_prefixes: tuple[str, ...]
+
+    def matches(self, *, scheme: str, host: str, port: int, method: str, path: str) -> bool:
+        return (
+            self.scheme == scheme.lower()
+            and self._host_matches(host.lower().rstrip("."))
+            and port in self.ports
+            and method.upper() in self.methods
+            and any(path.startswith(prefix) for prefix in self.path_prefixes)
+        )
+
+    def _host_matches(self, host: str) -> bool:
+        if self.host.startswith("*."):
+            suffix = self.host[2:]
+            return host.endswith(f".{suffix}") and host != suffix
+        return host == self.host
+
+
+@dataclass(frozen=True)
+class SecretPattern:
+    pattern_id: str
+    name: str
+    pattern: str
+    scan_headers: bool
+    scan_body: bool
+    compiled: re.Pattern[str]
+
+
+@dataclass(frozen=True)
+class SecretInjection:
+    injection_id: str
+    match: DestinationRule
+    header: str
+    value: str
+    value_template: str
+
+    def rendered_value(self) -> str:
+        return self.value_template.replace("${secret}", self.value)
+
+
+@dataclass(frozen=True)
+class SandboxEnvPlaceholder:
+    name: str
+    value: str
+
+
+@dataclass(frozen=True)
+class PolicyDecision:
+    allowed: bool
+    reason: str
+    rule_id: str | None = None
+
+
+@dataclass(frozen=True)
+class EffectivePolicy:
+    allowed_destinations: tuple[DestinationRule, ...]
+    blocked_destinations: tuple[DestinationRule, ...]
+    secret_patterns: tuple[SecretPattern, ...]
+    secret_injections: tuple[SecretInjection, ...]
+    sandbox_env: tuple[SandboxEnvPlaceholder, ...]
+
+    @classmethod
+    def deny_all(cls) -> EffectivePolicy:
+        return cls(
+            allowed_destinations=(),
+            blocked_destinations=(),
+            secret_patterns=(),
+            secret_injections=(),
+            sandbox_env=(),
+        )
+
+    def decide(self, *, scheme: str, host: str, port: int, method: str, path: str) -> PolicyDecision:
+        request = {
+            "scheme": scheme,
+            "host": host,
+            "port": port,
+            "method": method,
+            "path": path or "/",
+        }
+        for rule in self.blocked_destinations:
+            if rule.matches(**request):
+                return PolicyDecision(False, "blocked_destination", rule.rule_id)
+        for rule in self.allowed_destinations:
+            if rule.matches(**request):
+                return PolicyDecision(True, "allowed_destination", rule.rule_id)
+        return PolicyDecision(False, "destination_not_allowed")
+
+    def render_injection_headers(
+        self,
+        *,
+        scheme: str,
+        host: str,
+        port: int,
+        method: str,
+        path: str,
+    ) -> dict[str, str]:
+        rendered: dict[str, str] = {}
+        ids_by_header: dict[str, str] = {}
+        request = {
+            "scheme": scheme,
+            "host": host,
+            "port": port,
+            "method": method,
+            "path": path or "/",
+        }
+        for injection in self.secret_injections:
+            if not injection.match.matches(**request):
+                continue
+            value = injection.rendered_value()
+            existing = rendered.get(injection.header)
+            if existing is not None and existing != value:
+                raise PolicyValidationError(
+                    [
+                        PolicyError(
+                            field=f"secret_injections.{injection.injection_id}.header",
+                            type="secret_injection_conflict",
+                            message=f"conflicts with {ids_by_header[injection.header]}",
+                        )
+                    ]
+                )
+            rendered[injection.header] = value
+            ids_by_header[injection.header] = injection.injection_id
+        return rendered
+
+
+def parse_effective_policy(raw: Any) -> EffectivePolicy:
+    errors: list[PolicyError] = []
+    if not isinstance(raw, dict):
+        raise PolicyValidationError([PolicyError("policy", "object_required", "policy must be an object")])
+    _reject_unknown_fields(raw, TOP_LEVEL_FIELDS, "policy", errors)
+    if errors:
+        raise PolicyValidationError(errors)
+    allowed = _parse_destination_rules(raw.get("allowed_destinations", []), "allowed_destinations", errors)
+    blocked = _parse_destination_rules(raw.get("blocked_destinations", []), "blocked_destinations", errors)
+    patterns = _parse_secret_patterns(raw.get("secret_patterns", []), errors)
+    injections = _parse_secret_injections(raw.get("secret_injections", []), errors)
+    sandbox_env = _parse_sandbox_env(raw.get("sandbox_env", []), errors)
+    if errors:
+        raise PolicyValidationError(errors)
+    return EffectivePolicy(
+        allowed_destinations=tuple(allowed),
+        blocked_destinations=tuple(blocked),
+        secret_patterns=tuple(patterns),
+        secret_injections=tuple(injections),
+        sandbox_env=tuple(sandbox_env),
+    )
+
+
+def _parse_destination_rules(raw: Any, field: str, errors: list[PolicyError]) -> list[DestinationRule]:
+    if not isinstance(raw, list):
+        errors.append(PolicyError(field, "array_required", "destination rules must be an array"))
+        return []
+    return [
+        rule
+        for index, item in enumerate(raw)
+        if (rule := _parse_destination_rule(item, f"{field}.{index}", errors, require_id=True)) is not None
+    ]
+
+
+def _parse_destination_rule(
+    raw: Any,
+    field: str,
+    errors: list[PolicyError],
+    *,
+    require_id: bool,
+) -> DestinationRule | None:
+    if not isinstance(raw, dict):
+        errors.append(PolicyError(field, "object_required", "destination rule must be an object"))
+        return None
+    allowed_fields = DESTINATION_FIELDS if require_id else DESTINATION_MATCH_FIELDS
+    _reject_unknown_fields(raw, allowed_fields, field, errors)
+    rule_id = raw.get("id")
+    if require_id:
+        if not isinstance(rule_id, str) or not ID_RE.fullmatch(rule_id):
+            errors.append(PolicyError(f"{field}.id", "invalid_id", "id must be 1..100 chars [A-Za-z0-9._:-]"))
+    elif "id" in raw:
+        errors.append(PolicyError(f"{field}.id", "forbidden_field", "match rules must not include id"))
+        rule_id = None
+    scheme = raw.get("scheme")
+    host = raw.get("host")
+    if scheme not in {"http", "https"}:
+        errors.append(PolicyError(f"{field}.scheme", "invalid_scheme", "scheme must be http or https"))
+        scheme = "https"
+    if not isinstance(host, str) or not _valid_policy_host(host):
+        errors.append(PolicyError(f"{field}.host", "invalid_host", "host must be lower-case DNS or leading wildcard"))
+        host = ""
+    ports = _parse_ports(raw.get("ports"), scheme, f"{field}.ports", errors)
+    methods = _parse_methods(raw.get("methods"), f"{field}.methods", errors)
+    path_prefixes = _parse_path_prefixes(raw.get("path_prefixes"), f"{field}.path_prefixes", errors)
+    if not host or not methods or not path_prefixes:
+        return None
+    return DestinationRule(
+        rule_id=rule_id if isinstance(rule_id, str) else None,
+        scheme=scheme,
+        host=host,
+        ports=tuple(ports),
+        methods=tuple(methods),
+        path_prefixes=tuple(path_prefixes),
+    )
+
+
+def _parse_secret_patterns(raw: Any, errors: list[PolicyError]) -> list[SecretPattern]:
+    if not isinstance(raw, list):
+        errors.append(PolicyError("secret_patterns", "array_required", "secret_patterns must be an array"))
+        return []
+    patterns: list[SecretPattern] = []
+    for index, item in enumerate(raw):
+        field = f"secret_patterns.{index}"
+        if not isinstance(item, dict):
+            errors.append(PolicyError(field, "object_required", "secret pattern must be an object"))
+            continue
+        _reject_unknown_fields(item, SECRET_PATTERN_FIELDS, field, errors)
+        pattern_id = item.get("id")
+        name = item.get("name")
+        pattern = item.get("pattern")
+        scan_headers = item.get("scan_headers")
+        scan_body = item.get("scan_body")
+        if not isinstance(pattern_id, str) or not ID_RE.fullmatch(pattern_id):
+            errors.append(PolicyError(f"{field}.id", "invalid_id", "id must be 1..100 chars [A-Za-z0-9._:-]"))
+            continue
+        if not isinstance(name, str) or len(name) > 100:
+            errors.append(PolicyError(f"{field}.name", "invalid_name", "name must be a string <=100 chars"))
+            continue
+        if not isinstance(pattern, str) or not pattern or len(pattern) > 4096:
+            errors.append(PolicyError(f"{field}.pattern", "invalid_pattern", "pattern must be 1..4096 chars"))
+            continue
+        if not isinstance(scan_headers, bool) or not isinstance(scan_body, bool):
+            errors.append(PolicyError(field, "invalid_scan_flags", "scan flags must be booleans"))
+            continue
+        try:
+            compiled = re.compile(pattern)
+        except re.error as exc:
+            errors.append(PolicyError(f"{field}.pattern", "invalid_regex", str(exc)))
+            continue
+        patterns.append(SecretPattern(pattern_id, name, pattern, scan_headers, scan_body, compiled))
+    return patterns
+
+
+def _parse_secret_injections(raw: Any, errors: list[PolicyError]) -> list[SecretInjection]:
+    if not isinstance(raw, list):
+        errors.append(PolicyError("secret_injections", "array_required", "secret_injections must be an array"))
+        return []
+    injections: list[SecretInjection] = []
+    for index, item in enumerate(raw):
+        field = f"secret_injections.{index}"
+        if not isinstance(item, dict):
+            errors.append(PolicyError(field, "object_required", "secret injection must be an object"))
+            continue
+        _reject_unknown_fields(item, SECRET_INJECTION_FIELDS, field, errors)
+        injection_id = item.get("id")
+        injection_type = item.get("type")
+        header = item.get("header")
+        value = item.get("value")
+        template = item.get("value_template")
+        if not isinstance(injection_id, str) or not ID_RE.fullmatch(injection_id):
+            errors.append(PolicyError(f"{field}.id", "invalid_id", "id must be 1..100 chars [A-Za-z0-9._:-]"))
+            continue
+        if injection_type != "request_header":
+            errors.append(PolicyError(f"{field}.type", "invalid_type", "only request_header is supported"))
+            continue
+        match = _parse_destination_rule(item.get("match"), f"{field}.match", errors, require_id=False)
+        if not isinstance(header, str) or not HEADER_RE.fullmatch(header) or header in HOP_BY_HOP_HEADERS:
+            errors.append(PolicyError(f"{field}.header", "invalid_header", "header must be lower-case and injectable"))
+            continue
+        if not isinstance(value, str):
+            errors.append(PolicyError(f"{field}.value", "string_required", "value must be a string"))
+            continue
+        if not isinstance(template, str) or template.count("${secret}") != 1:
+            errors.append(
+                PolicyError(f"{field}.value_template", "invalid_template", "template must contain ${secret} once")
+            )
+            continue
+        if len(template.replace("${secret}", value)) > 8192:
+            errors.append(PolicyError(f"{field}.value_template", "rendered_value_too_long", "rendered value too long"))
+            continue
+        if match is not None:
+            injections.append(SecretInjection(injection_id, match, header, value, template))
+    return injections
+
+
+def _parse_sandbox_env(raw: Any, errors: list[PolicyError]) -> list[SandboxEnvPlaceholder]:
+    if not isinstance(raw, list):
+        errors.append(PolicyError("sandbox_env", "array_required", "sandbox_env must be an array"))
+        return []
+    placeholders: list[SandboxEnvPlaceholder] = []
+    for index, item in enumerate(raw):
+        field = f"sandbox_env.{index}"
+        if not isinstance(item, dict):
+            errors.append(PolicyError(field, "object_required", "sandbox_env item must be an object"))
+            continue
+        _reject_unknown_fields(item, SANDBOX_ENV_FIELDS, field, errors)
+        name = item.get("name")
+        value = item.get("value")
+        if not isinstance(name, str) or not ENV_NAME_RE.fullmatch(name):
+            errors.append(PolicyError(f"{field}.name", "invalid_name", "name must be a POSIX env name"))
+            continue
+        if not isinstance(value, str):
+            errors.append(PolicyError(f"{field}.value", "string_required", "value must be a string"))
+            continue
+        placeholders.append(SandboxEnvPlaceholder(name, value))
+    return placeholders
+
+
+def _parse_ports(raw: Any, scheme: str, field: str, errors: list[PolicyError]) -> list[int]:
+    if raw is None:
+        return [443 if scheme == "https" else 80]
+    if not isinstance(raw, list) or not 1 <= len(raw) <= 16:
+        errors.append(PolicyError(field, "invalid_ports", "ports must contain 1..16 integers"))
+        return []
+    ports: list[int] = []
+    for index, port in enumerate(raw):
+        if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
+            errors.append(PolicyError(f"{field}.{index}", "invalid_port", "port must be 1..65535"))
+            continue
+        ports.append(port)
+    return ports
+
+
+def _parse_methods(raw: Any, field: str, errors: list[PolicyError]) -> list[str]:
+    if not isinstance(raw, list) or not 1 <= len(raw) <= 16:
+        errors.append(PolicyError(field, "invalid_methods", "methods must contain 1..16 uppercase methods"))
+        return []
+    methods: list[str] = []
+    for index, method in enumerate(raw):
+        if not isinstance(method, str) or not method or method != method.upper() or len(method) > 20:
+            errors.append(PolicyError(f"{field}.{index}", "invalid_method", "method must be uppercase"))
+            continue
+        methods.append(method)
+    return methods
+
+
+def _parse_path_prefixes(raw: Any, field: str, errors: list[PolicyError]) -> list[str]:
+    if not isinstance(raw, list) or not 1 <= len(raw) <= 32:
+        errors.append(PolicyError(field, "invalid_path_prefixes", "path_prefixes must contain 1..32 values"))
+        return []
+    prefixes: list[str] = []
+    for index, prefix in enumerate(raw):
+        if not isinstance(prefix, str) or not prefix.startswith("/"):
+            errors.append(PolicyError(f"{field}.{index}", "invalid_path_prefix", "path prefix must be absolute"))
+            continue
+        prefixes.append(prefix)
+    return prefixes
+
+
+def _reject_unknown_fields(raw: dict[str, Any], allowed: set[str], field: str, errors: list[PolicyError]) -> None:
+    for key in sorted(set(raw) - allowed):
+        errors.append(PolicyError(f"{field}.{key}", "unknown_field", "field is not part of the Security CVM schema"))
+
+
+def _valid_policy_host(host: str) -> bool:
+    if host != host.lower() or host.endswith(".") or len(host) > 253:
+        return False
+    if host.startswith("*."):
+        suffix = host[2:]
+        return "." in suffix and _valid_dns_name(suffix)
+    return _valid_dns_name(host)
+
+
+def _valid_dns_name(host: str) -> bool:
+    labels = host.split(".")
+    return len(labels) >= 2 and all(DNS_LABEL_RE.fullmatch(label) for label in labels)
+
+
+def valid_proxy_token_hash(value: str) -> bool:
+    return bool(HEX_SHA256_RE.fullmatch(value))
