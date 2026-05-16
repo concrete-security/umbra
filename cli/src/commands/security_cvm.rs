@@ -1,9 +1,18 @@
-use reqwest::blocking::{Client, Response};
+use std::{
+    thread,
+    time::{Duration, Instant},
+};
+
+use reqwest::{
+    blocking::{Client, Response},
+    header::RETRY_AFTER,
+};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
+use uuid::Uuid;
 
 use crate::{
-    cli::{SecurityCvmAttestationArgs, SecurityCvmCommand},
+    cli::{SecurityCvmAttestationArgs, SecurityCvmCommand, SecurityCvmLaunchArgs},
     commands::auth,
     config::ResolvedConfig,
     exit::ExitStatus,
@@ -45,9 +54,58 @@ struct AttestationVerdict {
     verified_at: Option<String>,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+struct Operation {
+    id: String,
+    kind: String,
+    status: String,
+    actor_id: Option<String>,
+    target: OperationTarget,
+    result: Option<Value>,
+    error: Option<OperationError>,
+    progress: Option<OperationProgress>,
+    created_at: String,
+    updated_at: String,
+    expires_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct OperationTarget {
+    #[serde(rename = "type")]
+    kind: String,
+    id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct OperationError {
+    code: String,
+    message: String,
+    details: Option<Value>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct OperationProgress {
+    step: String,
+    percent: u8,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct SecurityCvmProvisionResult {
+    security_cvm: SecurityCvm,
+    ingest_token: String,
+    ca_export_token: String,
+}
+
+enum OperationPoll {
+    Operation(Box<Operation>),
+    RateLimited(Duration),
+}
+
 pub fn run(command: SecurityCvmCommand, config: &ResolvedConfig, json: bool) -> ExitStatus {
     match command {
         SecurityCvmCommand::Show => show(config, json),
+        SecurityCvmCommand::Launch(args) => launch(config, args, json),
+        SecurityCvmCommand::Terminate => terminate(config, json),
         SecurityCvmCommand::Attestation(args) => attestation(config, args, json),
     }
 }
@@ -68,6 +126,72 @@ fn show(config: &ResolvedConfig, json_output: bool) -> ExitStatus {
         }
     };
     print_security_cvm(&security_cvm, json_output);
+    ExitStatus::Ok
+}
+
+fn launch(config: &ResolvedConfig, args: SecurityCvmLaunchArgs, json_output: bool) -> ExitStatus {
+    if let Err(message) = validate_launch_args(&args) {
+        eprintln!("{message}");
+        return ExitStatus::Usage;
+    }
+    let (console_url, session) = match console_session(config) {
+        Ok(value) => value,
+        Err((status, message)) => {
+            eprintln!("{message}");
+            return status;
+        }
+    };
+    let operation = match submit_launch(console_url, &session, &args) {
+        Ok(value) => value,
+        Err((status, message)) => {
+            eprintln!("{message}");
+            return status;
+        }
+    };
+    if args.no_wait {
+        print_operation(&operation, json_output, false);
+        return ExitStatus::Ok;
+    }
+    let operation = match wait_for_operation(
+        console_url,
+        &session.access_token,
+        operation,
+        Duration::from_secs(u64::from(args.wait_timeout_seconds)),
+        json_output,
+    ) {
+        Ok(value) => value,
+        Err((status, message)) => {
+            eprintln!("{message}");
+            return status;
+        }
+    };
+    let result = match security_cvm_launch_result(&operation) {
+        Ok(value) => value,
+        Err(message) => {
+            eprintln!("{message}");
+            return ExitStatus::Error;
+        }
+    };
+    print_launch_result(&result, json_output);
+    ExitStatus::Ok
+}
+
+fn terminate(config: &ResolvedConfig, json_output: bool) -> ExitStatus {
+    let (console_url, session) = match console_session(config) {
+        Ok(value) => value,
+        Err((status, message)) => {
+            eprintln!("{message}");
+            return status;
+        }
+    };
+    let security_cvm = match submit_terminate(console_url, &session) {
+        Ok(value) => value,
+        Err((status, message)) => {
+            eprintln!("{message}");
+            return status;
+        }
+    };
+    print_terminate_result(&security_cvm, json_output);
     ExitStatus::Ok
 }
 
@@ -122,6 +246,56 @@ fn fetch_security_cvm(
     read_json_response(response, "fetch Security CVM")
 }
 
+fn submit_launch(
+    console_url: &str,
+    session: &Session,
+    args: &SecurityCvmLaunchArgs,
+) -> Result<Operation, (ExitStatus, String)> {
+    let mut body = Map::new();
+    if let Some(value) = &args.instance_type {
+        body.insert("instance_type".to_string(), Value::String(value.clone()));
+    }
+    if let Some(value) = &args.region {
+        body.insert("region".to_string(), Value::String(value.clone()));
+    }
+    let response = Client::new()
+        .post(format!(
+            "{console_url}/api/v1/entities/{}/security-cvm",
+            session.entity.id
+        ))
+        .bearer_auth(&session.access_token)
+        .header("Idempotency-Key", Uuid::new_v4().to_string())
+        .json(&Value::Object(body))
+        .send()
+        .map_err(|err| {
+            (
+                ExitStatus::Error,
+                format!("[error] failed to submit Security CVM launch: {err}"),
+            )
+        })?;
+    read_json_response(response, "submit Security CVM launch")
+}
+
+fn submit_terminate(
+    console_url: &str,
+    session: &Session,
+) -> Result<SecurityCvm, (ExitStatus, String)> {
+    let response = Client::new()
+        .delete(format!(
+            "{console_url}/api/v1/entities/{}/security-cvm",
+            session.entity.id
+        ))
+        .bearer_auth(&session.access_token)
+        .send()
+        .map_err(|err| {
+            (
+                ExitStatus::Error,
+                format!("[error] failed to terminate Security CVM: {err}"),
+            )
+        })?;
+    read_json_response(response, "terminate Security CVM")
+}
+
 fn fetch_attestation(
     console_url: &str,
     session: &Session,
@@ -144,6 +318,77 @@ fn fetch_attestation(
     read_json_response(response, "fetch Security CVM attestation")
 }
 
+fn fetch_operation(
+    console_url: &str,
+    access_token: &str,
+    operation_id: &str,
+) -> Result<OperationPoll, (ExitStatus, String)> {
+    let response = Client::new()
+        .get(format!("{console_url}/api/v1/operations/{operation_id}"))
+        .bearer_auth(access_token)
+        .send()
+        .map_err(|err| {
+            (
+                ExitStatus::Error,
+                format!("[error] failed to poll operation: {err}"),
+            )
+        })?;
+    if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        return Ok(OperationPoll::RateLimited(retry_after(&response)));
+    }
+    read_json_response(response, "poll operation")
+        .map(|operation| OperationPoll::Operation(Box::new(operation)))
+}
+
+fn wait_for_operation(
+    console_url: &str,
+    access_token: &str,
+    mut operation: Operation,
+    timeout: Duration,
+    json_output: bool,
+) -> Result<Operation, (ExitStatus, String)> {
+    let started = Instant::now();
+    let mut excluded = Duration::ZERO;
+    loop {
+        match operation.status.as_str() {
+            "succeeded" => return Ok(operation),
+            "failed" => return Err((ExitStatus::Error, operation_failure_message(&operation))),
+            "cancelled" => {
+                return Err((
+                    ExitStatus::Error,
+                    "[cancelled] operation was cancelled".to_string(),
+                ));
+            }
+            "pending" | "running" => {}
+            status => {
+                return Err((
+                    ExitStatus::Error,
+                    format!("[error] operation returned unknown status: {status}"),
+                ));
+            }
+        }
+        if Instant::now()
+            .duration_since(started)
+            .saturating_sub(excluded)
+            >= timeout
+        {
+            print_operation(&operation, json_output, true);
+            return Err((
+                ExitStatus::WaitTimeout,
+                "[wait_timeout] operation did not complete before timeout".to_string(),
+            ));
+        }
+        thread::sleep(Duration::from_secs(1));
+        match fetch_operation(console_url, access_token, &operation.id)? {
+            OperationPoll::Operation(next) => operation = *next,
+            OperationPoll::RateLimited(delay) => {
+                thread::sleep(delay);
+                excluded += delay;
+            }
+        }
+    }
+}
+
 fn read_json_response<T: for<'de> Deserialize<'de>>(
     response: Response,
     action: &str,
@@ -157,6 +402,32 @@ fn read_json_response<T: for<'de> Deserialize<'de>>(
             format!("[error] malformed {action} response: {err}"),
         )
     })
+}
+
+fn retry_after(response: &Response) -> Duration {
+    response
+        .headers()
+        .get(RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(|seconds| Duration::from_secs(seconds.max(1)))
+        .unwrap_or_else(|| Duration::from_secs(1))
+}
+
+fn operation_failure_message(operation: &Operation) -> String {
+    if let Some(error) = &operation.error {
+        format!("[{}] {}", error.code, error.message)
+    } else {
+        "[error] operation failed".to_string()
+    }
+}
+
+fn security_cvm_launch_result(operation: &Operation) -> Result<SecurityCvmProvisionResult, String> {
+    let result = operation.result.clone().ok_or_else(|| {
+        "[error] Security CVM launch operation succeeded without result".to_string()
+    })?;
+    serde_json::from_value::<SecurityCvmProvisionResult>(result)
+        .map_err(|err| format!("[error] malformed Security CVM launch result: {err}"))
 }
 
 fn error_for_response(response: Response, action: &str) -> (ExitStatus, String) {
@@ -198,14 +469,49 @@ fn console_error_message(body: &str) -> Option<String> {
     let component = details
         .and_then(|details| details.get("component"))
         .and_then(|value| value.as_str());
-    Some(match (state, component, code) {
-        (Some(state), _, _) => format!("{message} ({state})"),
-        (_, Some(component), _) => format!("{message} ({component})"),
-        (_, _, Some(code)) if code != "UNAUTHORIZED" && code != "VALIDATION_ERROR" => {
+    let dev_cvm_count = details
+        .and_then(|details| details.get("dev_cvm_count"))
+        .and_then(|value| value.as_u64());
+    Some(match (state, component, dev_cvm_count, code) {
+        (Some("dev_cvms_in_entity"), _, Some(count), _) => {
+            format!("{message} (dev_cvms_in_entity; dev_cvm_count={count})")
+        }
+        (Some(state), _, _, _) => format!("{message} ({state})"),
+        (_, Some(component), _, _) => format!("{message} ({component})"),
+        (_, _, _, Some(code)) if code != "UNAUTHORIZED" && code != "VALIDATION_ERROR" => {
             format!("{message} ({code})")
         }
         _ => message.to_string(),
     })
+}
+
+fn validate_launch_args(args: &SecurityCvmLaunchArgs) -> Result<(), String> {
+    if let Some(value) = args.instance_type.as_deref() {
+        validate_security_cvm_config_value("--instance-type", value, 100)?;
+    }
+    if let Some(value) = args.region.as_deref() {
+        validate_security_cvm_config_value("--region", value, 64)?;
+    }
+    Ok(())
+}
+
+fn validate_security_cvm_config_value(
+    name: &str,
+    value: &str,
+    max_len: usize,
+) -> Result<(), String> {
+    if value.is_empty() || value.len() > max_len {
+        return Err(format!("[usage] {name} must be 1..{max_len} characters"));
+    }
+    if !value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
+    {
+        return Err(format!(
+            "[usage] {name} may contain only letters, digits, '.', '_', and '-'"
+        ));
+    }
+    Ok(())
 }
 
 fn print_security_cvm(security_cvm: &SecurityCvm, json_output: bool) {
@@ -215,18 +521,66 @@ fn print_security_cvm(security_cvm: &SecurityCvm, json_output: bool) {
             serde_json::to_string_pretty(security_cvm).expect("Security CVM output serializes")
         );
     } else {
-        println!(
-            "security_cvm {} state={} fqdn={} region={} instance_type={} policy_version={} attestation_verified_at={} error_reason={}",
-            security_cvm.id,
-            security_cvm.state,
-            security_cvm.fqdn,
-            security_cvm.region.as_deref().unwrap_or("-"),
-            security_cvm.instance_type.as_deref().unwrap_or("-"),
-            security_cvm.policy_version,
-            security_cvm.attestation_verified_at.as_deref().unwrap_or("-"),
-            security_cvm.error_reason.as_deref().unwrap_or("-"),
-        );
+        println!("{}", security_cvm_summary(security_cvm));
     }
+}
+
+fn print_operation(operation: &Operation, json_output: bool, stderr: bool) {
+    let text = if json_output {
+        serde_json::to_string_pretty(operation).expect("operation output serializes")
+    } else {
+        format!(
+            "operation {} kind={} status={} target={}/{}",
+            operation.id,
+            operation.kind,
+            operation.status,
+            operation.target.kind,
+            operation.target.id.as_deref().unwrap_or("-")
+        )
+    };
+    if stderr {
+        eprintln!("{text}");
+    } else {
+        println!("{text}");
+    }
+}
+
+fn print_launch_result(result: &SecurityCvmProvisionResult, json_output: bool) {
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(result).expect("Security CVM launch output serializes")
+        );
+    } else {
+        println!("ingest_token={}", result.ingest_token);
+        println!("ca_export_token={}", result.ca_export_token);
+        println!("{}", security_cvm_summary(&result.security_cvm));
+    }
+}
+
+fn print_terminate_result(security_cvm: &SecurityCvm, json_output: bool) {
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(security_cvm).expect("Security CVM output serializes")
+        );
+    } else {
+        println!("terminated {}", security_cvm_summary(security_cvm));
+    }
+}
+
+fn security_cvm_summary(security_cvm: &SecurityCvm) -> String {
+    format!(
+        "security_cvm {} state={} fqdn={} region={} instance_type={} policy_version={} attestation_verified_at={} error_reason={}",
+        security_cvm.id,
+        security_cvm.state,
+        security_cvm.fqdn,
+        security_cvm.region.as_deref().unwrap_or("-"),
+        security_cvm.instance_type.as_deref().unwrap_or("-"),
+        security_cvm.policy_version,
+        security_cvm.attestation_verified_at.as_deref().unwrap_or("-"),
+        security_cvm.error_reason.as_deref().unwrap_or("-"),
+    )
 }
 
 fn print_attestation(attestation: &SecurityCvmAttestation, json_output: bool) {
@@ -274,6 +628,27 @@ mod tests {
             Some(
                 "security CVM attestation probe is not implemented (security_cvm_attestation_probe)"
             )
+        );
+    }
+
+    #[test]
+    fn console_error_message_includes_dev_cvm_count() {
+        let body = r#"{"error":{"code":"CONFLICT","message":"cannot decommission Security CVM while Dev CVMs exist","details":{"state":"dev_cvms_in_entity","dev_cvm_count":2}}}"#;
+
+        assert_eq!(
+            console_error_message(body).as_deref(),
+            Some(
+                "cannot decommission Security CVM while Dev CVMs exist (dev_cvms_in_entity; dev_cvm_count=2)"
+            )
+        );
+    }
+
+    #[test]
+    fn validate_security_cvm_config_value_rejects_slash() {
+        assert_eq!(
+            validate_security_cvm_config_value("--instance-type", "tdx/small", 100)
+                .expect_err("slash rejected"),
+            "[usage] --instance-type may contain only letters, digits, '.', '_', and '-'"
         );
     }
 }

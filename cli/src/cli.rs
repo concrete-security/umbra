@@ -461,8 +461,33 @@ pub enum SecurityCvmCommand {
     /// Show the current entity Security CVM.
     Show,
 
+    /// Launch the current entity Security CVM.
+    Launch(SecurityCvmLaunchArgs),
+
+    /// Terminate the current entity Security CVM.
+    Terminate,
+
     /// Show the current entity Security CVM attestation diagnostic.
     Attestation(SecurityCvmAttestationArgs),
+}
+
+#[derive(clap::Args, Debug)]
+pub struct SecurityCvmLaunchArgs {
+    /// Phala instance type. Defaults to the Console Security CVM default.
+    #[arg(long)]
+    pub instance_type: Option<String>,
+
+    /// Phala region. Defaults to the Console Security CVM default.
+    #[arg(long)]
+    pub region: Option<String>,
+
+    /// Submit the launch and return the operation handle without polling.
+    #[arg(long)]
+    pub no_wait: bool,
+
+    /// Maximum seconds to wait for launch completion.
+    #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u32).range(1..=86400))]
+    pub wait_timeout_seconds: u32,
 }
 
 #[derive(clap::Args, Debug)]
