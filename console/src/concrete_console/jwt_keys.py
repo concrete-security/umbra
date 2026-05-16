@@ -15,7 +15,9 @@ import jwt
 from concrete_console.config import load_settings
 
 KID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+TOKEN_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 FORBIDDEN_KEY_HEADERS = {"jku", "jwk", "x5u", "x5c"}
+ALLOWED_ALGORITHMS = {"EdDSA", "RS256"}
 
 
 @dataclass(frozen=True)
@@ -76,7 +78,7 @@ def _jwk_to_key(jwk: dict[str, Any]) -> Any:
 
 
 def _load_key_material(settings: JwtSettings, *, active_kid: str) -> tuple[str, dict[str, VerifyingKey]]:
-    if settings.algorithm not in {"EdDSA", "RS256"}:
+    if settings.algorithm not in ALLOWED_ALGORITHMS:
         raise ValueError("JWT_ALGORITHM must be EdDSA or RS256")
     if not KID_RE.fullmatch(active_kid):
         raise ValueError("JWT active kid has invalid characters")
@@ -89,7 +91,7 @@ def _load_key_material(settings: JwtSettings, *, active_kid: str) -> tuple[str, 
         if not isinstance(kid, str) or not KID_RE.fullmatch(kid):
             raise ValueError("JWKS entry has invalid kid")
         alg = jwk.get("alg") or settings.algorithm
-        if alg not in {"EdDSA", "RS256"}:
+        if alg not in ALLOWED_ALGORITHMS:
             raise ValueError("JWKS entry has unsupported alg")
         keys[kid] = VerifyingKey(kid=kid, alg=alg, key=_jwk_to_key({**jwk, "alg": alg}))
     if active_kid not in keys:
@@ -189,18 +191,26 @@ class JwtManager:
             )
 
     def verify_access_token(self, token: str) -> dict[str, Any]:
-        if token.count(".") != 2 or any(not part for part in token.split(".")):
+        parts = token.split(".")
+        if len(parts) != 3 or any(not part or not TOKEN_SEGMENT_RE.fullmatch(part) for part in parts):
             raise jwt.InvalidTokenError("invalid token shape")
 
-        header_segment = token.split(".", 1)[0]
+        header_segment = parts[0]
         try:
             header_bytes = base64.urlsafe_b64decode(header_segment + "=" * (-len(header_segment) % 4))
             header = json.loads(header_bytes)
         except Exception as exc:  # noqa: BLE001
             raise jwt.InvalidTokenError("invalid token header") from exc
+        if not isinstance(header, dict):
+            raise jwt.InvalidTokenError("invalid token header")
 
         if FORBIDDEN_KEY_HEADERS.intersection(header):
             raise jwt.InvalidTokenError("caller-supplied key headers are forbidden")
+        alg = header.get("alg")
+        if not isinstance(alg, str) or alg.lower() == "none" or alg not in ALLOWED_ALGORITHMS:
+            raise jwt.InvalidTokenError("unsupported algorithm")
+        if header.get("typ") not in {None, "at+JWT"}:
+            raise jwt.InvalidTokenError("invalid token type")
         kid = header.get("kid")
         if not isinstance(kid, str) or not KID_RE.fullmatch(kid):
             raise jwt.InvalidTokenError("invalid kid")
@@ -209,10 +219,8 @@ class JwtManager:
             verifying_key = self.verifying_keys.get(kid)
         if verifying_key is None:
             raise jwt.InvalidTokenError("unknown kid")
-        if header.get("alg") != verifying_key.alg:
+        if alg != verifying_key.alg:
             raise jwt.InvalidTokenError("algorithm mismatch")
-        if header.get("typ") not in {None, "at+JWT"}:
-            raise jwt.InvalidTokenError("invalid token type")
 
         return jwt.decode(
             token,
@@ -221,6 +229,7 @@ class JwtManager:
             issuer=self.settings.issuer,
             audience=self.settings.audience,
             leeway=self.settings.leeway_seconds,
+            options={"require": ["iss", "aud", "sub", "entity_id", "iat", "nbf", "exp", "jti"]},
         )
 
     def _prune_retired_keys(self, now: datetime) -> None:

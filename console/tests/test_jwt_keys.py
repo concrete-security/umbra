@@ -162,3 +162,49 @@ def test_access_token_rejects_caller_supplied_key_headers(tmp_path) -> None:
 
     with pytest.raises(jwt.InvalidTokenError, match="caller-supplied key headers"):
         manager.verify_access_token(token)
+
+
+def test_access_token_rejects_non_base64url_segments(tmp_path) -> None:
+    manager = JwtManager(settings_for(tmp_path))
+
+    with pytest.raises(jwt.InvalidTokenError, match="invalid token shape"):
+        manager.verify_access_token("abc.def*.ghi")
+
+
+def test_access_token_rejects_non_object_header(tmp_path) -> None:
+    manager = JwtManager(settings_for(tmp_path))
+    token = f"{b64url(b'[]')}.{b64url(b'{}')}.{b64url(b'signature')}"
+
+    with pytest.raises(jwt.InvalidTokenError, match="invalid token header"):
+        manager.verify_access_token(token)
+
+
+def test_access_token_rejects_unsupported_algorithm_before_kid_lookup(tmp_path) -> None:
+    manager = JwtManager(settings_for(tmp_path))
+    header = b64url(json.dumps({"alg": "none", "kid": "test-key", "typ": "at+JWT"}).encode())
+    token = f"{header}.{b64url(b'{}')}.{b64url(b'signature')}"
+
+    with pytest.raises(jwt.InvalidTokenError, match="unsupported algorithm"):
+        manager.verify_access_token(token)
+
+
+def test_access_token_requires_registered_claims(tmp_path) -> None:
+    manager = JwtManager(settings_for(tmp_path))
+    now = datetime.now(timezone.utc)
+    token = jwt.encode(
+        {
+            "iss": "issuer",
+            "aud": "audience",
+            "sub": "00000000-0000-4000-8000-000000000001",
+            "entity_id": "00000000-0000-4000-8000-000000000002",
+            "jti": "00000000-0000-4000-8000-000000000003",
+            "iat": now,
+            "exp": now + timedelta(hours=1),
+        },
+        manager.private_key,
+        algorithm="EdDSA",
+        headers={"kid": "test-key", "typ": "at+JWT"},
+    )
+
+    with pytest.raises(jwt.MissingRequiredClaimError, match='"nbf"'):
+        manager.verify_access_token(token)
