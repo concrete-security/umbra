@@ -46,6 +46,7 @@ from concrete_console.resources import (
     user_quota_resource,
     user_resource,
 )
+from concrete_console.scheduler import run_reconciliation_pass
 
 PERMISSIONS = {
     "CVM_LAUNCH",
@@ -210,6 +211,12 @@ class AdminKeysRotate(BaseModel):
 
     new_kid: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9._-]+$")
     retire_old_after_seconds: int = Field(default=3600, ge=0, le=86_400)
+
+
+class AdminReconcile(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    include_orphans: bool = True
 
 
 class ProfileCreate(BaseModel):
@@ -2389,6 +2396,44 @@ async def revoke_admin_sessions(
                 response_body=response_body,
             )
     return response_body
+
+
+@router.post("/admin/reconcile")
+async def reconcile_admin(
+    body: AdminReconcile | None = None,
+    current_user: CurrentUser = Depends(require_current_user),
+) -> dict:
+    current_user.require_permission("PLATFORM_OPERATOR")
+    body = body or AdminReconcile()
+    validate_reconcile_dependencies(include_orphans=body.include_orphans)
+    summary = await run_reconciliation_pass(include_orphans=body.include_orphans)
+    return {
+        "cvms_advanced": summary.cvms_advanced,
+        "security_cvms_advanced": summary.security_cvms_advanced,
+        "orphans_cleaned": summary.orphans_cleaned,
+    }
+
+
+def validate_reconcile_dependencies(*, include_orphans: bool) -> None:
+    raw = load_settings().raw
+    if not raw.get("PHALA_API_TOKEN", "").strip():
+        raise api_error(
+            503,
+            "SERVICE_UNAVAILABLE",
+            "Phala adapter is not configured",
+            {"component": "phala_adapter"},
+        )
+    if include_orphans and (
+        not raw.get("CLOUDFLARE_API_TOKEN", "").strip()
+        or not raw.get("CLOUDFLARE_ZONE_ID", "").strip()
+        or not raw.get("SECURITY_CVM_ZONE_ID", "").strip()
+    ):
+        raise api_error(
+            503,
+            "SERVICE_UNAVAILABLE",
+            "Cloudflare adapter is not configured",
+            {"component": "cloudflare_adapter"},
+        )
 
 
 @router.post("/admin/keys/rotate")

@@ -39,6 +39,9 @@ pub fn run() -> ExitCode {
         cli::Command::Key(command) => commands::key::run(command, &config, args.json),
         cli::Command::Profile(command) => commands::profile::run(command, &config, args.json),
         cli::Command::Quota(command) => commands::quota::run(command, &config, args.json),
+        cli::Command::Reconcile(reconcile_args) => {
+            commands::reconcile::run(reconcile_args, &config, args.json)
+        }
         cli::Command::SecurityCvm(command) => {
             commands::security_cvm::run(command, &config, args.json)
         }

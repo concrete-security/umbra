@@ -6,6 +6,7 @@ pub mod entity;
 pub mod key;
 pub mod profile;
 pub mod quota;
+pub mod reconcile;
 pub mod security_cvm;
 pub mod traffic_logs;
 pub mod user;

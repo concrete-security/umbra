@@ -8,6 +8,7 @@ from fastapi import HTTPException
 
 from concrete_console.routes import (
     AdminKeysRotate,
+    AdminReconcile,
     AuditExportCreate,
     SECURITY_CVM_PROVISION_REDACTION,
     cvm_etag,
@@ -24,6 +25,7 @@ from concrete_console.routes import (
     validate_audit_export_request,
     validate_permission_symbol,
     validate_profile_policy,
+    validate_reconcile_dependencies,
 )
 from concrete_console.routes_internal import (
     TrafficLogBatch,
@@ -214,6 +216,40 @@ def test_validate_audit_export_request_rejects_unknown_action() -> None:
 
     assert exc.value.status_code == 422
     assert exc.value.detail["error"]["details"]["errors"][0]["type"] == "unknown_action"
+
+
+def test_admin_reconcile_defaults_to_orphan_cleanup() -> None:
+    assert AdminReconcile().include_orphans is True
+
+
+def test_validate_reconcile_dependencies_requires_phala(monkeypatch) -> None:
+    monkeypatch.delenv("PHALA_API_TOKEN", raising=False)
+
+    with pytest.raises(HTTPException) as exc:
+        validate_reconcile_dependencies(include_orphans=False)
+
+    assert exc.value.status_code == 503
+    assert exc.value.detail["error"]["details"]["component"] == "phala_adapter"
+
+
+def test_validate_reconcile_dependencies_requires_cloudflare_for_orphans(monkeypatch) -> None:
+    monkeypatch.setenv("PHALA_API_TOKEN", "phala-token")
+    monkeypatch.delenv("CLOUDFLARE_API_TOKEN", raising=False)
+    monkeypatch.setenv("CLOUDFLARE_ZONE_ID", "dev-zone")
+    monkeypatch.setenv("SECURITY_CVM_ZONE_ID", "security-zone")
+
+    with pytest.raises(HTTPException) as exc:
+        validate_reconcile_dependencies(include_orphans=True)
+
+    assert exc.value.status_code == 503
+    assert exc.value.detail["error"]["details"]["component"] == "cloudflare_adapter"
+
+
+def test_validate_reconcile_dependencies_allows_no_orphans_without_cloudflare(monkeypatch) -> None:
+    monkeypatch.setenv("PHALA_API_TOKEN", "phala-token")
+    monkeypatch.delenv("CLOUDFLARE_API_TOKEN", raising=False)
+
+    validate_reconcile_dependencies(include_orphans=False)
 
 
 def test_redacted_security_cvm_provision_result_redacts_one_shot_bearers() -> None:

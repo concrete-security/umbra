@@ -73,6 +73,9 @@ pub enum Command {
     #[command(subcommand)]
     Quota(QuotaCommand),
 
+    /// Run a single Console reconciliation pass.
+    Reconcile(ReconcileArgs),
+
     /// Inspect the entity Security CVM.
     #[command(subcommand)]
     SecurityCvm(SecurityCvmCommand),
@@ -135,6 +138,13 @@ pub struct AdminKeysRotateArgs {
     /// Seconds to retain the previous key for verification.
     #[arg(long, default_value_t = 3600, value_parser = clap::value_parser!(u32).range(0..=86400))]
     pub retire_old_after_seconds: u32,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct ReconcileArgs {
+    /// Skip Cloudflare orphan cleanup during the pass.
+    #[arg(long)]
+    pub no_orphans: bool,
 }
 
 #[derive(Subcommand, Debug)]

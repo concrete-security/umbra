@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
+from dataclasses import dataclass
 import time
 
 from concrete_console.config import load_settings
@@ -10,6 +11,13 @@ from concrete_console.log_config import logger
 
 log = logger()
 _last_successful_tick_monotonic: float | None = None
+
+
+@dataclass(frozen=True)
+class ReconciliationSummary:
+    cvms_advanced: list[str]
+    security_cvms_advanced: list[str]
+    orphans_cleaned: list[str]
 
 
 def reconciler_interval_seconds() -> float:
@@ -47,6 +55,10 @@ async def operation_scheduler_loop() -> None:
 
 
 async def run_scheduler_tick() -> None:
+    await run_reconciliation_pass()
+
+
+async def run_reconciliation_pass(*, include_orphans: bool = True) -> ReconciliationSummary:
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
@@ -56,6 +68,7 @@ async def run_scheduler_tick() -> None:
               AND expires_at < now()
             """
         )
+    return ReconciliationSummary(cvms_advanced=[], security_cvms_advanced=[], orphans_cleaned=[])
 
 
 def mark_scheduler_tick_success(*, now: float | None = None) -> None:
