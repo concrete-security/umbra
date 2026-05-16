@@ -149,6 +149,14 @@ async def request_guard_response(request: Request, request_id: str) -> JSONRespo
                     {"limit_bytes": body_limit},
                     request_id,
                 )
+        if request_has_body(request) and not has_json_content_type(request):
+            return error_response(
+                415,
+                "UNSUPPORTED_MEDIA_TYPE",
+                "Content-Type must be application/json",
+                {},
+                request_id,
+            )
 
     rate_limited = await check_rate_limit(request)
     if rate_limited is None:
@@ -170,6 +178,22 @@ def request_body_limit(path: str) -> int | None:
     if path.startswith("/api/v1/"):
         return API_BODY_LIMIT_BYTES
     return None
+
+
+def request_has_body(request: Request) -> bool:
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            return int(content_length) > 0
+        except ValueError:
+            return True
+    return "transfer-encoding" in request.headers
+
+
+def has_json_content_type(request: Request) -> bool:
+    content_type = request.headers.get("content-type", "")
+    media_type = content_type.split(";", 1)[0].strip().lower()
+    return media_type == "application/json"
 
 
 def error_response(

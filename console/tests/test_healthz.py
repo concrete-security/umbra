@@ -72,6 +72,41 @@ def test_api_body_limit_rejects_before_route_parsing(monkeypatch) -> None:
     assert response.json()["error"]["details"] == {"limit_bytes": 8}
 
 
+def test_json_body_requires_application_json_content_type() -> None:
+    app_module.clear_rate_limit_state()
+
+    response = TestClient(app).post(
+        "/api/v1/auth/token",
+        content=b"{}",
+        headers={"Content-Type": "text/plain", "X-Request-Id": "bad-media"},
+    )
+
+    assert response.status_code == 415
+    assert response.headers["x-request-id"] == "bad-media"
+    assert response.json() == {
+        "error": {
+            "code": "UNSUPPORTED_MEDIA_TYPE",
+            "message": "Content-Type must be application/json",
+            "details": {},
+            "request_id": "bad-media",
+        }
+    }
+
+
+def test_bodyless_api_request_does_not_require_content_type() -> None:
+    app_module.clear_rate_limit_state()
+    request = SimpleNamespace(
+        client=SimpleNamespace(host="127.0.0.1"),
+        headers={},
+        method="POST",
+        url=SimpleNamespace(path="/api/v1/auth/token"),
+    )
+
+    response = asyncio.run(app_module.request_guard_response(request, "bodyless-request"))
+
+    assert response is None
+
+
 def test_forwarded_client_ip_prefers_leftmost_public(monkeypatch) -> None:
     monkeypatch.setenv("TRUST_FORWARDED_HEADERS", "true")
     app_module.clear_rate_limit_state()
