@@ -19,6 +19,7 @@ from concrete_console.routes import (
     apply_provider_cvm_lifecycle_action,
     cvm_etag,
     cvm_provider_app_id,
+    deprovision_security_cvm_dns_records,
     entity_quota_usage,
     erased_user_email,
     ensure_no_sandbox_env_conflict,
@@ -34,7 +35,9 @@ from concrete_console.routes import (
     render_security_cvm_compose_config,
     resolve_cvm_launch_config,
     resolve_security_cvm_provision_config,
+    security_cvm_provider_app_id,
     ssh_key_fingerprint,
+    terminate_provider_security_cvm,
     user_quota_usage,
     user_etag,
     validate_audit_export_request,
@@ -42,6 +45,7 @@ from concrete_console.routes import (
     validate_profile_policy,
     validate_reconcile_dependencies,
 )
+from concrete_console.dns_provider.cloudflare import CloudflareError
 from concrete_console.tee_provider.phala import PhalaError
 from concrete_console.routes_internal import (
     TrafficLogBatch,
@@ -163,6 +167,106 @@ def test_apply_provider_cvm_lifecycle_action_wraps_phala_error(monkeypatch) -> N
     assert exc.value.status_code == 502
     assert exc.value.detail["error"]["code"] == "UPSTREAM_ERROR"
     assert exc.value.detail["error"]["details"] == {"adapter": "phala", "reason": "cli_failed"}
+
+
+def test_security_cvm_provider_app_id_reads_phala_metadata() -> None:
+    assert security_cvm_provider_app_id({"metadata": {"app_id": "sc-app-123"}}) == "sc-app-123"
+    assert security_cvm_provider_app_id({"metadata": {}}) is None
+
+
+def test_terminate_provider_security_cvm_calls_phala_delete(monkeypatch) -> None:
+    calls = []
+
+    class FakePhalaClient:
+        async def delete(self, app_id: str) -> None:
+            calls.append(app_id)
+
+    fake = FakePhalaClient()
+    monkeypatch.setattr(
+        "concrete_console.tee_provider.phala.PhalaClient.from_settings",
+        classmethod(lambda cls, *, timeout_seconds=None: fake),
+    )
+
+    asyncio.run(terminate_provider_security_cvm(app_id="sc-app-123"))
+
+    assert calls == ["sc-app-123"]
+
+
+def test_terminate_provider_security_cvm_wraps_phala_error(monkeypatch) -> None:
+    class FailingPhalaClient:
+        async def delete(self, app_id: str) -> None:
+            raise PhalaError("cli_failed")
+
+    fake = FailingPhalaClient()
+    monkeypatch.setattr(
+        "concrete_console.tee_provider.phala.PhalaClient.from_settings",
+        classmethod(lambda cls, *, timeout_seconds=None: fake),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(terminate_provider_security_cvm(app_id="sc-app-123"))
+
+    assert exc.value.status_code == 502
+    assert exc.value.detail["error"]["code"] == "UPSTREAM_ERROR"
+    assert exc.value.detail["error"]["details"] == {"adapter": "phala", "reason": "cli_failed"}
+
+
+def test_deprovision_security_cvm_dns_records_uses_security_zone(monkeypatch) -> None:
+    calls = []
+
+    class FakeCloudflareClient:
+        async def delete_record(self, record_id: str) -> None:
+            calls.append(("delete", record_id))
+
+    fake = FakeCloudflareClient()
+    monkeypatch.setattr(
+        "concrete_console.dns_provider.cloudflare.CloudflareClient.from_settings",
+        classmethod(
+            lambda cls, *, zone_id_key="CLOUDFLARE_ZONE_ID": calls.append(("zone", zone_id_key)) or fake
+        ),
+    )
+
+    deleted = asyncio.run(
+        deprovision_security_cvm_dns_records(
+            {
+                "id": UUID("00000000-0000-4000-8000-000000000040"),
+                "txt_dns_record_id": "txt-record",
+                "cname_dns_record_id": "cname-record",
+            }
+        )
+    )
+
+    assert deleted == {"txt_dns_record_id", "cname_dns_record_id"}
+    assert calls == [
+        ("zone", "SECURITY_CVM_ZONE_ID"),
+        ("delete", "txt-record"),
+        ("delete", "cname-record"),
+    ]
+
+
+def test_deprovision_security_cvm_dns_records_keeps_failed_record_ids(monkeypatch) -> None:
+    class FakeCloudflareClient:
+        async def delete_record(self, record_id: str) -> None:
+            if record_id == "txt-record":
+                raise CloudflareError("api_error")
+
+    fake = FakeCloudflareClient()
+    monkeypatch.setattr(
+        "concrete_console.dns_provider.cloudflare.CloudflareClient.from_settings",
+        classmethod(lambda cls, *, zone_id_key="CLOUDFLARE_ZONE_ID": fake),
+    )
+
+    deleted = asyncio.run(
+        deprovision_security_cvm_dns_records(
+            {
+                "id": UUID("00000000-0000-4000-8000-000000000040"),
+                "txt_dns_record_id": "txt-record",
+                "cname_dns_record_id": "cname-record",
+            }
+        )
+    )
+
+    assert deleted == {"cname_dns_record_id"}
 
 
 def test_mint_service_principal_token_hash_returns_sha256(monkeypatch) -> None:

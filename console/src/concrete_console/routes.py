@@ -35,6 +35,7 @@ from concrete_console.idempotency import (
     store_idempotency_response,
 )
 from concrete_console.jwt_keys import get_jwt_manager
+from concrete_console.log_config import logger
 from concrete_console.resources import (
     audit_event_resource,
     cvm_resource,
@@ -55,6 +56,7 @@ from concrete_console.resources import (
 )
 from concrete_console.scheduler import run_reconciliation_pass
 
+log = logger()
 PERMISSIONS = {
     "CVM_LAUNCH",
     "CVM_MANAGE",
@@ -4400,6 +4402,64 @@ async def get_security_cvm(
     return security_cvm_resource(row)
 
 
+def security_cvm_provider_app_id(row: asyncpg.Record | dict) -> str | None:
+    metadata = json_payload(dict(row).get("metadata", {}))
+    if not isinstance(metadata, dict):
+        return None
+    app_id = metadata.get("app_id")
+    return app_id if isinstance(app_id, str) and app_id else None
+
+
+async def terminate_provider_security_cvm(*, app_id: str) -> None:
+    from concrete_console.tee_provider.phala import PhalaClient, PhalaError
+
+    try:
+        await PhalaClient.from_settings().delete(app_id)
+    except PhalaError as exc:
+        raise api_error(
+            502,
+            "UPSTREAM_ERROR",
+            "Security CVM provider termination failed",
+            {"adapter": "phala", "reason": exc.code},
+        ) from exc
+
+
+async def deprovision_security_cvm_dns_records(row: asyncpg.Record | dict) -> set[str]:
+    from concrete_console.dns_provider.cloudflare import CloudflareClient, CloudflareError
+
+    record_fields = (
+        ("txt_dns_record_id", dict(row).get("txt_dns_record_id")),
+        ("cname_dns_record_id", dict(row).get("cname_dns_record_id")),
+    )
+    record_fields = tuple(
+        (field, record_id) for field, record_id in record_fields if isinstance(record_id, str) and record_id
+    )
+    if not record_fields:
+        return set()
+    try:
+        client = CloudflareClient.from_settings(zone_id_key="SECURITY_CVM_ZONE_ID")
+    except CloudflareError as exc:
+        log.warning(
+            "security_cvm_dns_deprovision_skipped",
+            security_cvm_id=str(dict(row).get("id")),
+            reason=exc.code,
+        )
+        return set()
+    deleted_fields: set[str] = set()
+    for field, record_id in record_fields:
+        try:
+            await client.delete_record(record_id)
+            deleted_fields.add(field)
+        except CloudflareError as exc:
+            log.warning(
+                "security_cvm_dns_deprovision_failed",
+                security_cvm_id=str(dict(row).get("id")),
+                record_id=record_id,
+                reason=exc.code,
+            )
+    return deleted_fields
+
+
 @router.delete("/entities/{entity_id}/security-cvm")
 async def delete_security_cvm(
     entity_id: UUID,
@@ -4428,14 +4488,10 @@ async def delete_security_cvm(
                     "cannot decommission Security CVM while Dev CVMs exist",
                     {"state": "dev_cvms_in_entity", "dev_cvm_count": live_dev_cvm_count},
                 )
-            metadata = json_payload(row["metadata"])
-            if isinstance(metadata, dict) and metadata.get("app_id"):
-                raise api_error(
-                    503,
-                    "SERVICE_UNAVAILABLE",
-                    "Security CVM provider termination is not implemented",
-                    {"component": "phala_adapter"},
-                )
+            app_id = security_cvm_provider_app_id(row)
+            if app_id is not None:
+                await terminate_provider_security_cvm(app_id=app_id)
+            deleted_dns_fields = await deprovision_security_cvm_dns_records(row)
             await conn.execute(
                 """
                 UPDATE service_principal_tokens
@@ -4454,7 +4510,9 @@ async def delete_security_cvm(
                 SET state = 'TERMINATED',
                     deleted_at = now(),
                     deleted_by = $1,
-                    updated_at = now()
+                    updated_at = now(),
+                    txt_dns_record_id = CASE WHEN $3 THEN NULL ELSE txt_dns_record_id END,
+                    cname_dns_record_id = CASE WHEN $4 THEN NULL ELSE cname_dns_record_id END
                 WHERE id = $2
                 RETURNING
                     id,
@@ -4474,6 +4532,8 @@ async def delete_security_cvm(
                 """,
                 current_user.id,
                 row["id"],
+                "txt_dns_record_id" in deleted_dns_fields,
+                "cname_dns_record_id" in deleted_dns_fields,
             )
             await insert_audit_event(
                 conn,
@@ -4486,6 +4546,28 @@ async def delete_security_cvm(
                 before={"state": row["state"]},
                 after={"state": "TERMINATED"},
             )
+            if deleted_dns_fields:
+                await insert_audit_event(
+                    conn,
+                    entity_id=entity_id,
+                    actor_id=current_user.id,
+                    actor_email=current_user.email,
+                    action="SUBDOMAIN_DEPROVISIONED",
+                    target_type="security_cvm",
+                    target_id=row["id"],
+                    before={
+                        "txt_dns_record_id": row["txt_dns_record_id"],
+                        "cname_dns_record_id": row["cname_dns_record_id"],
+                    },
+                    after={
+                        "txt_dns_record_id": None
+                        if "txt_dns_record_id" in deleted_dns_fields
+                        else row["txt_dns_record_id"],
+                        "cname_dns_record_id": None
+                        if "cname_dns_record_id" in deleted_dns_fields
+                        else row["cname_dns_record_id"],
+                    },
+                )
     return security_cvm_resource(terminated)
 
 
@@ -4556,6 +4638,8 @@ async def lock_security_cvm_for_decommission(conn: asyncpg.Connection, entity_id
             state::text AS state,
             fqdn,
             metadata,
+            txt_dns_record_id,
+            cname_dns_record_id,
             instance_type,
             region,
             error_reason,
