@@ -5,7 +5,7 @@ import json
 import jwt
 import pytest
 from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import ed25519
+from cryptography.hazmat.primitives.asymmetric import ed25519, rsa
 
 from concrete_console.jwt_keys import JwtManager, JwtSettings
 
@@ -33,6 +33,20 @@ def generate_ed25519_material(kid: str):
         "alg": "EdDSA",
         "x": b64url(public_bytes),
     }
+    return private_pem, jwk
+
+
+def generate_rsa_material(kid: str, *, key_size: int):
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=key_size)
+    public_key = private_key.public_key()
+    private_pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    jwk = json.loads(jwt.algorithms.RSAAlgorithm.to_jwk(public_key))
+    jwk["kid"] = kid
+    jwk["alg"] = "RS256"
     return private_pem, jwk
 
 
@@ -86,6 +100,28 @@ def test_access_token_round_trips_with_configured_jwks(tmp_path) -> None:
     assert claims["entity_id"] == "00000000-0000-4000-8000-000000000002"
     assert claims["jti"] == str(result.jti)
     assert result.expires_at > datetime.now(timezone.utc)
+
+
+def test_rs256_refuses_weak_rsa_key_at_startup(tmp_path) -> None:
+    private_pem, jwk = generate_rsa_material("weak-key", key_size=1024)
+    private_path = tmp_path / "private.pem"
+    public_path = tmp_path / "public.jwks"
+    private_path.write_bytes(private_pem)
+    public_path.write_text(json.dumps({"keys": [jwk]}))
+
+    settings = JwtSettings(
+        algorithm="RS256",
+        private_key_ref=f"file://{private_path}",
+        public_keys_ref=f"file://{public_path}",
+        active_kid="weak-key",
+        issuer="issuer",
+        audience="audience",
+        access_ttl_seconds=3600,
+        leeway_seconds=0,
+    )
+
+    with pytest.raises(ValueError, match="RS256 keys must be at least 2048 bits"):
+        JwtManager(settings)
 
 
 def test_rotate_switches_active_kid_and_retains_old_verifier(tmp_path) -> None:

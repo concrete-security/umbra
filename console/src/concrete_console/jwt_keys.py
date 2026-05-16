@@ -11,6 +11,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import jwt
+from cryptography.hazmat.primitives.asymmetric import rsa
 
 from concrete_console.config import load_settings
 
@@ -79,6 +80,11 @@ def _jwk_to_key(jwk: dict[str, Any]) -> Any:
     return jwt.PyJWK.from_dict(jwk).key
 
 
+def _validate_key_strength(key: Any, *, alg: str) -> None:
+    if alg == "RS256" and (not isinstance(key, rsa.RSAPublicKey) or key.key_size < 2048):
+        raise ValueError("RS256 keys must be at least 2048 bits")
+
+
 def _load_key_material(settings: JwtSettings, *, active_kid: str) -> tuple[str, dict[str, VerifyingKey]]:
     if settings.algorithm not in ALLOWED_ALGORITHMS:
         raise ValueError("JWT_ALGORITHM must be EdDSA or RS256")
@@ -95,7 +101,9 @@ def _load_key_material(settings: JwtSettings, *, active_kid: str) -> tuple[str, 
         alg = jwk.get("alg") or settings.algorithm
         if alg not in ALLOWED_ALGORITHMS:
             raise ValueError("JWKS entry has unsupported alg")
-        keys[kid] = VerifyingKey(kid=kid, alg=alg, key=_jwk_to_key({**jwk, "alg": alg}))
+        key = _jwk_to_key({**jwk, "alg": alg})
+        _validate_key_strength(key, alg=alg)
+        keys[kid] = VerifyingKey(kid=kid, alg=alg, key=key)
     if active_kid not in keys:
         raise ValueError("active kid must appear in JWT_PUBLIC_KEYS_REF")
     if keys[active_kid].alg != settings.algorithm:
