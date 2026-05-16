@@ -2964,6 +2964,61 @@ async def get_cvm(
     return cvm_resource(rows[0])
 
 
+@router.get("/cvms/{cvm_id}/policy-bundle")
+async def get_cvm_policy_bundle(
+    cvm_id: UUID,
+    response: Response,
+    current_user: CurrentUser = Depends(require_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> dict:
+    async with pool.acquire() as conn:
+        cvm = await conn.fetchrow(
+            """
+            SELECT id, owner_id, state::text AS state
+            FROM cvms
+            WHERE id = $1
+              AND entity_id = $2
+              AND deleted_at IS NULL
+            """,
+            cvm_id,
+            current_user.entity_id,
+        )
+        if cvm is None:
+            raise api_error(404, "NOT_FOUND", "resource not found")
+        if cvm["owner_id"] != current_user.id and "CVM_MANAGE" not in current_user.permissions:
+            raise api_error(404, "NOT_FOUND", "resource not found")
+        if cvm["state"] == "TERMINATED":
+            raise api_error(
+                409,
+                "CONFLICT",
+                "policy bundle is unavailable for terminated CVM",
+                {"state": "cvm_terminated"},
+            )
+        bundle = await conn.fetchval(
+            """
+            SELECT result -> 'policy_bundle'
+            FROM operations
+            WHERE kind = 'cvm.launch'
+              AND status = 'succeeded'
+              AND target_type = 'cvm'
+              AND target_id = $1
+              AND result ? 'policy_bundle'
+            ORDER BY updated_at DESC, created_at DESC
+            LIMIT 1
+            """,
+            cvm_id,
+        )
+    if bundle is None:
+        raise api_error(
+            503,
+            "SERVICE_UNAVAILABLE",
+            "CVM policy bundle has not been materialized",
+            {"component": "policy_bundle"},
+        )
+    response.headers["Cache-Control"] = "no-store"
+    return json_payload(bundle)
+
+
 @router.post("/cvms/{cvm_id}/actions/start")
 async def start_cvm(
     cvm_id: UUID,
