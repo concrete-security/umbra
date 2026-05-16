@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
+import json
 from types import SimpleNamespace
 from uuid import UUID
 
@@ -11,7 +12,15 @@ from concrete_console.auth import CurrentUser, require_current_user
 from concrete_console.app import app
 from concrete_console.db import get_pool
 from concrete_console.internal_auth import parse_service_bearer_authorization
-from concrete_console.routes_auth import DeviceStartRequest, device_poll_too_soon, device_start, request_ip
+from concrete_console import routes_auth
+from concrete_console.routes_auth import (
+    DeviceStartRequest,
+    RefreshRequest,
+    device_poll_too_soon,
+    device_start,
+    refresh,
+    request_ip,
+)
 
 
 def current_user(*, permissions: set[str] | None = None) -> CurrentUser:
@@ -53,6 +62,36 @@ class FakePool:
 
     def acquire(self):
         return AsyncContext(self.conn)
+
+
+class RefreshReplayConn:
+    def __init__(self):
+        self.execute_calls: list[tuple[str, tuple[object, ...]]] = []
+
+    def transaction(self):
+        return AsyncContext()
+
+    async def fetchrow(self, query, *args):
+        return {
+            "redeemed_at": datetime(2026, 5, 16, 15, 12, 0, tzinfo=timezone.utc),
+            "family_id": UUID("00000000-0000-4000-8000-000000000011"),
+            "jti": UUID("00000000-0000-4000-8000-000000000012"),
+            "user_id": UUID("00000000-0000-4000-8000-000000000020"),
+            "actor_email": "dev@example.com",
+            "entity_id": UUID("00000000-0000-4000-8000-000000000001"),
+        }
+
+    async def fetch(self, query, *args):
+        return [
+            {
+                "access_jti": UUID("00000000-0000-4000-8000-000000000013"),
+                "access_expires_at": datetime(2026, 5, 16, 16, 12, 0, tzinfo=timezone.utc),
+            }
+        ]
+
+    async def execute(self, query, *args):
+        self.execute_calls.append((query, args))
+        return "INSERT 0 1"
 
 
 def test_require_permission_allows_granted_permission() -> None:
@@ -134,6 +173,39 @@ def test_logout_accepts_missing_body() -> None:
 
     assert response.status_code == 204
     assert response.content == b""
+
+
+def test_refresh_replay_error_envelope_includes_request_id(monkeypatch) -> None:
+    audit_calls: list[dict[str, object]] = []
+
+    async def fake_insert_audit_event(_conn, **kwargs):
+        audit_calls.append(kwargs)
+
+    monkeypatch.setattr(routes_auth, "insert_audit_event", fake_insert_audit_event)
+    request = SimpleNamespace(
+        state=SimpleNamespace(request_id="refresh-replay-request"),
+        headers={},
+        client=SimpleNamespace(host="127.0.0.1"),
+    )
+
+    response = asyncio.run(
+        refresh(
+            RefreshRequest(refresh_token="r" * 20),
+            request=request,
+            pool=FakePool(RefreshReplayConn()),
+        )
+    )
+
+    assert response.status_code == 401
+    assert json.loads(response.body) == {
+        "error": {
+            "code": "UNAUTHORIZED",
+            "message": "invalid refresh token",
+            "details": {},
+            "request_id": "refresh-replay-request",
+        }
+    }
+    assert audit_calls[0]["action"] == "AUTH_REFRESH_REUSE_DETECTED"
 
 
 def test_auth_request_ip_uses_forwarded_header_resolution(monkeypatch) -> None:

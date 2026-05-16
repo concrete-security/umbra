@@ -479,7 +479,14 @@ async def refresh(
                 )
                 return JSONResponse(
                     status_code=401,
-                    content={"error": {"code": "UNAUTHORIZED", "message": "invalid refresh token", "details": {}}},
+                    content={
+                        "error": {
+                            "code": "UNAUTHORIZED",
+                            "message": "invalid refresh token",
+                            "details": {},
+                            "request_id": request_id(request),
+                        }
+                    },
                 )
             if row["revoked_at"] is not None or row["expires_at"] <= datetime.now(timezone.utc):
                 raise api_error(401, "UNAUTHORIZED", "invalid refresh token")
