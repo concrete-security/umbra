@@ -479,8 +479,15 @@ def test_render_security_cvm_compose_config_keeps_runtime_values_as_placeholders
     )
 
     assert "ghcr.io/concrete-security/security-cvm/mitmproxy@sha256:abc" in compose
+    assert "  mitmproxy:" in compose
+    assert "command: [\"concrete-security-mitmproxy\"]" in compose
+    assert "${ENTITY_ID}" in compose
+    assert "${SC_ID}" in compose
+    assert "${SC_FQDN}" not in compose
     assert "${CONSOLE_INGEST_TOKEN}" in compose
     assert "${CA_EXPORT_TOKEN}" in compose
+    assert "SC_MITMPROXY_CONFDIR: /tmp/mitmproxy" in compose
+    assert "no-new-privileges:true" in compose
     assert "token_urlsafe" not in compose
 
 

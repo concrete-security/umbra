@@ -1,0 +1,18 @@
+app:
+  name: mitmproxy
+
+services:
+  mitmproxy:
+    networks: [proxy]
+
+cvm:
+  domain: ${SECURITY_CVM_FQDN}
+  routes:
+    - path: /ca.pem
+      service: mitmproxy
+      port: 8081
+      cors: false
+    - path: /
+      service: mitmproxy
+      port: 8080
+      cors: false

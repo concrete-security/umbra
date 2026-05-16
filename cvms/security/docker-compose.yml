@@ -1,0 +1,32 @@
+services:
+  mitmproxy:
+    image: "${SECURITY_CVM_IMAGE_REF:?set SECURITY_CVM_IMAGE_REF to a digest-pinned GHCR image}"
+    command: ["concrete-security-mitmproxy"]
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /run
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      CONSOLE_URL: ${CONSOLE_URL}
+      ENTITY_ID: ${ENTITY_ID}
+      SC_ID: ${SC_ID}
+      CONSOLE_INGEST_TOKEN: ${CONSOLE_INGEST_TOKEN}
+      CA_EXPORT_TOKEN: ${CA_EXPORT_TOKEN}
+      SC_MANAGEMENT_HOST: 0.0.0.0
+      SC_MANAGEMENT_PORT: "8081"
+      SC_MITMPROXY_HOST: 0.0.0.0
+      SC_MITMPROXY_PORT: "8080"
+      SC_MITMPROXY_CONFDIR: /tmp/mitmproxy
+    expose:
+      - "8080"
+      - "8081"
+    networks:
+      - proxy
+
+networks:
+  proxy:
+    driver: bridge

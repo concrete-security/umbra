@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import hmac
+from pathlib import Path
+import stat
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -82,3 +84,15 @@ def generate_root_ca(
         .sign(private_key=key, algorithm=hashes.SHA384())
     )
     return InMemoryRootCA(private_key=key, certificate=cert)
+
+
+def write_mitmproxy_ca_files(ca: InMemoryRootCA, directory: Path) -> None:
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    directory.chmod(stat.S_IRWXU)
+    private_bundle = ca.private_key_pem + ca.ca_pem
+    private_bundle_path = directory / "mitmproxy-ca.pem"
+    public_cert_path = directory / "mitmproxy-ca-cert.pem"
+    private_bundle_path.write_bytes(private_bundle)
+    private_bundle_path.chmod(stat.S_IRUSR)
+    public_cert_path.write_bytes(ca.ca_pem)
+    public_cert_path.chmod(stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)

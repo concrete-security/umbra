@@ -1,7 +1,7 @@
 """Security CVM runtime helpers."""
 
 from concrete_security_cvm.binding import BootBinding
-from concrete_security_cvm.ca import CAExportUnauthorized, InMemoryRootCA, generate_root_ca
+from concrete_security_cvm.ca import CAExportUnauthorized, InMemoryRootCA, generate_root_ca, write_mitmproxy_ca_files
 from concrete_security_cvm.control import ControlMap, DevCVMControlEntry, PollResult, SCControlClient
 from concrete_security_cvm.control_loop import (
     ControlPlaneSnapshot,
@@ -67,4 +67,5 @@ __all__ = [
     "run_control_plane_poll_loop",
     "run_traffic_log_emitter_loop",
     "serve_management_http",
+    "write_mitmproxy_ca_files",
 ]

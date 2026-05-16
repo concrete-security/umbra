@@ -1,11 +1,12 @@
 from datetime import datetime, timezone
+import stat
 
 import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtensionOID
 
-from concrete_security_cvm.ca import CAExportUnauthorized, generate_root_ca
+from concrete_security_cvm.ca import CAExportUnauthorized, generate_root_ca, write_mitmproxy_ca_files
 
 
 def test_generate_root_ca_uses_p384_ca_certificate() -> None:
@@ -29,3 +30,18 @@ def test_export_ca_pem_requires_exact_bearer() -> None:
     assert ca.export_ca_pem(supplied_token="correct", ca_export_token="correct") == ca.ca_pem
     with pytest.raises(CAExportUnauthorized):
         ca.export_ca_pem(supplied_token="wrong", ca_export_token="correct")
+
+
+def test_write_mitmproxy_ca_files_uses_tmpfs_friendly_private_modes(tmp_path) -> None:
+    ca = generate_root_ca()
+
+    write_mitmproxy_ca_files(ca, tmp_path / "mitmproxy")
+
+    directory = tmp_path / "mitmproxy"
+    private_bundle = directory / "mitmproxy-ca.pem"
+    public_cert = directory / "mitmproxy-ca-cert.pem"
+    assert private_bundle.read_bytes() == ca.private_key_pem + ca.ca_pem
+    assert public_cert.read_bytes() == ca.ca_pem
+    assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+    assert stat.S_IMODE(private_bundle.stat().st_mode) == 0o400
+    assert stat.S_IMODE(public_cert.stat().st_mode) == 0o444
