@@ -380,9 +380,10 @@ async def execute_security_cvm_phala_deploy_operation(operation_id: Any) -> None
     env = build_security_cvm_provision_env(snapshot)
     try:
         name = security_cvm_provider_name(_row_value(snapshot, "id"))
-        shade_result = await ShadeClient.from_settings().build(
+        shade_result = await ShadeClient.from_settings().build_with_policy(
             shade_config_yaml=render_security_cvm_shade_config(snapshot, name=name),
             app_compose_yaml=_row_value(snapshot, "compose_config"),
+            domain=_row_value(snapshot, "fqdn"),
         )
         deploy_result = await PhalaClient.from_settings().deploy(
             name=name,
@@ -415,6 +416,7 @@ async def execute_security_cvm_phala_deploy_operation(operation_id: Any) -> None
             app_id=deploy_result.app_id,
             gateway_host=deploy_result.gateway_host,
             status=deploy_result.status,
+            atls_policy=shade_result.policy,
         ),
     )
 
@@ -729,6 +731,13 @@ async def execute_cvm_launch_phala_deploy_operation(operation_id: Any) -> None:
             operation_id,
             code="SECURITY_CVM_CA_UNAVAILABLE",
             details={"component": "security_cvm_ca_cert"},
+        )
+        return
+    if stored_security_cvm_atls_policy(snapshot) is None:
+        await mark_cvm_launch_failed(
+            operation_id,
+            code="SECURITY_CVM_ATLS_POLICY_UNAVAILABLE",
+            details={"component": "security_cvm_atls_policy"},
         )
         return
 
@@ -1494,6 +1503,7 @@ async def fetch_cvm_launch_snapshot(conn: Any, operation_id: Any) -> Any | None:
             sc.fqdn AS security_cvm_fqdn,
             COALESCE(sc.proxy_port, 8080) AS security_cvm_proxy_port,
             sc.ca_cert_pem AS security_cvm_ca_cert_pem,
+            sc.metadata AS security_cvm_metadata,
             sc.expected_image_measurement AS security_cvm_expected_image_measurement,
             sc.image_measurement AS security_cvm_image_measurement,
             sc.rtmr3_digest AS security_cvm_rtmr3_digest,
@@ -1623,15 +1633,19 @@ def render_sandbox_env_placeholders(profile_rows: list[Any]) -> str:
     return "".join(f"{name}={merged[name]}\n" for name in sorted(merged))
 
 
+def stored_security_cvm_atls_policy(snapshot: Any) -> dict[str, Any] | None:
+    metadata = json_payload(_row_value(snapshot, "security_cvm_metadata") or {})
+    if not isinstance(metadata, dict):
+        return None
+    policy = metadata.get("atls_policy")
+    return policy if isinstance(policy, dict) else None
+
+
 def security_cvm_atls_policy(snapshot: Any) -> dict[str, Any]:
-    return {
-        "type": "dstack_tdx",
-        "allowed_tcb_status": ["UpToDate"],
-        "fqdn": _row_value(snapshot, "security_cvm_fqdn"),
-        "expected_image_measurement": _row_value(snapshot, "security_cvm_expected_image_measurement"),
-        "image_measurement": _row_value(snapshot, "security_cvm_image_measurement"),
-        "rtmr3_digest": _row_value(snapshot, "security_cvm_rtmr3_digest"),
-    }
+    policy = stored_security_cvm_atls_policy(snapshot)
+    if policy is None:
+        raise ValueError("security_cvm_atls_policy_missing")
+    return policy
 
 
 def render_dev_cvm_shade_config(snapshot: Any, *, name: str) -> str:
@@ -1699,13 +1713,21 @@ def build_security_cvm_provision_env(snapshot: Any) -> dict[str, str]:
     }
 
 
-def security_cvm_provision_metadata(*, name: str, app_id: str, gateway_host: str, status: str) -> dict[str, Any]:
+def security_cvm_provision_metadata(
+    *,
+    name: str,
+    app_id: str,
+    gateway_host: str,
+    status: str,
+    atls_policy: dict[str, Any],
+) -> dict[str, Any]:
     return {
         "provider": "phala",
         "name": name,
         "app_id": app_id,
         "gateway_host": gateway_host,
         "status": status,
+        "atls_policy": atls_policy,
     }
 
 

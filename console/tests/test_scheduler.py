@@ -157,6 +157,18 @@ def test_provider_app_id_parses_json_metadata() -> None:
     assert scheduler.provider_app_id({}) is None
 
 
+def security_atls_policy(**overrides):
+    policy = {
+        "type": "dstack_tdx",
+        "allowed_tcb_status": ["UpToDate"],
+        "app_compose": {"docker_compose_file": "services:\n  mitmproxy:\n    image: example/sc@sha256:abc\n"},
+        "expected_bootchain": {"mrtd": "b" * 64, "rtmr0": "0" * 64, "rtmr1": "1" * 64, "rtmr2": "2" * 64},
+        "os_image_hash": "b" * 64,
+    }
+    policy.update(overrides)
+    return policy
+
+
 def launch_snapshot(**overrides):
     now = scheduler.datetime.now(scheduler.timezone.utc)
     row = {
@@ -169,6 +181,7 @@ def launch_snapshot(**overrides):
         "security_cvm_fqdn": "sc-abc.sc.example.com",
         "security_cvm_proxy_port": 8080,
         "security_cvm_ca_cert_pem": "-----BEGIN CERTIFICATE-----\nca\n-----END CERTIFICATE-----\n",
+        "security_cvm_metadata": {"atls_policy": security_atls_policy()},
         "security_cvm_expected_image_measurement": "b" * 64,
         "security_cvm_image_measurement": "b" * 64,
         "security_cvm_rtmr3_digest": "c" * 96,
@@ -283,7 +296,7 @@ def test_build_cvm_launch_env_binds_runtime_material() -> None:
     assert decode_env(env["AUTHORIZED_SSH_KEYS_B64"]) == authorized_keys
     assert decode_env(env["SANDBOX_ENV_PLACEHOLDERS_B64"]) == "AWS_ACCESS_KEY_ID=concrete-proxy-injected\nZED=last\n"
     assert decode_env(env["SECURITY_CVM_CA_CERT_B64"]) == ca_cert
-    assert json.loads(decode_env(env["SECURITY_CVM_ATLS_POLICY_B64"]))["fqdn"] == "sc-abc.sc.example.com"
+    assert json.loads(decode_env(env["SECURITY_CVM_ATLS_POLICY_B64"])) == security_atls_policy()
     assert binding == {
         "cvm_id": "00000000-0000-4000-8000-000000000031",
         "security_cvm_fqdn": "sc-abc.sc.example.com",
@@ -355,13 +368,16 @@ class AsyncContext:
 
 
 class LaunchFakeConn:
-    def __init__(self):
+    def __init__(self, **snapshot_overrides):
+        self.snapshot_overrides = snapshot_overrides
         self.execute_calls: list[tuple[str, tuple[object, ...]]] = []
 
     def transaction(self):
         return AsyncContext()
 
     async def fetchrow(self, query, *args):
+        if "SELECT target_id" in query and "FROM operations" in query:
+            return {"target_id": UUID("00000000-0000-4000-8000-000000000031")}
         assert "FROM operations o" in query
         row = launch_snapshot(
             operation_id=UUID("00000000-0000-4000-8000-000000000030"),
@@ -373,6 +389,7 @@ class LaunchFakeConn:
             txt_dns_record_id=None,
             cname_dns_record_id=None,
             security_cvm_id=UUID("00000000-0000-4000-8000-000000000041"),
+            **self.snapshot_overrides,
         )
         return row
 
@@ -468,10 +485,14 @@ def test_execute_security_cvm_phala_deploy_materializes_env_and_metadata(monkeyp
         def from_settings(cls):
             return cls()
 
-        async def build(self, *, shade_config_yaml, app_compose_yaml):
+        async def build_with_policy(self, *, shade_config_yaml, app_compose_yaml, domain):
             captured["shade_config_yaml"] = shade_config_yaml
             captured["app_compose_yaml"] = app_compose_yaml
-            return SimpleNamespace(compose_yaml="services:\n  generated:\n    image: example\n")
+            captured["domain"] = domain
+            return SimpleNamespace(
+                compose_yaml="services:\n  generated:\n    image: example\n",
+                policy=security_atls_policy(app_compose={"docker_compose_file": app_compose_yaml}),
+            )
 
     class FakePhalaClient:
         @classmethod
@@ -499,11 +520,14 @@ def test_execute_security_cvm_phala_deploy_materializes_env_and_metadata(monkeyp
     assert isinstance(env, dict)
     assert captured["name"] == "concrete-v0-sc-0000000000004000"
     assert "domain: sc-abc.sc.example.com" in str(captured["shade_config_yaml"])
+    assert captured["domain"] == "sc-abc.sc.example.com"
     assert env["CONSOLE_INGEST_TOKEN"] == "ingest-plaintext"
     assert env["CA_EXPORT_TOKEN"] == "ca-export-plaintext"
     metadata_calls = [args for query, args in conn.execute_calls if "UPDATE security_cvms" in query and "metadata" in query]
     metadata = json.loads(metadata_calls[0][1])
     assert metadata["app_id"] == "sc-app-123"
+    assert metadata["atls_policy"]["type"] == "dstack_tdx"
+    assert metadata["atls_policy"]["app_compose"]["docker_compose_file"] == security_cvm_snapshot()["compose_config"]
     assert conn.audit_calls[0]["action"] == "SECURITY_CVM_PROVISIONING_STARTED"
     progress_calls = [args for query, args in conn.execute_calls if "progress_step = $2" in query]
     assert progress_calls[-1] == (UUID("00000000-0000-4000-8000-000000000030"), "cf_txt_create", 40)
@@ -606,6 +630,24 @@ def test_execute_cvm_launch_phala_deploy_persists_hash_only(monkeypatch) -> None
             40,
         )
     ]
+
+
+def test_execute_cvm_launch_phala_deploy_requires_security_cvm_atls_policy(monkeypatch) -> None:
+    conn = LaunchFakeConn(security_cvm_metadata={})
+
+    async def fake_get_pool():
+        return LaunchFakePool(conn)
+
+    monkeypatch.setattr(scheduler, "get_pool", fake_get_pool)
+
+    asyncio.run(scheduler.execute_cvm_launch_phala_deploy_operation(UUID("00000000-0000-4000-8000-000000000030")))
+
+    operation_updates = [args for query, args in conn.execute_calls if "UPDATE operations" in query and "status = 'failed'" in query]
+    error = json.loads(operation_updates[0][1])
+    assert error == {
+        "code": "SECURITY_CVM_ATLS_POLICY_UNAVAILABLE",
+        "details": {"component": "security_cvm_atls_policy"},
+    }
 
 
 class AttestationGateConn:
