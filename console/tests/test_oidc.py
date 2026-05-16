@@ -53,6 +53,30 @@ def signed_google_token(*, claims_override: dict | None = None) -> tuple[str, di
     return token, {GOOGLE_TEST_KID: public_jwk}
 
 
+def signed_google_token_with_headers(
+    *, headers_override: dict[str, str], claims_override: dict | None = None
+) -> tuple[str, dict[str, dict]]:
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    public_jwk = json.loads(jwt.algorithms.RSAAlgorithm.to_jwk(private_key.public_key()))
+    public_jwk["kid"] = GOOGLE_TEST_KID
+    public_jwk["alg"] = "RS256"
+    now = datetime.now(timezone.utc)
+    claims = {
+        "iss": "https://accounts.google.com",
+        "aud": "google-client",
+        "sub": "subject",
+        "email": "admin@example.com",
+        "email_verified": True,
+        "iat": int(now.timestamp()),
+        "exp": int((now + timedelta(minutes=5)).timestamp()),
+    }
+    claims.update(claims_override or {})
+    headers = {"kid": GOOGLE_TEST_KID, "typ": "JWT"}
+    headers.update(headers_override)
+    token = jwt.encode(claims, private_key, algorithm="RS256", headers=headers)
+    return token, {GOOGLE_TEST_KID: public_jwk}
+
+
 def install_jwks(monkeypatch, jwks):
     async def fake_load_google_jwks(*, settings=None, force=False):
         return jwks
@@ -136,6 +160,18 @@ def test_google_id_token_rejects_non_base64url_segments_before_jwks(monkeypatch)
         import asyncio
 
         asyncio.run(verify_google_id_token("abc.def*.ghi", nonce=None, access_token=None, settings=settings))
+
+
+@pytest.mark.parametrize("token_type", ["at+JWT", "JWS"])
+def test_google_id_token_rejects_wrong_token_type(monkeypatch, token_type) -> None:
+    settings = oidc_test_settings()
+    token, jwks = signed_google_token_with_headers(headers_override={"typ": token_type})
+    install_jwks(monkeypatch, jwks)
+
+    with pytest.raises(jwt.InvalidTokenError, match="wrong token type"):
+        import asyncio
+
+        asyncio.run(verify_google_id_token(token, nonce=None, access_token=None, settings=settings))
 
 
 def test_google_id_token_requires_azp_for_audience_array(monkeypatch) -> None:

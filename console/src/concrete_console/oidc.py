@@ -228,7 +228,7 @@ async def verify_google_id_token(
         raise jwt.InvalidTokenError("caller-supplied key headers are forbidden")
     if header.get("alg") != "RS256":
         raise jwt.InvalidTokenError("unsupported id_token algorithm")
-    if header.get("typ") == "at+JWT":
+    if header.get("typ") not in {None, "JWT"}:
         raise jwt.InvalidTokenError("wrong token type")
     kid = header.get("kid")
     if not isinstance(kid, str) or not GOOGLE_KID_RE.fullmatch(kid):
