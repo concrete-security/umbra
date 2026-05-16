@@ -17,7 +17,15 @@ from concrete_security_cvm.policy import (
     PolicyValidationError,
     parse_effective_policy,
 )
-from concrete_security_cvm.traffic import TrafficLogBatch, TrafficLogClient, TrafficLogQueue, TrafficLogRecord
+from concrete_security_cvm.traffic import (
+    TrafficLogBatch,
+    TrafficLogClient,
+    TrafficLogEmitter,
+    TrafficLogEmitterStats,
+    TrafficLogQueue,
+    TrafficLogRecord,
+    run_traffic_log_emitter_loop,
+)
 
 __all__ = [
     "BootBinding",
@@ -38,6 +46,8 @@ __all__ = [
     "SCControlClient",
     "TrafficLogBatch",
     "TrafficLogClient",
+    "TrafficLogEmitter",
+    "TrafficLogEmitterStats",
     "TrafficLogQueue",
     "TrafficLogRecord",
     "enforce_request",
@@ -46,4 +56,5 @@ __all__ = [
     "parse_effective_policy",
     "poll_control_plane_once",
     "run_control_plane_poll_loop",
+    "run_traffic_log_emitter_loop",
 ]

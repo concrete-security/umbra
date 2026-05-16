@@ -1,11 +1,20 @@
 import asyncio
 import json
+import logging
 from datetime import datetime, timezone
 from uuid import UUID
 
 import httpx
+import pytest
 
-from concrete_security_cvm.traffic import TrafficLogBatch, TrafficLogClient, TrafficLogQueue, TrafficLogRecord
+from concrete_security_cvm.traffic import (
+    TrafficLogBatch,
+    TrafficLogClient,
+    TrafficLogEmitter,
+    TrafficLogQueue,
+    TrafficLogRecord,
+    run_traffic_log_emitter_loop,
+)
 
 
 CVM_ID = UUID("00000000-0000-4000-8000-000000000010")
@@ -51,6 +60,19 @@ def test_queue_drops_oldest_when_bound_is_exceeded() -> None:
     assert len(queue) == 0
 
 
+def test_emitter_logs_when_queue_drops_oldest(caplog: pytest.LogCaptureFixture) -> None:
+    queue = TrafficLogQueue(max_entries=1, max_bytes=10_000)
+    client = TrafficLogClient(console_url="https://console.example.com", ingest_token="ingest")
+    emitter = TrafficLogEmitter(queue=queue, client=client, max_batch_entries=100)
+
+    with caplog.at_level(logging.ERROR, logger="concrete_security_cvm.traffic"):
+        emitter.enqueue(record(path="/first"))
+        emitter.enqueue(record(path="/second"))
+
+    assert queue.dropped_oldest == 1
+    assert [item.message for item in caplog.records] == ["traffic_log_queue_dropped_oldest"]
+
+
 def test_queue_drains_at_most_1000_records() -> None:
     queue = TrafficLogQueue(max_entries=1100, max_bytes=10_000_000)
     for index in range(1001):
@@ -61,6 +83,34 @@ def test_queue_drains_at_most_1000_records() -> None:
     assert batch is not None
     assert len(batch.records) == 1000
     assert len(queue) == 1
+
+
+def test_emitter_flushes_when_entry_threshold_is_reached() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"accepted": 2, "deduplicated": False})
+
+    async def run() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            queue = TrafficLogQueue(max_entries=10, max_bytes=10_000)
+            client = TrafficLogClient(console_url="https://console.example.com", ingest_token="ingest", http=http)
+            emitter = TrafficLogEmitter(queue=queue, client=client, max_batch_entries=2)
+            emitter.enqueue(record(path="/one"))
+            emitter.enqueue(record(path="/two"))
+            assert emitter.should_flush() is True
+            await run_traffic_log_emitter_loop(emitter, max_iterations=1)
+            stats = emitter.stats()
+            assert stats.submitted_batches == 1
+            assert stats.submitted_records == 2
+            assert stats.queued_records == 0
+
+    asyncio.run(run())
+
+    assert len(requests) == 1
+    body = json.loads(requests[0].content)
+    assert [item["path"] for item in body["logs"]] == ["/one", "/two"]
 
 
 def test_traffic_log_client_retries_with_same_idempotency_key() -> None:
@@ -91,3 +141,71 @@ def test_traffic_log_client_retries_with_same_idempotency_key() -> None:
     second_body = json.loads(requests[1].content)
     assert first_body["idempotency_key"] == second_body["idempotency_key"]
     assert first_body["logs"][0]["path"] == "/repos"
+
+
+def test_emitter_retains_retryable_failed_batch_with_same_idempotency_key() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(503, json={"error": "unavailable"})
+        return httpx.Response(200, json={"accepted": 1, "deduplicated": False})
+
+    async def run() -> TrafficLogEmitter:
+        async def no_sleep(delay: float) -> None:
+            assert delay >= 0
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            queue = TrafficLogQueue(max_entries=10, max_bytes=10_000)
+            client = TrafficLogClient(console_url="https://console.example.com", ingest_token="ingest", http=http)
+            emitter = TrafficLogEmitter(queue=queue, client=client, max_submit_attempts=1)
+            emitter.enqueue(record())
+            assert await emitter.flush_once(sleep=no_sleep) is False
+            assert emitter.stats().pending_records == 1
+            assert await emitter.flush_once(sleep=no_sleep) is True
+            return emitter
+
+    emitter = asyncio.run(run())
+
+    assert len(requests) == 2
+    first_body = json.loads(requests[0].content)
+    second_body = json.loads(requests[1].content)
+    assert first_body["idempotency_key"] == second_body["idempotency_key"]
+    stats = emitter.stats()
+    assert stats.failed_attempts == 1
+    assert stats.pending_records == 0
+    assert stats.submitted_records == 1
+
+
+def test_emitter_drops_unretryable_failed_batch_and_continues() -> None:
+    responses = [400, 200]
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(responses.pop(0), json={"accepted": 1})
+
+    async def run() -> TrafficLogEmitter:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            queue = TrafficLogQueue(max_entries=10, max_bytes=10_000)
+            client = TrafficLogClient(console_url="https://console.example.com", ingest_token="ingest", http=http)
+            emitter = TrafficLogEmitter(queue=queue, client=client, max_submit_attempts=1)
+            emitter.enqueue(record(path="/bad"))
+            assert await emitter.flush_once() is False
+            emitter.enqueue(record(path="/next"))
+            assert await emitter.flush_once() is True
+            return emitter
+
+    emitter = asyncio.run(run())
+
+    assert len(requests) == 2
+    first_body = json.loads(requests[0].content)
+    second_body = json.loads(requests[1].content)
+    assert first_body["idempotency_key"] != second_body["idempotency_key"]
+    assert first_body["logs"][0]["path"] == "/bad"
+    assert second_body["logs"][0]["path"] == "/next"
+    stats = emitter.stats()
+    assert stats.dropped_unretryable_batches == 1
+    assert stats.dropped_unretryable_records == 1
+    assert stats.submitted_records == 1
