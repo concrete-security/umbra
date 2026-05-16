@@ -166,6 +166,8 @@ async def run_operation_scheduler_pass(*, batch_size: int | None = None) -> list
                         claimed_ids.append(str(_row_value(row, "id")))
                     continue
                 if await advance_claimed_operation(conn, row):
+                    if pending_operation_start_is_executable(row):
+                        executable_ids.append(_row_value(row, "id"))
                     claimed_ids.append(str(_row_value(row, "id")))
     for operation_id in executable_ids:
         await execute_running_operation(operation_id)
@@ -278,6 +280,20 @@ def executable_running_operation(row: Any) -> bool:
         kind == "cvm.launch" and step in CVM_LAUNCH_EXECUTABLE_STEPS
     ) or (
         kind == "security_cvm.provision" and step in SECURITY_CVM_PROVISION_EXECUTABLE_STEPS
+    )
+
+
+def pending_operation_start_is_executable(row: Any) -> bool:
+    progress = pending_operation_start_progress(
+        _row_value(row, "kind"),
+        progress_step=_row_value(row, "progress_step"),
+        progress_percent=_row_value(row, "progress_percent"),
+    )
+    if progress is None:
+        return False
+    next_step, _next_percent = progress
+    return executable_running_operation(
+        {"kind": _row_value(row, "kind"), "status": "running", "progress_step": next_step}
     )
 
 

@@ -24,6 +24,9 @@ class FakeConn:
         self.execute_calls.append((query, args))
         return self.execute_result
 
+    def transaction(self):
+        return AsyncContext()
+
 
 def operation_row(**overrides):
     row = {
@@ -135,6 +138,17 @@ def test_executable_running_operation_recognizes_terminate_step() -> None:
     )
 
 
+def test_pending_operation_start_is_executable_for_live_sagas() -> None:
+    assert scheduler.pending_operation_start_is_executable(operation_row(kind="cvm.launch"))
+    assert scheduler.pending_operation_start_is_executable(
+        operation_row(kind="security_cvm.provision", progress_step="persist_tokens_and_stub")
+    )
+    assert scheduler.pending_operation_start_is_executable(operation_row(kind="cvm.terminate", progress_step="queued"))
+    assert not scheduler.pending_operation_start_is_executable(
+        operation_row(kind="audit.export", progress_step="queued", progress_percent=0)
+    )
+
+
 def test_lease_running_operation_updates_executable_row() -> None:
     conn = FakeConn()
 
@@ -149,6 +163,26 @@ def test_lease_running_operation_updates_executable_row() -> None:
     query, args = conn.execute_calls[0]
     assert "SET updated_at = now()" in query
     assert args == (UUID("00000000-0000-4000-8000-000000000030"),)
+
+
+def test_run_operation_scheduler_pass_executes_newly_started_pending_row(monkeypatch) -> None:
+    conn = FakeConn(fetch_rows=[operation_row()])
+    executed: list[object] = []
+
+    async def fake_get_pool():
+        return LaunchFakePool(conn)
+
+    async def fake_execute_running_operation(operation_id):
+        executed.append(operation_id)
+        return True
+
+    monkeypatch.setattr(scheduler, "get_pool", fake_get_pool)
+    monkeypatch.setattr(scheduler, "execute_running_operation", fake_execute_running_operation)
+
+    claimed = asyncio.run(scheduler.run_operation_scheduler_pass(batch_size=1))
+
+    assert claimed == ["00000000-0000-4000-8000-000000000030"]
+    assert executed == [UUID("00000000-0000-4000-8000-000000000030")]
 
 
 def test_provider_app_id_parses_json_metadata() -> None:
