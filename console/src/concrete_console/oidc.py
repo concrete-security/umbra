@@ -253,16 +253,21 @@ async def verify_google_id_token(
     if claims.get("iss") not in GOOGLE_ISSUERS:
         raise jwt.InvalidTokenError("invalid issuer")
     audience = claims.get("aud")
-    if isinstance(audience, list) and any(item != settings.google_client_id for item in audience):
-        raise jwt.InvalidTokenError("invalid audience")
-    if claims.get("azp") not in {None, settings.google_client_id}:
+    if isinstance(audience, list):
+        if any(item != settings.google_client_id for item in audience):
+            raise jwt.InvalidTokenError("invalid audience")
+        if claims.get("azp") != settings.google_client_id:
+            raise jwt.InvalidTokenError("invalid authorized party")
+    elif claims.get("azp") not in {None, settings.google_client_id}:
         raise jwt.InvalidTokenError("invalid authorized party")
     if claims.get("email_verified") is not True:
         raise jwt.InvalidTokenError("email is not verified")
     if nonce is not None and claims.get("nonce") != nonce:
         raise jwt.InvalidTokenError("invalid nonce")
-    if access_token is not None and "at_hash" in claims and claims["at_hash"] != _at_hash(access_token):
-        raise jwt.InvalidTokenError("invalid at_hash")
+    if access_token is not None:
+        at_hash = claims.get("at_hash")
+        if not isinstance(at_hash, str) or at_hash != _at_hash(access_token):
+            raise jwt.InvalidTokenError("invalid at_hash")
     return claims
 
 

@@ -1,15 +1,63 @@
+from datetime import datetime, timedelta, timezone
+import json
+
 import pytest
 import jwt
+from cryptography.hazmat.primitives.asymmetric import rsa
 
 from concrete_console.crypto import pkce_s256
 from concrete_console.oidc import (
     IdpOAuthError,
     OidcSettings,
+    _at_hash,
     google_authorize_redirect,
     oidc_settings,
     poll_device_code,
     verify_google_id_token,
 )
+
+
+GOOGLE_TEST_KID = "a" * 40
+
+
+def oidc_test_settings() -> OidcSettings:
+    return OidcSettings(
+        google_client_id="google-client",
+        google_client_secret="secret",
+        console_url="https://console.example.com",
+        client_allowlist=frozenset({"concrete-cli-v1"}),
+        authorize_url="https://accounts.example/authorize",
+        token_url="https://accounts.example/token",
+        device_code_url="https://accounts.example/device",
+        jwks_url="https://accounts.example/jwks",
+    )
+
+
+def signed_google_token(*, claims_override: dict | None = None) -> tuple[str, dict[str, dict]]:
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    public_jwk = json.loads(jwt.algorithms.RSAAlgorithm.to_jwk(private_key.public_key()))
+    public_jwk["kid"] = GOOGLE_TEST_KID
+    public_jwk["alg"] = "RS256"
+    now = datetime.now(timezone.utc)
+    claims = {
+        "iss": "https://accounts.google.com",
+        "aud": "google-client",
+        "sub": "subject",
+        "email": "admin@example.com",
+        "email_verified": True,
+        "iat": int(now.timestamp()),
+        "exp": int((now + timedelta(minutes=5)).timestamp()),
+    }
+    claims.update(claims_override or {})
+    token = jwt.encode(claims, private_key, algorithm="RS256", headers={"kid": GOOGLE_TEST_KID, "typ": "JWT"})
+    return token, {GOOGLE_TEST_KID: public_jwk}
+
+
+def install_jwks(monkeypatch, jwks):
+    async def fake_load_google_jwks(*, settings=None, force=False):
+        return jwks
+
+    monkeypatch.setattr("concrete_console.oidc.load_google_jwks", fake_load_google_jwks)
 
 
 def test_oidc_settings_refuses_endpoint_override_without_debug_flag(monkeypatch) -> None:
@@ -74,6 +122,40 @@ def test_google_id_token_rejects_caller_supplied_key_headers_before_jwks(monkeyp
         import asyncio
 
         asyncio.run(verify_google_id_token(token, nonce=None, access_token=None, settings=settings))
+
+
+def test_google_id_token_requires_azp_for_audience_array(monkeypatch) -> None:
+    settings = oidc_test_settings()
+    token, jwks = signed_google_token(claims_override={"aud": ["google-client"]})
+    install_jwks(monkeypatch, jwks)
+
+    with pytest.raises(jwt.InvalidTokenError, match="authorized party"):
+        import asyncio
+
+        asyncio.run(verify_google_id_token(token, nonce=None, access_token=None, settings=settings))
+
+
+def test_google_id_token_requires_at_hash_when_access_token_is_returned(monkeypatch) -> None:
+    settings = oidc_test_settings()
+    token, jwks = signed_google_token()
+    install_jwks(monkeypatch, jwks)
+
+    with pytest.raises(jwt.InvalidTokenError, match="at_hash"):
+        import asyncio
+
+        asyncio.run(verify_google_id_token(token, nonce=None, access_token="access-token", settings=settings))
+
+
+def test_google_id_token_accepts_matching_at_hash(monkeypatch) -> None:
+    settings = oidc_test_settings()
+    token, jwks = signed_google_token(claims_override={"at_hash": _at_hash("access-token")})
+    install_jwks(monkeypatch, jwks)
+
+    import asyncio
+
+    claims = asyncio.run(verify_google_id_token(token, nonce=None, access_token="access-token", settings=settings))
+
+    assert claims["sub"] == "subject"
 
 
 def test_device_poll_preserves_idp_pending_error(monkeypatch) -> None:
