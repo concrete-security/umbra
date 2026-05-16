@@ -1,0 +1,8 @@
+{
+  "proxies": {
+    "http-proxy": "http://dev-egress-forwarder:3128",
+    "https-proxy": "http://dev-egress-forwarder:3128",
+    "no-proxy": "localhost,127.0.0.1,user-sandbox,dev-tunnel,dev-egress-forwarder"
+  },
+  "storage-driver": "overlay2"
+}

@@ -1,0 +1,9 @@
+PasswordAuthentication no
+PermitRootLogin no
+PubkeyAuthentication yes
+AuthorizedKeysFile /run/ssh/authorized_keys/dev
+PermitUserEnvironment yes
+ClientAliveInterval 60
+UsePAM no
+PidFile /run/sshd/sshd.pid
+Subsystem sftp internal-sftp
