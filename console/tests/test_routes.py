@@ -14,6 +14,7 @@ from concrete_console.routes import (
     AuditExportCreate,
     CVMCreate,
     SECURITY_CVM_PROVISION_REDACTION,
+    SecurityCVMCreate,
     cvm_etag,
     entity_quota_usage,
     erased_user_email,
@@ -26,6 +27,7 @@ from concrete_console.routes import (
     require_idempotency_key,
     require_if_match,
     resolve_cvm_launch_config,
+    resolve_security_cvm_provision_config,
     ssh_key_fingerprint,
     user_quota_usage,
     user_etag,
@@ -88,6 +90,10 @@ def cvm_create(**overrides) -> CVMCreate:
     }
     body.update(overrides)
     return CVMCreate(**body)
+
+
+def security_cvm_create(**overrides) -> SecurityCVMCreate:
+    return SecurityCVMCreate(**overrides)
 
 
 def test_profile_etag_uses_updated_at_microseconds() -> None:
@@ -212,6 +218,54 @@ def test_resolve_cvm_launch_config_requires_image_measurement(monkeypatch) -> No
 
     assert exc.value.status_code == 503
     assert exc.value.detail["error"]["details"]["component"] == "dev_cvm_image_measurement"
+
+
+def test_resolve_security_cvm_provision_config_uses_defaults(monkeypatch) -> None:
+    monkeypatch.delenv("PHALA_DEFAULT_INSTANCE_TYPE", raising=False)
+    monkeypatch.setenv("PHALA_REGION", "FR-PARIS-1")
+    monkeypatch.setenv("SECURITY_CVM_IMAGE_REF", "ghcr.io/concrete-security/security-cvm/mitmproxy@sha256:abc")
+    monkeypatch.setenv("SECURITY_CVM_IMAGE_MEASUREMENT", "B" * 64)
+    monkeypatch.setenv("SECURITY_CVM_BASE_DOMAIN", "sc.example.com")
+
+    resolved = resolve_security_cvm_provision_config(security_cvm_create())
+
+    assert resolved["instance_type"] == "tdx.small"
+    assert resolved["region"] == "FR-PARIS-1"
+    assert resolved["expected_image_measurement"] == "b" * 64
+    assert resolved["base_domain"] == "sc.example.com"
+
+
+def test_resolve_security_cvm_provision_config_requires_image_pair(monkeypatch) -> None:
+    with pytest.raises(HTTPException) as exc:
+        resolve_security_cvm_provision_config(security_cvm_create(image_ref="ghcr.io/example/sc@sha256:abc"))
+
+    assert exc.value.status_code == 422
+    assert exc.value.detail["error"]["details"]["errors"][0]["type"] == "paired_image_measurement"
+
+
+def test_resolve_security_cvm_provision_config_requires_image(monkeypatch) -> None:
+    monkeypatch.setenv("PHALA_REGION", "FR-PARIS-1")
+    monkeypatch.setenv("SECURITY_CVM_BASE_DOMAIN", "sc.example.com")
+    monkeypatch.delenv("SECURITY_CVM_IMAGE_REF", raising=False)
+
+    with pytest.raises(HTTPException) as exc:
+        resolve_security_cvm_provision_config(security_cvm_create())
+
+    assert exc.value.status_code == 503
+    assert exc.value.detail["error"]["details"]["component"] == "security_cvm_image"
+
+
+def test_resolve_security_cvm_provision_config_requires_base_domain(monkeypatch) -> None:
+    monkeypatch.setenv("PHALA_REGION", "FR-PARIS-1")
+    monkeypatch.setenv("SECURITY_CVM_IMAGE_REF", "ghcr.io/concrete-security/security-cvm/mitmproxy@sha256:abc")
+    monkeypatch.setenv("SECURITY_CVM_IMAGE_MEASUREMENT", "b" * 64)
+    monkeypatch.delenv("SECURITY_CVM_BASE_DOMAIN", raising=False)
+
+    with pytest.raises(HTTPException) as exc:
+        resolve_security_cvm_provision_config(security_cvm_create())
+
+    assert exc.value.status_code == 503
+    assert exc.value.detail["error"]["details"]["component"] == "security_cvm_base_domain"
 
 
 class FakeFetchValConn:

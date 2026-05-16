@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import re
+import secrets
 from typing import Annotated, Any
 from uuid import UUID, uuid4
 
@@ -65,6 +66,7 @@ SANDBOX_ENV_RESERVED_NAMES = {"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "PATH", "
 SANDBOX_ENV_RESERVED_PREFIXES = ("CONCRETE_", "SECURITY_CVM_", "AUTHORIZED_SSH_", "SANDBOX_ENV_")
 IDEMPOTENCY_KEY_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 CVM_CONFIG_VALUE_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+SECURITY_CVM_INSTANCE_TYPE_RE = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
 HEX64_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 DEFAULT_SANDBOX_ENV_VALUE_DENYLIST = (
     r"^sk-ant-[A-Za-z0-9_-]+$",
@@ -220,6 +222,30 @@ class AdminReconcile(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     include_orphans: bool = True
+
+
+class SecurityCVMCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    instance_type: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=100,
+        pattern=r"^[A-Za-z0-9._-]+$",
+    )
+    region: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9._-]+$",
+    )
+    image_ref: str | None = Field(default=None, min_length=1, max_length=512)
+    image_measurement: str | None = Field(
+        default=None,
+        min_length=64,
+        max_length=64,
+        pattern=r"^[0-9a-fA-F]{64}$",
+    )
 
 
 class ProfileCreate(BaseModel):
@@ -555,6 +581,81 @@ def resolve_cvm_launch_config(body: CVMCreate) -> dict[str, str]:
         "region": region,
         "image": image,
         "expected_image_measurement": expected_image_measurement.lower(),
+    }
+
+
+def resolve_security_cvm_provision_config(body: SecurityCVMCreate) -> dict[str, str]:
+    raw = load_settings().raw
+    instance_type = (body.instance_type or raw.get("PHALA_DEFAULT_INSTANCE_TYPE", "tdx.small")).strip()
+    if not instance_type:
+        raise api_error(
+            422,
+            "VALIDATION_ERROR",
+            "Security CVM instance type is required",
+            {"errors": [{"field": "instance_type", "type": "missing_default"}]},
+        )
+    if not SECURITY_CVM_INSTANCE_TYPE_RE.fullmatch(instance_type):
+        raise api_error(
+            503,
+            "SERVICE_UNAVAILABLE",
+            "Security CVM default instance type is invalid",
+            {"component": "security_cvm_default_instance_type"},
+        )
+
+    region = (body.region or raw.get("PHALA_REGION", "FR-PARIS-1")).strip()
+    if not region:
+        raise api_error(
+            422,
+            "VALIDATION_ERROR",
+            "Security CVM region is required",
+            {"errors": [{"field": "region", "type": "missing_default"}]},
+        )
+    if not CVM_CONFIG_VALUE_RE.fullmatch(region):
+        raise api_error(
+            503,
+            "SERVICE_UNAVAILABLE",
+            "Security CVM default region is invalid",
+            {"component": "security_cvm_default_region"},
+        )
+
+    if (body.image_ref is None) != (body.image_measurement is None):
+        raise api_error(
+            422,
+            "VALIDATION_ERROR",
+            "Security CVM image reference and measurement must be supplied together",
+            {"errors": [{"field": "image_ref", "type": "paired_image_measurement"}]},
+        )
+    image_ref = (body.image_ref or raw.get("SECURITY_CVM_IMAGE_REF", "")).strip()
+    image_measurement = (body.image_measurement or raw.get("SECURITY_CVM_IMAGE_MEASUREMENT", "")).strip()
+    if not image_ref:
+        raise api_error(
+            503,
+            "SERVICE_UNAVAILABLE",
+            "Security CVM image is not configured",
+            {"component": "security_cvm_image"},
+        )
+    if not image_measurement or not HEX64_RE.fullmatch(image_measurement):
+        raise api_error(
+            503,
+            "SERVICE_UNAVAILABLE",
+            "Security CVM image measurement is not configured",
+            {"component": "security_cvm_image_measurement"},
+        )
+
+    base_domain = raw.get("SECURITY_CVM_BASE_DOMAIN", "").strip()
+    if not base_domain:
+        raise api_error(
+            503,
+            "SERVICE_UNAVAILABLE",
+            "Security CVM base domain is not configured",
+            {"component": "security_cvm_base_domain"},
+        )
+    return {
+        "instance_type": instance_type,
+        "region": region,
+        "image_ref": image_ref,
+        "expected_image_measurement": image_measurement.lower(),
+        "base_domain": base_domain,
     }
 
 
@@ -3276,6 +3377,134 @@ async def fetch_cvm_rows(
     """
     async with pool.acquire() as conn:
         return await conn.fetch(query, *values)
+
+
+@router.post("/entities/{entity_id}/security-cvm", status_code=202)
+async def create_security_cvm(
+    entity_id: UUID,
+    request: Request,
+    body: SecurityCVMCreate,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+    current_user: CurrentUser = Depends(require_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> Any:
+    idempotency_key_value = require_idempotency_key(idempotency_key)
+    current_user.require_entity(entity_id)
+    current_user.require_permission("SECURITY_CVM_CONFIGURE")
+    route = f"POST /api/v1/entities/{entity_id}/security-cvm"
+    body_sha256 = request_body_sha256(await request.body())
+    operation_id = uuid4()
+    security_cvm_id = uuid4()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await acquire_idempotency_lock(
+                conn,
+                credential_id=str(current_user.id),
+                idempotency_key=idempotency_key_value,
+                route=route,
+            )
+            cached = await lookup_idempotency_response(
+                conn,
+                credential_id=str(current_user.id),
+                idempotency_key=idempotency_key_value,
+                route=route,
+                body_sha256=body_sha256,
+            )
+            if cached is not None:
+                return JSONResponse(status_code=cached.status_code, content=cached.body, headers=cached.headers)
+
+            existing = await fetch_security_cvm_row(conn, entity_id)
+            if existing is not None:
+                raise api_error(
+                    409,
+                    "CONFLICT",
+                    "Security CVM already exists for entity",
+                    {"state": "security_cvm_already_live"},
+                )
+            resolved = resolve_security_cvm_provision_config(body)
+            token = secrets.token_hex(16)
+            fqdn = f"sc-{token}.{resolved['base_domain']}"
+            try:
+                await conn.execute(
+                    """
+                    INSERT INTO security_cvms (
+                        id,
+                        entity_id,
+                        state,
+                        fqdn,
+                        instance_type,
+                        region,
+                        proxy_port,
+                        expected_image_measurement
+                    )
+                    VALUES ($1, $2, 'PROVISIONING', $3, $4, $5, 8080, $6)
+                    """,
+                    security_cvm_id,
+                    entity_id,
+                    fqdn,
+                    resolved["instance_type"],
+                    resolved["region"],
+                    resolved["expected_image_measurement"],
+                )
+            except asyncpg.UniqueViolationError:
+                raise api_error(
+                    409,
+                    "CONFLICT",
+                    "Security CVM already exists for entity",
+                    {"state": "security_cvm_already_live"},
+                ) from None
+            row = await conn.fetchrow(
+                """
+                INSERT INTO operations (
+                    id,
+                    kind,
+                    status,
+                    actor_id,
+                    actor_email,
+                    target_type,
+                    target_id,
+                    idempotency_key,
+                    request_body_sha256,
+                    progress_step,
+                    progress_percent
+                )
+                VALUES ($1, $2, 'pending', $3, $4, 'security_cvm', $5, $6, $7, 'queued', 0)
+                RETURNING
+                    id,
+                    kind,
+                    status::text AS status,
+                    actor_id,
+                    actor_email,
+                    target_type,
+                    target_id,
+                    progress_step,
+                    progress_percent,
+                    result,
+                    error,
+                    result_disclosed_at,
+                    created_at,
+                    updated_at,
+                    expires_at
+                """,
+                operation_id,
+                SECURITY_CVM_PROVISION_KIND,
+                current_user.id,
+                current_user.email,
+                security_cvm_id,
+                idempotency_key_value,
+                body_sha256,
+            )
+            response_body = operation_resource(row)
+            await store_idempotency_response(
+                conn,
+                credential_id=str(current_user.id),
+                idempotency_key=idempotency_key_value,
+                route=route,
+                body_sha256=body_sha256,
+                status_code=202,
+                response_body=response_body,
+            )
+            return response_body
 
 
 @router.get("/entities/{entity_id}/security-cvm")
