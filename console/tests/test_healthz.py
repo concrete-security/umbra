@@ -170,6 +170,31 @@ def test_json_body_requires_application_json_content_type() -> None:
     }
 
 
+def test_cors_preflight_is_rejected_without_cors_headers() -> None:
+    app_module.clear_rate_limit_state()
+
+    response = TestClient(app).options(
+        "/api/v1/auth/token",
+        headers={
+            "Origin": "https://example.com",
+            "Access-Control-Request-Method": "POST",
+            "X-Request-Id": "cors-request",
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.headers["x-request-id"] == "cors-request"
+    assert "access-control-allow-origin" not in response.headers
+    assert response.json() == {
+        "error": {
+            "code": "FORBIDDEN",
+            "message": "CORS preflight requests are not accepted",
+            "details": {"required": "cors_disabled"},
+            "request_id": "cors-request",
+        }
+    }
+
+
 def test_bodyless_api_request_does_not_require_content_type() -> None:
     app_module.clear_rate_limit_state()
     request = SimpleNamespace(

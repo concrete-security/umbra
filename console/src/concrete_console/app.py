@@ -204,6 +204,15 @@ def resolve_request_id(request: Request) -> str:
 
 
 async def request_guard_response(request: Request, request_id: str) -> JSONResponse | None:
+    if is_cors_preflight(request):
+        return error_response(
+            403,
+            "FORBIDDEN",
+            "CORS preflight requests are not accepted",
+            {"required": "cors_disabled"},
+            request_id,
+        )
+
     body_limit = request_body_limit(request.url.path)
     if body_limit is not None:
         raw_length = request.headers.get("content-length")
@@ -240,6 +249,14 @@ async def request_guard_response(request: Request, request_id: str) -> JSONRespo
         {"retry_after_seconds": retry_after_seconds, "limit": limit_name},
         request_id,
         headers={"Retry-After": str(retry_after_seconds)},
+    )
+
+
+def is_cors_preflight(request: Request) -> bool:
+    return (
+        request.method == "OPTIONS"
+        and "origin" in request.headers
+        and "access-control-request-method" in request.headers
     )
 
 
