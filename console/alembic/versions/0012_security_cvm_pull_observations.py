@@ -1,13 +1,13 @@
 """security cvm pull observations
 
-Revision ID: 0012_security_cvm_pull_observations
+Revision ID: 0012_sc_pull_obs
 Revises: 0011_audit_export_artifacts
 Create Date: 2026-05-16
 """
 
 from alembic import op
 
-revision = "0012_security_cvm_pull_observations"
+revision = "0012_sc_pull_obs"
 down_revision = "0011_audit_export_artifacts"
 branch_labels = None
 depends_on = None

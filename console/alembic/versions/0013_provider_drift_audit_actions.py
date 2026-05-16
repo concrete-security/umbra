@@ -1,15 +1,15 @@
 """provider drift audit actions
 
-Revision ID: 0013_provider_drift_audit_actions
-Revises: 0012_security_cvm_pull_observations
+Revision ID: 0013_provider_drift
+Revises: 0012_sc_pull_obs
 Create Date: 2026-05-16
 """
 
 from alembic import op
 
 
-revision = "0013_provider_drift_audit_actions"
-down_revision = "0012_security_cvm_pull_observations"
+revision = "0013_provider_drift"
+down_revision = "0012_sc_pull_obs"
 branch_labels = None
 depends_on = None
 
