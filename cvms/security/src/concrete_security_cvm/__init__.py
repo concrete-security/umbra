@@ -4,6 +4,7 @@ from concrete_security_cvm.binding import BootBinding
 from concrete_security_cvm.ca import CAExportUnauthorized, InMemoryRootCA, generate_root_ca
 from concrete_security_cvm.control import ControlMap, DevCVMControlEntry, PollResult, SCControlClient
 from concrete_security_cvm.enforcement import DLPScanTimeout, EnforcementResult, ProxyRequest, enforce_request
+from concrete_security_cvm.management import ManagementResponse, handle_ca_pem_request
 from concrete_security_cvm.policy import (
     EffectivePolicy,
     PolicyDecision,
@@ -21,6 +22,7 @@ __all__ = [
     "EffectivePolicy",
     "EnforcementResult",
     "InMemoryRootCA",
+    "ManagementResponse",
     "PolicyDecision",
     "PolicyValidationError",
     "PollResult",
@@ -32,5 +34,6 @@ __all__ = [
     "TrafficLogRecord",
     "enforce_request",
     "generate_root_ca",
+    "handle_ca_pem_request",
     "parse_effective_policy",
 ]
