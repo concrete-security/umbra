@@ -32,6 +32,13 @@ class CurrentUser:
             raise api_error(404, "NOT_FOUND", "resource not found")
 
 
+def parse_uuid4_claim(value: object) -> UUID:
+    parsed = UUID(str(value))
+    if parsed.version != 4:
+        raise ValueError("claim is not a UUIDv4")
+    return parsed
+
+
 async def load_current_user(pool: asyncpg.Pool, user_id: UUID, entity_id: UUID) -> CurrentUser:
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -80,9 +87,9 @@ async def require_current_user(
         raise api_error(401, "UNAUTHORIZED", "missing bearer token")
     try:
         claims = get_jwt_manager().verify_access_token(token)
-        user_id = UUID(str(claims["sub"]))
-        entity_id = UUID(str(claims["entity_id"]))
-        jti = UUID(str(claims["jti"]))
+        user_id = parse_uuid4_claim(claims["sub"])
+        entity_id = parse_uuid4_claim(claims["entity_id"])
+        jti = parse_uuid4_claim(claims["jti"])
     except (KeyError, ValueError, jwt.PyJWTError):
         raise api_error(401, "UNAUTHORIZED", "invalid bearer token") from None
 

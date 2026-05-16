@@ -8,6 +8,7 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
+from concrete_console import auth as auth_module
 from concrete_console.auth import CurrentUser, require_current_user
 from concrete_console.app import app
 from concrete_console.db import get_pool
@@ -64,6 +65,20 @@ class FakePool:
 
     def acquire(self):
         return AsyncContext(self.conn)
+
+
+class NoAcquirePool:
+    def acquire(self):
+        raise AssertionError("invalid JWT claims should fail before database access")
+
+
+class FakeJwtManager:
+    def __init__(self, claims: dict[str, str]):
+        self.claims = claims
+
+    def verify_access_token(self, token: str):
+        assert token == "token"
+        return self.claims
 
 
 class RefreshReplayConn:
@@ -170,6 +185,23 @@ def test_require_entity_allows_platform_operator_cross_entity() -> None:
 def test_require_current_user_rejects_whitespace_slop_before_db_lookup() -> None:
     with pytest.raises(HTTPException) as exc:
         asyncio.run(require_current_user("Bearer  not-a-token"))
+
+    assert exc.value.status_code == 401
+    assert exc.value.detail["error"]["code"] == "UNAUTHORIZED"
+
+
+@pytest.mark.parametrize("claim_name", ["sub", "entity_id", "jti"])
+def test_require_current_user_rejects_non_v4_uuid_claims_before_db_lookup(monkeypatch, claim_name) -> None:
+    claims = {
+        "sub": "00000000-0000-4000-8000-000000000001",
+        "entity_id": "00000000-0000-4000-8000-000000000002",
+        "jti": "00000000-0000-4000-8000-000000000003",
+    }
+    claims[claim_name] = "00000000-0000-1000-8000-000000000001"
+    monkeypatch.setattr(auth_module, "get_jwt_manager", lambda: FakeJwtManager(claims))
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(require_current_user("Bearer token", pool=NoAcquirePool()))
 
     assert exc.value.status_code == 401
     assert exc.value.detail["error"]["code"] == "UNAUTHORIZED"
