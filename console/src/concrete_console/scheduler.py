@@ -15,7 +15,7 @@ from concrete_console.audit import insert_audit_event
 from concrete_console.config import load_settings
 from concrete_console.db import get_pool
 from concrete_console.log_config import logger
-from concrete_console.resources import cvm_resource, json_payload
+from concrete_console.resources import cvm_resource, json_payload, security_cvm_resource
 
 log = logger()
 _last_successful_tick_monotonic: float | None = None
@@ -42,6 +42,22 @@ CVM_LAUNCH_PROGRESS = {
     "policy_push": 80,
     "finalise": 90,
 }
+SECURITY_CVM_PROVISION_EXECUTABLE_STEPS = {
+    "phala_deploy",
+    "cf_txt_create",
+    "cf_cname_create",
+    "verify_attestation",
+    "fetch_ca",
+    "finalise",
+}
+SECURITY_CVM_PROVISION_PROGRESS = {
+    "cf_txt_create": 40,
+    "cf_cname_create": 50,
+    "verify_attestation": 60,
+    "fetch_ca": 80,
+    "finalise": 90,
+}
+SECURITY_CVM_TOKEN_PLAINTEXT_TTL_SECONDS = 3600
 
 
 @dataclass(frozen=True)
@@ -259,6 +275,8 @@ def executable_running_operation(row: Any) -> bool:
     step = _row_value(row, "progress_step")
     return (kind == "cvm.terminate" and step == "phala_terminate") or (
         kind == "cvm.launch" and step in CVM_LAUNCH_EXECUTABLE_STEPS
+    ) or (
+        kind == "security_cvm.provision" and step in SECURITY_CVM_PROVISION_EXECUTABLE_STEPS
     )
 
 
@@ -280,6 +298,12 @@ async def execute_running_operation(operation_id: Any) -> bool:
         return True
     if _row_value(row, "kind") == "cvm.launch" and _row_value(row, "progress_step") in CVM_LAUNCH_EXECUTABLE_STEPS:
         await execute_cvm_launch_operation(operation_id, _row_value(row, "progress_step"))
+        return True
+    if (
+        _row_value(row, "kind") == "security_cvm.provision"
+        and _row_value(row, "progress_step") in SECURITY_CVM_PROVISION_EXECUTABLE_STEPS
+    ):
+        await execute_security_cvm_provision_operation(operation_id, _row_value(row, "progress_step"))
         return True
     return False
 
@@ -306,6 +330,381 @@ async def execute_cvm_launch_operation(operation_id: Any, step: str) -> None:
     if step == "finalise":
         await execute_cvm_launch_finalise_operation(operation_id)
         return
+
+
+async def execute_security_cvm_provision_operation(operation_id: Any, step: str) -> None:
+    if step == "phala_deploy":
+        await execute_security_cvm_phala_deploy_operation(operation_id)
+        return
+    if step == "cf_txt_create":
+        await execute_security_cvm_txt_operation(operation_id)
+        return
+    if step == "cf_cname_create":
+        await execute_security_cvm_cname_operation(operation_id)
+        return
+    if step == "verify_attestation":
+        await execute_security_cvm_attestation_gate_operation(operation_id)
+        return
+    if step == "fetch_ca":
+        await execute_security_cvm_fetch_ca_operation(operation_id)
+        return
+    if step == "finalise":
+        await execute_security_cvm_finalise_operation(operation_id)
+        return
+
+
+async def execute_security_cvm_phala_deploy_operation(operation_id: Any) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        snapshot = await fetch_security_cvm_provision_snapshot(conn, operation_id)
+    if snapshot is None:
+        await mark_security_cvm_provision_failed(operation_id, code="SECURITY_CVM_NOT_FOUND", details={"state": "missing_target"})
+        return
+    if _row_value(snapshot, "state") != "PROVISIONING":
+        await mark_security_cvm_provision_failed(
+            operation_id,
+            code="INVALID_STATE",
+            details={"state": _row_value(snapshot, "state")},
+        )
+        return
+    if provider_app_id(_row_value(snapshot, "metadata")) is not None:
+        await advance_security_cvm_provision_step(operation_id, "cf_txt_create")
+        return
+    if not security_cvm_token_stash_available(snapshot):
+        await mark_security_cvm_provision_failed(operation_id, code="CA_EXPORT_TTL_EXPIRED", details={})
+        return
+
+    from concrete_console.shade_provider.shade import ShadeClient, ShadeError
+    from concrete_console.tee_provider.phala import PhalaClient, PhalaError
+
+    env = build_security_cvm_provision_env(snapshot)
+    try:
+        name = security_cvm_provider_name(_row_value(snapshot, "id"))
+        shade_result = await ShadeClient.from_settings().build(
+            shade_config_yaml=render_security_cvm_shade_config(snapshot, name=name),
+            app_compose_yaml=_row_value(snapshot, "compose_config"),
+        )
+        deploy_result = await PhalaClient.from_settings().deploy(
+            name=name,
+            compose_yaml=shade_result.compose_yaml,
+            env=env,
+        )
+    except ShadeError as exc:
+        await mark_security_cvm_provision_failed(
+            operation_id,
+            code="SHADE_BUILD_FAILED",
+            details={"adapter": "shade", "reason": exc.code},
+        )
+        return
+    except PhalaError as exc:
+        await mark_security_cvm_provision_failed(
+            operation_id,
+            code="PHALA_DEPLOY_FAILED",
+            details={"adapter": "phala", "reason": exc.code},
+        )
+        return
+    finally:
+        env["CONSOLE_INGEST_TOKEN"] = ""
+        env["CA_EXPORT_TOKEN"] = ""
+
+    await persist_security_cvm_phala_result(
+        operation_id,
+        snapshot,
+        metadata=security_cvm_provision_metadata(
+            name=name,
+            app_id=deploy_result.app_id,
+            gateway_host=deploy_result.gateway_host,
+            status=deploy_result.status,
+        ),
+    )
+
+
+async def execute_security_cvm_txt_operation(operation_id: Any) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        snapshot = await fetch_security_cvm_provision_snapshot(conn, operation_id)
+    if snapshot is None:
+        await mark_security_cvm_provision_failed(operation_id, code="SECURITY_CVM_NOT_FOUND", details={"state": "missing_target"})
+        return
+    if _row_value(snapshot, "txt_dns_record_id"):
+        await advance_security_cvm_provision_step(operation_id, "cf_cname_create")
+        return
+    app_id = provider_app_id(_row_value(snapshot, "metadata"))
+    if app_id is None:
+        await mark_security_cvm_provision_failed(operation_id, code="PHALA_APP_MISSING", details={"field": "metadata.app_id"})
+        return
+
+    from concrete_console.dns_provider.cloudflare import CloudflareClient, CloudflareError
+
+    try:
+        record_id = await CloudflareClient.from_settings(zone_id_key="SECURITY_CVM_ZONE_ID").ensure_dstack_txt(
+            fqdn=_row_value(snapshot, "fqdn"),
+            app_id=app_id,
+        )
+    except CloudflareError as exc:
+        await compensate_security_cvm_provision_resources(snapshot)
+        await mark_security_cvm_provision_failed(
+            operation_id,
+            code="CLOUDFLARE_TXT_FAILED",
+            details={"adapter": "cloudflare", "reason": exc.code},
+        )
+        return
+    await persist_security_cvm_dns_record(operation_id, snapshot, field="txt", record_id=record_id)
+
+
+async def execute_security_cvm_cname_operation(operation_id: Any) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        snapshot = await fetch_security_cvm_provision_snapshot(conn, operation_id)
+    if snapshot is None:
+        await mark_security_cvm_provision_failed(operation_id, code="SECURITY_CVM_NOT_FOUND", details={"state": "missing_target"})
+        return
+    if _row_value(snapshot, "cname_dns_record_id"):
+        await advance_security_cvm_provision_step(operation_id, "verify_attestation")
+        return
+    gateway_host = provider_gateway_host(_row_value(snapshot, "metadata"))
+    if gateway_host is None:
+        await mark_security_cvm_provision_failed(
+            operation_id,
+            code="PHALA_GATEWAY_MISSING",
+            details={"field": "metadata.gateway_host"},
+        )
+        return
+
+    from concrete_console.dns_provider.cloudflare import CloudflareClient, CloudflareError
+
+    try:
+        record_id = await CloudflareClient.from_settings(zone_id_key="SECURITY_CVM_ZONE_ID").ensure_gateway_cname(
+            fqdn=_row_value(snapshot, "fqdn"),
+            gateway_host=gateway_host,
+        )
+    except CloudflareError as exc:
+        await compensate_security_cvm_provision_resources(snapshot)
+        await mark_security_cvm_provision_failed(
+            operation_id,
+            code="CLOUDFLARE_CNAME_FAILED",
+            details={"adapter": "cloudflare", "reason": exc.code},
+        )
+        return
+    await persist_security_cvm_dns_record(operation_id, snapshot, field="cname", record_id=record_id)
+
+
+async def execute_security_cvm_attestation_gate_operation(operation_id: Any) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        snapshot = await fetch_security_cvm_provision_snapshot(conn, operation_id)
+    if snapshot is None:
+        await mark_security_cvm_provision_failed(operation_id, code="SECURITY_CVM_NOT_FOUND", details={"state": "missing_target"})
+        return
+    if _row_value(snapshot, "image_measurement") is None or _row_value(snapshot, "attestation_verified_at") is None:
+        verified = await run_security_cvm_provision_attestation_verifier(operation_id, snapshot)
+        if verified:
+            return
+        log.info(
+            "security_cvm_provision_attestation_waiting",
+            operation_id=str(operation_id),
+            security_cvm_id=str(_row_value(snapshot, "id")),
+        )
+        return
+    if _row_value(snapshot, "image_measurement") != _row_value(snapshot, "expected_image_measurement"):
+        await compensate_security_cvm_provision_resources(snapshot)
+        await mark_security_cvm_provision_failed(
+            operation_id,
+            code="ATTESTATION_IMAGE_MISMATCH",
+            details={
+                "expected": _row_value(snapshot, "expected_image_measurement"),
+                "actual": _row_value(snapshot, "image_measurement"),
+            },
+        )
+        return
+    if _row_value(snapshot, "rtmr3_digest") is None:
+        await compensate_security_cvm_provision_resources(snapshot)
+        await mark_security_cvm_provision_failed(
+            operation_id,
+            code="ATTESTATION_RTMR_MISMATCH",
+            details={"state": "missing_rtmr3_digest"},
+        )
+        return
+    await advance_security_cvm_provision_step(operation_id, "fetch_ca")
+
+
+async def run_security_cvm_provision_attestation_verifier(operation_id: Any, snapshot: Any) -> bool:
+    from concrete_console.attestation import (
+        AtlasVerifierClient,
+        AttestationVerifierError,
+        AttestationVerifierUnavailable,
+        build_security_cvm_attestation_request,
+    )
+
+    try:
+        verifier = AtlasVerifierClient.from_settings()
+    except AttestationVerifierUnavailable:
+        return False
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        token_hashes = await fetch_security_cvm_token_hashes(conn, _row_value(snapshot, "id"))
+    try:
+        request = build_security_cvm_attestation_request(
+            snapshot,
+            token_hashes=token_hashes,
+            console_url=load_settings().raw.get("CONSOLE_URL", "http://localhost:8000"),
+        )
+        report = await verifier.verify(request, timeout_seconds=dev_cvm_attestation_timeout_seconds())
+    except AttestationVerifierUnavailable:
+        return False
+    except AttestationVerifierError as exc:
+        await compensate_security_cvm_provision_resources(snapshot)
+        await mark_security_cvm_provision_failed(operation_id, code=exc.code, details=exc.details)
+        return True
+
+    if report.image_measurement != _row_value(snapshot, "expected_image_measurement"):
+        await compensate_security_cvm_provision_resources(snapshot)
+        await mark_security_cvm_provision_failed(
+            operation_id,
+            code="ATTESTATION_IMAGE_MISMATCH",
+            details={
+                "expected_image_measurement": _row_value(snapshot, "expected_image_measurement"),
+                "reported_image_measurement": report.image_measurement,
+            },
+        )
+        return True
+
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            verified_at = datetime.now(timezone.utc)
+            await conn.execute(
+                """
+                UPDATE security_cvms
+                SET image_measurement = $2,
+                    rtmr3_digest = $3,
+                    attestation_verified_at = $4,
+                    updated_at = now()
+                WHERE id = $1
+                  AND state = 'PROVISIONING'
+                """,
+                _row_value(snapshot, "id"),
+                report.image_measurement,
+                report.rtmr3_digest,
+                verified_at,
+            )
+            await insert_audit_event(
+                conn,
+                entity_id=_row_value(snapshot, "entity_id"),
+                actor_id=_row_value(snapshot, "actor_id"),
+                actor_email=_row_value(snapshot, "actor_email"),
+                action="SECURITY_CVM_ATTESTATION_VERIFIED",
+                target_type="security_cvm",
+                target_id=_row_value(snapshot, "id"),
+                before={
+                    "image_measurement": _row_value(snapshot, "image_measurement"),
+                    "rtmr3_digest": _row_value(snapshot, "rtmr3_digest"),
+                },
+                after={
+                    "image_measurement": report.image_measurement,
+                    "rtmr3_digest": report.rtmr3_digest,
+                    "attestation_verified_at": verified_at.isoformat().replace("+00:00", "Z"),
+                    "source": "provisioning",
+                },
+            )
+            await advance_security_cvm_provision_step_with_conn(conn, operation_id, "fetch_ca")
+    return True
+
+
+async def execute_security_cvm_fetch_ca_operation(operation_id: Any) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        snapshot = await fetch_security_cvm_provision_snapshot(conn, operation_id)
+    if snapshot is None:
+        await mark_security_cvm_provision_failed(operation_id, code="SECURITY_CVM_NOT_FOUND", details={"state": "missing_target"})
+        return
+    if _row_value(snapshot, "ca_cert_pem"):
+        await advance_security_cvm_provision_step(operation_id, "finalise")
+        return
+    if not security_cvm_token_stash_available(snapshot):
+        await mark_security_cvm_provision_failed(operation_id, code="CA_EXPORT_TTL_EXPIRED", details={})
+        return
+    try:
+        ca_pem = await fetch_security_cvm_ca_pem(
+            fqdn=_row_value(snapshot, "fqdn"),
+            ca_export_token=_row_value(snapshot, "ca_export_token_plaintext"),
+        )
+    except SecurityCVMCAFetchError as exc:
+        await mark_security_cvm_provision_failed(
+            operation_id,
+            code="CA_FETCH_FAILED",
+            details={"http_status": exc.http_status},
+        )
+        return
+    await persist_security_cvm_ca_pem(operation_id, security_cvm_id=_row_value(snapshot, "id"), ca_pem=ca_pem)
+
+
+async def execute_security_cvm_finalise_operation(operation_id: Any) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        snapshot = await fetch_security_cvm_provision_snapshot(conn, operation_id)
+    if snapshot is None:
+        await mark_security_cvm_provision_failed(operation_id, code="SECURITY_CVM_NOT_FOUND", details={"state": "missing_target"})
+        return
+    if not _row_value(snapshot, "ca_cert_pem"):
+        await mark_security_cvm_provision_failed(operation_id, code="CA_FETCH_FAILED", details={"state": "missing_ca_cert"})
+        return
+    if not security_cvm_token_stash_available(snapshot):
+        await mark_security_cvm_provision_failed(operation_id, code="CA_EXPORT_TTL_EXPIRED", details={})
+        return
+    result_ingest_token = _row_value(snapshot, "ingest_token_plaintext")
+    result_ca_export_token = _row_value(snapshot, "ca_export_token_plaintext")
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                """
+                UPDATE security_cvms
+                SET state = 'RUNNING',
+                    error_reason = NULL,
+                    ingest_token_plaintext = NULL,
+                    ingest_token_stashed_at = NULL,
+                    ca_export_token_plaintext = NULL,
+                    ca_export_token_stashed_at = NULL,
+                    updated_at = now()
+                WHERE id = $1
+                  AND state = 'PROVISIONING'
+                """,
+                _row_value(snapshot, "id"),
+            )
+            security_cvm_payload = await fetch_security_cvm_resource_for_scheduler(conn, _row_value(snapshot, "id"))
+            result = {
+                "security_cvm": security_cvm_payload,
+                "ingest_token": result_ingest_token,
+                "ca_export_token": result_ca_export_token,
+            }
+            await insert_audit_event(
+                conn,
+                entity_id=_row_value(snapshot, "entity_id"),
+                actor_id=_row_value(snapshot, "actor_id"),
+                actor_email=_row_value(snapshot, "actor_email"),
+                action="SECURITY_CVM_PROVISIONED",
+                target_type="security_cvm",
+                target_id=_row_value(snapshot, "id"),
+                before={"state": _row_value(snapshot, "state")},
+                after={"state": "RUNNING"},
+            )
+            await conn.execute(
+                """
+                UPDATE operations
+                SET status = 'succeeded',
+                    progress_step = 'finalise',
+                    progress_percent = 100,
+                    result = $2::jsonb,
+                    error = NULL,
+                    updated_at = now(),
+                    expires_at = $3
+                WHERE id = $1
+                  AND kind = 'security_cvm.provision'
+                  AND status = 'running'
+                """,
+                operation_id,
+                json.dumps(result),
+                operation_expiry(),
+            )
 
 
 async def execute_cvm_launch_phala_deploy_operation(operation_id: Any) -> None:
@@ -1000,6 +1399,74 @@ async def fetch_cvm_resource_for_scheduler(conn: Any, cvm_id: Any) -> dict[str, 
     return cvm_resource(row)
 
 
+async def fetch_security_cvm_resource_for_scheduler(conn: Any, security_cvm_id: Any) -> dict[str, Any]:
+    row = await conn.fetchrow(
+        """
+        SELECT
+            id,
+            entity_id,
+            state::text AS state,
+            fqdn,
+            instance_type,
+            region,
+            error_reason,
+            policy_version,
+            expected_image_measurement,
+            image_measurement,
+            rtmr3_digest,
+            attestation_verified_at,
+            created_at,
+            updated_at
+        FROM security_cvms
+        WHERE id = $1
+        """,
+        security_cvm_id,
+    )
+    if row is None:
+        raise RuntimeError("Security CVM target disappeared before provision finalise")
+    return security_cvm_resource(row)
+
+
+async def fetch_security_cvm_provision_snapshot(conn: Any, operation_id: Any) -> Any | None:
+    return await conn.fetchrow(
+        """
+        SELECT
+            sc.id,
+            o.id AS operation_id,
+            o.actor_id,
+            o.actor_email,
+            o.updated_at AS operation_updated_at,
+            sc.entity_id,
+            sc.state::text AS state,
+            sc.fqdn,
+            sc.instance_type,
+            sc.region,
+            sc.metadata,
+            sc.compose_config,
+            sc.txt_dns_record_id,
+            sc.cname_dns_record_id,
+            sc.proxy_port,
+            sc.ca_cert_pem,
+            sc.ingest_token_plaintext,
+            sc.ingest_token_stashed_at,
+            sc.ca_export_token_plaintext,
+            sc.ca_export_token_stashed_at,
+            sc.expected_image_measurement,
+            sc.image_measurement,
+            sc.rtmr3_digest,
+            sc.attestation_verified_at,
+            sc.policy_version
+        FROM operations o
+        JOIN security_cvms sc ON sc.id = o.target_id
+        WHERE o.id = $1
+          AND o.kind = 'security_cvm.provision'
+          AND o.status = 'running'
+          AND sc.deleted_at IS NULL
+        """,
+        operation_id,
+    )
+
+
 async def fetch_cvm_launch_snapshot(conn: Any, operation_id: Any) -> Any | None:
     return await conn.fetchrow(
         """
@@ -1181,6 +1648,56 @@ def render_dev_cvm_shade_config(snapshot: Any, *, name: str) -> str:
     )
 
 
+def render_security_cvm_shade_config(snapshot: Any, *, name: str) -> str:
+    return "\n".join(
+        [
+            "app:",
+            f"  name: {name}",
+            "",
+            "services:",
+            "  mitmproxy:",
+            "    networks: [proxy]",
+            "",
+            "cvm:",
+            f"  domain: {_row_value(snapshot, 'fqdn')}",
+            f"  instance_type: {_row_value(snapshot, 'instance_type')}",
+            f"  region: {_row_value(snapshot, 'region')}",
+            "  routes:",
+            "    - path: /ca.pem",
+            "      service: mitmproxy",
+            "      port: 8081",
+            "      cors: false",
+            "    - path: /",
+            "      service: mitmproxy",
+            "      port: 8080",
+            "      cors: false",
+            "",
+        ]
+    )
+
+
+def build_security_cvm_provision_env(snapshot: Any) -> dict[str, str]:
+    raw = load_settings().raw
+    return {
+        "CONSOLE_URL": raw.get("CONSOLE_URL", "http://localhost:8000"),
+        "ENTITY_ID": str(_row_value(snapshot, "entity_id")),
+        "SC_ID": str(_row_value(snapshot, "id")),
+        "SECURITY_CVM_FQDN": _row_value(snapshot, "fqdn"),
+        "CONSOLE_INGEST_TOKEN": _row_value(snapshot, "ingest_token_plaintext"),
+        "CA_EXPORT_TOKEN": _row_value(snapshot, "ca_export_token_plaintext"),
+    }
+
+
+def security_cvm_provision_metadata(*, name: str, app_id: str, gateway_host: str, status: str) -> dict[str, Any]:
+    return {
+        "provider": "phala",
+        "name": name,
+        "app_id": app_id,
+        "gateway_host": gateway_host,
+        "status": status,
+    }
+
+
 def build_cvm_policy_bundle(
     snapshot: Any,
     *,
@@ -1221,6 +1738,217 @@ def cvm_launch_metadata(
         "status": status,
         "policy_bundle": policy_bundle,
     }
+
+
+async def persist_security_cvm_phala_result(operation_id: Any, snapshot: Any, *, metadata: dict[str, Any]) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                """
+                UPDATE security_cvms
+                SET metadata = $2::jsonb,
+                    updated_at = now()
+                WHERE id = $1
+                  AND state = 'PROVISIONING'
+                """,
+                _row_value(snapshot, "id"),
+                json.dumps(metadata),
+            )
+            await insert_audit_event(
+                conn,
+                entity_id=_row_value(snapshot, "entity_id"),
+                actor_id=_row_value(snapshot, "actor_id"),
+                actor_email=_row_value(snapshot, "actor_email"),
+                action="SECURITY_CVM_PROVISIONING_STARTED",
+                target_type="security_cvm",
+                target_id=_row_value(snapshot, "id"),
+                before={"metadata": _row_value(snapshot, "metadata")},
+                after={"metadata": metadata},
+            )
+            await advance_security_cvm_provision_step_with_conn(conn, operation_id, "cf_txt_create")
+
+
+async def persist_security_cvm_dns_record(operation_id: Any, snapshot: Any, *, field: str, record_id: str) -> None:
+    if field == "txt":
+        column = "txt_dns_record_id"
+        next_step = "cf_cname_create"
+    elif field == "cname":
+        column = "cname_dns_record_id"
+        next_step = "verify_attestation"
+    else:
+        raise ValueError("unknown Security CVM DNS record field")
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                f"""
+                UPDATE security_cvms
+                SET {column} = $2,
+                    updated_at = now()
+                WHERE id = $1
+                  AND state = 'PROVISIONING'
+                """,
+                _row_value(snapshot, "id"),
+                record_id,
+            )
+            if field == "cname":
+                await insert_audit_event(
+                    conn,
+                    entity_id=_row_value(snapshot, "entity_id"),
+                    actor_id=_row_value(snapshot, "actor_id"),
+                    actor_email=_row_value(snapshot, "actor_email"),
+                    action="SUBDOMAIN_PROVISIONED",
+                    target_type="security_cvm",
+                    target_id=_row_value(snapshot, "id"),
+                    before={"txt_dns_record_id": _row_value(snapshot, "txt_dns_record_id"), "cname_dns_record_id": None},
+                    after={"txt_dns_record_id": _row_value(snapshot, "txt_dns_record_id"), "cname_dns_record_id": record_id},
+                )
+            await advance_security_cvm_provision_step_with_conn(conn, operation_id, next_step)
+
+
+async def persist_security_cvm_ca_pem(operation_id: Any, *, security_cvm_id: Any, ca_pem: str) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                """
+                UPDATE security_cvms
+                SET ca_cert_pem = $2,
+                    updated_at = now()
+                WHERE id = $1
+                  AND state = 'PROVISIONING'
+                """,
+                security_cvm_id,
+                ca_pem,
+            )
+            await advance_security_cvm_provision_step_with_conn(conn, operation_id, "finalise")
+
+
+async def advance_security_cvm_provision_step(operation_id: Any, next_step: str) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await advance_security_cvm_provision_step_with_conn(conn, operation_id, next_step)
+
+
+async def advance_security_cvm_provision_step_with_conn(conn: Any, operation_id: Any, next_step: str) -> None:
+    await conn.execute(
+        """
+        UPDATE operations
+        SET progress_step = $2,
+            progress_percent = GREATEST(progress_percent, $3),
+            updated_at = now()
+        WHERE id = $1
+          AND kind = 'security_cvm.provision'
+          AND status = 'running'
+        """,
+        operation_id,
+        next_step,
+        SECURITY_CVM_PROVISION_PROGRESS[next_step],
+    )
+
+
+async def mark_security_cvm_provision_failed(operation_id: Any, *, code: str, details: dict[str, Any]) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """
+                SELECT
+                    o.target_id,
+                    o.actor_id,
+                    o.actor_email,
+                    sc.entity_id,
+                    sc.state::text AS state,
+                    sc.error_reason
+                FROM operations o
+                LEFT JOIN security_cvms sc ON sc.id = o.target_id
+                WHERE o.id = $1
+                  AND o.kind = 'security_cvm.provision'
+                """,
+                operation_id,
+            )
+            if row is not None and row["target_id"] is not None:
+                await scrub_security_cvm_plaintext_stash_with_conn(conn, row["target_id"])
+                await conn.execute(
+                    """
+                    UPDATE service_principal_tokens
+                    SET deleted_at = now()
+                    WHERE principal_type = 'security_cvm'
+                      AND principal_id = $1
+                      AND deleted_at IS NULL
+                    """,
+                    row["target_id"],
+                )
+                await conn.execute(
+                    """
+                    UPDATE security_cvms
+                    SET state = 'FAILED',
+                        error_reason = $2,
+                        updated_at = now()
+                    WHERE id = $1
+                      AND state = 'PROVISIONING'
+                    """,
+                    row["target_id"],
+                    code,
+                )
+                if row["entity_id"] is not None:
+                    await insert_audit_event(
+                        conn,
+                        entity_id=row["entity_id"],
+                        actor_id=row["actor_id"],
+                        actor_email=row["actor_email"],
+                        action="SECURITY_CVM_PROVISIONING_FAILED",
+                        target_type="security_cvm",
+                        target_id=row["target_id"],
+                        before={"state": row["state"], "error_reason": row["error_reason"]},
+                        after={"state": "FAILED", "error_reason": code},
+                    )
+            await conn.execute(
+                """
+                UPDATE operations
+                SET status = 'failed',
+                    error = $2::jsonb,
+                    updated_at = now(),
+                    expires_at = $3
+                WHERE id = $1
+                  AND status = 'running'
+                """,
+                operation_id,
+                json.dumps({"code": code, "details": details}),
+                operation_expiry(),
+            )
+
+
+async def scrub_security_cvm_plaintext_stash_with_conn(conn: Any, security_cvm_id: Any) -> None:
+    await conn.execute(
+        """
+        UPDATE security_cvms
+        SET ingest_token_plaintext = NULL,
+            ingest_token_stashed_at = NULL,
+            ca_export_token_plaintext = NULL,
+            ca_export_token_stashed_at = NULL,
+            updated_at = now()
+        WHERE id = $1
+        """,
+        security_cvm_id,
+    )
+
+
+async def compensate_security_cvm_provision_resources(snapshot: Any) -> None:
+    from concrete_console.dns_provider.cloudflare import CloudflareClient, CloudflareError
+    from concrete_console.tee_provider.phala import PhalaClient, PhalaError
+
+    with suppress(CloudflareError):
+        cloudflare = CloudflareClient.from_settings(zone_id_key="SECURITY_CVM_ZONE_ID")
+        for field in ("cname_dns_record_id", "txt_dns_record_id"):
+            record_id = _row_value(snapshot, field)
+            if isinstance(record_id, str) and record_id:
+                await cloudflare.delete_record(record_id)
+    app_id = provider_app_id(_row_value(snapshot, "metadata"))
+    if app_id is not None:
+        with suppress(PhalaError):
+            await PhalaClient.from_settings().delete(app_id)
 
 
 async def persist_cvm_launch_phala_result(
@@ -1406,6 +2134,49 @@ async def compensate_cvm_launch_resources(snapshot: Any) -> None:
             await PhalaClient.from_settings().delete(app_id)
 
 
+class SecurityCVMCAFetchError(RuntimeError):
+    def __init__(self, *, http_status: int):
+        super().__init__("ca_fetch_failed")
+        self.http_status = http_status
+
+
+async def fetch_security_cvm_ca_pem(*, fqdn: str, ca_export_token: str) -> str:
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(
+                f"https://{fqdn}/ca.pem",
+                headers={"Authorization": f"Bearer {ca_export_token}"},
+            )
+    except httpx.HTTPError as exc:
+        raise SecurityCVMCAFetchError(http_status=0) from exc
+    if response.status_code != 200:
+        raise SecurityCVMCAFetchError(http_status=response.status_code)
+    body = response.text
+    if "-----BEGIN CERTIFICATE-----" not in body or "-----END CERTIFICATE-----" not in body:
+        raise SecurityCVMCAFetchError(http_status=200)
+    return body
+
+
+def security_cvm_token_stash_available(snapshot: Any) -> bool:
+    ingest_token = _row_value(snapshot, "ingest_token_plaintext")
+    ca_export_token = _row_value(snapshot, "ca_export_token_plaintext")
+    ingest_stashed_at = _row_value(snapshot, "ingest_token_stashed_at")
+    ca_export_stashed_at = _row_value(snapshot, "ca_export_token_stashed_at")
+    if not all(
+        [
+            isinstance(ingest_token, str) and ingest_token,
+            isinstance(ca_export_token, str) and ca_export_token,
+            isinstance(ingest_stashed_at, datetime),
+            isinstance(ca_export_stashed_at, datetime),
+        ]
+    ):
+        return False
+    oldest_stash = min(_as_utc(ingest_stashed_at), _as_utc(ca_export_stashed_at))
+    return datetime.now(timezone.utc) - oldest_stash <= timedelta(seconds=SECURITY_CVM_TOKEN_PLAINTEXT_TTL_SECONDS)
+
+
 def provider_gateway_host(metadata: Any) -> str | None:
     metadata = json_payload(metadata or {})
     if not isinstance(metadata, dict):
@@ -1417,6 +2188,11 @@ def provider_gateway_host(metadata: Any) -> str | None:
 def cvm_launch_provider_name(cvm_id: Any) -> str:
     token = str(cvm_id).replace("-", "")[:16]
     return f"concrete-v0-cvm-{token}"
+
+
+def security_cvm_provider_name(security_cvm_id: Any) -> str:
+    token = str(security_cvm_id).replace("-", "")[:16]
+    return f"concrete-v0-sc-{token}"
 
 
 def sha256_text(value: str) -> str:
@@ -1464,6 +2240,12 @@ def pending_operation_start_progress(
 
 def _row_value(row: Any, key: str) -> Any:
     return row[key]
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 async def run_reconciliation_pass(*, include_orphans: bool = True) -> ReconciliationSummary:

@@ -4299,10 +4299,12 @@ async def create_security_cvm(
                         proxy_port,
                         expected_image_measurement,
                         compose_config,
+                        ingest_token_plaintext,
+                        ingest_token_stashed_at,
                         ca_export_token_plaintext,
                         ca_export_token_stashed_at
                     )
-                    VALUES ($1, $2, 'PROVISIONING', $3, $4, $5, 8080, $6, $7, $8, now())
+                    VALUES ($1, $2, 'PROVISIONING', $3, $4, $5, 8080, $6, $7, $8, now(), $9, now())
                     """,
                     security_cvm_id,
                     entity_id,
@@ -4311,6 +4313,7 @@ async def create_security_cvm(
                     resolved["region"],
                     resolved["expected_image_measurement"],
                     compose_config,
+                    ingest_token,
                     ca_export_token,
                 )
                 await conn.executemany(

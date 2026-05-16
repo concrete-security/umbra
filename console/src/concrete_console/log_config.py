@@ -15,7 +15,7 @@ SENSITIVE_KEY_RE = re.compile(
     r"(authorization|bearer|token|secret|password|private_key|device_code|polling_secret|id_token|access_token)",
     re.IGNORECASE,
 )
-SENSITIVE_EXACT_KEYS = {"before", "after", "ca_cert_pem", "compose_config"}
+SENSITIVE_EXACT_KEYS = {"before", "after", "ca_cert_pem", "ca_export_token_plaintext", "compose_config", "ingest_token_plaintext"}
 SENSITIVE_VALUE_RE = re.compile(
     r"(Bearer\s+[A-Za-z0-9._~-]+|"
     r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|"

@@ -267,6 +267,7 @@ def test_security_cvm_resource_omits_secret_material() -> None:
             "created_at": datetime(2026, 5, 15, 20, 11, tzinfo=timezone.utc),
             "updated_at": datetime(2026, 5, 15, 20, 12, tzinfo=timezone.utc),
             "ca_cert_pem": "must-not-appear",
+            "ingest_token_plaintext": "must-not-appear",
             "ca_export_token_plaintext": "must-not-appear",
         }
     )
@@ -274,6 +275,7 @@ def test_security_cvm_resource_omits_secret_material() -> None:
     assert resource["policy_version"] == 3
     assert resource["attestation_verified_at"] is None
     assert "ca_cert_pem" not in resource
+    assert "ingest_token_plaintext" not in resource
     assert "ca_export_token_plaintext" not in resource
 
 

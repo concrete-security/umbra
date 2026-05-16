@@ -127,6 +127,12 @@ def test_executable_running_operation_recognizes_terminate_step() -> None:
     assert scheduler.executable_running_operation(
         operation_row(kind="cvm.launch", status="running", progress_step="finalise")
     )
+    assert scheduler.executable_running_operation(
+        operation_row(kind="security_cvm.provision", status="running", progress_step="phala_deploy")
+    )
+    assert scheduler.executable_running_operation(
+        operation_row(kind="security_cvm.provision", status="running", progress_step="fetch_ca")
+    )
 
 
 def test_lease_running_operation_updates_executable_row() -> None:
@@ -204,6 +210,61 @@ def cvm_resource_row(**overrides):
     return row
 
 
+def security_cvm_snapshot(**overrides):
+    now = scheduler.datetime.now(scheduler.timezone.utc)
+    row = {
+        "id": UUID("00000000-0000-4000-8000-000000000041"),
+        "operation_id": UUID("00000000-0000-4000-8000-000000000030"),
+        "actor_id": UUID("00000000-0000-4000-8000-000000000020"),
+        "actor_email": "admin@example.com",
+        "operation_updated_at": now,
+        "entity_id": UUID("00000000-0000-4000-8000-000000000001"),
+        "state": "PROVISIONING",
+        "fqdn": "sc-abc.sc.example.com",
+        "instance_type": "tdx.small",
+        "region": "FR-PARIS-1",
+        "metadata": {},
+        "compose_config": "services:\n  mitmproxy:\n    image: example/sc@sha256:abc\n",
+        "txt_dns_record_id": None,
+        "cname_dns_record_id": None,
+        "proxy_port": 8080,
+        "ca_cert_pem": None,
+        "ingest_token_plaintext": "ingest-plaintext",
+        "ingest_token_stashed_at": now,
+        "ca_export_token_plaintext": "ca-export-plaintext",
+        "ca_export_token_stashed_at": now,
+        "expected_image_measurement": "b" * 64,
+        "image_measurement": None,
+        "rtmr3_digest": None,
+        "attestation_verified_at": None,
+        "policy_version": 0,
+    }
+    row.update(overrides)
+    return row
+
+
+def security_cvm_resource_row(**overrides):
+    now = scheduler.datetime.now(scheduler.timezone.utc)
+    row = {
+        "id": UUID("00000000-0000-4000-8000-000000000041"),
+        "entity_id": UUID("00000000-0000-4000-8000-000000000001"),
+        "state": "RUNNING",
+        "fqdn": "sc-abc.sc.example.com",
+        "instance_type": "tdx.small",
+        "region": "FR-PARIS-1",
+        "error_reason": None,
+        "policy_version": 0,
+        "expected_image_measurement": "b" * 64,
+        "image_measurement": "b" * 64,
+        "rtmr3_digest": "d" * 96,
+        "attestation_verified_at": now,
+        "created_at": now,
+        "updated_at": now,
+    }
+    row.update(overrides)
+    return row
+
+
 def test_build_cvm_launch_env_binds_runtime_material() -> None:
     env, binding = scheduler.build_cvm_launch_env(
         launch_snapshot(),
@@ -263,6 +324,13 @@ def test_cvm_launch_provider_name_is_concrete_scoped() -> None:
     )
 
 
+def test_security_cvm_provider_name_is_concrete_scoped() -> None:
+    assert (
+        scheduler.security_cvm_provider_name(UUID("00000000-0000-4000-8000-123456789abc"))
+        == "concrete-v0-sc-0000000000004000"
+    )
+
+
 class AsyncContext:
     def __init__(self, value=None):
         self.value = value
@@ -314,6 +382,150 @@ class LaunchFakePool:
 
     def acquire(self):
         return AsyncContext(self.conn)
+
+
+class SecurityProvisionFakeConn:
+    def __init__(self, snapshot):
+        self.snapshot = snapshot
+        self.execute_calls: list[tuple[str, tuple[object, ...]]] = []
+        self.audit_calls: list[dict[str, object]] = []
+
+    def transaction(self):
+        return AsyncContext()
+
+    async def fetchrow(self, query, *args):
+        if "FROM operations o" in query and "JOIN security_cvms sc" in query:
+            return self.snapshot
+        if "FROM security_cvms" in query and "WHERE id = $1" in query:
+            return security_cvm_resource_row()
+        return None
+
+    async def fetch(self, query, *args):
+        if "FROM service_principal_tokens" in query:
+            return [
+                {"purpose": "INGEST", "token_hash": "b" * 64},
+                {"purpose": "CA_EXPORT", "token_hash": "c" * 64},
+            ]
+        return []
+
+    async def execute(self, query, *args):
+        self.execute_calls.append((query, args))
+        return "UPDATE 1"
+
+
+def test_build_security_cvm_provision_env_uses_stashed_plaintexts(monkeypatch) -> None:
+    monkeypatch.setenv("CONSOLE_URL", "https://console.example.com")
+    env = scheduler.build_security_cvm_provision_env(security_cvm_snapshot())
+
+    assert env == {
+        "CONSOLE_URL": "https://console.example.com",
+        "ENTITY_ID": "00000000-0000-4000-8000-000000000001",
+        "SC_ID": "00000000-0000-4000-8000-000000000041",
+        "SECURITY_CVM_FQDN": "sc-abc.sc.example.com",
+        "CONSOLE_INGEST_TOKEN": "ingest-plaintext",
+        "CA_EXPORT_TOKEN": "ca-export-plaintext",
+    }
+
+
+def test_security_cvm_token_stash_expires_after_one_hour() -> None:
+    now = scheduler.datetime.now(scheduler.timezone.utc)
+
+    assert scheduler.security_cvm_token_stash_available(
+        security_cvm_snapshot(
+            ingest_token_stashed_at=now - scheduler.timedelta(seconds=3599),
+            ca_export_token_stashed_at=now - scheduler.timedelta(seconds=3599),
+        )
+    )
+    assert not scheduler.security_cvm_token_stash_available(
+        security_cvm_snapshot(
+            ingest_token_stashed_at=now - scheduler.timedelta(seconds=3601),
+            ca_export_token_stashed_at=now - scheduler.timedelta(seconds=3601),
+        )
+    )
+
+
+def test_execute_security_cvm_phala_deploy_materializes_env_and_metadata(monkeypatch) -> None:
+    conn = SecurityProvisionFakeConn(security_cvm_snapshot())
+    captured: dict[str, object] = {}
+
+    async def fake_get_pool():
+        return LaunchFakePool(conn)
+
+    class FakeShadeClient:
+        @classmethod
+        def from_settings(cls):
+            return cls()
+
+        async def build(self, *, shade_config_yaml, app_compose_yaml):
+            captured["shade_config_yaml"] = shade_config_yaml
+            captured["app_compose_yaml"] = app_compose_yaml
+            return SimpleNamespace(compose_yaml="services:\n  generated:\n    image: example\n")
+
+    class FakePhalaClient:
+        @classmethod
+        def from_settings(cls):
+            return cls()
+
+        async def deploy(self, *, name, compose_yaml, env):
+            captured["name"] = name
+            captured["compose_yaml"] = compose_yaml
+            captured["env"] = dict(env)
+            return SimpleNamespace(app_id="sc-app-123", gateway_host="gateway.example.com", status="RUNNING")
+
+    async def fake_insert_audit_event(_conn, **kwargs):
+        conn.audit_calls.append(kwargs)
+
+    monkeypatch.setenv("CONSOLE_URL", "https://console.example.com")
+    monkeypatch.setattr(scheduler, "get_pool", fake_get_pool)
+    monkeypatch.setattr("concrete_console.shade_provider.shade.ShadeClient", FakeShadeClient)
+    monkeypatch.setattr("concrete_console.tee_provider.phala.PhalaClient", FakePhalaClient)
+    monkeypatch.setattr(scheduler, "insert_audit_event", fake_insert_audit_event)
+
+    asyncio.run(scheduler.execute_security_cvm_phala_deploy_operation(UUID("00000000-0000-4000-8000-000000000030")))
+
+    env = captured["env"]
+    assert isinstance(env, dict)
+    assert captured["name"] == "concrete-v0-sc-0000000000004000"
+    assert "domain: sc-abc.sc.example.com" in str(captured["shade_config_yaml"])
+    assert env["CONSOLE_INGEST_TOKEN"] == "ingest-plaintext"
+    assert env["CA_EXPORT_TOKEN"] == "ca-export-plaintext"
+    metadata_calls = [args for query, args in conn.execute_calls if "UPDATE security_cvms" in query and "metadata" in query]
+    metadata = json.loads(metadata_calls[0][1])
+    assert metadata["app_id"] == "sc-app-123"
+    assert conn.audit_calls[0]["action"] == "SECURITY_CVM_PROVISIONING_STARTED"
+    progress_calls = [args for query, args in conn.execute_calls if "progress_step = $2" in query]
+    assert progress_calls[-1] == (UUID("00000000-0000-4000-8000-000000000030"), "cf_txt_create", 40)
+
+
+def test_execute_security_cvm_finalise_scrubs_stash_and_materializes_result(monkeypatch) -> None:
+    conn = SecurityProvisionFakeConn(
+        security_cvm_snapshot(
+            ca_cert_pem="-----BEGIN CERTIFICATE-----\nca\n-----END CERTIFICATE-----\n",
+            image_measurement="b" * 64,
+            rtmr3_digest="d" * 96,
+            attestation_verified_at=scheduler.datetime.now(scheduler.timezone.utc),
+        )
+    )
+
+    async def fake_get_pool():
+        return LaunchFakePool(conn)
+
+    async def fake_insert_audit_event(_conn, **kwargs):
+        conn.audit_calls.append(kwargs)
+
+    monkeypatch.setattr(scheduler, "get_pool", fake_get_pool)
+    monkeypatch.setattr(scheduler, "insert_audit_event", fake_insert_audit_event)
+
+    asyncio.run(scheduler.execute_security_cvm_finalise_operation(UUID("00000000-0000-4000-8000-000000000030")))
+
+    scrub_updates = [query for query, _args in conn.execute_calls if "ingest_token_plaintext = NULL" in query]
+    assert scrub_updates
+    operation_updates = [args for query, args in conn.execute_calls if "UPDATE operations" in query and "status = 'succeeded'" in query]
+    result = json.loads(operation_updates[0][1])
+    assert result["ingest_token"] == "ingest-plaintext"
+    assert result["ca_export_token"] == "ca-export-plaintext"
+    assert result["security_cvm"]["state"] == "RUNNING"
+    assert conn.audit_calls[0]["action"] == "SECURITY_CVM_PROVISIONED"
 
 
 def test_execute_cvm_launch_phala_deploy_persists_hash_only(monkeypatch) -> None:

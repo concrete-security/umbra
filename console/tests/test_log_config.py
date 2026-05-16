@@ -36,6 +36,8 @@ def test_redaction_covers_spec_denied_keys() -> None:
             "after": {"email": "admin@example.com"},
             "compose_config": "services: {}",
             "ca_cert_pem": "-----BEGIN CERTIFICATE-----\nsecret\n-----END CERTIFICATE-----",
+            "ingest_token_plaintext": "ingest",
+            "ca_export_token_plaintext": "ca-export",
             "nested": {"device_code": "device-code"},
         },
     )
@@ -44,6 +46,8 @@ def test_redaction_covers_spec_denied_keys() -> None:
     assert event["after"] == "<redacted>"
     assert event["compose_config"] == "<redacted>"
     assert event["ca_cert_pem"] == "<redacted>"
+    assert event["ingest_token_plaintext"] == "<redacted>"
+    assert event["ca_export_token_plaintext"] == "<redacted>"
     assert event["nested"]["device_code"] == "<redacted>"
 
 
