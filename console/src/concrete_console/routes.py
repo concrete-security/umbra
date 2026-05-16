@@ -3523,6 +3523,95 @@ async def get_security_cvm(
     return security_cvm_resource(row)
 
 
+@router.delete("/entities/{entity_id}/security-cvm")
+async def delete_security_cvm(
+    entity_id: UUID,
+    current_user: CurrentUser = Depends(require_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> dict:
+    current_user.require_entity(entity_id)
+    current_user.require_permission("SECURITY_CVM_CONFIGURE")
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await lock_security_cvm_for_decommission(conn, entity_id)
+            live_dev_cvm_count = await conn.fetchval(
+                """
+                SELECT count(*)
+                FROM cvms
+                WHERE entity_id = $1
+                  AND deleted_at IS NULL
+                  AND state <> 'TERMINATED'
+                """,
+                entity_id,
+            )
+            if live_dev_cvm_count:
+                raise api_error(
+                    409,
+                    "CONFLICT",
+                    "cannot decommission Security CVM while Dev CVMs exist",
+                    {"state": "dev_cvms_in_entity", "dev_cvm_count": live_dev_cvm_count},
+                )
+            metadata = json_payload(row["metadata"])
+            if isinstance(metadata, dict) and metadata.get("app_id"):
+                raise api_error(
+                    503,
+                    "SERVICE_UNAVAILABLE",
+                    "Security CVM provider termination is not implemented",
+                    {"component": "phala_adapter"},
+                )
+            await conn.execute(
+                """
+                UPDATE service_principal_tokens
+                SET deleted_at = now(),
+                    deleted_by = $1
+                WHERE principal_type = 'security_cvm'
+                  AND principal_id = $2
+                  AND deleted_at IS NULL
+                """,
+                current_user.id,
+                row["id"],
+            )
+            terminated = await conn.fetchrow(
+                """
+                UPDATE security_cvms
+                SET state = 'TERMINATED',
+                    deleted_at = now(),
+                    deleted_by = $1,
+                    updated_at = now()
+                WHERE id = $2
+                RETURNING
+                    id,
+                    entity_id,
+                    state::text AS state,
+                    fqdn,
+                    instance_type,
+                    region,
+                    error_reason,
+                    policy_version,
+                    expected_image_measurement,
+                    image_measurement,
+                    rtmr3_digest,
+                    attestation_verified_at,
+                    created_at,
+                    updated_at
+                """,
+                current_user.id,
+                row["id"],
+            )
+            await insert_audit_event(
+                conn,
+                entity_id=entity_id,
+                actor_id=current_user.id,
+                actor_email=current_user.email,
+                action="SECURITY_CVM_DECOMMISSIONED",
+                target_type="security_cvm",
+                target_id=row["id"],
+                before={"state": row["state"]},
+                after={"state": "TERMINATED"},
+            )
+    return security_cvm_resource(terminated)
+
+
 @router.get("/entities/{entity_id}/security-cvm/attestation")
 async def get_security_cvm_attestation(
     entity_id: UUID,
@@ -3579,6 +3668,39 @@ async def fetch_security_cvm_row(conn: asyncpg.Connection, entity_id: UUID) -> a
         """,
         entity_id,
     )
+
+
+async def lock_security_cvm_for_decommission(conn: asyncpg.Connection, entity_id: UUID) -> asyncpg.Record:
+    row = await conn.fetchrow(
+        """
+        SELECT
+            id,
+            entity_id,
+            state::text AS state,
+            fqdn,
+            metadata,
+            instance_type,
+            region,
+            error_reason,
+            policy_version,
+            expected_image_measurement,
+            image_measurement,
+            rtmr3_digest,
+            attestation_verified_at,
+            created_at,
+            updated_at
+        FROM security_cvms
+        WHERE entity_id = $1
+          AND deleted_at IS NULL
+        ORDER BY created_at DESC
+        LIMIT 1
+        FOR UPDATE
+        """,
+        entity_id,
+    )
+    if row is None:
+        raise api_error(404, "NOT_FOUND", "resource not found")
+    return row
 
 
 @router.get("/traffic-logs")
