@@ -185,6 +185,85 @@ def test_run_operation_scheduler_pass_executes_newly_started_pending_row(monkeyp
     assert executed == [UUID("00000000-0000-4000-8000-000000000030")]
 
 
+def test_execute_operation_step_with_logging_records_elapsed(monkeypatch) -> None:
+    events: list[tuple[str, dict[str, object]]] = []
+
+    class FakeLog:
+        def info(self, event: str, **kwargs) -> None:
+            events.append((event, kwargs))
+
+        def error(self, event: str, **kwargs) -> None:
+            events.append((event, kwargs))
+
+    async def handler() -> None:
+        return None
+
+    monkeypatch.setattr(scheduler, "log", FakeLog())
+
+    asyncio.run(
+        scheduler.execute_operation_step_with_logging(
+            UUID("00000000-0000-4000-8000-000000000030"),
+            kind="cvm.launch",
+            step="phala_deploy",
+            handler=handler,
+        )
+    )
+
+    assert events[0] == (
+        "operation_scheduler_step_started",
+        {
+            "operation_id": "00000000-0000-4000-8000-000000000030",
+            "kind": "cvm.launch",
+            "step": "phala_deploy",
+        },
+    )
+    assert events[1][0] == "operation_scheduler_step_finished"
+    assert events[1][1]["operation_id"] == "00000000-0000-4000-8000-000000000030"
+    assert events[1][1]["kind"] == "cvm.launch"
+    assert events[1][1]["step"] == "phala_deploy"
+    assert isinstance(events[1][1]["elapsed_ms"], int)
+
+
+def test_execute_operation_step_with_logging_records_failure(monkeypatch) -> None:
+    events: list[tuple[str, dict[str, object]]] = []
+
+    class FakeLog:
+        def info(self, event: str, **kwargs) -> None:
+            events.append((event, kwargs))
+
+        def error(self, event: str, **kwargs) -> None:
+            events.append((event, kwargs))
+
+    async def handler() -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(scheduler, "log", FakeLog())
+
+    try:
+        asyncio.run(
+            scheduler.execute_operation_step_with_logging(
+                UUID("00000000-0000-4000-8000-000000000030"),
+                kind="security_cvm.provision",
+                step="verify_attestation",
+                handler=handler,
+            )
+        )
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("expected RuntimeError")
+
+    assert [event for event, _kwargs in events] == [
+        "operation_scheduler_step_started",
+        "operation_scheduler_step_failed",
+    ]
+    assert events[1][1]["operation_id"] == "00000000-0000-4000-8000-000000000030"
+    assert events[1][1]["kind"] == "security_cvm.provision"
+    assert events[1][1]["step"] == "verify_attestation"
+    assert events[1][1]["error_type"] == "RuntimeError"
+    assert isinstance(events[1][1]["elapsed_ms"], int)
+
+
 def test_provider_app_id_parses_json_metadata() -> None:
     assert scheduler.provider_app_id({"app_id": "app-123"}) == "app-123"
     assert scheduler.provider_app_id('{"app_id": "app-123"}') == "app-123"

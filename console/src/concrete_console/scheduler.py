@@ -310,19 +310,70 @@ async def execute_running_operation(operation_id: Any) -> bool:
         )
     if row is None or _row_value(row, "status") != "running":
         return False
-    if _row_value(row, "kind") == "cvm.terminate" and _row_value(row, "progress_step") == "phala_terminate":
-        await execute_cvm_terminate_operation(operation_id)
+    kind = _row_value(row, "kind")
+    step = _row_value(row, "progress_step")
+    if kind == "cvm.terminate" and step == "phala_terminate":
+        await execute_operation_step_with_logging(
+            operation_id,
+            kind=kind,
+            step=step,
+            handler=lambda: execute_cvm_terminate_operation(operation_id),
+        )
         return True
-    if _row_value(row, "kind") == "cvm.launch" and _row_value(row, "progress_step") in CVM_LAUNCH_EXECUTABLE_STEPS:
-        await execute_cvm_launch_operation(operation_id, _row_value(row, "progress_step"))
+    if kind == "cvm.launch" and step in CVM_LAUNCH_EXECUTABLE_STEPS:
+        await execute_operation_step_with_logging(
+            operation_id,
+            kind=kind,
+            step=step,
+            handler=lambda: execute_cvm_launch_operation(operation_id, step),
+        )
         return True
-    if (
-        _row_value(row, "kind") == "security_cvm.provision"
-        and _row_value(row, "progress_step") in SECURITY_CVM_PROVISION_EXECUTABLE_STEPS
-    ):
-        await execute_security_cvm_provision_operation(operation_id, _row_value(row, "progress_step"))
+    if kind == "security_cvm.provision" and step in SECURITY_CVM_PROVISION_EXECUTABLE_STEPS:
+        await execute_operation_step_with_logging(
+            operation_id,
+            kind=kind,
+            step=step,
+            handler=lambda: execute_security_cvm_provision_operation(operation_id, step),
+        )
         return True
     return False
+
+
+async def execute_operation_step_with_logging(
+    operation_id: Any,
+    *,
+    kind: str,
+    step: str,
+    handler: Any,
+) -> None:
+    started = time.monotonic()
+    log.info(
+        "operation_scheduler_step_started",
+        operation_id=str(operation_id),
+        kind=kind,
+        step=step,
+    )
+    try:
+        await handler()
+    except Exception as exc:
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        log.error(
+            "operation_scheduler_step_failed",
+            operation_id=str(operation_id),
+            kind=kind,
+            step=step,
+            elapsed_ms=elapsed_ms,
+            error_type=type(exc).__name__,
+        )
+        raise
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    log.info(
+        "operation_scheduler_step_finished",
+        operation_id=str(operation_id),
+        kind=kind,
+        step=step,
+        elapsed_ms=elapsed_ms,
+    )
 
 
 async def execute_cvm_launch_operation(operation_id: Any, step: str) -> None:
