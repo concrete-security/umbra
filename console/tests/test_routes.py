@@ -17,6 +17,7 @@ from concrete_console.routes import (
     SECURITY_CVM_PROVISION_REDACTION,
     SecurityCVMCreate,
     cvm_etag,
+    cvm_provider_app_id,
     entity_quota_usage,
     erased_user_email,
     ensure_no_sandbox_env_conflict,
@@ -106,6 +107,11 @@ def test_profile_etag_uses_updated_at_microseconds() -> None:
 
 def test_cvm_etag_includes_policy_version() -> None:
     assert cvm_etag(cvm_row()) == 'W/"00000000-0000-4000-8000-000000000030:4:123456"'
+
+
+def test_cvm_provider_app_id_reads_phala_metadata() -> None:
+    assert cvm_provider_app_id(cvm_row(metadata={"app_id": "app-123"})) == "app-123"
+    assert cvm_provider_app_id(cvm_row(metadata={})) is None
 
 
 def test_mint_service_principal_token_hash_returns_sha256(monkeypatch) -> None:

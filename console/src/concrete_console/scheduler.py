@@ -3,12 +3,16 @@ from __future__ import annotations
 import asyncio
 from contextlib import suppress
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+import json
 import time
 from typing import Any
 
+from concrete_console.audit import insert_audit_event
 from concrete_console.config import load_settings
 from concrete_console.db import get_pool
 from concrete_console.log_config import logger
+from concrete_console.resources import cvm_resource, json_payload
 
 log = logger()
 _last_successful_tick_monotonic: float | None = None
@@ -80,13 +84,21 @@ async def run_scheduler_tick() -> None:
 async def run_operation_scheduler_pass(*, batch_size: int | None = None) -> list[str]:
     pool = await get_pool()
     claimed_ids: list[str] = []
+    executable_ids: list[Any] = []
     async with pool.acquire() as conn:
         async with conn.transaction():
             rows = await claim_active_operations(conn, batch_size=batch_size or operation_scheduler_batch_size())
             for row in rows:
-                advanced = await advance_claimed_operation(conn, row)
-                if advanced:
+                if _row_value(row, "status") == "running":
+                    leased = await lease_running_operation(conn, row)
+                    if leased:
+                        executable_ids.append(_row_value(row, "id"))
+                        claimed_ids.append(str(_row_value(row, "id")))
+                    continue
+                if await advance_claimed_operation(conn, row):
                     claimed_ids.append(str(_row_value(row, "id")))
+    for operation_id in executable_ids:
+        await execute_running_operation(operation_id)
     return claimed_ids
 
 
@@ -158,6 +170,314 @@ async def advance_claimed_operation(conn: Any, row: Any) -> bool:
             step=next_step,
         )
     return advanced
+
+
+async def lease_running_operation(conn: Any, row: Any) -> bool:
+    if not executable_running_operation(row):
+        log.info(
+            "operation_scheduler_running_operation_claimed",
+            operation_id=str(_row_value(row, "id")),
+            kind=_row_value(row, "kind"),
+            step=_row_value(row, "progress_step"),
+        )
+        return False
+    result = await conn.execute(
+        """
+        UPDATE operations
+        SET updated_at = now()
+        WHERE id = $1
+          AND status = 'running'
+        """,
+        _row_value(row, "id"),
+    )
+    leased = result == "UPDATE 1"
+    if leased:
+        log.info(
+            "operation_scheduler_operation_leased",
+            operation_id=str(_row_value(row, "id")),
+            kind=_row_value(row, "kind"),
+            step=_row_value(row, "progress_step"),
+        )
+    return leased
+
+
+def executable_running_operation(row: Any) -> bool:
+    return _row_value(row, "kind") == "cvm.terminate" and _row_value(row, "progress_step") == "phala_terminate"
+
+
+async def execute_running_operation(operation_id: Any) -> bool:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT id, kind, status::text AS status, progress_step
+            FROM operations
+            WHERE id = $1
+            """,
+            operation_id,
+        )
+    if row is None or _row_value(row, "status") != "running":
+        return False
+    if _row_value(row, "kind") == "cvm.terminate" and _row_value(row, "progress_step") == "phala_terminate":
+        await execute_cvm_terminate_operation(operation_id)
+        return True
+    return False
+
+
+async def execute_cvm_terminate_operation(operation_id: Any) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        snapshot = await conn.fetchrow(
+            """
+            SELECT
+                o.id AS operation_id,
+                o.actor_id,
+                o.actor_email,
+                o.target_id AS cvm_id,
+                c.entity_id,
+                c.state::text AS state,
+                c.metadata,
+                c.txt_dns_record_id,
+                c.cname_dns_record_id
+            FROM operations o
+            JOIN cvms c ON c.id = o.target_id
+            WHERE o.id = $1
+              AND o.kind = 'cvm.terminate'
+              AND o.status = 'running'
+            """,
+            operation_id,
+        )
+    if snapshot is None:
+        await mark_operation_failed(operation_id, code="CVM_NOT_FOUND", details={"state": "missing_target"})
+        return
+
+    if _row_value(snapshot, "state") not in {"RUNNING", "STOPPED", "FAILED", "TERMINATED"}:
+        await mark_operation_failed(
+            operation_id,
+            code="INVALID_STATE",
+            details={"state": _row_value(snapshot, "state")},
+        )
+        return
+
+    app_id = provider_app_id(_row_value(snapshot, "metadata"))
+    if app_id is not None:
+        from concrete_console.tee_provider.phala import PhalaClient, PhalaError
+
+        try:
+            await PhalaClient.from_settings().delete(app_id)
+        except PhalaError as exc:
+            await mark_operation_failed(
+                operation_id,
+                code="PHALA_TERMINATE_FAILED",
+                details={"adapter": "phala", "reason": exc.code},
+            )
+            return
+
+    dns_deleted = await deprovision_cvm_dns_records(snapshot)
+    await finalise_cvm_terminate_operation(operation_id, snapshot, dns_deleted=dns_deleted)
+
+
+async def deprovision_cvm_dns_records(snapshot: Any) -> bool:
+    from concrete_console.dns_provider.cloudflare import CloudflareClient, CloudflareError
+
+    record_ids = [
+        _row_value(snapshot, "txt_dns_record_id"),
+        _row_value(snapshot, "cname_dns_record_id"),
+    ]
+    record_ids = [record_id for record_id in record_ids if isinstance(record_id, str) and record_id]
+    if not record_ids:
+        return False
+    try:
+        client = CloudflareClient.from_settings()
+    except CloudflareError as exc:
+        log.warning(
+            "cvm_dns_deprovision_skipped",
+            cvm_id=str(_row_value(snapshot, "cvm_id")),
+            reason=exc.code,
+        )
+        return False
+    deleted = False
+    for record_id in record_ids:
+        try:
+            await client.delete_record(record_id)
+            deleted = True
+        except CloudflareError as exc:
+            log.warning(
+                "cvm_dns_deprovision_failed",
+                cvm_id=str(_row_value(snapshot, "cvm_id")),
+                record_id=record_id,
+                reason=exc.code,
+            )
+    return deleted
+
+
+async def finalise_cvm_terminate_operation(operation_id: Any, snapshot: Any, *, dns_deleted: bool) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                """
+                UPDATE service_principal_tokens
+                SET deleted_at = now(),
+                    deleted_by = $1
+                WHERE principal_type = 'dev_cvm'
+                  AND principal_id = $2
+                  AND deleted_at IS NULL
+                """,
+                _row_value(snapshot, "actor_id"),
+                _row_value(snapshot, "cvm_id"),
+            )
+            await conn.execute(
+                """
+                UPDATE cvms
+                SET state = 'TERMINATED',
+                    deleted_at = COALESCE(deleted_at, now()),
+                    deleted_by = COALESCE(deleted_by, $1),
+                    updated_at = now(),
+                    txt_dns_record_id = NULL,
+                    cname_dns_record_id = NULL
+                WHERE id = $2
+                """,
+                _row_value(snapshot, "actor_id"),
+                _row_value(snapshot, "cvm_id"),
+            )
+            result = await fetch_cvm_resource_for_scheduler(conn, _row_value(snapshot, "cvm_id"))
+            await insert_audit_event(
+                conn,
+                entity_id=_row_value(snapshot, "entity_id"),
+                actor_id=_row_value(snapshot, "actor_id"),
+                actor_email=_row_value(snapshot, "actor_email"),
+                action="CVM_TERMINATED",
+                target_type="cvm",
+                target_id=_row_value(snapshot, "cvm_id"),
+                before={"state": _row_value(snapshot, "state")},
+                after={"state": "TERMINATED"},
+            )
+            if dns_deleted:
+                await insert_audit_event(
+                    conn,
+                    entity_id=_row_value(snapshot, "entity_id"),
+                    actor_id=_row_value(snapshot, "actor_id"),
+                    actor_email=_row_value(snapshot, "actor_email"),
+                    action="SUBDOMAIN_DEPROVISIONED",
+                    target_type="cvm",
+                    target_id=_row_value(snapshot, "cvm_id"),
+                    before={
+                        "txt_dns_record_id": _row_value(snapshot, "txt_dns_record_id"),
+                        "cname_dns_record_id": _row_value(snapshot, "cname_dns_record_id"),
+                    },
+                    after={"txt_dns_record_id": None, "cname_dns_record_id": None},
+                )
+            await conn.execute(
+                """
+                UPDATE operations
+                SET status = 'succeeded',
+                    progress_step = 'finalise',
+                    progress_percent = 100,
+                    result = $2::jsonb,
+                    error = NULL,
+                    updated_at = now(),
+                    expires_at = $3
+                WHERE id = $1
+                  AND status = 'running'
+                """,
+                operation_id,
+                json.dumps(result),
+                operation_expiry(),
+            )
+
+
+async def mark_operation_failed(operation_id: Any, *, code: str, details: dict[str, Any]) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE operations
+            SET status = 'failed',
+                error = $2::jsonb,
+                updated_at = now(),
+                expires_at = $3
+            WHERE id = $1
+              AND status = 'running'
+            """,
+            operation_id,
+            json.dumps({"code": code, "details": details}),
+            operation_expiry(),
+        )
+
+
+async def fetch_cvm_resource_for_scheduler(conn: Any, cvm_id: Any) -> dict[str, Any]:
+    row = await conn.fetchrow(
+        """
+        SELECT
+            c.id,
+            c.owner_id,
+            owner.email AS owner_email,
+            c.entity_id,
+            c.state::text AS state,
+            c.instance_type,
+            c.region,
+            c.fqdn,
+            c.expected_image_measurement,
+            c.image_measurement,
+            c.rtmr3_digest,
+            c.attestation_verified_at,
+            c.error_reason,
+            c.policy_version,
+            c.created_at,
+            c.updated_at,
+            COALESCE(
+                (
+                    SELECT jsonb_agg(
+                        jsonb_build_object('id', ep.id, 'name', ep.name)
+                        ORDER BY ep.name, ep.id
+                    )
+                    FROM cvm_profiles cp
+                    JOIN entity_profiles ep ON ep.id = cp.profile_id
+                    WHERE cp.cvm_id = c.id
+                      AND ep.deleted_at IS NULL
+                ),
+                '[]'::jsonb
+            ) AS profiles,
+            COALESCE(
+                (
+                    SELECT jsonb_agg(
+                        jsonb_build_object('id', sk.id, 'label', sk.label)
+                        ORDER BY sk.label, sk.id
+                    )
+                    FROM cvm_ssh_keys csk
+                    JOIN ssh_keys sk ON sk.id = csk.ssh_key_id
+                    WHERE csk.cvm_id = c.id
+                      AND sk.deleted_at IS NULL
+                ),
+                '[]'::jsonb
+            ) AS ssh_keys
+        FROM cvms c
+        JOIN users owner ON owner.id = c.owner_id
+        WHERE c.id = $1
+        """,
+        cvm_id,
+    )
+    if row is None:
+        raise RuntimeError("CVM target disappeared before terminate finalise")
+    return cvm_resource(row)
+
+
+def provider_app_id(metadata: Any) -> str | None:
+    metadata = json_payload(metadata or {})
+    if not isinstance(metadata, dict):
+        return None
+    app_id = metadata.get("app_id")
+    return app_id if isinstance(app_id, str) and app_id else None
+
+
+def operation_expiry() -> datetime:
+    raw = load_settings().raw.get("OPERATION_RETENTION_DAYS", "30").strip() or "30"
+    try:
+        days = int(raw)
+    except ValueError:
+        days = 30
+    return datetime.now(timezone.utc) + timedelta(days=min(max(days, 1), 365))
 
 
 def pending_operation_start_progress(

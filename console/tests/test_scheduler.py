@@ -95,3 +95,34 @@ def test_advance_claimed_operation_leaves_running_row_unchanged() -> None:
 
     assert advanced is False
     assert conn.execute_calls == []
+
+
+def test_executable_running_operation_recognizes_terminate_step() -> None:
+    assert scheduler.executable_running_operation(
+        operation_row(kind="cvm.terminate", status="running", progress_step="phala_terminate")
+    )
+    assert not scheduler.executable_running_operation(
+        operation_row(kind="cvm.launch", status="running", progress_step="phala_deploy")
+    )
+
+
+def test_lease_running_operation_updates_executable_row() -> None:
+    conn = FakeConn()
+
+    leased = asyncio.run(
+        scheduler.lease_running_operation(
+            conn,
+            operation_row(kind="cvm.terminate", status="running", progress_step="phala_terminate"),
+        )
+    )
+
+    assert leased is True
+    query, args = conn.execute_calls[0]
+    assert "SET updated_at = now()" in query
+    assert args == (UUID("00000000-0000-4000-8000-000000000030"),)
+
+
+def test_provider_app_id_parses_json_metadata() -> None:
+    assert scheduler.provider_app_id({"app_id": "app-123"}) == "app-123"
+    assert scheduler.provider_app_id('{"app_id": "app-123"}') == "app-123"
+    assert scheduler.provider_app_id({}) is None

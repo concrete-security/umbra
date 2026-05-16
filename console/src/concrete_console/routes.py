@@ -3556,6 +3556,10 @@ async def terminate_cvm(
                 require_matching_etag(cvm_etag(cvm), if_match)
             if cvm["state"] == "TERMINATED":
                 cvm_payload = await fetch_cvm_resource_for_operation(conn, cvm_id)
+                operation_status = "succeeded"
+                operation_result = json.dumps(cvm_payload)
+                progress_step = "finalise"
+                progress_percent = 100
             else:
                 if cvm["state"] not in {"RUNNING", "STOPPED", "FAILED"}:
                     raise api_error(
@@ -3564,45 +3568,54 @@ async def terminate_cvm(
                         "illegal CVM lifecycle transition",
                         {"state": cvm["state"]},
                     )
-                require_local_cvm_lifecycle_action(cvm)
-                await conn.execute(
-                    """
-                    UPDATE service_principal_tokens
-                    SET deleted_at = now(),
-                        deleted_by = $1
-                    WHERE principal_type = 'dev_cvm'
-                      AND principal_id = $2
-                      AND deleted_at IS NULL
-                    """,
-                    current_user.id,
-                    cvm_id,
-                )
-                await conn.execute(
-                    """
-                    UPDATE cvms
-                    SET state = 'TERMINATED',
-                        deleted_at = now(),
-                        deleted_by = $1,
-                        updated_at = now(),
-                        txt_dns_record_id = NULL,
-                        cname_dns_record_id = NULL
-                    WHERE id = $2
-                    """,
-                    current_user.id,
-                    cvm_id,
-                )
-                cvm_payload = await fetch_cvm_resource_for_operation(conn, cvm_id)
-                await insert_audit_event(
-                    conn,
-                    entity_id=current_user.entity_id,
-                    actor_id=current_user.id,
-                    actor_email=current_user.email,
-                    action="CVM_TERMINATED",
-                    target_type="cvm",
-                    target_id=cvm_id,
-                    before={"state": cvm["state"]},
-                    after={"state": "TERMINATED"},
-                )
+                if cvm_provider_app_id(cvm) is not None:
+                    operation_status = "pending"
+                    operation_result = None
+                    progress_step = "queued"
+                    progress_percent = 0
+                else:
+                    await conn.execute(
+                        """
+                        UPDATE service_principal_tokens
+                        SET deleted_at = now(),
+                            deleted_by = $1
+                        WHERE principal_type = 'dev_cvm'
+                          AND principal_id = $2
+                          AND deleted_at IS NULL
+                        """,
+                        current_user.id,
+                        cvm_id,
+                    )
+                    await conn.execute(
+                        """
+                        UPDATE cvms
+                        SET state = 'TERMINATED',
+                            deleted_at = now(),
+                            deleted_by = $1,
+                            updated_at = now(),
+                            txt_dns_record_id = NULL,
+                            cname_dns_record_id = NULL
+                        WHERE id = $2
+                        """,
+                        current_user.id,
+                        cvm_id,
+                    )
+                    cvm_payload = await fetch_cvm_resource_for_operation(conn, cvm_id)
+                    await insert_audit_event(
+                        conn,
+                        entity_id=current_user.entity_id,
+                        actor_id=current_user.id,
+                        actor_email=current_user.email,
+                        action="CVM_TERMINATED",
+                        target_type="cvm",
+                        target_id=cvm_id,
+                        before={"state": cvm["state"]},
+                        after={"state": "TERMINATED"},
+                    )
+                    operation_status = "succeeded"
+                    operation_result = json.dumps(cvm_payload)
+                    progress_step = "finalise"
+                    progress_percent = 100
             row = await conn.fetchrow(
                 """
                 INSERT INTO operations (
@@ -3619,7 +3632,7 @@ async def terminate_cvm(
                     progress_step,
                     progress_percent
                 )
-                VALUES ($1, 'cvm.terminate', 'succeeded', $2, $3, 'cvm', $4, $5, $6, $7::jsonb, 'finalise', 100)
+                VALUES ($1, 'cvm.terminate', $2::operation_status, $3, $4, 'cvm', $5, $6, $7, $8::jsonb, $9, $10)
                 RETURNING
                     id,
                     kind,
@@ -3638,12 +3651,15 @@ async def terminate_cvm(
                     expires_at
                 """,
                 operation_id,
+                operation_status,
                 current_user.id,
                 current_user.email,
                 cvm_id,
                 idempotency_key_value,
                 body_sha256 if idempotency_key_value is not None else None,
-                json.dumps(cvm_payload),
+                operation_result,
+                progress_step,
+                progress_percent,
             )
             response_body = operation_resource(row)
             if idempotency_key_value is not None:
@@ -3851,14 +3867,21 @@ async def lock_cvm_for_lifecycle_action(
 
 
 def require_local_cvm_lifecycle_action(row: asyncpg.Record | dict) -> None:
-    metadata = json_payload(dict(row).get("metadata", {}))
-    if isinstance(metadata, dict) and metadata.get("app_id"):
+    if cvm_provider_app_id(row) is not None:
         raise api_error(
             503,
             "SERVICE_UNAVAILABLE",
             "Dev CVM provider lifecycle actions are not implemented",
             {"component": "phala_adapter"},
         )
+
+
+def cvm_provider_app_id(row: asyncpg.Record | dict) -> str | None:
+    metadata = json_payload(dict(row).get("metadata", {}))
+    if not isinstance(metadata, dict):
+        return None
+    app_id = metadata.get("app_id")
+    return app_id if isinstance(app_id, str) and app_id else None
 
 
 async def apply_cvm_state_action(
