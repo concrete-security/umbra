@@ -60,6 +60,19 @@ def settings_for(tmp_path) -> JwtSettings:
     )
 
 
+def access_claims(now: datetime):
+    return {
+        "iss": "issuer",
+        "aud": "audience",
+        "sub": "00000000-0000-4000-8000-000000000001",
+        "entity_id": "00000000-0000-4000-8000-000000000002",
+        "jti": "00000000-0000-4000-8000-000000000003",
+        "iat": now,
+        "nbf": now,
+        "exp": now + timedelta(hours=1),
+    }
+
+
 def test_access_token_round_trips_with_configured_jwks(tmp_path) -> None:
     manager = JwtManager(settings_for(tmp_path))
 
@@ -207,4 +220,28 @@ def test_access_token_requires_registered_claims(tmp_path) -> None:
     )
 
     with pytest.raises(jwt.MissingRequiredClaimError, match='"nbf"'):
+        manager.verify_access_token(token)
+
+
+@pytest.mark.parametrize(
+    ("claim_name", "claim_value"),
+    [
+        ("email", "user@example.com"),
+        ("permissions", ["USER_MANAGE"]),
+        ("profiles", [{"id": "00000000-0000-4000-8000-000000000004", "name": "default"}]),
+    ],
+)
+def test_access_token_rejects_forbidden_payload_claims(tmp_path, claim_name, claim_value) -> None:
+    manager = JwtManager(settings_for(tmp_path))
+    now = datetime.now(timezone.utc)
+    claims = access_claims(now)
+    claims[claim_name] = claim_value
+    token = jwt.encode(
+        claims,
+        manager.private_key,
+        algorithm="EdDSA",
+        headers={"kid": "test-key", "typ": "at+JWT"},
+    )
+
+    with pytest.raises(jwt.InvalidTokenError, match="forbidden access token claims"):
         manager.verify_access_token(token)

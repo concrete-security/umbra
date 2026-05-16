@@ -17,6 +17,7 @@ from concrete_console.config import load_settings
 KID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 TOKEN_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 FORBIDDEN_KEY_HEADERS = {"jku", "jwk", "x5u", "x5c"}
+FORBIDDEN_ACCESS_TOKEN_CLAIMS = {"email", "permissions", "profiles"}
 ALLOWED_ALGORITHMS = {"EdDSA", "RS256"}
 
 
@@ -222,7 +223,7 @@ class JwtManager:
         if alg != verifying_key.alg:
             raise jwt.InvalidTokenError("algorithm mismatch")
 
-        return jwt.decode(
+        claims = jwt.decode(
             token,
             verifying_key.key,
             algorithms=[verifying_key.alg],
@@ -231,6 +232,9 @@ class JwtManager:
             leeway=self.settings.leeway_seconds,
             options={"require": ["iss", "aud", "sub", "entity_id", "iat", "nbf", "exp", "jti"]},
         )
+        if FORBIDDEN_ACCESS_TOKEN_CLAIMS.intersection(claims):
+            raise jwt.InvalidTokenError("forbidden access token claims")
+        return claims
 
     def _prune_retired_keys(self, now: datetime) -> None:
         expired = [kid for kid, deadline in self._retiring_deadlines.items() if deadline <= now]
