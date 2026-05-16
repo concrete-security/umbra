@@ -60,8 +60,9 @@ RUN echo 'dev:100000:65536' >/etc/subuid \
 
 COPY sshd_config /etc/ssh/sshd_config
 COPY entrypoint.sh /entrypoint.sh
+COPY concrete-dev-tunnel.py /usr/local/bin/concrete-dev-tunnel
 
-RUN chmod +x /entrypoint.sh
+RUN chmod +x /entrypoint.sh /usr/local/bin/concrete-dev-tunnel
 
 EXPOSE 22
 
