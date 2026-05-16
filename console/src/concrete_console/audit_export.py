@@ -92,6 +92,15 @@ def audit_export_object_key(operation_id: Any, export_format: str) -> str:
     return f"audit-exports/{operation_id}.{audit_export_extension(export_format)}"
 
 
+def audit_export_storage_uri(bucket_uri: str, object_key: str) -> str:
+    parsed = urlparse(bucket_uri)
+    if parsed.scheme == "file":
+        return file_artifact_path(bucket_uri, object_key).as_uri()
+    if parsed.scheme in POSTGRES_SCHEMES:
+        return f"{postgres_export_target(bucket_uri).public_uri}#objects/{quote(object_key, safe='')}"
+    raise ValueError("AUDIT_EXPORT_BUCKET must use file:// or postgresql://")
+
+
 def file_bucket_root(bucket_uri: str) -> Path:
     parsed = urlparse(bucket_uri)
     if parsed.scheme != "file":
@@ -104,11 +113,16 @@ def file_bucket_root(bucket_uri: str) -> Path:
     return root
 
 
-def write_file_artifact(bucket_uri: str, object_key: str, content: bytes) -> str:
+def file_artifact_path(bucket_uri: str, object_key: str) -> Path:
     root = file_bucket_root(bucket_uri)
     path = (root / object_key).resolve()
     if not path.is_relative_to(root.resolve()):
         raise ValueError("audit export object key escapes bucket root")
+    return path
+
+
+def write_file_artifact(bucket_uri: str, object_key: str, content: bytes) -> str:
+    path = file_artifact_path(bucket_uri, object_key)
     path.parent.mkdir(parents=True, exist_ok=True)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     fd = os.open(path, flags, 0o600)

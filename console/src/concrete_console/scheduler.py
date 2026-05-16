@@ -17,6 +17,8 @@ from concrete_console.audit import insert_audit_event
 from concrete_console.audit_export import (
     AuditExportStorageError,
     audit_export_object_key,
+    audit_export_storage_uri,
+    read_audit_export_artifact,
     serialize_audit_export,
     write_audit_export_artifact,
 )
@@ -502,7 +504,7 @@ async def execute_audit_export_operation(operation_id: Any) -> None:
 
     object_key = audit_export_object_key(operation_id, str(export_format))
     try:
-        storage_uri = await write_audit_export_artifact(bucket_uri, object_key, artifact)
+        storage_uri = await write_audit_export_artifact_idempotently(bucket_uri, object_key, artifact)
     except AuditExportStorageError:
         await mark_operation_failed(
             operation_id,
@@ -538,7 +540,15 @@ async def execute_audit_export_operation(operation_id: Any) -> None:
                     expires_at
                 )
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                ON CONFLICT (operation_id) DO NOTHING
+                ON CONFLICT (operation_id) DO UPDATE
+                SET storage_uri = EXCLUDED.storage_uri,
+                    download_token_hash = EXCLUDED.download_token_hash,
+                    content_type = EXCLUDED.content_type,
+                    sha256 = EXCLUDED.sha256,
+                    row_count = EXCLUDED.row_count,
+                    byte_size = EXCLUDED.byte_size,
+                    expires_at = EXCLUDED.expires_at,
+                    redeemed_at = NULL
                 """,
                 operation_id,
                 storage_uri,
@@ -549,20 +559,21 @@ async def execute_audit_export_operation(operation_id: Any) -> None:
                 artifact.byte_size,
                 download_expires_at,
             )
-            await insert_audit_event(
-                conn,
-                entity_id=_row_value(snapshot, "entity_id"),
-                actor_id=_row_value(snapshot, "actor_id"),
-                actor_email=_row_value(snapshot, "actor_email"),
-                action="AUDIT_EXPORT_ISSUED",
-                target_type="audit_export",
-                target_id=operation_id,
-                after={
-                    "row_count": artifact.row_count,
-                    "byte_size": artifact.byte_size,
-                    "sha256": artifact.sha256,
-                },
-            )
+            if not await audit_export_issued_event_exists(conn, operation_id):
+                await insert_audit_event(
+                    conn,
+                    entity_id=_row_value(snapshot, "entity_id"),
+                    actor_id=_row_value(snapshot, "actor_id"),
+                    actor_email=_row_value(snapshot, "actor_email"),
+                    action="AUDIT_EXPORT_ISSUED",
+                    target_type="audit_export",
+                    target_id=operation_id,
+                    after={
+                        "row_count": artifact.row_count,
+                        "byte_size": artifact.byte_size,
+                        "sha256": artifact.sha256,
+                    },
+                )
             await conn.execute(
                 """
                 UPDATE operations
@@ -581,6 +592,36 @@ async def execute_audit_export_operation(operation_id: Any) -> None:
                 json.dumps(result),
                 operation_expiry(),
             )
+
+
+async def write_audit_export_artifact_idempotently(bucket_uri: str, object_key: str, artifact: Any) -> str:
+    try:
+        return await write_audit_export_artifact(bucket_uri, object_key, artifact)
+    except AuditExportStorageError as write_error:
+        try:
+            storage_uri = audit_export_storage_uri(bucket_uri, object_key)
+            existing = await read_audit_export_artifact(bucket_uri, storage_uri)
+        except (AuditExportStorageError, ValueError) as read_error:
+            raise write_error from read_error
+        if hashlib.sha256(existing).hexdigest() != artifact.sha256:
+            raise write_error
+        return storage_uri
+
+
+async def audit_export_issued_event_exists(conn: Any, operation_id: Any) -> bool:
+    return bool(
+        await conn.fetchval(
+            """
+            SELECT 1
+            FROM audit_events
+            WHERE action = 'AUDIT_EXPORT_ISSUED'
+              AND target_type = 'audit_export'
+              AND target_id = $1
+            LIMIT 1
+            """,
+            str(operation_id),
+        )
+    )
 
 
 async def fetch_audit_export_snapshot(conn: Any, operation_id: Any) -> Any | None:

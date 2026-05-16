@@ -244,11 +244,13 @@ def audit_event_row(**overrides):
 
 
 class AuditExportConn:
-    def __init__(self):
+    def __init__(self, *, issued_exists: bool = False):
         self.operation_id = UUID("00000000-0000-4000-8000-000000000030")
         self.entity_id = UUID("00000000-0000-4000-8000-000000000001")
         self.actor_id = UUID("00000000-0000-4000-8000-000000000020")
+        self.issued_exists = issued_exists
         self.execute_calls: list[tuple[str, tuple[object, ...]]] = []
+        self.fetchval_calls: list[tuple[str, tuple[object, ...]]] = []
         self.audit_calls: list[dict[str, object]] = []
 
     def transaction(self):
@@ -269,6 +271,12 @@ class AuditExportConn:
         assert "action = $2" in query
         assert args == (self.entity_id, "USER_REGISTERED", scheduler.AUDIT_EXPORT_ROW_CAP + 1)
         return [audit_event_row(entity_id=self.entity_id, actor_id=self.actor_id)]
+
+    async def fetchval(self, query, *args):
+        self.fetchval_calls.append((query, args))
+        assert "AUDIT_EXPORT_ISSUED" in query
+        assert args == (str(self.operation_id),)
+        return 1 if self.issued_exists else None
 
     async def execute(self, query, *args):
         self.execute_calls.append((query, args))
@@ -307,6 +315,44 @@ def test_execute_audit_export_operation_materializes_artifact_and_result(monkeyp
     assert result["download_url"].startswith("https://console.example.com/api/v1/audit/exports/")
     assert result["content_type"] == "application/x-ndjson"
     assert result["row_count"] == 1
+    artifact_writes = [query for query, _args in conn.execute_calls if "INSERT INTO audit_export_artifacts" in query]
+    assert "ON CONFLICT (operation_id) DO UPDATE" in artifact_writes[0]
+
+
+def test_execute_audit_export_operation_reuses_existing_object_after_retry(monkeypatch, tmp_path) -> None:
+    conn = AuditExportConn(issued_exists=True)
+    attempted_artifacts: list[object] = []
+    read_uris: list[str] = []
+
+    async def fake_get_pool():
+        return LaunchFakePool(conn)
+
+    async def fake_write_artifact(_bucket_uri, _object_key, artifact):
+        attempted_artifacts.append(artifact)
+        raise scheduler.AuditExportStorageError("already exists")
+
+    async def fake_read_artifact(_bucket_uri, storage_uri):
+        read_uris.append(storage_uri)
+        return attempted_artifacts[0].content
+
+    async def fake_insert_audit_event(_conn, **kwargs):
+        conn.audit_calls.append(kwargs)
+
+    monkeypatch.setenv("AUDIT_EXPORT_BUCKET", tmp_path.as_uri())
+    monkeypatch.setenv("CONSOLE_URL", "https://console.example.com")
+    monkeypatch.setattr(scheduler, "get_pool", fake_get_pool)
+    monkeypatch.setattr(scheduler, "write_audit_export_artifact", fake_write_artifact)
+    monkeypatch.setattr(scheduler, "read_audit_export_artifact", fake_read_artifact)
+    monkeypatch.setattr(scheduler, "insert_audit_event", fake_insert_audit_event)
+
+    asyncio.run(scheduler.execute_audit_export_operation(conn.operation_id))
+
+    assert read_uris[0].endswith("/audit-exports/00000000-0000-4000-8000-000000000030.ndjson")
+    assert conn.audit_calls == []
+    operation_updates = [args for query, args in conn.execute_calls if "UPDATE operations" in query]
+    assert len(operation_updates) == 1
+    result = json.loads(operation_updates[0][1])
+    assert result["sha256"] == attempted_artifacts[0].sha256
 
 
 def test_execute_operation_step_with_logging_records_elapsed(monkeypatch) -> None:

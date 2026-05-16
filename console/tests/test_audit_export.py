@@ -4,6 +4,7 @@ from uuid import UUID
 
 from concrete_console.audit_export import (
     audit_export_object_key,
+    audit_export_storage_uri,
     csv_safe_cell,
     file_bucket_root,
     postgres_export_target,
@@ -72,6 +73,18 @@ def test_file_bucket_requires_absolute_file_uri(tmp_path) -> None:
     assert file_bucket_root(bucket) == tmp_path
     assert storage_uri.endswith("/audit-exports/00000000-0000-4000-8000-000000000001.csv")
     assert (tmp_path / key).read_bytes() == b"payload"
+
+
+def test_audit_export_storage_uri_derives_supported_backend_locations(tmp_path) -> None:
+    key = audit_export_object_key("00000000-0000-4000-8000-000000000001", "ndjson")
+
+    assert audit_export_storage_uri(tmp_path.as_uri(), key).endswith(
+        "/audit-exports/00000000-0000-4000-8000-000000000001.ndjson"
+    )
+    assert audit_export_storage_uri("postgresql://export:secret@db.example/audit?table=exports", key) == (
+        "postgresql://db.example/audit?table=exports"
+        "#objects/audit-exports%2F00000000-0000-4000-8000-000000000001.ndjson"
+    )
 
 
 def test_postgres_export_target_strips_credentials_from_public_uri() -> None:
