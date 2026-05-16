@@ -80,6 +80,9 @@ pub enum Command {
     #[command(subcommand)]
     SecurityCvm(SecurityCvmCommand),
 
+    /// Show a summary of the current entity and visible resources.
+    Status,
+
     /// Query egress traffic logs.
     TrafficLogs(TrafficLogsArgs),
 

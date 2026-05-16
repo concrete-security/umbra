@@ -45,6 +45,7 @@ pub fn run() -> ExitCode {
         cli::Command::SecurityCvm(command) => {
             commands::security_cvm::run(command, &config, args.json)
         }
+        cli::Command::Status => commands::status::run(&config, args.json),
         cli::Command::TrafficLogs(traffic_args) => {
             commands::traffic_logs::run(traffic_args, &config, args.json)
         }
