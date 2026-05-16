@@ -27,6 +27,7 @@ from concrete_console.routes import (
     require_idempotency_key,
     require_if_match,
     render_dev_cvm_compose_config,
+    render_security_cvm_compose_config,
     resolve_cvm_launch_config,
     resolve_security_cvm_provision_config,
     ssh_key_fingerprint,
@@ -299,6 +300,23 @@ def test_resolve_security_cvm_provision_config_requires_base_domain(monkeypatch)
 
     assert exc.value.status_code == 503
     assert exc.value.detail["error"]["details"]["component"] == "security_cvm_base_domain"
+
+
+def test_render_security_cvm_compose_config_keeps_runtime_values_as_placeholders() -> None:
+    compose = render_security_cvm_compose_config(
+        {
+            "image_ref": "ghcr.io/concrete-security/security-cvm/mitmproxy@sha256:abc",
+            "instance_type": "tdx.small",
+            "region": "FR-PARIS-1",
+            "expected_image_measurement": "b" * 64,
+            "base_domain": "sc.example.com",
+        }
+    )
+
+    assert "ghcr.io/concrete-security/security-cvm/mitmproxy@sha256:abc" in compose
+    assert "${CONSOLE_INGEST_TOKEN}" in compose
+    assert "${CA_EXPORT_TOKEN}" in compose
+    assert "token_urlsafe" not in compose
 
 
 class FakeFetchValConn:

@@ -709,6 +709,23 @@ def resolve_security_cvm_provision_config(body: SecurityCVMCreate) -> dict[str, 
     }
 
 
+def render_security_cvm_compose_config(resolved: dict[str, str]) -> str:
+    image = json.dumps(resolved["image_ref"])
+    return "\n".join(
+        [
+            "services:",
+            "  security-cvm:",
+            f"    image: {image}",
+            "    environment:",
+            "      CONSOLE_URL: ${CONSOLE_URL}",
+            "      SC_FQDN: ${SC_FQDN}",
+            "      CONSOLE_INGEST_TOKEN: ${CONSOLE_INGEST_TOKEN}",
+            "      CA_EXPORT_TOKEN: ${CA_EXPORT_TOKEN}",
+            "",
+        ]
+    )
+
+
 async def entity_quota_limit(conn: asyncpg.Connection, entity_id: UUID, resource: str) -> tuple[int, str, UUID | None, datetime | None]:
     row = await conn.fetchrow(
         """
@@ -4190,6 +4207,11 @@ async def create_security_cvm(
             resolved = resolve_security_cvm_provision_config(body)
             token = secrets.token_hex(16)
             fqdn = f"sc-{token}.{resolved['base_domain']}"
+            compose_config = render_security_cvm_compose_config(resolved)
+            ingest_token = secrets.token_urlsafe(32)
+            ca_export_token = secrets.token_urlsafe(32)
+            ingest_token_hash = hashlib.sha256(ingest_token.encode("utf-8")).hexdigest()
+            ca_export_token_hash = hashlib.sha256(ca_export_token.encode("utf-8")).hexdigest()
             try:
                 await conn.execute(
                     """
@@ -4201,9 +4223,12 @@ async def create_security_cvm(
                         instance_type,
                         region,
                         proxy_port,
-                        expected_image_measurement
+                        expected_image_measurement,
+                        compose_config,
+                        ca_export_token_plaintext,
+                        ca_export_token_stashed_at
                     )
-                    VALUES ($1, $2, 'PROVISIONING', $3, $4, $5, 8080, $6)
+                    VALUES ($1, $2, 'PROVISIONING', $3, $4, $5, 8080, $6, $7, $8, now())
                     """,
                     security_cvm_id,
                     entity_id,
@@ -4211,6 +4236,24 @@ async def create_security_cvm(
                     resolved["instance_type"],
                     resolved["region"],
                     resolved["expected_image_measurement"],
+                    compose_config,
+                    ca_export_token,
+                )
+                await conn.executemany(
+                    """
+                    INSERT INTO service_principal_tokens (
+                        id,
+                        principal_type,
+                        principal_id,
+                        purpose,
+                        token_hash
+                    )
+                    VALUES ($1, 'security_cvm', $2, $3, $4)
+                    """,
+                    [
+                        (uuid4(), security_cvm_id, "INGEST", ingest_token_hash),
+                        (uuid4(), security_cvm_id, "CA_EXPORT", ca_export_token_hash),
+                    ],
                 )
             except asyncpg.UniqueViolationError:
                 raise api_error(
@@ -4234,7 +4277,7 @@ async def create_security_cvm(
                     progress_step,
                     progress_percent
                 )
-                VALUES ($1, $2, 'pending', $3, $4, 'security_cvm', $5, $6, $7, 'queued', 0)
+                VALUES ($1, $2, 'pending', $3, $4, 'security_cvm', $5, $6, $7, 'persist_tokens_and_stub', 10)
                 RETURNING
                     id,
                     kind,
