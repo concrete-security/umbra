@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Annotated
 from uuid import UUID
 
@@ -11,6 +12,8 @@ from concrete_console.crypto import sha256_hex
 from concrete_console.db import get_pool
 from concrete_console.errors import api_error
 from concrete_console.log_config import bind_actor
+
+SERVICE_BEARER_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 @dataclass(frozen=True)
@@ -34,7 +37,7 @@ def parse_service_bearer_authorization(authorization: str | None) -> str:
         raise api_error(401, "UNAUTHORIZED", "missing bearer token") from None
     if scheme != "Bearer" or not token or token.strip() != token or " " in token:
         raise api_error(401, "UNAUTHORIZED", "missing bearer token")
-    if token.count(".") >= 2:
+    if not SERVICE_BEARER_RE.fullmatch(token):
         raise api_error(401, "UNAUTHORIZED", "invalid bearer token")
     return token
 

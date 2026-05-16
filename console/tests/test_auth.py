@@ -215,6 +215,15 @@ def test_parse_service_bearer_rejects_jwt_shape_before_db_lookup() -> None:
     assert exc.value.detail["error"]["code"] == "UNAUTHORIZED"
 
 
+@pytest.mark.parametrize("token", ["opaque.token", "opaque*token"])
+def test_parse_service_bearer_rejects_non_base64url_opaque_shape(token) -> None:
+    with pytest.raises(HTTPException) as exc:
+        parse_service_bearer_authorization(f"Bearer {token}")
+
+    assert exc.value.status_code == 401
+    assert exc.value.detail["error"]["code"] == "UNAUTHORIZED"
+
+
 def test_parse_service_bearer_accepts_opaque_token() -> None:
     assert parse_service_bearer_authorization("Bearer opaque_token-123") == "opaque_token-123"
 
