@@ -2,7 +2,7 @@
 
 from concrete_security_cvm.binding import BootBinding
 from concrete_security_cvm.control import ControlMap, DevCVMControlEntry, PollResult, SCControlClient
-from concrete_security_cvm.enforcement import EnforcementResult, ProxyRequest, enforce_request
+from concrete_security_cvm.enforcement import DLPScanTimeout, EnforcementResult, ProxyRequest, enforce_request
 from concrete_security_cvm.policy import (
     EffectivePolicy,
     PolicyDecision,
@@ -14,6 +14,7 @@ from concrete_security_cvm.traffic import TrafficLogBatch, TrafficLogClient, Tra
 __all__ = [
     "BootBinding",
     "ControlMap",
+    "DLPScanTimeout",
     "DevCVMControlEntry",
     "EffectivePolicy",
     "EnforcementResult",

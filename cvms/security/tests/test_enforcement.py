@@ -2,7 +2,9 @@ from datetime import datetime, timezone
 import hashlib
 
 from concrete_security_cvm.control import ControlMap
-from concrete_security_cvm.enforcement import ProxyRequest, enforce_request
+import pytest
+
+from concrete_security_cvm.enforcement import DLPScanTimeout, ProxyRequest, enforce_request, find_dlp_match
 
 
 def policy() -> dict[str, object]:
@@ -155,3 +157,28 @@ def test_malformed_pulled_policy_denies_all() -> None:
     assert result.allowed is False
     assert result.response_code == 403
     assert result.reason == "destination_not_allowed"
+
+
+def test_dlp_scan_deadline_is_enforced() -> None:
+    entry = control_map().lookup_proxy_token("proxy-token")
+    assert entry is not None
+    ticks = iter([0.0, 1.0])
+
+    with pytest.raises(DLPScanTimeout):
+        find_dlp_match(
+            entry.merged_policy.secret_patterns,
+            {"authorization": "placeholder"},
+            b"body",
+            timeout_seconds=0.05,
+            now=lambda: next(ticks),
+        )
+
+
+def test_dlp_timeout_blocks_authenticated_request() -> None:
+    ticks = iter([0.0, 1.0])
+
+    result = enforce_request(request(), control_map(), dlp_timeout_seconds=0.05, dlp_now=lambda: next(ticks))
+
+    assert result.allowed is False
+    assert result.response_code == 403
+    assert result.reason == "dlp_scan_timeout"

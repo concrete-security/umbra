@@ -3,7 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import re
-from typing import Mapping
+import time
+from typing import Callable, Mapping
 
 from concrete_security_cvm.control import ControlMap, DevCVMControlEntry
 from concrete_security_cvm.policy import PolicyValidationError
@@ -11,6 +12,11 @@ from concrete_security_cvm.traffic import TrafficLogRecord
 
 
 DLP_SCAN_BODY_LIMIT_BYTES = 10 * 1024 * 1024
+DLP_SCAN_TIMEOUT_SECONDS = 0.050
+
+
+class DLPScanTimeout(RuntimeError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -38,7 +44,13 @@ class EnforcementResult:
     matched_policy_id: str | None = None
 
 
-def enforce_request(request: ProxyRequest, control_map: ControlMap) -> EnforcementResult:
+def enforce_request(
+    request: ProxyRequest,
+    control_map: ControlMap,
+    *,
+    dlp_timeout_seconds: float = DLP_SCAN_TIMEOUT_SECONDS,
+    dlp_now: Callable[[], float] = time.monotonic,
+) -> EnforcementResult:
     headers = normalize_headers(request.headers)
     token = extract_proxy_bearer(headers)
     if token is None:
@@ -72,7 +84,16 @@ def enforce_request(request: ProxyRequest, control_map: ControlMap) -> Enforceme
     if not decision.allowed:
         return _blocked_result(request, cvm, upstream_headers, decision.reason, decision.rule_id)
 
-    dlp_match = find_dlp_match(cvm.merged_policy.secret_patterns, upstream_headers, request.body)
+    try:
+        dlp_match = find_dlp_match(
+            cvm.merged_policy.secret_patterns,
+            upstream_headers,
+            request.body,
+            timeout_seconds=dlp_timeout_seconds,
+            now=dlp_now,
+        )
+    except DLPScanTimeout:
+        return _blocked_result(request, cvm, upstream_headers, "dlp_scan_timeout", None)
     if dlp_match is not None:
         return _blocked_result(request, cvm, upstream_headers, "dlp_secret_detected", dlp_match)
 
@@ -119,14 +140,25 @@ def normalize_headers(headers: Mapping[str, str]) -> dict[str, str]:
     return normalized
 
 
-def find_dlp_match(patterns: object, headers: Mapping[str, str], body: bytes) -> str | None:
+def find_dlp_match(
+    patterns: object,
+    headers: Mapping[str, str],
+    body: bytes,
+    *,
+    timeout_seconds: float = DLP_SCAN_TIMEOUT_SECONDS,
+    now: Callable[[], float] = time.monotonic,
+) -> str | None:
     header_blob = "\n".join(f"{name}: {value}" for name, value in sorted(headers.items()))
     body_text = body[:DLP_SCAN_BODY_LIMIT_BYTES].decode("utf-8", errors="ignore")
+    deadline = now() + timeout_seconds
     for pattern in patterns:  # type: ignore[assignment]
+        _raise_if_dlp_deadline_elapsed(now, deadline)
         if pattern.scan_headers and pattern.compiled.search(header_blob):
             return pattern.pattern_id
+        _raise_if_dlp_deadline_elapsed(now, deadline)
         if pattern.scan_body and pattern.compiled.search(body_text):
             return pattern.pattern_id
+        _raise_if_dlp_deadline_elapsed(now, deadline)
     return None
 
 
@@ -168,3 +200,8 @@ def _blocked_result(
         traffic_log=traffic_log_record(request, cvm, response_code=403),
         matched_policy_id=matched_policy_id,
     )
+
+
+def _raise_if_dlp_deadline_elapsed(now: Callable[[], float], deadline: float) -> None:
+    if now() > deadline:
+        raise DLPScanTimeout
