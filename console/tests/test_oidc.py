@@ -174,6 +174,18 @@ def test_google_id_token_rejects_wrong_token_type(monkeypatch, token_type) -> No
         asyncio.run(verify_google_id_token(token, nonce=None, access_token=None, settings=settings))
 
 
+@pytest.mark.parametrize("email", ["", "   ", 123])
+def test_google_id_token_requires_string_email(monkeypatch, email) -> None:
+    settings = oidc_test_settings()
+    token, jwks = signed_google_token(claims_override={"email": email})
+    install_jwks(monkeypatch, jwks)
+
+    with pytest.raises(jwt.InvalidTokenError, match="invalid email"):
+        import asyncio
+
+        asyncio.run(verify_google_id_token(token, nonce=None, access_token=None, settings=settings))
+
+
 def test_google_id_token_requires_azp_for_audience_array(monkeypatch) -> None:
     settings = oidc_test_settings()
     token, jwks = signed_google_token(claims_override={"aud": ["google-client"]})

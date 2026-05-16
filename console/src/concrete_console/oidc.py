@@ -262,6 +262,9 @@ async def verify_google_id_token(
             raise jwt.InvalidTokenError("invalid authorized party")
     elif claims.get("azp") not in {None, settings.google_client_id}:
         raise jwt.InvalidTokenError("invalid authorized party")
+    email = claims.get("email")
+    if not isinstance(email, str) or not email.strip():
+        raise jwt.InvalidTokenError("invalid email")
     if claims.get("email_verified") is not True:
         raise jwt.InvalidTokenError("email is not verified")
     if nonce is not None and claims.get("nonce") != nonce:
