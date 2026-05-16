@@ -1,6 +1,7 @@
 """Security CVM runtime helpers."""
 
 from concrete_security_cvm.binding import BootBinding
+from concrete_security_cvm.ca import CAExportUnauthorized, InMemoryRootCA, generate_root_ca
 from concrete_security_cvm.control import ControlMap, DevCVMControlEntry, PollResult, SCControlClient
 from concrete_security_cvm.enforcement import DLPScanTimeout, EnforcementResult, ProxyRequest, enforce_request
 from concrete_security_cvm.policy import (
@@ -13,11 +14,13 @@ from concrete_security_cvm.traffic import TrafficLogBatch, TrafficLogClient, Tra
 
 __all__ = [
     "BootBinding",
+    "CAExportUnauthorized",
     "ControlMap",
     "DLPScanTimeout",
     "DevCVMControlEntry",
     "EffectivePolicy",
     "EnforcementResult",
+    "InMemoryRootCA",
     "PolicyDecision",
     "PolicyValidationError",
     "PollResult",
@@ -28,5 +31,6 @@ __all__ = [
     "TrafficLogQueue",
     "TrafficLogRecord",
     "enforce_request",
+    "generate_root_ca",
     "parse_effective_policy",
 ]

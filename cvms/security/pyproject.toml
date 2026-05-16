@@ -5,6 +5,7 @@ description = "Concrete Security CVM services"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "cryptography>=42,<47",
     "google-re2>=1,<2",
     "httpx>=0.27,<1",
     "pytest>=8,<9",
