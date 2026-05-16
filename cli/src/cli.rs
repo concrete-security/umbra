@@ -69,12 +69,18 @@ pub enum Command {
     #[command(subcommand)]
     Auth(AuthCommand),
 
+    /// Launch or attach a Claude session on a Dev CVM.
+    Claude(AgentSessionArgs),
+
     /// Print a shell-completion script.
     Completions {
         /// Shell to generate completions for.
         #[arg(value_enum)]
         shell: clap_complete::Shell,
     },
+
+    /// Launch or attach a Codex session on a Dev CVM.
+    Codex(AgentSessionArgs),
 
     /// Inspect resolved local configuration.
     #[command(subcommand)]
@@ -402,6 +408,20 @@ pub struct SshArgs {
     /// Remote command to execute directly instead of opening a dtach shell.
     #[arg(long)]
     pub command: Option<String>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct AgentSessionArgs {
+    /// Dev CVM UUID. Defaults to --cvm, CONCRETE_DEFAULT_CVM, or default_cvm.
+    pub cvm_id: Option<String>,
+
+    /// Start or attach the named dtach session.
+    #[arg(long)]
+    pub name: Option<String>,
+
+    /// Private SSH key to pass to ssh(1).
+    #[arg(long)]
+    pub identity_file: Option<PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]

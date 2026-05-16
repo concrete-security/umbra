@@ -9,7 +9,11 @@ use reqwest::blocking::Client;
 use serde::Deserialize;
 
 use crate::{
-    cli::SshArgs, commands::auth, config::ResolvedConfig, exit::ExitStatus, session::Session,
+    cli::{AgentSessionArgs, SshArgs},
+    commands::auth,
+    config::ResolvedConfig,
+    exit::ExitStatus,
+    session::Session,
 };
 
 #[derive(Debug, Deserialize)]
@@ -19,12 +23,69 @@ struct Cvm {
     fqdn: Option<String>,
 }
 
+struct SshInvocation<'a> {
+    cvm_id: Option<&'a str>,
+    identity_file: Option<&'a Path>,
+    remote_command: String,
+    allocate_tty: bool,
+}
+
 pub fn run(args: SshArgs, config: &ResolvedConfig) -> ExitStatus {
     if args.name.is_some() && args.command.is_some() {
         eprintln!("[usage] --name cannot be combined with --command");
         return ExitStatus::Usage;
     }
-    let cvm_id = match selected_cvm_id(args.cvm_id.as_deref(), config) {
+    let remote_command = match ssh_remote_command(&args) {
+        Ok(value) => value,
+        Err(message) => {
+            eprintln!("{message}");
+            return ExitStatus::Usage;
+        }
+    };
+    run_ssh(
+        SshInvocation {
+            cvm_id: args.cvm_id.as_deref(),
+            identity_file: args.identity_file.as_deref(),
+            remote_command,
+            allocate_tty: args.command.is_none(),
+        },
+        config,
+    )
+}
+
+pub fn run_agent(
+    args: AgentSessionArgs,
+    config: &ResolvedConfig,
+    verb: &'static str,
+) -> ExitStatus {
+    let program = match verb {
+        "claude" => "claude",
+        "codex" => "codex",
+        _ => {
+            eprintln!("[error] unsupported agent session verb {verb}");
+            return ExitStatus::Error;
+        }
+    };
+    let session_name = match session_name(args.name.as_deref(), program) {
+        Ok(value) => value,
+        Err(message) => {
+            eprintln!("{message}");
+            return ExitStatus::Usage;
+        }
+    };
+    run_ssh(
+        SshInvocation {
+            cvm_id: args.cvm_id.as_deref(),
+            identity_file: args.identity_file.as_deref(),
+            remote_command: dtach_remote_command(&session_name, program),
+            allocate_tty: true,
+        },
+        config,
+    )
+}
+
+fn run_ssh(invocation: SshInvocation<'_>, config: &ResolvedConfig) -> ExitStatus {
+    let cvm_id = match selected_cvm_id(invocation.cvm_id, config) {
         Ok(value) => value,
         Err(message) => {
             eprintln!("{message}");
@@ -86,21 +147,14 @@ pub fn run(args: SshArgs, config: &ResolvedConfig) -> ExitStatus {
         .arg("BatchMode=yes")
         .arg("-o")
         .arg("ConnectTimeout=30");
-    if let Some(identity_file) = &args.identity_file {
+    if let Some(identity_file) = invocation.identity_file {
         ssh.arg("-i").arg(identity_file);
     }
-    let remote_command = match remote_command(&args) {
-        Ok(value) => value,
-        Err(message) => {
-            eprintln!("{message}");
-            return ExitStatus::Usage;
-        }
-    };
-    if args.command.is_none() {
+    if invocation.allocate_tty {
         ssh.arg("-t");
     }
     ssh.arg(format!("dev@{fqdn}"));
-    ssh.arg(remote_command);
+    ssh.arg(invocation.remote_command);
     match ssh.status() {
         Ok(status) if status.success() => ExitStatus::Ok,
         Ok(status) => {
@@ -210,19 +264,28 @@ fn proxy_command(
     ))
 }
 
-fn remote_command(args: &SshArgs) -> Result<String, String> {
+fn ssh_remote_command(args: &SshArgs) -> Result<String, String> {
     if let Some(command) = args.command.clone() {
         return Ok(command);
     }
-    let session_name = match args.name.as_deref() {
-        Some(value) => validate_session_name(value)?.to_string(),
-        None => default_session_name(),
-    };
+    let session_name = session_name(args.name.as_deref(), "ssh")?;
+    Ok(dtach_remote_command(&session_name, "bash -l"))
+}
+
+fn session_name(value: Option<&str>, prefix: &str) -> Result<String, String> {
+    match value {
+        Some(value) => Ok(validate_session_name(value)?.to_string()),
+        None => Ok(default_session_name(prefix)),
+    }
+}
+
+fn dtach_remote_command(session_name: &str, program_command: &str) -> String {
     let socket = format!("/run/concrete/sessions/{session_name}.sock");
-    Ok(format!(
-        "mkdir -p /run/concrete/sessions && chmod 700 /run/concrete/sessions && exec dtach -A {} -r winch bash -l",
+    format!(
+        "mkdir -p /run/concrete/sessions && chmod 700 /run/concrete/sessions && exec dtach -A {} -r winch {}",
         shell_quote(&socket),
-    ))
+        program_command,
+    )
 }
 
 fn validate_session_name(value: &str) -> Result<&str, String> {
@@ -243,8 +306,8 @@ fn validate_session_name(value: &str) -> Result<&str, String> {
     Ok(value)
 }
 
-fn default_session_name() -> String {
-    format!("ssh-{}", Utc::now().format("%Y%m%d-%H%M%S"))
+fn default_session_name(prefix: &str) -> String {
+    format!("{}-{}", prefix, Utc::now().format("%Y%m%d-%H%M%S"))
 }
 
 fn shell_quote(value: &str) -> String {
