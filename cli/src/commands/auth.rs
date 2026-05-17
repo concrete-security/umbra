@@ -26,6 +26,7 @@ struct DeviceStart {
     device_code: String,
     user_code: String,
     verification_url: String,
+    verification_url_complete: Option<String>,
     polling_secret: String,
     expires_in: u64,
     interval: u64,
@@ -169,6 +170,13 @@ fn login(
     };
     eprintln!("Open this URL to authenticate: {}", start.verification_url);
     eprintln!("Enter code: {}", start.user_code);
+    if let Some(verification_url_complete) = start
+        .verification_url_complete
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        eprintln!("Complete URL: {verification_url_complete}");
+    }
     eprintln!(
         "Code expires in {} seconds; approve before it expires.",
         start.expires_in

@@ -147,6 +147,9 @@ async def device_start(
     device_code = idp_response.get("device_code")
     user_code = idp_response.get("user_code")
     verification_url = idp_response.get("verification_url") or idp_response.get("verification_uri")
+    verification_url_complete = idp_response.get("verification_url_complete") or idp_response.get(
+        "verification_uri_complete"
+    )
     expires_in = int(idp_response.get("expires_in", 0))
     interval = int(idp_response.get("interval", 5))
     if not all(isinstance(value, str) and value for value in (device_code, user_code, verification_url)):
@@ -173,7 +176,7 @@ async def device_start(
             expires_in,
             max(interval, 1),
         )
-    return {
+    response = {
         "user_code": user_code,
         "verification_url": verification_url,
         "device_code": device_code,
@@ -181,6 +184,9 @@ async def device_start(
         "expires_in": expires_in,
         "interval": max(interval, 1),
     }
+    if isinstance(verification_url_complete, str) and verification_url_complete:
+        response["verification_url_complete"] = verification_url_complete
+    return response
 
 
 @router.post("/device/poll")

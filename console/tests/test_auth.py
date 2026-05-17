@@ -156,6 +156,15 @@ class DevicePollBadSecretConn:
         return "DELETE 0"
 
 
+class DeviceStartConn:
+    def __init__(self):
+        self.execute_calls: list[tuple[str, tuple[object, ...]]] = []
+
+    async def execute(self, query, *args):
+        self.execute_calls.append((query, args))
+        return "INSERT 0 1"
+
+
 def test_require_permission_allows_granted_permission() -> None:
     current_user(permissions={"USER_MANAGE"}).require_permission("USER_MANAGE")
 
@@ -234,6 +243,28 @@ def test_device_start_rejects_non_google_provider_before_provider_call() -> None
 
     assert exc.value.status_code == 400
     assert exc.value.detail["error"]["code"] == "BAD_REQUEST"
+
+
+def test_device_start_passes_through_complete_verification_url(monkeypatch) -> None:
+    async def fake_start_device_flow():
+        return {
+            "device_code": "device-code",
+            "user_code": "ABCD-EFGH",
+            "verification_uri": "https://accounts.example/device",
+            "verification_uri_complete": "https://accounts.example/device?user_code=ABCD-EFGH",
+            "expires_in": 300,
+            "interval": 5,
+        }
+
+    conn = DeviceStartConn()
+    monkeypatch.setattr(routes_auth, "start_device_flow", fake_start_device_flow)
+    response = asyncio.run(device_start(body=DeviceStartRequest(provider="google"), pool=FakePool(conn)))
+
+    assert response["verification_url"] == "https://accounts.example/device"
+    assert response["verification_url_complete"] == "https://accounts.example/device?user_code=ABCD-EFGH"
+    assert response["user_code"] == "ABCD-EFGH"
+    assert response["expires_in"] == 300
+    assert conn.execute_calls[-1][1][0] == "device-code"
 
 
 def test_prune_expired_auth_rows_uses_skip_locked_now_cutoff() -> None:
