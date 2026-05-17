@@ -169,6 +169,10 @@ fn login(
     };
     eprintln!("Open this URL to authenticate: {}", start.verification_url);
     eprintln!("Enter code: {}", start.user_code);
+    eprintln!(
+        "Code expires in {} seconds; approve before it expires.",
+        start.expires_in
+    );
 
     let token_pair = match poll_device(&client, console_url, &start) {
         Ok(value) => value,
