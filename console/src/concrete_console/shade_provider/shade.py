@@ -14,7 +14,7 @@ from concrete_console.config import load_settings
 
 DEFAULT_UV_BIN = "uv"
 DNS_HOST_RE = re.compile(r"^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$")
-SUBPROCESS_ENV_ALLOWLIST = ("PATH", "HOME", "LANG", "LC_ALL")
+SUBPROCESS_ENV_ALLOWLIST = ("PATH", "HOME", "LANG", "LC_ALL", "UV_PROJECT_ENVIRONMENT")
 
 
 class ShadeError(RuntimeError):

@@ -13,6 +13,7 @@ from concrete_console.attestation import (
     build_security_cvm_attestation_request,
     parse_attestation_report,
     verifier_error_from_output,
+    verify_with_fetch_retries,
 )
 
 
@@ -89,7 +90,7 @@ def test_build_security_cvm_attestation_request_uses_token_hashes() -> None:
             "fqdn": "sc.example.com",
             "expected_image_measurement": "a" * 96,
             "compose_config": "services: {}\n",
-            "metadata": {"passthrough_host": "sc-app-443s.dstack.example.com"},
+            "metadata": {"provider": "phala", "passthrough_host": "sc-app-443s.dstack.example.com"},
         },
         token_hashes={"INGEST": "B" * 64, "CA_EXPORT": "C" * 64},
         console_url="https://console.example.com",
@@ -132,6 +133,70 @@ def test_atlas_verifier_client_uses_stdin_stdout_contract(tmp_path) -> None:
 
     assert report.image_measurement == "a" * 96
     assert report.rtmr3_digest == "b" * 96
+
+
+def test_verify_with_fetch_retries_retries_transient_fetch_failure(monkeypatch) -> None:
+    attempts: list[int] = []
+
+    class FakeVerifier:
+        async def verify(self, request, *, timeout_seconds):
+            attempts.append(timeout_seconds)
+            if len(attempts) == 1:
+                raise AttestationVerifierError(
+                    "ATTESTATION_FETCH_FAILED",
+                    {"reason": "tls_handshake_failed"},
+                )
+            return parse_attestation_report(
+                json.dumps({"image_measurement": "a" * 96, "rtmr3_digest": "b" * 96}).encode("utf-8")
+            )
+
+    async def fake_sleep(_delay):
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    report = asyncio.run(
+        verify_with_fetch_retries(
+            FakeVerifier(),
+            {"kind": "security_cvm"},
+            timeout_seconds=30,
+            initial_delay_seconds=0,
+            max_delay_seconds=0,
+        )
+    )
+
+    assert report.image_measurement == "a" * 96
+    assert len(attempts) == 2
+
+
+def test_verify_with_fetch_retries_does_not_retry_attestation_content_errors(monkeypatch) -> None:
+    attempts = 0
+
+    class FakeVerifier:
+        async def verify(self, request, *, timeout_seconds):
+            nonlocal attempts
+            attempts += 1
+            raise AttestationVerifierError(
+                "ATTESTATION_RTMR_MISMATCH",
+                {"reason": "rtmr_mismatch"},
+            )
+
+    async def fail_sleep(_delay):
+        raise AssertionError("content errors must not sleep for retry")
+
+    monkeypatch.setattr(asyncio, "sleep", fail_sleep)
+
+    with pytest.raises(AttestationVerifierError) as exc:
+        asyncio.run(
+            verify_with_fetch_retries(
+                FakeVerifier(),
+                {"kind": "security_cvm"},
+                timeout_seconds=30,
+            )
+        )
+
+    assert exc.value.code == "ATTESTATION_RTMR_MISMATCH"
+    assert attempts == 1
 
 
 def test_atlas_verifier_client_rejects_malformed_command(monkeypatch) -> None:

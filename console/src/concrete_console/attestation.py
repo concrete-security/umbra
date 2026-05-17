@@ -88,6 +88,45 @@ class AtlasVerifierClient:
         return parse_attestation_report(stdout)
 
 
+async def verify_with_fetch_retries(
+    verifier: AtlasVerifierClient,
+    request: dict[str, Any],
+    *,
+    timeout_seconds: int,
+    initial_delay_seconds: float = 5.0,
+    max_delay_seconds: float = 20.0,
+) -> AttestationReport:
+    """Retry transient reachability failures while a freshly-provisioned CVM boots."""
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max(timeout_seconds, 0)
+    delay = max(initial_delay_seconds, 0.0)
+    max_delay = max(max_delay_seconds, 0.0)
+    last_fetch_error: AttestationVerifierError | None = None
+
+    while True:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            if last_fetch_error is not None:
+                raise last_fetch_error
+            raise AttestationVerifierError("ATTESTATION_FETCH_FAILED", {"reason": "verifier_timeout"})
+        try:
+            attempt_timeout = max(1, min(timeout_seconds, int(remaining + 0.999)))
+            return await verifier.verify(request, timeout_seconds=attempt_timeout)
+        except AttestationVerifierError as exc:
+            if exc.code != "ATTESTATION_FETCH_FAILED":
+                raise
+            last_fetch_error = exc
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise
+            sleep_for = min(delay, remaining)
+            if sleep_for > 0:
+                await asyncio.sleep(sleep_for)
+            if max_delay > 0:
+                delay = min(max_delay, delay * 2 if delay > 0 else max_delay)
+
+
 def build_dev_cvm_attestation_request(snapshot: Any) -> dict[str, Any]:
     metadata = json_payload(_row_value(snapshot, "metadata") or {})
     if not isinstance(metadata, dict):

@@ -596,8 +596,27 @@ def test_build_cvm_launch_env_includes_security_cvm_connect_host() -> None:
     env, _binding = scheduler.build_cvm_launch_env(
         launch_snapshot(
             security_cvm_metadata={
+                "provider": "other",
                 "atls_policy": security_atls_policy(),
                 "passthrough_host": "sc-app-443s.dstack.example.com",
+            }
+        ),
+        public_keys=["ssh-ed25519 aaa label-a"],
+        profile_rows=[],
+        proxy_token="proxy-plaintext",
+    )
+
+    assert env["SECURITY_CVM_CONNECT_HOST"] == "sc-app-443s.dstack.example.com"
+
+
+def test_build_cvm_launch_env_includes_phala_security_cvm_connect_host() -> None:
+    env, _binding = scheduler.build_cvm_launch_env(
+        launch_snapshot(
+            security_cvm_metadata={
+                "provider": "phala",
+                "atls_policy": security_atls_policy(),
+                "app_id": "sc-app",
+                "gateway_host": "dstack.example.com",
             }
         ),
         public_keys=["ssh-ed25519 aaa label-a"],

@@ -22,7 +22,11 @@ from pathlib import Path
 LOG_PATH = Path({json.dumps(str(log_path))})
 SHADE_DIR = {json.dumps(str(shade_dir))}
 args = sys.argv[1:]
-entry = {{"args": args, "leaked_secret": "CONCRETE_SHOULD_NOT_LEAK" in os.environ}}
+entry = {{
+    "args": args,
+    "leaked_secret": "CONCRETE_SHOULD_NOT_LEAK" in os.environ,
+    "uv_project_environment": os.environ.get("UV_PROJECT_ENVIRONMENT"),
+}}
 
 if {str(fail)}:
     print("shade failed", file=sys.stderr)
@@ -89,6 +93,24 @@ def test_build_invokes_shade_build_with_private_staging(monkeypatch, tmp_path: P
     assert entry["args"][:5] == ["run", "--project", str(shade_dir), "shade", "build"]
     assert entry["config_mode"] == "0o600"
     assert entry["compose_mode"] == "0o600"
+    assert entry["leaked_secret"] is False
+
+
+def test_build_allows_writable_uv_project_environment(monkeypatch, tmp_path: Path) -> None:
+    shade_dir = tmp_path / "shade"
+    shade_dir.mkdir()
+    log_path = tmp_path / "uv.log"
+    uv_path = tmp_path / "uv"
+    uv_env = tmp_path / "shade-venv"
+    write_fake_uv(uv_path, shade_dir=shade_dir, log_path=log_path)
+    monkeypatch.setenv("UV_PROJECT_ENVIRONMENT", str(uv_env))
+    monkeypatch.setenv("CONCRETE_SHOULD_NOT_LEAK", "secret")
+
+    client = ShadeClient(shade_dir=shade_dir, uv_bin=str(uv_path))
+    run(client.build(shade_config_yaml="app:\n  name: app\n", app_compose_yaml="services: {}\n"))
+
+    entry = read_log(log_path)[0]
+    assert entry["uv_project_environment"] == str(uv_env)
     assert entry["leaked_secret"] is False
 
 

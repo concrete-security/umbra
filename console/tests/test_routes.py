@@ -110,6 +110,14 @@ def security_cvm_create(**overrides) -> SecurityCVMCreate:
     return SecurityCVMCreate(**overrides)
 
 
+def test_random_dns_token_is_128_bit_base32(monkeypatch) -> None:
+    monkeypatch.setattr(routes_module.secrets, "token_bytes", lambda size: b"\0" * size)
+
+    token = routes_module.random_dns_token()
+
+    assert token == "a" * 26
+
+
 def test_profile_etag_uses_updated_at_microseconds() -> None:
     assert profile_etag(profile_row()) == 'W/"00000000-0000-4000-8000-000000000010:123456"'
 
@@ -403,6 +411,19 @@ def test_resolve_cvm_launch_config_requires_base_domain(monkeypatch) -> None:
     assert exc.value.detail["error"]["details"]["component"] == "cloudflare_base_domain"
 
 
+def test_resolve_cvm_launch_config_rejects_cert_cn_too_long_base_domain(monkeypatch) -> None:
+    monkeypatch.setenv("DEV_CVM_DEFAULT_REGION", "FR-PARIS-1")
+    monkeypatch.setenv("DEV_CVM_IMAGE", "ghcr.io/concrete-security/dev-cvm/user-sandbox@sha256:abc")
+    monkeypatch.setenv("DEV_CVM_IMAGE_MEASUREMENT", "a" * 96)
+    monkeypatch.setenv("CLOUDFLARE_BASE_DOMAIN", f"{'a' * 23}.example.com")
+
+    with pytest.raises(HTTPException) as exc:
+        resolve_cvm_launch_config(cvm_create())
+
+    assert exc.value.status_code == 503
+    assert exc.value.detail["error"]["details"]["component"] == "cloudflare_base_domain"
+
+
 def test_render_dev_cvm_compose_config_keeps_runtime_values_as_placeholders() -> None:
     compose = render_dev_cvm_compose_config(
         {
@@ -477,6 +498,19 @@ def test_resolve_security_cvm_provision_config_requires_base_domain(monkeypatch)
     assert exc.value.detail["error"]["details"]["component"] == "security_cvm_base_domain"
 
 
+def test_resolve_security_cvm_provision_config_rejects_cert_cn_too_long_base_domain(monkeypatch) -> None:
+    monkeypatch.setenv("PHALA_REGION", "FR-PARIS-1")
+    monkeypatch.setenv("SECURITY_CVM_IMAGE_REF", "ghcr.io/concrete-security/security-cvm/mitmproxy@sha256:abc")
+    monkeypatch.setenv("SECURITY_CVM_IMAGE_MEASUREMENT", "b" * 96)
+    monkeypatch.setenv("SECURITY_CVM_BASE_DOMAIN", f"{'a' * 24}.example.com")
+
+    with pytest.raises(HTTPException) as exc:
+        resolve_security_cvm_provision_config(security_cvm_create())
+
+    assert exc.value.status_code == 503
+    assert exc.value.detail["error"]["details"]["component"] == "security_cvm_base_domain"
+
+
 def test_render_security_cvm_compose_config_keeps_runtime_values_as_placeholders() -> None:
     compose = render_security_cvm_compose_config(
         {
@@ -533,12 +567,22 @@ class SecurityCvmAttestationProbeConn:
         return "UPDATE 1"
 
 
+class FetchSecurityCvmRowConn:
+    def __init__(self):
+        self.query = ""
+
+    async def fetchrow(self, query, *args):
+        self.query = query
+        return security_cvm_attestation_row()
+
+
 def security_cvm_attestation_row(**overrides):
     row = {
         "id": UUID("00000000-0000-4000-8000-000000000041"),
         "entity_id": UUID("00000000-0000-4000-8000-000000000001"),
         "state": "RUNNING",
         "fqdn": "sc.example.com",
+        "metadata": {"provider": "phala", "passthrough_host": "sc-app-443s.dstack.example.com"},
         "compose_config": "services: {}\n",
         "expected_image_measurement": "a" * 96,
         "image_measurement": None,
@@ -548,6 +592,15 @@ def security_cvm_attestation_row(**overrides):
     }
     row.update(overrides)
     return row
+
+
+def test_fetch_security_cvm_row_includes_metadata_for_route_hints() -> None:
+    conn = FetchSecurityCvmRowConn()
+
+    row = asyncio.run(routes_module.fetch_security_cvm_row(conn, UUID("00000000-0000-4000-8000-000000000001")))
+
+    assert row is not None
+    assert "metadata" in conn.query
 
 
 def current_user(**overrides):
@@ -585,6 +638,7 @@ def test_run_security_cvm_attestation_probe_persists_success(monkeypatch) -> Non
     )
 
     assert captured_request["kind"] == "security_cvm"
+    assert captured_request["connect_host"] == "sc-app-443s.dstack.example.com"
     assert captured_request["policy"]["rtmr3_binding"]["ingest_token_sha256"] == "b" * 64
     assert result["verdict"]["verified"] is True
     security_cvm_updates = [args for query, args in conn.execute_calls if "UPDATE security_cvms" in query]

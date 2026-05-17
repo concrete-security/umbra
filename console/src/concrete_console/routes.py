@@ -75,6 +75,12 @@ CVM_CONFIG_VALUE_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 SECURITY_CVM_INSTANCE_TYPE_RE = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
 HEX64_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 IMAGE_MEASUREMENT_RE = re.compile(r"^[0-9a-fA-F]{96}$")
+DNS_RANDOM_TOKEN_BYTES = 16
+DNS_RANDOM_TOKEN_CHARS = 26
+DNS_FQDN_MAX_LENGTH = 253
+DNS_CERT_COMMON_NAME_MAX_LENGTH = 64
+DEV_CVM_FQDN_PREFIX = "cvm"
+SECURITY_CVM_FQDN_PREFIX = "sc"
 DEFAULT_SANDBOX_ENV_VALUE_DENYLIST = (
     r"^sk-ant-[A-Za-z0-9_-]+$",
     r"^sk-[A-Za-z0-9]{32,}$",
@@ -376,6 +382,24 @@ def optional_idempotency_key(value: str | None) -> str | None:
     return require_idempotency_key(value)
 
 
+def random_dns_token() -> str:
+    return base64.b32encode(secrets.token_bytes(DNS_RANDOM_TOKEN_BYTES)).decode("ascii").rstrip("=").lower()
+
+
+def generated_cvm_fqdn(prefix: str, base_domain: str) -> str:
+    return f"{prefix}-{random_dns_token()}.{base_domain}"
+
+
+def validate_generated_fqdn_base_domain(*, base_domain: str, prefix: str, component: str, message: str) -> None:
+    expected_fqdn = f"{prefix}-{'a' * DNS_RANDOM_TOKEN_CHARS}.{base_domain}"
+    if (
+        len(expected_fqdn) > DNS_FQDN_MAX_LENGTH
+        or len(expected_fqdn) > DNS_CERT_COMMON_NAME_MAX_LENGTH
+        or not re.fullmatch(r"[a-z0-9][a-z0-9.-]*[a-z0-9]", base_domain)
+    ):
+        raise api_error(503, "SERVICE_UNAVAILABLE", message, {"component": component})
+
+
 def profile_etag(row: asyncpg.Record | dict) -> str:
     row = dict(row)
     updated_at = row["updated_at"]
@@ -599,13 +623,12 @@ def resolve_cvm_launch_config(body: CVMCreate) -> dict[str, str]:
             "Dev CVM base domain is not configured",
             {"component": "cloudflare_base_domain"},
         )
-    if len(f"cvm-{'0' * 32}.{base_domain}") > 253 or not re.fullmatch(r"[a-z0-9][a-z0-9.-]*[a-z0-9]", base_domain):
-        raise api_error(
-            503,
-            "SERVICE_UNAVAILABLE",
-            "Dev CVM base domain is invalid",
-            {"component": "cloudflare_base_domain"},
-        )
+    validate_generated_fqdn_base_domain(
+        base_domain=base_domain,
+        prefix=DEV_CVM_FQDN_PREFIX,
+        component="cloudflare_base_domain",
+        message="Dev CVM base domain is invalid",
+    )
     return {
         "instance_type": instance_type,
         "region": region,
@@ -791,7 +814,7 @@ def resolve_security_cvm_provision_config(body: SecurityCVMCreate) -> dict[str, 
             {"component": "security_cvm_image_measurement"},
         )
 
-    base_domain = raw.get("SECURITY_CVM_BASE_DOMAIN", "").strip()
+    base_domain = raw.get("SECURITY_CVM_BASE_DOMAIN", "").strip().strip(".").lower()
     if not base_domain:
         raise api_error(
             503,
@@ -799,6 +822,12 @@ def resolve_security_cvm_provision_config(body: SecurityCVMCreate) -> dict[str, 
             "Security CVM base domain is not configured",
             {"component": "security_cvm_base_domain"},
         )
+    validate_generated_fqdn_base_domain(
+        base_domain=base_domain,
+        prefix=SECURITY_CVM_FQDN_PREFIX,
+        component="security_cvm_base_domain",
+        message="Security CVM base domain is invalid",
+    )
     return {
         "instance_type": instance_type,
         "region": region,
@@ -3288,7 +3317,7 @@ async def create_cvm(
             security_cvm_id = await fetch_live_security_cvm_id(conn, current_user.entity_id)
             await enforce_user_quota(conn, current_user.id, "dev_cvms")
             await enforce_entity_quota(conn, current_user.entity_id, "dev_cvms")
-            fqdn = f"cvm-{secrets.token_hex(16)}.{resolved['base_domain']}"
+            fqdn = generated_cvm_fqdn(DEV_CVM_FQDN_PREFIX, resolved["base_domain"])
             compose_config = render_dev_cvm_compose_config(resolved)
             await conn.execute(
                 """
@@ -4245,8 +4274,7 @@ async def create_security_cvm(
                     {"state": "security_cvm_already_live"},
                 )
             resolved = resolve_security_cvm_provision_config(body)
-            token = secrets.token_hex(16)
-            fqdn = f"sc-{token}.{resolved['base_domain']}"
+            fqdn = generated_cvm_fqdn(SECURITY_CVM_FQDN_PREFIX, resolved["base_domain"])
             compose_config = render_security_cvm_compose_config(resolved)
             try:
                 await conn.execute(
@@ -4734,6 +4762,7 @@ async def fetch_security_cvm_row(conn: asyncpg.Connection, entity_id: UUID) -> a
             region,
             error_reason,
             policy_version,
+            metadata,
             compose_config,
             expected_image_measurement,
             image_measurement,

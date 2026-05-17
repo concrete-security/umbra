@@ -129,6 +129,17 @@ def dev_cvm_attestation_timeout_seconds() -> int:
     return timeout
 
 
+def security_cvm_attestation_timeout_seconds() -> int:
+    raw = load_settings().raw.get("SECURITY_CVM_ATTESTATION_TIMEOUT_SECONDS", "180").strip() or "180"
+    try:
+        timeout = int(raw)
+    except ValueError as exc:
+        raise RuntimeError("SECURITY_CVM_ATTESTATION_TIMEOUT_SECONDS must be an integer") from exc
+    if timeout < 30 or timeout > 600:
+        raise RuntimeError("SECURITY_CVM_ATTESTATION_TIMEOUT_SECONDS must be between 30 and 600")
+    return timeout
+
+
 def reconciler_attestation_interval_seconds() -> int:
     raw = load_settings().raw.get("RECONCILER_ATTESTATION_INTERVAL_SECONDS", "21600").strip() or "21600"
     try:
@@ -897,6 +908,7 @@ async def run_security_cvm_provision_attestation_verifier(operation_id: Any, sna
         AttestationVerifierError,
         AttestationVerifierUnavailable,
         build_security_cvm_attestation_request,
+        verify_with_fetch_retries,
     )
 
     try:
@@ -912,7 +924,11 @@ async def run_security_cvm_provision_attestation_verifier(operation_id: Any, sna
             token_hashes=token_hashes,
             console_url=load_settings().raw.get("CONSOLE_URL", "http://localhost:8000"),
         )
-        report = await verifier.verify(request, timeout_seconds=dev_cvm_attestation_timeout_seconds())
+        report = await verify_with_fetch_retries(
+            verifier,
+            request,
+            timeout_seconds=security_cvm_attestation_timeout_seconds(),
+        )
     except AttestationVerifierUnavailable:
         return False
     except AttestationVerifierError as exc:
@@ -1301,12 +1317,17 @@ async def run_cvm_launch_attestation_verifier(operation_id: Any, snapshot: Any) 
         AttestationVerifierError,
         AttestationVerifierUnavailable,
         build_dev_cvm_attestation_request,
+        verify_with_fetch_retries,
     )
 
     try:
         verifier = AtlasVerifierClient.from_settings()
         request = build_dev_cvm_attestation_request(snapshot)
-        report = await verifier.verify(request, timeout_seconds=dev_cvm_attestation_timeout_seconds())
+        report = await verify_with_fetch_retries(
+            verifier,
+            request,
+            timeout_seconds=dev_cvm_attestation_timeout_seconds(),
+        )
     except AttestationVerifierUnavailable:
         return False
     except AttestationVerifierError as exc:
@@ -2202,7 +2223,13 @@ def provider_passthrough_host(metadata: Any) -> str | None:
             return value.strip()
     app_id = current.get("app_id")
     gateway_host = current.get("gateway_host")
-    if isinstance(app_id, str) and app_id and isinstance(gateway_host, str) and gateway_host:
+    if (
+        current.get("provider") == "phala"
+        and isinstance(app_id, str)
+        and app_id
+        and isinstance(gateway_host, str)
+        and gateway_host
+    ):
         return phala_passthrough_host(app_id, gateway_host)
     return None
 
