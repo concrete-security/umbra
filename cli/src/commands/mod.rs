@@ -5,6 +5,7 @@ pub mod config;
 pub mod cvm;
 pub mod entity;
 pub mod key;
+pub(crate) mod operation_debug;
 pub mod profile;
 pub mod quota;
 pub mod reconcile;

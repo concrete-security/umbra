@@ -19,7 +19,7 @@ use uuid::Uuid;
 
 use crate::{
     cli::{CvmCommand, CvmLaunchArgs, CvmTerminateArgs},
-    commands::auth,
+    commands::{auth, operation_debug},
     config::ResolvedConfig,
     exit::ExitStatus,
     session::Session,
@@ -796,7 +796,14 @@ pub(crate) fn read_json_response<T: for<'de> Deserialize<'de>>(
     if !response.status().is_success() {
         return Err(error_for_response(response, action));
     }
-    response.json::<T>().map_err(|err| {
+    let body = response.bytes().map_err(|err| {
+        (
+            ExitStatus::Error,
+            format!("[error] failed to read {action} response: {err}"),
+        )
+    })?;
+    serde_json::from_slice::<T>(&body).map_err(|err| {
+        operation_debug::log_poll_decode_failure(action, &body, &err);
         (
             ExitStatus::Error,
             format!("[error] malformed {action} response: {err}"),

@@ -25,7 +25,13 @@ from concrete_console.audit_export import (
 from concrete_console.config import load_settings
 from concrete_console.db import get_pool
 from concrete_console.log_config import logger
-from concrete_console.resources import cvm_resource, json_payload, security_cvm_resource, timestamp
+from concrete_console.resources import (
+    cvm_resource,
+    json_payload,
+    operation_error_payload,
+    security_cvm_resource,
+    timestamp,
+)
 
 log = logger()
 _last_successful_tick_monotonic: float | None = None
@@ -1760,7 +1766,7 @@ async def mark_operation_failed(operation_id: Any, *, code: str, details: dict[s
               AND status = 'running'
             """,
             operation_id,
-            json.dumps({"code": code, "details": details}),
+            json.dumps(operation_error_payload({"code": code, "details": details})),
             operation_expiry(),
         )
 
@@ -2537,7 +2543,7 @@ async def mark_security_cvm_provision_failed(operation_id: Any, *, code: str, de
                   AND status = 'running'
                 """,
                 operation_id,
-                json.dumps({"code": code, "details": details}),
+                json.dumps(operation_error_payload({"code": code, "details": details})),
                 operation_expiry(),
             )
 
@@ -2733,7 +2739,7 @@ async def mark_cvm_launch_failed(operation_id: Any, *, code: str, details: dict[
                   AND status = 'running'
                 """,
                 operation_id,
-                json.dumps({"code": code, "details": details}),
+                json.dumps(operation_error_payload({"code": code, "details": details})),
                 operation_expiry(),
             )
 

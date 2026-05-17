@@ -162,7 +162,7 @@ def operation_resource(row: Any) -> dict[str, Any]:
             "id": str(row["target_id"]) if row["target_id"] else None,
         },
         "result": json_payload(row["result"]) if row["result"] is not None else None,
-        "error": json_payload(row["error"]) if row["error"] is not None else None,
+        "error": operation_error_payload(row["error"]) if row["error"] is not None else None,
         "progress": progress,
         "created_at": timestamp(row["created_at"]),
         "updated_at": timestamp(row["updated_at"]),
@@ -278,3 +278,20 @@ def json_payload(value: Any) -> Any:
     if isinstance(value, str):
         return json.loads(value)
     return value
+
+
+def operation_error_payload(value: Any) -> Any:
+    payload = json_payload(value)
+    if not isinstance(payload, dict):
+        return payload
+    code = payload.get("code")
+    if not isinstance(code, str) or "message" in payload:
+        return payload
+    normalized = dict(payload)
+    normalized["message"] = operation_error_message(code)
+    normalized["details"] = normalized.get("details") or {}
+    return normalized
+
+
+def operation_error_message(code: str) -> str:
+    return code.lower().replace("_", " ")

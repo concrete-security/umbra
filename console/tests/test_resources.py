@@ -195,6 +195,32 @@ def test_operation_resource_formats_target_progress_and_payloads() -> None:
     assert resource["expires_at"] == "2026-06-14T19:41:00Z"
 
 
+def test_operation_resource_normalizes_failed_error_message() -> None:
+    resource = operation_resource(
+        {
+            "id": UUID("00000000-0000-4000-8000-000000000030"),
+            "kind": "security_cvm.provision",
+            "status": "failed",
+            "actor_id": UUID("00000000-0000-4000-8000-000000000001"),
+            "target_type": "security_cvm",
+            "target_id": UUID("00000000-0000-4000-8000-000000000031"),
+            "progress_step": "phala_deploy",
+            "progress_percent": 20,
+            "result": None,
+            "error": '{"code":"PHALA_DEPLOY_FAILED","details":{"adapter":"phala"}}',
+            "created_at": datetime(2026, 5, 15, 19, 40, tzinfo=timezone.utc),
+            "updated_at": datetime(2026, 5, 15, 19, 41, tzinfo=timezone.utc),
+            "expires_at": datetime(2026, 6, 14, 19, 41, tzinfo=timezone.utc),
+        }
+    )
+
+    assert resource["error"] == {
+        "code": "PHALA_DEPLOY_FAILED",
+        "message": "phala deploy failed",
+        "details": {"adapter": "phala"},
+    }
+
+
 def test_traffic_log_resource_formats_fields() -> None:
     resource = traffic_log_resource(
         {

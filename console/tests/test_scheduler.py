@@ -1042,6 +1042,7 @@ def test_execute_cvm_launch_phala_deploy_requires_security_cvm_atls_policy(monke
     error = json.loads(operation_updates[0][1])
     assert error == {
         "code": "SECURITY_CVM_ATLS_POLICY_UNAVAILABLE",
+        "message": "security cvm atls policy unavailable",
         "details": {"component": "security_cvm_atls_policy"},
     }
 
