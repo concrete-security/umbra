@@ -74,6 +74,7 @@ IDEMPOTENCY_KEY_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 CVM_CONFIG_VALUE_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 SECURITY_CVM_INSTANCE_TYPE_RE = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
 HEX64_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+IMAGE_MEASUREMENT_RE = re.compile(r"^[0-9a-fA-F]{96}$")
 DEFAULT_SANDBOX_ENV_VALUE_DENYLIST = (
     r"^sk-ant-[A-Za-z0-9_-]+$",
     r"^sk-[A-Za-z0-9]{32,}$",
@@ -109,7 +110,7 @@ OPERATION_KIND_PERMISSIONS = {
 }
 SECURITY_CVM_PROVISION_KIND = "security_cvm.provision"
 SECURITY_CVM_PROVISION_REDACTION = "<redacted-after-first-read>"
-SECURITY_CVM_PROVISION_SECRET_FIELDS = ("ingest_token", "ca_export_token")
+SECURITY_CVM_PROVISION_SECRET_FIELDS = ("ca_export_token",)
 OPERATION_READ_SELECT = """
     SELECT
         o.id,
@@ -250,9 +251,9 @@ class SecurityCVMCreate(BaseModel):
     image_ref: str | None = Field(default=None, min_length=1, max_length=512)
     image_measurement: str | None = Field(
         default=None,
-        min_length=64,
-        max_length=64,
-        pattern=r"^[0-9a-fA-F]{64}$",
+        min_length=96,
+        max_length=96,
+        pattern=r"^[0-9a-fA-F]{96}$",
     )
 
 
@@ -583,7 +584,7 @@ def resolve_cvm_launch_config(body: CVMCreate) -> dict[str, str]:
             {"component": "dev_cvm_image"},
         )
     expected_image_measurement = raw.get("DEV_CVM_IMAGE_MEASUREMENT", "").strip()
-    if not expected_image_measurement or not HEX64_RE.fullmatch(expected_image_measurement):
+    if not expected_image_measurement or not IMAGE_MEASUREMENT_RE.fullmatch(expected_image_measurement):
         raise api_error(
             503,
             "SERVICE_UNAVAILABLE",
@@ -676,6 +677,7 @@ def render_dev_cvm_compose_config(resolved: dict[str, str]) -> str:
             "      - no-new-privileges:true",
             "    environment:",
             "      SECURITY_CVM_FQDN: ${SECURITY_CVM_FQDN}",
+            "      SECURITY_CVM_CONNECT_HOST: ${SECURITY_CVM_CONNECT_HOST:-}",
             "      SECURITY_CVM_PROXY_PORT: ${SECURITY_CVM_PROXY_PORT}",
             "      SECURITY_CVM_ATLS_POLICY_B64: ${SECURITY_CVM_ATLS_POLICY_B64}",
             "      SECURITY_CVM_CA_CERT_B64: ${SECURITY_CVM_CA_CERT_B64}",
@@ -781,7 +783,7 @@ def resolve_security_cvm_provision_config(body: SecurityCVMCreate) -> dict[str, 
             "Security CVM image is not configured",
             {"component": "security_cvm_image"},
         )
-    if not image_measurement or not HEX64_RE.fullmatch(image_measurement):
+    if not image_measurement or not IMAGE_MEASUREMENT_RE.fullmatch(image_measurement):
         raise api_error(
             503,
             "SERVICE_UNAVAILABLE",
@@ -4246,10 +4248,6 @@ async def create_security_cvm(
             token = secrets.token_hex(16)
             fqdn = f"sc-{token}.{resolved['base_domain']}"
             compose_config = render_security_cvm_compose_config(resolved)
-            ingest_token = secrets.token_urlsafe(32)
-            ca_export_token = secrets.token_urlsafe(32)
-            ingest_token_hash = hashlib.sha256(ingest_token.encode("utf-8")).hexdigest()
-            ca_export_token_hash = hashlib.sha256(ca_export_token.encode("utf-8")).hexdigest()
             try:
                 await conn.execute(
                     """
@@ -4262,13 +4260,9 @@ async def create_security_cvm(
                         region,
                         proxy_port,
                         expected_image_measurement,
-                        compose_config,
-                        ingest_token_plaintext,
-                        ingest_token_stashed_at,
-                        ca_export_token_plaintext,
-                        ca_export_token_stashed_at
+                        compose_config
                     )
-                    VALUES ($1, $2, 'PROVISIONING', $3, $4, $5, 8080, $6, $7, $8, now(), $9, now())
+                    VALUES ($1, $2, 'PROVISIONING', $3, $4, $5, 8080, $6, $7)
                     """,
                     security_cvm_id,
                     entity_id,
@@ -4277,24 +4271,6 @@ async def create_security_cvm(
                     resolved["region"],
                     resolved["expected_image_measurement"],
                     compose_config,
-                    ingest_token,
-                    ca_export_token,
-                )
-                await conn.executemany(
-                    """
-                    INSERT INTO service_principal_tokens (
-                        id,
-                        principal_type,
-                        principal_id,
-                        purpose,
-                        token_hash
-                    )
-                    VALUES ($1, 'security_cvm', $2, $3, $4)
-                    """,
-                    [
-                        (uuid4(), security_cvm_id, "INGEST", ingest_token_hash),
-                        (uuid4(), security_cvm_id, "CA_EXPORT", ca_export_token_hash),
-                    ],
                 )
             except asyncpg.UniqueViolationError:
                 raise api_error(

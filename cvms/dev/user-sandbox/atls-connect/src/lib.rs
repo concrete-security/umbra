@@ -33,6 +33,7 @@ pub type Result<T> = std::result::Result<T, HelperError>;
 #[serde(deny_unknown_fields)]
 pub struct ConnectRequest {
     pub fqdn: String,
+    pub connect_host: Option<String>,
     pub port: u16,
     pub policy_path: PathBuf,
     pub ca_cert_path: PathBuf,
@@ -57,6 +58,16 @@ pub fn validate_request(request: &ConnectRequest) -> Result<()> {
     }
     if request.fqdn.chars().any(|character| character.is_control()) {
         return Err(HelperError::new("fqdn must not contain control characters"));
+    }
+    if let Some(connect_host) = request.connect_host.as_deref() {
+        if connect_host.trim().is_empty() {
+            return Err(HelperError::new("connect_host must not be empty"));
+        }
+        if connect_host.chars().any(|character| character.is_control()) {
+            return Err(HelperError::new(
+                "connect_host must not contain control characters",
+            ));
+        }
     }
     if request.port == 0 {
         return Err(HelperError::new("port must be in 1..=65535"));
@@ -146,7 +157,7 @@ mod tests {
 
         let request = parse_request(
             format!(
-                r#"{{"fqdn":"sc.example.com","port":443,"policy_path":{},"ca_cert_path":{}}}"#,
+                r#"{{"fqdn":"sc.example.com","connect_host":"app-443s.dstack.example.com","port":443,"policy_path":{},"ca_cert_path":{}}}"#,
                 serde_json::to_string(policy_path.to_str().unwrap()).unwrap(),
                 serde_json::to_string(ca_path.to_str().unwrap()).unwrap()
             )
@@ -155,6 +166,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(request.fqdn, "sc.example.com");
+        assert_eq!(
+            request.connect_host.as_deref(),
+            Some("app-443s.dstack.example.com")
+        );
         assert_eq!(request.port, 443);
         assert!(load_policy(&request.policy_path).is_ok());
     }
@@ -185,6 +200,7 @@ mod tests {
     fn rejects_zero_port() {
         let request = ConnectRequest {
             fqdn: "sc.example.com".to_string(),
+            connect_host: None,
             port: 0,
             policy_path: PathBuf::from("/tmp/policy.json"),
             ca_cert_path: PathBuf::from("/tmp/ca.pem"),
@@ -193,5 +209,20 @@ mod tests {
         let error = validate_request(&request).unwrap_err();
 
         assert!(error.to_string().contains("port must be"));
+    }
+
+    #[test]
+    fn rejects_invalid_connect_host() {
+        let request = ConnectRequest {
+            fqdn: "sc.example.com".to_string(),
+            connect_host: Some("bad\nhost".to_string()),
+            port: 443,
+            policy_path: PathBuf::from("/tmp/policy.json"),
+            ca_cert_path: PathBuf::from("/tmp/ca.pem"),
+        };
+
+        let error = validate_request(&request).unwrap_err();
+
+        assert!(error.to_string().contains("connect_host must not contain"));
     }
 }

@@ -35,6 +35,7 @@ class ForwarderConfig:
     listen_host: str
     listen_port: int
     security_cvm_fqdn: str
+    security_cvm_connect_host: str | None
     security_cvm_public_port: int
     proxy_token: str
     atls_policy_path: Path
@@ -66,6 +67,15 @@ def required_env(name: str) -> str:
     value = os.environ.get(name, "")
     if not value:
         raise RuntimeError(f"missing required env {name}")
+    return value
+
+
+def optional_host_env(name: str) -> str | None:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        return None
+    if any(character in value for character in "\r\n\t\0"):
+        raise RuntimeError(f"{name} must not contain control characters")
     return value
 
 
@@ -122,6 +132,7 @@ def load_config(runtime_dir: Path = Path("/run/concrete")) -> ForwarderConfig:
         listen_host=os.environ.get("DEV_EGRESS_LISTEN_HOST", "0.0.0.0"),
         listen_port=int(os.environ.get("DEV_EGRESS_LISTEN_PORT", "3128")),
         security_cvm_fqdn=required_env("SECURITY_CVM_FQDN"),
+        security_cvm_connect_host=optional_host_env("SECURITY_CVM_CONNECT_HOST"),
         security_cvm_public_port=int(os.environ.get("SECURITY_CVM_PUBLIC_PORT", "443")),
         proxy_token=proxy_token,
         atls_policy_path=policy_path,
@@ -193,6 +204,8 @@ async def open_verified_upstream(config: ForwarderConfig) -> VerifiedUpstream:
         "policy_path": str(config.atls_policy_path),
         "ca_cert_path": str(config.ca_cert_path),
     }
+    if config.security_cvm_connect_host:
+        payload["connect_host"] = config.security_cvm_connect_host
     env = {"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")}
     process = await asyncio.create_subprocess_exec(
         *config.atls_connect_cmd,

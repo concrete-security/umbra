@@ -282,6 +282,10 @@ class AuditExportConn:
         self.execute_calls.append((query, args))
         return "UPDATE 1"
 
+    async def executemany(self, query, args):
+        for row in args:
+            self.execute_calls.append((query, tuple(row)))
+
 
 def test_execute_audit_export_operation_materializes_artifact_and_result(monkeypatch) -> None:
     conn = AuditExportConn()
@@ -445,7 +449,7 @@ def security_atls_policy(**overrides):
         "type": "dstack_tdx",
         "allowed_tcb_status": ["UpToDate"],
         "app_compose": {"docker_compose_file": "services:\n  mitmproxy:\n    image: example/sc@sha256:abc\n"},
-        "expected_bootchain": {"mrtd": "b" * 64, "rtmr0": "0" * 64, "rtmr1": "1" * 64, "rtmr2": "2" * 64},
+        "expected_bootchain": {"mrtd": "b" * 96, "rtmr0": "0" * 96, "rtmr1": "1" * 96, "rtmr2": "2" * 96},
         "os_image_hash": "b" * 64,
     }
     policy.update(overrides)
@@ -460,13 +464,13 @@ def launch_snapshot(**overrides):
         "instance_type": "tdx.small",
         "region": "FR-PARIS-1",
         "compose_config": "services:\n  user-sandbox:\n    image: example/dev@sha256:abc\n",
-        "expected_image_measurement": "a" * 64,
+        "expected_image_measurement": "a" * 96,
         "security_cvm_fqdn": "sc-abc.sc.example.com",
         "security_cvm_proxy_port": 8080,
         "security_cvm_ca_cert_pem": "-----BEGIN CERTIFICATE-----\nca\n-----END CERTIFICATE-----\n",
         "security_cvm_metadata": {"atls_policy": security_atls_policy()},
-        "security_cvm_expected_image_measurement": "b" * 64,
-        "security_cvm_image_measurement": "b" * 64,
+        "security_cvm_expected_image_measurement": "b" * 96,
+        "security_cvm_image_measurement": "b" * 96,
         "security_cvm_rtmr3_digest": "c" * 96,
         "security_cvm_last_policy_pull_at": None,
         "security_cvm_last_policy_pull_etag": None,
@@ -491,8 +495,8 @@ def cvm_resource_row(**overrides):
         "instance_type": "tdx.small",
         "region": "FR-PARIS-1",
         "fqdn": "cvm-abc.dev.example.com",
-        "expected_image_measurement": "a" * 64,
-        "image_measurement": "a" * 64,
+        "expected_image_measurement": "a" * 96,
+        "image_measurement": "a" * 96,
         "rtmr3_digest": "d" * 96,
         "attestation_verified_at": now,
         "error_reason": None,
@@ -525,11 +529,9 @@ def security_cvm_snapshot(**overrides):
         "cname_dns_record_id": None,
         "proxy_port": 8080,
         "ca_cert_pem": None,
-        "ingest_token_plaintext": "ingest-plaintext",
-        "ingest_token_stashed_at": now,
         "ca_export_token_plaintext": "ca-export-plaintext",
         "ca_export_token_stashed_at": now,
-        "expected_image_measurement": "b" * 64,
+        "expected_image_measurement": "b" * 96,
         "image_measurement": None,
         "rtmr3_digest": None,
         "attestation_verified_at": None,
@@ -550,8 +552,8 @@ def security_cvm_resource_row(**overrides):
         "region": "FR-PARIS-1",
         "error_reason": None,
         "policy_version": 0,
-        "expected_image_measurement": "b" * 64,
-        "image_measurement": "b" * 64,
+        "expected_image_measurement": "b" * 96,
+        "image_measurement": "b" * 96,
         "rtmr3_digest": "d" * 96,
         "attestation_verified_at": now,
         "created_at": now,
@@ -590,6 +592,84 @@ def test_build_cvm_launch_env_binds_runtime_material() -> None:
     }
 
 
+def test_build_cvm_launch_env_includes_security_cvm_connect_host() -> None:
+    env, _binding = scheduler.build_cvm_launch_env(
+        launch_snapshot(
+            security_cvm_metadata={
+                "atls_policy": security_atls_policy(),
+                "passthrough_host": "sc-app-443s.dstack.example.com",
+            }
+        ),
+        public_keys=["ssh-ed25519 aaa label-a"],
+        profile_rows=[],
+        proxy_token="proxy-plaintext",
+    )
+
+    assert env["SECURITY_CVM_CONNECT_HOST"] == "sc-app-443s.dstack.example.com"
+
+
+def test_dstack_docker_pull_env_uses_private_registry_credentials() -> None:
+    assert scheduler.dstack_docker_pull_env(
+        {
+            "DSTACK_DOCKER_REGISTRY": "ghcr.io",
+            "DSTACK_DOCKER_USERNAME": "github-user",
+            "DSTACK_DOCKER_PASSWORD": "github-token",
+            "GHCR_USER": "fallback-user",
+            "GHCR_TOKEN": "fallback-token",
+        }
+    ) == {
+        "DSTACK_DOCKER_REGISTRY": "https://ghcr.io",
+        "DSTACK_DOCKER_USERNAME": "github-user",
+        "DSTACK_DOCKER_PASSWORD": "github-token",
+    }
+
+
+def test_dstack_docker_pull_env_falls_back_to_ghcr_credentials() -> None:
+    assert scheduler.dstack_docker_pull_env(
+        {
+            "DOCKER_REGISTRY": "ghcr.io",
+            "GHCR_USER": "github-user",
+            "GHCR_TOKEN": "github-token",
+        }
+    ) == {
+        "DSTACK_DOCKER_REGISTRY": "https://ghcr.io",
+        "DSTACK_DOCKER_USERNAME": "github-user",
+        "DSTACK_DOCKER_PASSWORD": "github-token",
+    }
+
+
+def test_shade_acme_dns01_env_uses_scoped_cloudflare_token() -> None:
+    assert scheduler.shade_acme_dns01_env(
+        {
+            "SHADE_CLOUDFLARE_API_TOKEN": "shade-token",
+            "CLOUDFLARE_API_TOKEN": "global-token",
+            "CLOUDFLARE_PROPAGATION_SECONDS": "90",
+        }
+    ) == {
+        "CLOUDFLARE_API_TOKEN": "shade-token",
+        "CLOUDFLARE_PROPAGATION_SECONDS": "90",
+    }
+
+
+def test_shade_acme_dns01_env_is_empty_without_cloudflare_token() -> None:
+    assert scheduler.shade_acme_dns01_env({}) == {}
+
+
+def test_build_cvm_launch_env_includes_shade_acme_dns01_env(monkeypatch) -> None:
+    monkeypatch.setenv("CLOUDFLARE_API_TOKEN", "cf-token")
+    monkeypatch.setenv("CLOUDFLARE_PROPAGATION_SECONDS", "75")
+
+    env, _binding = scheduler.build_cvm_launch_env(
+        launch_snapshot(),
+        public_keys=["ssh-ed25519 aaa label-a"],
+        profile_rows=[],
+        proxy_token="proxy-plaintext",
+    )
+
+    assert env["CLOUDFLARE_API_TOKEN"] == "cf-token"
+    assert env["CLOUDFLARE_PROPAGATION_SECONDS"] == "75"
+
+
 def test_build_cvm_policy_bundle_uses_shade_policy_and_binding() -> None:
     binding = {"cvm_id": "00000000-0000-4000-8000-000000000031"}
     bundle = scheduler.build_cvm_policy_bundle(
@@ -597,19 +677,23 @@ def test_build_cvm_policy_bundle_uses_shade_policy_and_binding() -> None:
         shade_policy={
             "policy_template_version": "dev-v1",
             "app_compose": {"docker_compose_file": "services: {}\n"},
-            "expected_bootchain": {"mrtd": "d" * 64},
+            "expected_bootchain": {"mrtd": "d" * 96},
             "os_image_hash": "e" * 64,
         },
         rtmr3_binding=binding,
+        deploy_compose_yaml="services:\n  generated:\n",
+        connect_host="app-443s.dstack.example.com",
     )
 
     assert bundle["cvm_id"] == "00000000-0000-4000-8000-000000000031"
     assert bundle["policy_template_version"] == "dev-v1"
     assert bundle["compose_template"] == "services: {}\n"
-    assert bundle["expected_bootchain"] == {"mrtd": "d" * 64}
+    assert bundle["expected_bootchain"] == {"mrtd": "d" * 96}
     assert bundle["os_image_hash"] == "e" * 64
     assert bundle["rtmr3_binding"] == binding
+    assert bundle["deploy_compose_yaml"] == "services:\n  generated:\n"
     assert bundle["security_cvm_fqdn"] == "sc-abc.sc.example.com"
+    assert bundle["connect_host"] == "app-443s.dstack.example.com"
     assert bundle["issued_at"].endswith("Z")
 
 
@@ -724,10 +808,18 @@ class SecurityProvisionFakeConn:
         self.execute_calls.append((query, args))
         return "UPDATE 1"
 
+    async def executemany(self, query, args):
+        for row in args:
+            self.execute_calls.append((query, tuple(row)))
 
-def test_build_security_cvm_provision_env_uses_stashed_plaintexts(monkeypatch) -> None:
+
+def test_build_security_cvm_provision_env_uses_saga_local_plaintexts(monkeypatch) -> None:
     monkeypatch.setenv("CONSOLE_URL", "https://console.example.com")
-    env = scheduler.build_security_cvm_provision_env(security_cvm_snapshot())
+    env = scheduler.build_security_cvm_provision_env(
+        security_cvm_snapshot(),
+        ingest_token="ingest-plaintext",
+        ca_export_token="ca-export-plaintext",
+    )
 
     assert env == {
         "CONSOLE_URL": "https://console.example.com",
@@ -739,18 +831,30 @@ def test_build_security_cvm_provision_env_uses_stashed_plaintexts(monkeypatch) -
     }
 
 
+def test_build_security_cvm_provision_env_includes_shade_acme_dns01_env(monkeypatch) -> None:
+    monkeypatch.setenv("CONSOLE_URL", "https://console.example.com")
+    monkeypatch.setenv("SHADE_CLOUDFLARE_API_TOKEN", "cf-token")
+
+    env = scheduler.build_security_cvm_provision_env(
+        security_cvm_snapshot(),
+        ingest_token="ingest-plaintext",
+        ca_export_token="ca-export-plaintext",
+    )
+
+    assert env["CLOUDFLARE_API_TOKEN"] == "cf-token"
+    assert env["CLOUDFLARE_PROPAGATION_SECONDS"] == "60"
+
+
 def test_security_cvm_token_stash_expires_after_one_hour() -> None:
     now = scheduler.datetime.now(scheduler.timezone.utc)
 
-    assert scheduler.security_cvm_token_stash_available(
+    assert scheduler.security_cvm_ca_export_stash_available(
         security_cvm_snapshot(
-            ingest_token_stashed_at=now - scheduler.timedelta(seconds=3599),
             ca_export_token_stashed_at=now - scheduler.timedelta(seconds=3599),
         )
     )
-    assert not scheduler.security_cvm_token_stash_available(
+    assert not scheduler.security_cvm_ca_export_stash_available(
         security_cvm_snapshot(
-            ingest_token_stashed_at=now - scheduler.timedelta(seconds=3601),
             ca_export_token_stashed_at=now - scheduler.timedelta(seconds=3601),
         )
     )
@@ -768,13 +872,11 @@ def test_execute_security_cvm_phala_deploy_materializes_env_and_metadata(monkeyp
         def from_settings(cls):
             return cls()
 
-        async def build_with_policy(self, *, shade_config_yaml, app_compose_yaml, domain):
+        async def build(self, *, shade_config_yaml, app_compose_yaml):
             captured["shade_config_yaml"] = shade_config_yaml
             captured["app_compose_yaml"] = app_compose_yaml
-            captured["domain"] = domain
             return SimpleNamespace(
                 compose_yaml="services:\n  generated:\n    image: example\n",
-                policy=security_atls_policy(app_compose={"docker_compose_file": app_compose_yaml}),
             )
 
     class FakePhalaClient:
@@ -793,6 +895,16 @@ def test_execute_security_cvm_phala_deploy_materializes_env_and_metadata(monkeyp
 
     monkeypatch.setenv("CONSOLE_URL", "https://console.example.com")
     monkeypatch.setattr(scheduler, "get_pool", fake_get_pool)
+    monkeypatch.setattr(
+        scheduler,
+        "mint_security_cvm_provision_bearers",
+        lambda: {
+            "ingest_token": "ingest-plaintext",
+            "ca_export_token": "ca-export-plaintext",
+            "ingest_token_hash": "b" * 64,
+            "ca_export_token_hash": "c" * 64,
+        },
+    )
     monkeypatch.setattr("concrete_console.shade_provider.shade.ShadeClient", FakeShadeClient)
     monkeypatch.setattr("concrete_console.tee_provider.phala.PhalaClient", FakePhalaClient)
     monkeypatch.setattr(scheduler, "insert_audit_event", fake_insert_audit_event)
@@ -803,14 +915,19 @@ def test_execute_security_cvm_phala_deploy_materializes_env_and_metadata(monkeyp
     assert isinstance(env, dict)
     assert captured["name"] == "concrete-v0-sc-0000000000004000"
     assert "domain: sc-abc.sc.example.com" in str(captured["shade_config_yaml"])
-    assert captured["domain"] == "sc-abc.sc.example.com"
     assert env["CONSOLE_INGEST_TOKEN"] == "ingest-plaintext"
     assert env["CA_EXPORT_TOKEN"] == "ca-export-plaintext"
+    token_insert_calls = [args for query, args in conn.execute_calls if "INSERT INTO service_principal_tokens" in query]
+    assert token_insert_calls == [
+        (UUID("00000000-0000-4000-8000-000000000041"), "INGEST", "b" * 64),
+        (UUID("00000000-0000-4000-8000-000000000041"), "CA_EXPORT", "c" * 64),
+    ]
     metadata_calls = [args for query, args in conn.execute_calls if "UPDATE security_cvms" in query and "metadata" in query]
     metadata = json.loads(metadata_calls[0][1])
     assert metadata["app_id"] == "sc-app-123"
-    assert metadata["atls_policy"]["type"] == "dstack_tdx"
-    assert metadata["atls_policy"]["app_compose"]["docker_compose_file"] == security_cvm_snapshot()["compose_config"]
+    assert metadata["passthrough_host"] == "sc-app-123-443s.gateway.example.com"
+    assert metadata["deploy_compose_yaml"] == "services:\n  generated:\n    image: example\n"
+    assert "atls_policy" not in metadata
     assert conn.audit_calls[0]["action"] == "SECURITY_CVM_PROVISIONING_STARTED"
     progress_calls = [args for query, args in conn.execute_calls if "progress_step = $2" in query]
     assert progress_calls[-1] == (UUID("00000000-0000-4000-8000-000000000030"), "cf_txt_create", 40)
@@ -820,7 +937,7 @@ def test_execute_security_cvm_finalise_scrubs_stash_and_materializes_result(monk
     conn = SecurityProvisionFakeConn(
         security_cvm_snapshot(
             ca_cert_pem="-----BEGIN CERTIFICATE-----\nca\n-----END CERTIFICATE-----\n",
-            image_measurement="b" * 64,
+            image_measurement="b" * 96,
             rtmr3_digest="d" * 96,
             attestation_verified_at=scheduler.datetime.now(scheduler.timezone.utc),
         )
@@ -837,11 +954,11 @@ def test_execute_security_cvm_finalise_scrubs_stash_and_materializes_result(monk
 
     asyncio.run(scheduler.execute_security_cvm_finalise_operation(UUID("00000000-0000-4000-8000-000000000030")))
 
-    scrub_updates = [query for query, _args in conn.execute_calls if "ingest_token_plaintext = NULL" in query]
+    scrub_updates = [query for query, _args in conn.execute_calls if "ca_export_token_plaintext = NULL" in query]
     assert scrub_updates
     operation_updates = [args for query, args in conn.execute_calls if "UPDATE operations" in query and "status = 'succeeded'" in query]
     result = json.loads(operation_updates[0][1])
-    assert result["ingest_token"] == "ingest-plaintext"
+    assert "ingest_token" not in result
     assert result["ca_export_token"] == "ca-export-plaintext"
     assert result["security_cvm"]["state"] == "RUNNING"
     assert conn.audit_calls[0]["action"] == "SECURITY_CVM_PROVISIONED"
@@ -859,18 +976,11 @@ def test_execute_cvm_launch_phala_deploy_persists_hash_only(monkeypatch) -> None
         def from_settings(cls):
             return cls()
 
-        async def build_with_policy(self, *, shade_config_yaml, app_compose_yaml, domain):
+        async def build(self, *, shade_config_yaml, app_compose_yaml):
             captured["shade_config_yaml"] = shade_config_yaml
             captured["app_compose_yaml"] = app_compose_yaml
-            captured["domain"] = domain
             return SimpleNamespace(
                 compose_yaml="services:\n  app:\n    image: generated\n",
-                policy={
-                    "policy_template_version": "dev-v1",
-                    "app_compose": {"docker_compose_file": app_compose_yaml},
-                    "expected_bootchain": {"mrtd": "d" * 64},
-                    "os_image_hash": "e" * 64,
-                },
             )
 
     class FakePhalaClient:
@@ -895,7 +1005,6 @@ def test_execute_cvm_launch_phala_deploy_persists_hash_only(monkeypatch) -> None
     assert captured["name"] == "concrete-v0-cvm-0000000000004000"
     assert env["SECURITY_CVM_PROXY_TOKEN"]
     proxy_token_hash = hashlib.sha256(env["SECURITY_CVM_PROXY_TOKEN"].encode("utf-8")).hexdigest()
-    assert captured["domain"] == "cvm-abc.dev.example.com"
     assert any("UPDATE service_principal_tokens" in query for query, _args in conn.execute_calls)
     insert_calls = [args for query, args in conn.execute_calls if "INSERT INTO service_principal_tokens" in query]
     assert insert_calls == [(UUID("00000000-0000-4000-8000-000000000031"), proxy_token_hash)]
@@ -904,6 +1013,10 @@ def test_execute_cvm_launch_phala_deploy_persists_hash_only(monkeypatch) -> None
     metadata = json.loads(metadata_calls[0][1])
     assert metadata["app_id"] == "app-123"
     assert metadata["gateway_host"] == "gateway.example.com"
+    assert metadata["passthrough_host"] == "app-123-443s.gateway.example.com"
+    assert metadata["policy_bundle"]["connect_host"] == "app-123-443s.gateway.example.com"
+    assert metadata["policy_bundle"]["deploy_compose_yaml"] == "services:\n  app:\n    image: generated\n"
+    assert "expected_bootchain" not in metadata["policy_bundle"]
     assert metadata["policy_bundle"]["rtmr3_binding"]["security_cvm_proxy_token_sha256"] == proxy_token_hash
     progress_calls = [args for query, args in conn.execute_calls if "progress_step = 'cf_txt_create'" in query]
     assert progress_calls == [
@@ -1191,7 +1304,7 @@ def test_execute_cvm_launch_attestation_gate_advances_after_columns_exist(monkey
         metadata={},
         txt_dns_record_id="txt-1",
         cname_dns_record_id="cname-1",
-        image_measurement="a" * 64,
+        image_measurement="a" * 96,
         rtmr3_digest="d" * 96,
         attestation_verified_at=scheduler.datetime.now(scheduler.timezone.utc),
         policy_version=0,
@@ -1215,7 +1328,8 @@ def test_execute_cvm_launch_attestation_gate_advances_after_columns_exist(monkey
 def test_run_cvm_launch_attestation_verifier_persists_report_and_audit(monkeypatch) -> None:
     policy_bundle = {
         "compose_template": "services: {}\n",
-        "expected_bootchain": {"mrtd": "d" * 64},
+        "deploy_compose_yaml": "services:\n  generated:\n",
+        "expected_bootchain": {"mrtd": "d" * 96},
         "os_image_hash": "e" * 64,
         "rtmr3_binding": {"cvm_id": "00000000-0000-4000-8000-000000000031"},
     }
@@ -1242,13 +1356,32 @@ def test_run_cvm_launch_attestation_verifier_persists_report_and_audit(monkeypat
         async def verify(self, request, *, timeout_seconds):
             captured_request.update(request)
             assert timeout_seconds == 180
-            return attestation.AttestationReport(image_measurement="a" * 64, rtmr3_digest="d" * 96)
+            return attestation.AttestationReport(image_measurement="a" * 96, rtmr3_digest="d" * 96)
+
+    class FakeShadeClient:
+        @classmethod
+        def from_settings(cls):
+            return cls()
+
+        async def generate_policy(self, *, domain, deploy_compose_yaml, connect_host=None):
+            assert domain == "cvm-abc.dev.example.com"
+            assert connect_host is None
+            assert deploy_compose_yaml == "services:\n  generated:\n"
+            return SimpleNamespace(
+                policy={
+                    "policy_template_version": "dev-v1",
+                    "app_compose": {"docker_compose_file": "services: {}\n"},
+                    "expected_bootchain": {"mrtd": "d" * 96},
+                    "os_image_hash": "e" * 64,
+                }
+            )
 
     async def fake_insert_audit_event(_conn, **kwargs):
         conn.audit_calls.append(kwargs)
 
     monkeypatch.setattr(scheduler, "get_pool", fake_get_pool)
     monkeypatch.setattr(attestation.AtlasVerifierClient, "from_settings", classmethod(lambda cls: FakeVerifier()))
+    monkeypatch.setattr("concrete_console.shade_provider.shade.ShadeClient", FakeShadeClient)
     monkeypatch.setattr(scheduler, "insert_audit_event", fake_insert_audit_event)
 
     handled = asyncio.run(
@@ -1260,9 +1393,11 @@ def test_run_cvm_launch_attestation_verifier_persists_report_and_audit(monkeypat
     cvm_updates = [args for query, args in conn.execute_calls if "UPDATE cvms" in query]
     assert cvm_updates[0][:3] == (
         UUID("00000000-0000-4000-8000-000000000031"),
-        "a" * 64,
+        "a" * 96,
         "d" * 96,
     )
+    metadata = json.loads(cvm_updates[0][4])
+    assert metadata["policy_bundle"]["expected_bootchain"] == {"mrtd": "d" * 96}
     assert conn.audit_calls[0]["action"] == "CVM_ATTESTATION_VERIFIED"
     assert conn.audit_calls[0]["after"]["source"] == "launch"
     operation_updates = [args for query, args in conn.execute_calls if "UPDATE operations" in query]
@@ -1278,7 +1413,7 @@ def test_reconcile_security_cvm_attestation_refresh_persists_success(monkeypatch
                 "entity_id": UUID("00000000-0000-4000-8000-000000000001"),
                 "fqdn": "sc.example.com",
                 "compose_config": "services: {}\n",
-                "expected_image_measurement": "a" * 64,
+                "expected_image_measurement": "a" * 96,
                 "image_measurement": None,
                 "rtmr3_digest": None,
                 "attestation_verified_at": None,
@@ -1296,7 +1431,7 @@ def test_reconcile_security_cvm_attestation_refresh_persists_success(monkeypatch
         async def verify(self, request, *, timeout_seconds):
             captured_request.update(request)
             assert timeout_seconds == 30
-            return attestation.AttestationReport(image_measurement="a" * 64, rtmr3_digest="d" * 96)
+            return attestation.AttestationReport(image_measurement="a" * 96, rtmr3_digest="d" * 96)
 
     async def fake_insert_audit_event(_conn, **kwargs):
         conn.audit_calls.append(kwargs)
@@ -1311,7 +1446,7 @@ def test_reconcile_security_cvm_attestation_refresh_persists_success(monkeypatch
     assert captured_request["kind"] == "security_cvm"
     assert captured_request["policy"]["rtmr3_binding"]["CONSOLE_URL"] == "https://console.example.com"
     security_updates = [args for query, args in conn.execute_calls if "UPDATE security_cvms" in query]
-    assert security_updates[0][:3] == (security_cvm_id, "a" * 64, "d" * 96)
+    assert security_updates[0][:3] == (security_cvm_id, "a" * 96, "d" * 96)
     assert conn.audit_calls[0]["action"] == "SECURITY_CVM_ATTESTATION_VERIFIED"
     assert conn.audit_calls[0]["after"]["source"] == "reconciler"
 
@@ -1320,7 +1455,7 @@ def test_reconcile_dev_cvm_attestation_refresh_records_drift(monkeypatch) -> Non
     cvm_id = UUID("00000000-0000-4000-8000-000000000031")
     policy_bundle = {
         "compose_template": "services: {}\n",
-        "expected_bootchain": {"mrtd": "d" * 64},
+        "expected_bootchain": {"mrtd": "d" * 96},
         "os_image_hash": "e" * 64,
         "rtmr3_binding": {"cvm_id": str(cvm_id)},
     }
@@ -1331,8 +1466,8 @@ def test_reconcile_dev_cvm_attestation_refresh_records_drift(monkeypatch) -> Non
                 "entity_id": UUID("00000000-0000-4000-8000-000000000001"),
                 "fqdn": "cvm.example.com",
                 "metadata": {"policy_bundle": policy_bundle},
-                "expected_image_measurement": "a" * 64,
-                "image_measurement": "a" * 64,
+                "expected_image_measurement": "a" * 96,
+                "image_measurement": "a" * 96,
                 "rtmr3_digest": "d" * 96,
                 "attestation_verified_at": scheduler.datetime.now(scheduler.timezone.utc)
                 - scheduler.timedelta(seconds=90_000),
@@ -1344,7 +1479,7 @@ def test_reconcile_dev_cvm_attestation_refresh_records_drift(monkeypatch) -> Non
     class FakeVerifier:
         async def verify(self, request, *, timeout_seconds):
             assert request["kind"] == "dev_cvm"
-            return attestation.AttestationReport(image_measurement="e" * 64, rtmr3_digest="f" * 96)
+            return attestation.AttestationReport(image_measurement="e" * 96, rtmr3_digest="f" * 96)
 
     async def fake_insert_audit_event(_conn, **kwargs):
         conn.audit_calls.append(kwargs)
@@ -1564,7 +1699,7 @@ def test_execute_cvm_launch_finalise_materializes_result_and_audit(monkeypatch) 
         metadata={"policy_bundle": policy_bundle},
         txt_dns_record_id="txt-1",
         cname_dns_record_id="cname-1",
-        image_measurement="a" * 64,
+        image_measurement="a" * 96,
         rtmr3_digest="d" * 96,
         attestation_verified_at=scheduler.datetime.now(scheduler.timezone.utc),
         policy_version=1,

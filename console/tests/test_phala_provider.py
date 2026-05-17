@@ -118,6 +118,37 @@ def test_deploy_stages_files_with_private_modes_and_cleans(tmp_path) -> None:
     assert not Path(seen["env"]).exists()
 
 
+def test_deploy_falls_back_to_cvms_get_when_cli_stdout_is_empty(tmp_path) -> None:
+    marker = tmp_path / "argv.json"
+    cli = write_fake_cli(
+        tmp_path,
+        f"""
+        import json
+        import sys
+
+        if sys.argv[1:3] == ["cvms", "get"]:
+            print(json.dumps({{
+                "app_id": "app-123",
+                "gateway": {{"base_domain": "dstack.example.com", "cname": "_.dstack.example.com"}},
+                "status": "stopped"
+            }}))
+            raise SystemExit(0)
+
+        open({str(marker)!r}, "w").write(json.dumps(sys.argv[1:]))
+        """,
+    )
+    client = PhalaClient(cli_path=str(cli), api_token="phala-token", timeout_seconds=5)
+
+    result = run(client.deploy(name="concrete-v0-cvm-smoke", compose_yaml="services: {}\n", env={}))
+
+    argv = json.loads(marker.read_text())
+    assert argv[:3] == ["deploy", "--name", "concrete-v0-cvm-smoke"]
+    assert "--wait" in argv
+    assert result.app_id == "app-123"
+    assert result.gateway_host == "dstack.example.com"
+    assert result.status == "STOPPED"
+
+
 def test_update_uses_phala_deploy_with_cvm_id(tmp_path) -> None:
     marker = tmp_path / "argv.json"
     cli = write_fake_cli(
@@ -138,6 +169,7 @@ def test_update_uses_phala_deploy_with_cvm_id(tmp_path) -> None:
     assert argv[:3] == ["deploy", "--cvm-id", "app-123"]
     assert "--compose" in argv
     assert "-e" in argv
+    assert "--wait" in argv
     assert "--json" in argv
     assert result.status == "RUNNING"
 

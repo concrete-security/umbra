@@ -346,14 +346,14 @@ def test_resolve_cvm_launch_config_uses_defaults(monkeypatch) -> None:
     monkeypatch.delenv("DEV_CVM_DEFAULT_INSTANCE_TYPE", raising=False)
     monkeypatch.setenv("DEV_CVM_DEFAULT_REGION", "FR-PARIS-1")
     monkeypatch.setenv("DEV_CVM_IMAGE", "ghcr.io/concrete-security/dev-cvm/user-sandbox@sha256:abc")
-    monkeypatch.setenv("DEV_CVM_IMAGE_MEASUREMENT", "A" * 64)
+    monkeypatch.setenv("DEV_CVM_IMAGE_MEASUREMENT", "A" * 96)
     monkeypatch.setenv("CLOUDFLARE_BASE_DOMAIN", "dev.example.com")
 
     resolved = resolve_cvm_launch_config(cvm_create())
 
     assert resolved["instance_type"] == "tdx.small"
     assert resolved["region"] == "FR-PARIS-1"
-    assert resolved["expected_image_measurement"] == "a" * 64
+    assert resolved["expected_image_measurement"] == "a" * 96
     assert resolved["base_domain"] == "dev.example.com"
 
 
@@ -393,7 +393,7 @@ def test_resolve_cvm_launch_config_requires_image_measurement(monkeypatch) -> No
 def test_resolve_cvm_launch_config_requires_base_domain(monkeypatch) -> None:
     monkeypatch.setenv("DEV_CVM_DEFAULT_REGION", "FR-PARIS-1")
     monkeypatch.setenv("DEV_CVM_IMAGE", "ghcr.io/concrete-security/dev-cvm/user-sandbox@sha256:abc")
-    monkeypatch.setenv("DEV_CVM_IMAGE_MEASUREMENT", "a" * 64)
+    monkeypatch.setenv("DEV_CVM_IMAGE_MEASUREMENT", "a" * 96)
     monkeypatch.delenv("CLOUDFLARE_BASE_DOMAIN", raising=False)
 
     with pytest.raises(HTTPException) as exc:
@@ -409,13 +409,14 @@ def test_render_dev_cvm_compose_config_keeps_runtime_values_as_placeholders() ->
             "image": "ghcr.io/concrete-security/dev-cvm/user-sandbox@sha256:abc",
             "instance_type": "tdx.small",
             "region": "FR-PARIS-1",
-            "expected_image_measurement": "a" * 64,
+            "expected_image_measurement": "a" * 96,
             "base_domain": "dev.example.com",
         }
     )
 
     assert "ghcr.io/concrete-security/dev-cvm/user-sandbox@sha256:abc" in compose
     assert "${SECURITY_CVM_PROXY_TOKEN}" in compose
+    assert "${SECURITY_CVM_CONNECT_HOST:-}" in compose
     assert "${AUTHORIZED_SSH_KEYS_B64}" in compose
     assert "  dev-egress-forwarder:" in compose
     assert "entrypoint: [\"concrete-dev-egress-forwarder\"]" in compose
@@ -432,14 +433,14 @@ def test_resolve_security_cvm_provision_config_uses_defaults(monkeypatch) -> Non
     monkeypatch.delenv("PHALA_DEFAULT_INSTANCE_TYPE", raising=False)
     monkeypatch.setenv("PHALA_REGION", "FR-PARIS-1")
     monkeypatch.setenv("SECURITY_CVM_IMAGE_REF", "ghcr.io/concrete-security/security-cvm/mitmproxy@sha256:abc")
-    monkeypatch.setenv("SECURITY_CVM_IMAGE_MEASUREMENT", "B" * 64)
+    monkeypatch.setenv("SECURITY_CVM_IMAGE_MEASUREMENT", "B" * 96)
     monkeypatch.setenv("SECURITY_CVM_BASE_DOMAIN", "sc.example.com")
 
     resolved = resolve_security_cvm_provision_config(security_cvm_create())
 
     assert resolved["instance_type"] == "tdx.small"
     assert resolved["region"] == "FR-PARIS-1"
-    assert resolved["expected_image_measurement"] == "b" * 64
+    assert resolved["expected_image_measurement"] == "b" * 96
     assert resolved["base_domain"] == "sc.example.com"
 
 
@@ -466,7 +467,7 @@ def test_resolve_security_cvm_provision_config_requires_image(monkeypatch) -> No
 def test_resolve_security_cvm_provision_config_requires_base_domain(monkeypatch) -> None:
     monkeypatch.setenv("PHALA_REGION", "FR-PARIS-1")
     monkeypatch.setenv("SECURITY_CVM_IMAGE_REF", "ghcr.io/concrete-security/security-cvm/mitmproxy@sha256:abc")
-    monkeypatch.setenv("SECURITY_CVM_IMAGE_MEASUREMENT", "b" * 64)
+    monkeypatch.setenv("SECURITY_CVM_IMAGE_MEASUREMENT", "b" * 96)
     monkeypatch.delenv("SECURITY_CVM_BASE_DOMAIN", raising=False)
 
     with pytest.raises(HTTPException) as exc:
@@ -482,7 +483,7 @@ def test_render_security_cvm_compose_config_keeps_runtime_values_as_placeholders
             "image_ref": "ghcr.io/concrete-security/security-cvm/mitmproxy@sha256:abc",
             "instance_type": "tdx.small",
             "region": "FR-PARIS-1",
-            "expected_image_measurement": "b" * 64,
+            "expected_image_measurement": "b" * 96,
             "base_domain": "sc.example.com",
         }
     )
@@ -539,7 +540,7 @@ def security_cvm_attestation_row(**overrides):
         "state": "RUNNING",
         "fqdn": "sc.example.com",
         "compose_config": "services: {}\n",
-        "expected_image_measurement": "a" * 64,
+        "expected_image_measurement": "a" * 96,
         "image_measurement": None,
         "rtmr3_digest": None,
         "attestation_verified_at": None,
@@ -566,7 +567,7 @@ def test_run_security_cvm_attestation_probe_persists_success(monkeypatch) -> Non
         async def verify(self, request, *, timeout_seconds):
             captured_request.update(request)
             assert timeout_seconds == 30
-            return attestation.AttestationReport(image_measurement="a" * 64, rtmr3_digest="d" * 96)
+            return attestation.AttestationReport(image_measurement="a" * 96, rtmr3_digest="d" * 96)
 
     async def fake_insert_audit_event(_conn, **kwargs):
         conn.audit_calls.append(kwargs)
@@ -589,7 +590,7 @@ def test_run_security_cvm_attestation_probe_persists_success(monkeypatch) -> Non
     security_cvm_updates = [args for query, args in conn.execute_calls if "UPDATE security_cvms" in query]
     assert security_cvm_updates[0][:3] == (
         UUID("00000000-0000-4000-8000-000000000041"),
-        "a" * 64,
+        "a" * 96,
         "d" * 96,
     )
     assert conn.audit_calls[0]["action"] == "SECURITY_CVM_ATTESTATION_VERIFIED"
@@ -601,7 +602,7 @@ def test_run_security_cvm_attestation_probe_reports_drift_without_update(monkeyp
 
     class FakeVerifier:
         async def verify(self, request, *, timeout_seconds):
-            return attestation.AttestationReport(image_measurement="e" * 64, rtmr3_digest="f" * 96)
+            return attestation.AttestationReport(image_measurement="e" * 96, rtmr3_digest="f" * 96)
 
     async def fake_insert_audit_event(_conn, **kwargs):
         conn.audit_calls.append(kwargs)
@@ -613,7 +614,7 @@ def test_run_security_cvm_attestation_probe_reports_drift_without_update(monkeyp
         asyncio.run(
             routes_module.run_security_cvm_attestation_probe(
                 conn,
-                security_cvm_attestation_row(image_measurement="a" * 64, rtmr3_digest="d" * 96),
+                security_cvm_attestation_row(image_measurement="a" * 96, rtmr3_digest="d" * 96),
                 current_user=current_user(),
             )
         )
@@ -771,7 +772,6 @@ def test_validate_reconcile_dependencies_allows_no_orphans_without_cloudflare(mo
 def test_redacted_security_cvm_provision_result_redacts_one_shot_bearers() -> None:
     result = {
         "security_cvm": {"id": "00000000-0000-4000-8000-000000000040", "state": "RUNNING"},
-        "ingest_token": "ingest-plaintext",
         "ca_export_token": "ca-plaintext",
     }
 
@@ -779,20 +779,17 @@ def test_redacted_security_cvm_provision_result_redacts_one_shot_bearers() -> No
 
     assert redacted == {
         "security_cvm": {"id": "00000000-0000-4000-8000-000000000040", "state": "RUNNING"},
-        "ingest_token": SECURITY_CVM_PROVISION_REDACTION,
         "ca_export_token": SECURITY_CVM_PROVISION_REDACTION,
     }
-    assert result["ingest_token"] == "ingest-plaintext"
     assert result["ca_export_token"] == "ca-plaintext"
 
 
 def test_redacted_security_cvm_provision_result_accepts_json_payload() -> None:
     redacted = redacted_security_cvm_provision_result(
-        '{"security_cvm":{"id":"sc-1"},"ingest_token":"ingest","ca_export_token":"ca"}'
+        '{"security_cvm":{"id":"sc-1"},"ca_export_token":"ca"}'
     )
 
     assert redacted["security_cvm"] == {"id": "sc-1"}
-    assert redacted["ingest_token"] == SECURITY_CVM_PROVISION_REDACTION
     assert redacted["ca_export_token"] == SECURITY_CVM_PROVISION_REDACTION
 
 

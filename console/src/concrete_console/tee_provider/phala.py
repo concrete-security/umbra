@@ -90,7 +90,7 @@ class PhalaClient:
     async def deploy(self, *, name: str, compose_yaml: str, env: dict[str, str]) -> PhalaDeployResult:
         validate_concrete_cvm_name(name)
         async with staged_compose_and_env(compose_yaml=compose_yaml, env=env) as staged:
-            payload = await self._run_json(
+            stdout = await self._run_text(
                 [
                     "deploy",
                     "--name",
@@ -99,15 +99,16 @@ class PhalaClient:
                     str(staged.compose_path),
                     "-e",
                     str(staged.env_path),
+                    "--wait",
                     "--json",
                 ]
             )
-        return deploy_result_from_payload(payload)
+        return await self._deploy_result_from_stdout(stdout, fallback_lookup=name)
 
     async def update(self, *, app_id: str, compose_yaml: str, env: dict[str, str]) -> PhalaDeployResult:
         validate_app_id(app_id)
         async with staged_compose_and_env(compose_yaml=compose_yaml, env=env) as staged:
-            payload = await self._run_json(
+            stdout = await self._run_text(
                 [
                     "deploy",
                     "--cvm-id",
@@ -116,10 +117,11 @@ class PhalaClient:
                     str(staged.compose_path),
                     "-e",
                     str(staged.env_path),
+                    "--wait",
                     "--json",
                 ]
             )
-        return deploy_result_from_payload(payload)
+        return await self._deploy_result_from_stdout(stdout, fallback_lookup=app_id)
 
     async def info(self, app_id: str) -> PhalaDeployResult:
         validate_app_id(app_id)
@@ -154,6 +156,14 @@ class PhalaClient:
         if not isinstance(rows, list):
             raise PhalaError("invalid_response", field="cvms")
         return [row for row in rows if isinstance(row, dict) and concrete_cvm_name(row)]
+
+    async def _deploy_result_from_stdout(self, stdout: str, *, fallback_lookup: str) -> PhalaDeployResult:
+        if stdout.strip():
+            try:
+                return deploy_result_from_payload(json.loads(stdout))
+            except (json.JSONDecodeError, PhalaError):
+                pass
+        return await self.info(fallback_lookup)
 
     async def _run_json(self, args: list[str]) -> Any:
         stdout = await self._run_text(args)
@@ -223,7 +233,7 @@ def deploy_result_from_payload(payload: Any) -> PhalaDeployResult:
     if not isinstance(payload, dict):
         raise PhalaError("invalid_response")
     app_id = first_string(payload, ("app_id", "appId", "id"), ("app", "cvm"))
-    gateway_host = first_string(payload, ("gateway_host", "gatewayHost", "gateway"), ("app", "cvm"))
+    gateway_host = gateway_host_from_payload(payload)
     validate_app_id(app_id)
     validate_gateway_host(gateway_host)
     raw_status = first_string(payload, ("status", "state"), ("app", "cvm"), required=False) or ""
@@ -257,6 +267,36 @@ def first_string(
     if required:
         raise PhalaError("invalid_response", field=keys[0])
     return ""
+
+
+def gateway_host_from_payload(payload: dict[str, Any]) -> str:
+    gateway_host = first_string(payload, ("gateway_host", "gatewayHost"), ("app", "cvm"), required=False)
+    if gateway_host:
+        return normalize_gateway_host(gateway_host)
+
+    value = payload.get("gateway")
+    if isinstance(value, str) and value:
+        return normalize_gateway_host(value)
+    if isinstance(value, dict):
+        for key in ("base_domain", "baseDomain", "default_gateway_domain", "defaultGatewayDomain", "cname"):
+            nested = value.get(key)
+            if isinstance(nested, str) and nested:
+                return normalize_gateway_host(nested)
+
+    for nested_key in ("app", "cvm"):
+        nested = payload.get(nested_key)
+        if isinstance(nested, dict):
+            try:
+                return gateway_host_from_payload(nested)
+            except PhalaError as exc:
+                if exc.code != "invalid_response" or exc.field != "gateway_host":
+                    raise
+
+    raise PhalaError("invalid_response", field="gateway_host")
+
+
+def normalize_gateway_host(gateway_host: str) -> str:
+    return gateway_host.removeprefix("_.")
 
 
 def normalize_status(raw_status: str) -> str:

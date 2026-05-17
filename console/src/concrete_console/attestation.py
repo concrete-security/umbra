@@ -20,6 +20,7 @@ ATTESTATION_ERROR_CODES = {
 }
 HEX64_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 HEX96_RE = re.compile(r"^[0-9a-fA-F]{96}$")
+IMAGE_MEASUREMENT_RE = HEX96_RE
 
 
 @dataclass(frozen=True)
@@ -104,17 +105,23 @@ def build_dev_cvm_attestation_request(snapshot: Any) -> dict[str, Any]:
             "ATTESTATION_QUOTE_INVALID",
             {"reason": "policy_bundle_invalid"},
         )
+    policy: dict[str, Any] = {
+        "type": "dstack_tdx",
+        "expected_image_measurement": _row_value(snapshot, "expected_image_measurement"),
+        "app_compose": {"docker_compose_file": compose_template},
+        "rtmr3_binding": rtmr3_binding,
+    }
+    expected_bootchain = policy_bundle.get("expected_bootchain")
+    if isinstance(expected_bootchain, dict) and expected_bootchain:
+        policy["expected_bootchain"] = expected_bootchain
+    os_image_hash = policy_bundle.get("os_image_hash")
+    if isinstance(os_image_hash, str) and os_image_hash:
+        policy["os_image_hash"] = os_image_hash
     return {
         "kind": "dev_cvm",
         "fqdn": _row_value(snapshot, "fqdn"),
-        "policy": {
-            "type": "dstack_tdx",
-            "expected_image_measurement": _row_value(snapshot, "expected_image_measurement"),
-            "expected_bootchain": policy_bundle.get("expected_bootchain"),
-            "os_image_hash": policy_bundle.get("os_image_hash"),
-            "app_compose": {"docker_compose_file": compose_template},
-            "rtmr3_binding": rtmr3_binding,
-        },
+        **attestation_connect_host_payload(metadata),
+        "policy": policy,
     }
 
 
@@ -139,6 +146,7 @@ def build_security_cvm_attestation_request(
     return {
         "kind": "security_cvm",
         "fqdn": _row_value(snapshot, "fqdn"),
+        **attestation_connect_host_payload(json_payload(_row_value_optional(snapshot, "metadata") or {})),
         "policy": {
             "type": "dstack_tdx",
             "expected_image_measurement": _row_value(snapshot, "expected_image_measurement"),
@@ -152,6 +160,19 @@ def build_security_cvm_attestation_request(
             },
         },
     }
+
+
+def attestation_connect_host_payload(metadata: Any) -> dict[str, str]:
+    if not isinstance(metadata, dict):
+        return {}
+    connect_host = metadata.get("passthrough_host") or metadata.get("connect_host")
+    if not isinstance(connect_host, str) or not connect_host.strip():
+        policy_bundle = metadata.get("policy_bundle")
+        if isinstance(policy_bundle, dict):
+            connect_host = policy_bundle.get("connect_host")
+    if not isinstance(connect_host, str) or not connect_host.strip():
+        return {}
+    return {"connect_host": connect_host.strip()}
 
 
 def verifier_error_from_output(stdout: bytes) -> AttestationVerifierError:
@@ -178,7 +199,7 @@ def parse_attestation_report(stdout: bytes) -> AttestationReport:
         raise AttestationVerifierError("ATTESTATION_QUOTE_INVALID", {"reason": "malformed_verifier_output"})
     image_measurement = payload.get("image_measurement")
     rtmr3_digest = payload.get("rtmr3_digest")
-    if not isinstance(image_measurement, str) or not HEX64_RE.fullmatch(image_measurement):
+    if not isinstance(image_measurement, str) or not IMAGE_MEASUREMENT_RE.fullmatch(image_measurement):
         raise AttestationVerifierError(
             "ATTESTATION_QUOTE_INVALID",
             {"reason": "invalid_image_measurement"},
@@ -197,3 +218,12 @@ def _row_value(row: Any, key: str) -> Any:
     if isinstance(row, dict):
         return row[key]
     return row[key]
+
+
+def _row_value_optional(row: Any, key: str) -> Any:
+    if isinstance(row, dict):
+        return row.get(key)
+    try:
+        return row[key]
+    except (KeyError, TypeError):
+        return None

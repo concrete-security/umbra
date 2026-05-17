@@ -103,6 +103,7 @@ def test_generate_policy_invokes_shade_policy_generate(tmp_path: Path) -> None:
     result = run(
         client.generate_policy(
             domain="cvm.example.com",
+            connect_host="app-443s.dstack.example.com",
             deploy_compose_yaml="services:\n  app:\n    image: example/app@sha256:abc\n",
         )
     )
@@ -111,6 +112,7 @@ def test_generate_policy_invokes_shade_policy_generate(tmp_path: Path) -> None:
     entry = read_log(log_path)[0]
     assert entry["args"][:6] == ["run", "--project", str(shade_dir), "shade", "policy", "generate"]
     assert "--allowed-tcb-status" in entry["args"]
+    assert entry["args"][entry["args"].index("--connect-host") + 1] == "app-443s.dstack.example.com"
 
 
 def test_build_with_policy_uses_generated_compose(tmp_path: Path) -> None:

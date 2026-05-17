@@ -62,6 +62,7 @@ def write_fake_connect_helper(directory: Path, relay_port: int) -> Path:
                 "async def main():",
                 "    request = json.loads(sys.stdin.readline())",
                 "    assert request['fqdn'] == 'sc.example.com'",
+                "    assert request['connect_host'] == 'app-443s.dstack.example.com'",
                 "    assert request['port'] == 443",
                 "    assert request['policy_path']",
                 "    assert request['ca_cert_path']",
@@ -85,6 +86,7 @@ def write_fake_connect_helper(directory: Path, relay_port: int) -> Path:
 
 def set_forwarder_env(helper: Path) -> None:
     os.environ["SECURITY_CVM_FQDN"] = "sc.example.com"
+    os.environ["SECURITY_CVM_CONNECT_HOST"] = "app-443s.dstack.example.com"
     os.environ["SECURITY_CVM_PROXY_PORT"] = "8080"
     os.environ["SECURITY_CVM_PROXY_TOKEN"] = "real-proxy-token"
     os.environ["SECURITY_CVM_CA_CERT_B64"] = base64.b64encode(b"-----BEGIN CERTIFICATE-----\nMIIB\n").decode("ascii")

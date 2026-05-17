@@ -92,7 +92,8 @@ struct OperationProgress {
 #[derive(Debug, Deserialize, Serialize)]
 struct SecurityCvmProvisionResult {
     security_cvm: SecurityCvm,
-    ingest_token: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ingest_token: Option<String>,
     ca_export_token: String,
 }
 
@@ -552,7 +553,9 @@ fn print_launch_result(result: &SecurityCvmProvisionResult, json_output: bool) {
             serde_json::to_string_pretty(result).expect("Security CVM launch output serializes")
         );
     } else {
-        println!("ingest_token={}", result.ingest_token);
+        if let Some(ingest_token) = &result.ingest_token {
+            println!("ingest_token={ingest_token}");
+        }
         println!("ca_export_token={}", result.ca_export_token);
         println!("{}", security_cvm_summary(&result.security_cvm));
     }

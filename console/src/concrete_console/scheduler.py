@@ -712,20 +712,29 @@ async def execute_security_cvm_phala_deploy_operation(operation_id: Any) -> None
     if provider_app_id(_row_value(snapshot, "metadata")) is not None:
         await advance_security_cvm_provision_step(operation_id, "cf_txt_create")
         return
-    if not security_cvm_token_stash_available(snapshot):
-        await mark_security_cvm_provision_failed(operation_id, code="CA_EXPORT_TTL_EXPIRED", details={})
-        return
-
     from concrete_console.shade_provider.shade import ShadeClient, ShadeError
     from concrete_console.tee_provider.phala import PhalaClient, PhalaError
 
-    env = build_security_cvm_provision_env(snapshot)
+    env: dict[str, str] | None = None
+    bearers: dict[str, str] | None = None
     try:
         name = security_cvm_provider_name(_row_value(snapshot, "id"))
-        shade_result = await ShadeClient.from_settings().build_with_policy(
+        shade_result = await ShadeClient.from_settings().build(
             shade_config_yaml=render_security_cvm_shade_config(snapshot, name=name),
             app_compose_yaml=_row_value(snapshot, "compose_config"),
-            domain=_row_value(snapshot, "fqdn"),
+        )
+        bearers = mint_security_cvm_provision_bearers()
+        await persist_security_cvm_provision_bearers(
+            operation_id,
+            snapshot,
+            ingest_token_hash=bearers["ingest_token_hash"],
+            ca_export_token_hash=bearers["ca_export_token_hash"],
+            ca_export_token_plaintext=bearers["ca_export_token"],
+        )
+        env = build_security_cvm_provision_env(
+            snapshot,
+            ingest_token=bearers["ingest_token"],
+            ca_export_token=bearers["ca_export_token"],
         )
         deploy_result = await PhalaClient.from_settings().deploy(
             name=name,
@@ -747,8 +756,12 @@ async def execute_security_cvm_phala_deploy_operation(operation_id: Any) -> None
         )
         return
     finally:
-        env["CONSOLE_INGEST_TOKEN"] = ""
-        env["CA_EXPORT_TOKEN"] = ""
+        if env is not None:
+            env["CONSOLE_INGEST_TOKEN"] = ""
+            env["CA_EXPORT_TOKEN"] = ""
+        if bearers is not None:
+            bearers["ingest_token"] = ""
+            bearers["ca_export_token"] = ""
 
     await persist_security_cvm_phala_result(
         operation_id,
@@ -758,7 +771,7 @@ async def execute_security_cvm_phala_deploy_operation(operation_id: Any) -> None
             app_id=deploy_result.app_id,
             gateway_host=deploy_result.gateway_host,
             status=deploy_result.status,
-            atls_policy=shade_result.policy,
+            deploy_compose_yaml=shade_result.compose_yaml,
         ),
     )
 
@@ -913,6 +926,26 @@ async def run_security_cvm_provision_attestation_verifier(operation_id: Any, sna
         )
         return True
 
+    from concrete_console.shade_provider.shade import ShadeClient, ShadeError
+
+    try:
+        deploy_compose_yaml = deployed_compose_from_metadata(_row_value(snapshot, "metadata"))
+        if deploy_compose_yaml is None:
+            raise ShadeError("missing_deploy_compose", field="metadata.deploy_compose_yaml")
+        policy_result = await ShadeClient.from_settings().generate_policy(
+            domain=_row_value(snapshot, "fqdn"),
+            deploy_compose_yaml=deploy_compose_yaml,
+            connect_host=provider_passthrough_host(_row_value(snapshot, "metadata")),
+        )
+    except ShadeError as exc:
+        await compensate_security_cvm_provision_resources(snapshot)
+        await mark_security_cvm_provision_failed(
+            operation_id,
+            code="SHADE_BUILD_FAILED",
+            details={"adapter": "shade", "reason": exc.code},
+        )
+        return True
+
     async with pool.acquire() as conn:
         async with conn.transaction():
             verified_at = datetime.now(timezone.utc)
@@ -922,6 +955,7 @@ async def run_security_cvm_provision_attestation_verifier(operation_id: Any, sna
                 SET image_measurement = $2,
                     rtmr3_digest = $3,
                     attestation_verified_at = $4,
+                    metadata = $5::jsonb,
                     updated_at = now()
                 WHERE id = $1
                   AND state = 'PROVISIONING'
@@ -930,6 +964,7 @@ async def run_security_cvm_provision_attestation_verifier(operation_id: Any, sna
                 report.image_measurement,
                 report.rtmr3_digest,
                 verified_at,
+                json.dumps(metadata_with_atls_policy(_row_value(snapshot, "metadata"), policy_result.policy)),
             )
             await insert_audit_event(
                 conn,
@@ -964,12 +999,13 @@ async def execute_security_cvm_fetch_ca_operation(operation_id: Any) -> None:
     if _row_value(snapshot, "ca_cert_pem"):
         await advance_security_cvm_provision_step(operation_id, "finalise")
         return
-    if not security_cvm_token_stash_available(snapshot):
+    if not security_cvm_ca_export_stash_available(snapshot):
         await mark_security_cvm_provision_failed(operation_id, code="CA_EXPORT_TTL_EXPIRED", details={})
         return
     try:
         ca_pem = await fetch_security_cvm_ca_pem(
             fqdn=_row_value(snapshot, "fqdn"),
+            connect_host=provider_passthrough_host(_row_value(snapshot, "metadata")),
             ca_export_token=_row_value(snapshot, "ca_export_token_plaintext"),
         )
     except SecurityCVMCAFetchError as exc:
@@ -992,10 +1028,9 @@ async def execute_security_cvm_finalise_operation(operation_id: Any) -> None:
     if not _row_value(snapshot, "ca_cert_pem"):
         await mark_security_cvm_provision_failed(operation_id, code="CA_FETCH_FAILED", details={"state": "missing_ca_cert"})
         return
-    if not security_cvm_token_stash_available(snapshot):
+    if not security_cvm_ca_export_stash_available(snapshot):
         await mark_security_cvm_provision_failed(operation_id, code="CA_EXPORT_TTL_EXPIRED", details={})
         return
-    result_ingest_token = _row_value(snapshot, "ingest_token_plaintext")
     result_ca_export_token = _row_value(snapshot, "ca_export_token_plaintext")
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -1004,8 +1039,6 @@ async def execute_security_cvm_finalise_operation(operation_id: Any) -> None:
                 UPDATE security_cvms
                 SET state = 'RUNNING',
                     error_reason = NULL,
-                    ingest_token_plaintext = NULL,
-                    ingest_token_stashed_at = NULL,
                     ca_export_token_plaintext = NULL,
                     ca_export_token_stashed_at = NULL,
                     updated_at = now()
@@ -1017,7 +1050,6 @@ async def execute_security_cvm_finalise_operation(operation_id: Any) -> None:
             security_cvm_payload = await fetch_security_cvm_resource_for_scheduler(conn, _row_value(snapshot, "id"))
             result = {
                 "security_cvm": security_cvm_payload,
-                "ingest_token": result_ingest_token,
                 "ca_export_token": result_ca_export_token,
             }
             await insert_audit_event(
@@ -1095,10 +1127,9 @@ async def execute_cvm_launch_phala_deploy_operation(operation_id: Any) -> None:
             proxy_token=proxy_token,
         )
         name = cvm_launch_provider_name(_row_value(snapshot, "cvm_id"))
-        shade_result = await ShadeClient.from_settings().build_with_policy(
+        shade_result = await ShadeClient.from_settings().build(
             shade_config_yaml=render_dev_cvm_shade_config(snapshot, name=name),
             app_compose_yaml=_row_value(snapshot, "compose_config"),
-            domain=_row_value(snapshot, "fqdn"),
         )
         deploy_result = await PhalaClient.from_settings().deploy(
             name=name,
@@ -1131,8 +1162,9 @@ async def execute_cvm_launch_phala_deploy_operation(operation_id: Any) -> None:
         status=deploy_result.status,
         policy_bundle=build_cvm_policy_bundle(
             snapshot,
-            shade_policy=shade_result.policy,
             rtmr3_binding=binding,
+            deploy_compose_yaml=shade_result.compose_yaml,
+            connect_host=phala_passthrough_host(deploy_result.app_id, deploy_result.gateway_host),
         ),
     )
     await persist_cvm_launch_phala_result(
@@ -1288,6 +1320,44 @@ async def run_cvm_launch_attestation_verifier(operation_id: Any, snapshot: Any) 
         )
         return True
 
+    from concrete_console.shade_provider.shade import ShadeClient, ShadeError
+
+    try:
+        metadata = json_payload(_row_value(snapshot, "metadata") or {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+        policy_bundle = metadata.get("policy_bundle")
+        if not isinstance(policy_bundle, dict):
+            raise ShadeError("missing_policy_bundle", field="metadata.policy_bundle")
+        deploy_compose_yaml = deployed_compose_from_metadata(metadata)
+        if deploy_compose_yaml is None:
+            raise ShadeError("missing_deploy_compose", field="metadata.policy_bundle.deploy_compose_yaml")
+        rtmr3_binding = policy_bundle.get("rtmr3_binding")
+        if not isinstance(rtmr3_binding, dict):
+            raise ShadeError("missing_rtmr3_binding", field="metadata.policy_bundle.rtmr3_binding")
+        policy_result = await ShadeClient.from_settings().generate_policy(
+            domain=_row_value(snapshot, "fqdn"),
+            deploy_compose_yaml=deploy_compose_yaml,
+            connect_host=provider_passthrough_host(metadata),
+        )
+        updated_metadata = metadata_with_policy_bundle(
+            metadata,
+            build_cvm_policy_bundle(
+                snapshot,
+                shade_policy=policy_result.policy,
+                rtmr3_binding=rtmr3_binding,
+                deploy_compose_yaml=deploy_compose_yaml,
+            ),
+        )
+    except ShadeError as exc:
+        await compensate_cvm_launch_resources(snapshot)
+        await mark_cvm_launch_failed(
+            operation_id,
+            code="SHADE_BUILD_FAILED",
+            details={"adapter": "shade", "reason": exc.code},
+        )
+        return True
+
     pool = await get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -1298,6 +1368,7 @@ async def run_cvm_launch_attestation_verifier(operation_id: Any, snapshot: Any) 
                 SET image_measurement = $2,
                     rtmr3_digest = $3,
                     attestation_verified_at = $4,
+                    metadata = $5::jsonb,
                     updated_at = now()
                 WHERE id = $1
                   AND state = 'PROVISIONING'
@@ -1306,6 +1377,7 @@ async def run_cvm_launch_attestation_verifier(operation_id: Any, snapshot: Any) 
                 report.image_measurement,
                 report.rtmr3_digest,
                 verified_at,
+                json.dumps(updated_metadata),
             )
             await insert_audit_event(
                 conn,
@@ -1798,8 +1870,6 @@ async def fetch_security_cvm_provision_snapshot(conn: Any, operation_id: Any) ->
             sc.cname_dns_record_id,
             sc.proxy_port,
             sc.ca_cert_pem,
-            sc.ingest_token_plaintext,
-            sc.ingest_token_stashed_at,
             sc.ca_export_token_plaintext,
             sc.ca_export_token_stashed_at,
             sc.expected_image_measurement,
@@ -1952,6 +2022,11 @@ def build_cvm_launch_env(
         "AUTHORIZED_SSH_KEYS_B64": b64_text(authorized_keys),
         "SANDBOX_ENV_PLACEHOLDERS_B64": b64_text(sandbox_env),
     }
+    security_cvm_connect_host = provider_passthrough_host(_row_value(snapshot, "security_cvm_metadata"))
+    if security_cvm_connect_host:
+        env["SECURITY_CVM_CONNECT_HOST"] = security_cvm_connect_host
+    env.update(shade_acme_dns01_env())
+    env.update(dstack_docker_pull_env())
     return env, binding
 
 
@@ -2043,16 +2118,87 @@ def render_security_cvm_shade_config(snapshot: Any, *, name: str) -> str:
     )
 
 
-def build_security_cvm_provision_env(snapshot: Any) -> dict[str, str]:
-    raw = load_settings().raw
+def mint_security_cvm_provision_bearers() -> dict[str, str]:
+    ingest_token = secrets.token_urlsafe(32)
+    ca_export_token = secrets.token_urlsafe(32)
     return {
+        "ingest_token": ingest_token,
+        "ca_export_token": ca_export_token,
+        "ingest_token_hash": sha256_text(ingest_token),
+        "ca_export_token_hash": sha256_text(ca_export_token),
+    }
+
+
+def build_security_cvm_provision_env(snapshot: Any, *, ingest_token: str, ca_export_token: str) -> dict[str, str]:
+    raw = load_settings().raw
+    env = {
         "CONSOLE_URL": raw.get("CONSOLE_URL", "http://localhost:8000"),
         "ENTITY_ID": str(_row_value(snapshot, "entity_id")),
         "SC_ID": str(_row_value(snapshot, "id")),
         "SECURITY_CVM_FQDN": _row_value(snapshot, "fqdn"),
-        "CONSOLE_INGEST_TOKEN": _row_value(snapshot, "ingest_token_plaintext"),
-        "CA_EXPORT_TOKEN": _row_value(snapshot, "ca_export_token_plaintext"),
+        "CONSOLE_INGEST_TOKEN": ingest_token,
+        "CA_EXPORT_TOKEN": ca_export_token,
     }
+    env.update(shade_acme_dns01_env(raw))
+    env.update(dstack_docker_pull_env(raw))
+    return env
+
+
+def shade_acme_dns01_env(raw: dict[str, str] | None = None) -> dict[str, str]:
+    raw = load_settings().raw if raw is None else raw
+    token = raw.get("SHADE_CLOUDFLARE_API_TOKEN", "").strip() or raw.get("CLOUDFLARE_API_TOKEN", "").strip()
+    if not token:
+        return {}
+    propagation_seconds = raw.get("CLOUDFLARE_PROPAGATION_SECONDS", "").strip() or "60"
+    return {
+        "CLOUDFLARE_API_TOKEN": token,
+        "CLOUDFLARE_PROPAGATION_SECONDS": propagation_seconds,
+    }
+
+
+def dstack_docker_pull_env(raw: dict[str, str] | None = None) -> dict[str, str]:
+    raw = load_settings().raw if raw is None else raw
+    registry = raw.get("DSTACK_DOCKER_REGISTRY", "").strip() or raw.get("DOCKER_REGISTRY", "").strip()
+    username = raw.get("DSTACK_DOCKER_USERNAME", "").strip() or raw.get("GHCR_USER", "").strip()
+    password = raw.get("DSTACK_DOCKER_PASSWORD", "").strip() or raw.get("GHCR_TOKEN", "").strip()
+    env: dict[str, str] = {}
+    if registry:
+        env["DSTACK_DOCKER_REGISTRY"] = phala_docker_registry_value(registry)
+    if username and password:
+        env["DSTACK_DOCKER_USERNAME"] = username
+        env["DSTACK_DOCKER_PASSWORD"] = password
+    return env
+
+
+def phala_docker_registry_value(registry: str) -> str:
+    if registry == "ghcr.io":
+        # Phala's pre-launch GHCR verifier treats digest refs as tags when this value is exactly "ghcr.io".
+        # Docker login still authenticates pulls for ghcr.io when the registry is passed with a scheme.
+        return "https://ghcr.io"
+    return registry
+
+
+def phala_passthrough_host(app_id: str, gateway_host: str) -> str:
+    return f"{app_id}-443s.{gateway_host}"
+
+
+def provider_passthrough_host(metadata: Any) -> str | None:
+    current = json_payload(metadata or {})
+    if not isinstance(current, dict):
+        return None
+    value = current.get("passthrough_host") or current.get("connect_host")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    policy_bundle = current.get("policy_bundle")
+    if isinstance(policy_bundle, dict):
+        value = policy_bundle.get("connect_host")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    app_id = current.get("app_id")
+    gateway_host = current.get("gateway_host")
+    if isinstance(app_id, str) and app_id and isinstance(gateway_host, str) and gateway_host:
+        return phala_passthrough_host(app_id, gateway_host)
+    return None
 
 
 def security_cvm_provision_metadata(
@@ -2061,40 +2207,88 @@ def security_cvm_provision_metadata(
     app_id: str,
     gateway_host: str,
     status: str,
-    atls_policy: dict[str, Any],
+    deploy_compose_yaml: str,
+    atls_policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    passthrough_host = phala_passthrough_host(app_id, gateway_host)
+    metadata: dict[str, Any] = {
         "provider": "phala",
         "name": name,
         "app_id": app_id,
         "gateway_host": gateway_host,
+        "passthrough_host": passthrough_host,
         "status": status,
-        "atls_policy": atls_policy,
+        "deploy_compose_yaml": deploy_compose_yaml,
     }
+    if atls_policy is not None:
+        metadata["atls_policy"] = atls_policy
+    return metadata
+
+
+def metadata_with_atls_policy(metadata: Any, policy: dict[str, Any]) -> dict[str, Any]:
+    current = json_payload(metadata or {})
+    if not isinstance(current, dict):
+        current = {}
+    updated = dict(current)
+    updated["atls_policy"] = policy
+    return updated
+
+
+def metadata_with_policy_bundle(metadata: Any, policy_bundle: dict[str, Any]) -> dict[str, Any]:
+    current = json_payload(metadata or {})
+    if not isinstance(current, dict):
+        current = {}
+    updated = dict(current)
+    updated["policy_bundle"] = policy_bundle
+    return updated
+
+
+def deployed_compose_from_metadata(metadata: Any) -> str | None:
+    current = json_payload(metadata or {})
+    if not isinstance(current, dict):
+        return None
+    deploy_compose_yaml = current.get("deploy_compose_yaml")
+    if isinstance(deploy_compose_yaml, str) and deploy_compose_yaml:
+        return deploy_compose_yaml
+    policy_bundle = current.get("policy_bundle")
+    if isinstance(policy_bundle, dict):
+        deploy_compose_yaml = policy_bundle.get("deploy_compose_yaml")
+        if isinstance(deploy_compose_yaml, str) and deploy_compose_yaml:
+            return deploy_compose_yaml
+    return None
 
 
 def build_cvm_policy_bundle(
     snapshot: Any,
     *,
-    shade_policy: dict[str, Any],
     rtmr3_binding: dict[str, Any],
+    deploy_compose_yaml: str,
+    shade_policy: dict[str, Any] | None = None,
+    connect_host: str | None = None,
 ) -> dict[str, Any]:
+    shade_policy = shade_policy or {}
     app_compose = json_payload(shade_policy.get("app_compose", {}))
     if not isinstance(app_compose, dict):
         app_compose = {}
     expected_bootchain = json_payload(shade_policy.get("expected_bootchain", {}))
     if not isinstance(expected_bootchain, dict):
         expected_bootchain = {}
-    return {
+    bundle: dict[str, Any] = {
         "cvm_id": str(_row_value(snapshot, "cvm_id")),
         "policy_template_version": str(shade_policy.get("policy_template_version", "shade")),
         "compose_template": app_compose.get("docker_compose_file") or _row_value(snapshot, "compose_config"),
-        "expected_bootchain": expected_bootchain,
-        "os_image_hash": shade_policy.get("os_image_hash") or _row_value(snapshot, "expected_image_measurement"),
+        "deploy_compose_yaml": deploy_compose_yaml,
         "rtmr3_binding": rtmr3_binding,
         "security_cvm_fqdn": _row_value(snapshot, "security_cvm_fqdn"),
         "issued_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
+    if connect_host:
+        bundle["connect_host"] = connect_host
+    if expected_bootchain:
+        bundle["expected_bootchain"] = expected_bootchain
+    if isinstance(shade_policy.get("os_image_hash"), str):
+        bundle["os_image_hash"] = shade_policy["os_image_hash"]
+    return bundle
 
 
 def cvm_launch_metadata(
@@ -2105,11 +2299,13 @@ def cvm_launch_metadata(
     status: str,
     policy_bundle: dict[str, Any],
 ) -> dict[str, Any]:
+    passthrough_host = phala_passthrough_host(app_id, gateway_host)
     return {
         "provider": "phala",
         "name": name,
         "app_id": app_id,
         "gateway_host": gateway_host,
+        "passthrough_host": passthrough_host,
         "status": status,
         "policy_bundle": policy_bundle,
     }
@@ -2144,6 +2340,57 @@ async def persist_security_cvm_phala_result(operation_id: Any, snapshot: Any, *,
             await advance_security_cvm_provision_step_with_conn(conn, operation_id, "cf_txt_create")
 
 
+async def persist_security_cvm_provision_bearers(
+    operation_id: Any,
+    snapshot: Any,
+    *,
+    ingest_token_hash: str,
+    ca_export_token_hash: str,
+    ca_export_token_plaintext: str,
+) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                """
+                UPDATE service_principal_tokens
+                SET deleted_at = now(),
+                    deleted_by = $2
+                WHERE principal_type = 'security_cvm'
+                  AND principal_id = $1
+                  AND purpose IN ('INGEST', 'CA_EXPORT')
+                  AND deleted_at IS NULL
+                """,
+                _row_value(snapshot, "id"),
+                _row_value(snapshot, "actor_id"),
+            )
+            await conn.executemany(
+                """
+                INSERT INTO service_principal_tokens (
+                    principal_type,
+                    principal_id,
+                    purpose,
+                    token_hash
+                )
+                VALUES ('security_cvm', $1, $2, $3)
+                """,
+                [
+                    (_row_value(snapshot, "id"), "INGEST", ingest_token_hash),
+                    (_row_value(snapshot, "id"), "CA_EXPORT", ca_export_token_hash),
+                ],
+            )
+            await conn.execute(
+                """
+                UPDATE security_cvms
+                SET ca_export_token_plaintext = $2,
+                    ca_export_token_stashed_at = now(),
+                    updated_at = now()
+                WHERE id = $1
+                  AND state = 'PROVISIONING'
+                """,
+                _row_value(snapshot, "id"),
+                ca_export_token_plaintext,
+            )
 async def persist_security_cvm_dns_record(operation_id: Any, snapshot: Any, *, field: str, record_id: str) -> None:
     if field == "txt":
         column = "txt_dns_record_id"
@@ -2299,9 +2546,7 @@ async def scrub_security_cvm_plaintext_stash_with_conn(conn: Any, security_cvm_i
     await conn.execute(
         """
         UPDATE security_cvms
-        SET ingest_token_plaintext = NULL,
-            ingest_token_stashed_at = NULL,
-            ca_export_token_plaintext = NULL,
+        SET ca_export_token_plaintext = NULL,
             ca_export_token_stashed_at = NULL,
             updated_at = now()
         WHERE id = $1
@@ -2515,41 +2760,59 @@ class SecurityCVMCAFetchError(RuntimeError):
         self.http_status = http_status
 
 
-async def fetch_security_cvm_ca_pem(*, fqdn: str, ca_export_token: str) -> str:
-    import httpx
+async def fetch_security_cvm_ca_pem(*, fqdn: str, ca_export_token: str, connect_host: str | None = None) -> str:
+    import ssl
 
+    target_host = connect_host or fqdn
+    request = (
+        "GET /ca.pem HTTP/1.1\r\n"
+        f"Host: {fqdn}\r\n"
+        f"Authorization: Bearer {ca_export_token}\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+    )
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.get(
-                f"https://{fqdn}/ca.pem",
-                headers={"Authorization": f"Bearer {ca_export_token}"},
-            )
-    except httpx.HTTPError as exc:
+        context = ssl.create_default_context()
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(target_host, 443, ssl=context, server_hostname=fqdn),
+            timeout=15.0,
+        )
+        writer.write(request.encode("utf-8"))
+        await writer.drain()
+        raw_response = await asyncio.wait_for(reader.read(), timeout=15.0)
+        writer.close()
+        await writer.wait_closed()
+    except (OSError, TimeoutError, ssl.SSLError) as exc:
         raise SecurityCVMCAFetchError(http_status=0) from exc
-    if response.status_code != 200:
-        raise SecurityCVMCAFetchError(http_status=response.status_code)
-    body = response.text
+    header_bytes, separator, body_bytes = raw_response.partition(b"\r\n\r\n")
+    if not separator:
+        raise SecurityCVMCAFetchError(http_status=0)
+    status_line = header_bytes.splitlines()[0].decode("iso-8859-1", errors="replace")
+    try:
+        status_code = int(status_line.split()[1])
+    except (IndexError, ValueError) as exc:
+        raise SecurityCVMCAFetchError(http_status=0) from exc
+    if status_code != 200:
+        raise SecurityCVMCAFetchError(http_status=status_code)
+    body = body_bytes.decode("utf-8", errors="replace")
     if "-----BEGIN CERTIFICATE-----" not in body or "-----END CERTIFICATE-----" not in body:
         raise SecurityCVMCAFetchError(http_status=200)
     return body
 
 
-def security_cvm_token_stash_available(snapshot: Any) -> bool:
-    ingest_token = _row_value(snapshot, "ingest_token_plaintext")
+def security_cvm_ca_export_stash_available(snapshot: Any) -> bool:
     ca_export_token = _row_value(snapshot, "ca_export_token_plaintext")
-    ingest_stashed_at = _row_value(snapshot, "ingest_token_stashed_at")
     ca_export_stashed_at = _row_value(snapshot, "ca_export_token_stashed_at")
     if not all(
         [
-            isinstance(ingest_token, str) and ingest_token,
             isinstance(ca_export_token, str) and ca_export_token,
-            isinstance(ingest_stashed_at, datetime),
             isinstance(ca_export_stashed_at, datetime),
         ]
     ):
         return False
-    oldest_stash = min(_as_utc(ingest_stashed_at), _as_utc(ca_export_stashed_at))
-    return datetime.now(timezone.utc) - oldest_stash <= timedelta(seconds=SECURITY_CVM_TOKEN_PLAINTEXT_TTL_SECONDS)
+    return datetime.now(timezone.utc) - _as_utc(ca_export_stashed_at) <= timedelta(
+        seconds=SECURITY_CVM_TOKEN_PLAINTEXT_TTL_SECONDS
+    )
 
 
 def provider_gateway_host(metadata: Any) -> str | None:

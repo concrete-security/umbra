@@ -907,14 +907,24 @@ fn policy_document(bundle: &PolicyBundle) -> Value {
     app_compose
         .entry("runner".to_string())
         .or_insert_with(|| Value::String("docker-compose".to_string()));
-    json!({
+    let mut policy = json!({
         "type": "dstack_tdx",
         "allowed_tcb_status": ["UpToDate"],
         "expected_bootchain": bundle.expected_bootchain.clone(),
         "os_image_hash": bundle.os_image_hash.clone(),
         "app_compose": Value::Object(app_compose),
         "rtmr3_binding": bundle.rtmr3_binding.clone(),
-    })
+    });
+    if let Some(connect_host) = bundle
+        .extra
+        .get("connect_host")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        policy["connect_host"] = Value::String(connect_host.to_string());
+    }
+    policy
 }
 
 fn error_for_response(response: Response, action: &str) -> (ExitStatus, String) {
@@ -1149,12 +1159,23 @@ mod tests {
                 "security_cvm_ca_cert_sha256": "0".repeat(64),
                 "authorised_ssh_keys_sha256": "1".repeat(64),
             }),
-            extra: Map::new(),
+            extra: {
+                let mut extra = Map::new();
+                extra.insert(
+                    "connect_host".to_string(),
+                    Value::String("app-443s.dstack.example.com".to_string()),
+                );
+                extra
+            },
         };
 
         let policy = policy_document(&bundle);
 
         assert_eq!(policy["type"], "dstack_tdx");
+        assert_eq!(
+            policy["connect_host"],
+            Value::String("app-443s.dstack.example.com".to_string())
+        );
         assert_eq!(
             policy["app_compose"]["docker_compose_file"],
             Value::String("services: {}".to_string())

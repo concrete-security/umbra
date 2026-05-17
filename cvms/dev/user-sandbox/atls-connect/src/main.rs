@@ -17,7 +17,8 @@ async fn main() {
 async fn run() -> Result<()> {
     let request = read_request().await?;
     let policy = load_policy(&request.policy_path)?;
-    let tcp = TcpStream::connect((request.fqdn.as_str(), request.port))
+    let connect_host = request.connect_host.as_deref().unwrap_or(&request.fqdn);
+    let tcp = TcpStream::connect((connect_host, request.port))
         .await
         .map_err(|error| HelperError::new(format!("failed to connect to Security CVM: {error}")))?;
     let (mut tls_stream, _report) = atlas_rs::atls_connect(tcp, &request.fqdn, policy, None)
