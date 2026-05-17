@@ -2783,7 +2783,7 @@ async def fetch_security_cvm_ca_pem(*, fqdn: str, ca_export_token: str, connect_
             ssl_object = writer.get_extra_info("ssl_object")
             if ssl_object is None:
                 raise SecurityCVMCAFetchError(http_status=0)
-            ssl.match_hostname(ssl_object.getpeercert(), fqdn)
+            verify_peer_certificate_hostname(ssl_object.getpeercert(), fqdn)
         writer.write(request.encode("utf-8"))
         await writer.drain()
         raw_response = await asyncio.wait_for(reader.read(), timeout=15.0)
@@ -2805,6 +2805,31 @@ async def fetch_security_cvm_ca_pem(*, fqdn: str, ca_export_token: str, connect_
     if "-----BEGIN CERTIFICATE-----" not in body or "-----END CERTIFICATE-----" not in body:
         raise SecurityCVMCAFetchError(http_status=200)
     return body
+
+
+def verify_peer_certificate_hostname(peer_cert: dict[str, Any], hostname: str) -> None:
+    hostname = hostname.rstrip(".").lower()
+    names: list[str] = []
+    for key, value in peer_cert.get("subjectAltName", ()):
+        if key == "DNS" and isinstance(value, str):
+            names.append(value)
+    if not names:
+        for subject in peer_cert.get("subject", ()):
+            for key, value in subject:
+                if key == "commonName" and isinstance(value, str):
+                    names.append(value)
+    if not any(dns_name_matches(pattern, hostname) for pattern in names):
+        raise SecurityCVMCAFetchError(http_status=0)
+
+
+def dns_name_matches(pattern: str, hostname: str) -> bool:
+    pattern = pattern.rstrip(".").lower()
+    if pattern == hostname:
+        return True
+    if not pattern.startswith("*."):
+        return False
+    suffix = pattern[1:]
+    return hostname.endswith(suffix) and hostname.count(".") == pattern.count(".")
 
 
 def security_cvm_ca_export_stash_available(snapshot: Any) -> bool:
