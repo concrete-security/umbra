@@ -5,6 +5,7 @@ use std::{
 
 use clap::{CommandFactory, Parser};
 
+mod atls;
 mod cli;
 mod commands;
 mod config;

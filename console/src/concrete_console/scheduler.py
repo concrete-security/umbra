@@ -2773,10 +2773,17 @@ async def fetch_security_cvm_ca_pem(*, fqdn: str, ca_export_token: str, connect_
     )
     try:
         context = ssl.create_default_context()
+        if connect_host:
+            context.check_hostname = False
         reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(target_host, 443, ssl=context, server_hostname=fqdn),
+            asyncio.open_connection(target_host, 443, ssl=context, server_hostname=target_host),
             timeout=15.0,
         )
+        if connect_host:
+            ssl_object = writer.get_extra_info("ssl_object")
+            if ssl_object is None:
+                raise SecurityCVMCAFetchError(http_status=0)
+            ssl.match_hostname(ssl_object.getpeercert(), fqdn)
         writer.write(request.encode("utf-8"))
         await writer.drain()
         raw_response = await asyncio.wait_for(reader.read(), timeout=15.0)

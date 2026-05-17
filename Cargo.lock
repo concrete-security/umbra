@@ -402,10 +402,13 @@ name = "concrete-atls-connect"
 version = "0.1.0"
 dependencies = [
  "atlas-rs",
+ "rustls",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-rustls",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -421,15 +424,18 @@ dependencies = [
  "getrandom 0.3.4",
  "libc",
  "reqwest",
+ "rustls",
  "serde",
  "serde_json",
  "sha1",
  "sha2",
  "tokio",
+ "tokio-rustls",
  "toml",
  "url",
  "uuid",
  "webbrowser",
+ "webpki-roots 0.26.11",
  "zeroize",
 ]
 

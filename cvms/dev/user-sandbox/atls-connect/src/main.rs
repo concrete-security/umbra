@@ -1,6 +1,8 @@
 use std::io::Write;
 
-use concrete_atls_connect::{load_policy, parse_request, HelperError, RelayResponse, Result};
+use concrete_atls_connect::{
+    atls_connect_with_route_sni, load_policy, parse_request, HelperError, RelayResponse, Result,
+};
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
 
@@ -21,9 +23,12 @@ async fn run() -> Result<()> {
     let tcp = TcpStream::connect((connect_host, request.port))
         .await
         .map_err(|error| HelperError::new(format!("failed to connect to Security CVM: {error}")))?;
-    let (mut tls_stream, _report) = atlas_rs::atls_connect(tcp, &request.fqdn, policy, None)
-        .await
-        .map_err(|error| HelperError::new(format!("aTLS verification failed: {error}")))?;
+    let (mut tls_stream, _report) = if connect_host == request.fqdn {
+        atlas_rs::atls_connect(tcp, &request.fqdn, policy, None).await
+    } else {
+        atls_connect_with_route_sni(tcp, &request.fqdn, connect_host, policy).await
+    }
+    .map_err(|error| HelperError::new(format!("aTLS verification failed: {error}")))?;
 
     let listener = TcpListener::bind(("127.0.0.1", 0))
         .await
