@@ -695,7 +695,12 @@ def test_build_cvm_policy_bundle_uses_shade_policy_and_binding() -> None:
         launch_snapshot(),
         shade_policy={
             "policy_template_version": "dev-v1",
-            "app_compose": {"docker_compose_file": "services: {}\n"},
+            "app_compose": {
+                "allowed_envs": [],
+                "docker_compose_file": "services: {}\n",
+                "features": ["kms", "tproxy-net"],
+                "runner": "docker-compose",
+            },
             "expected_bootchain": {"mrtd": "d" * 96},
             "os_image_hash": "e" * 64,
         },
@@ -707,6 +712,16 @@ def test_build_cvm_policy_bundle_uses_shade_policy_and_binding() -> None:
     assert bundle["cvm_id"] == "00000000-0000-4000-8000-000000000031"
     assert bundle["policy_template_version"] == "dev-v1"
     assert bundle["compose_template"] == "services: {}\n"
+    assert bundle["app_compose"] == {
+        "allowed_envs": [],
+        "docker_compose_file": "services: {}\n",
+        "features": ["kms", "tproxy-net"],
+        "runner": "docker-compose",
+    }
+    assert (
+        bundle["app_compose_json"]
+        == '{"allowed_envs":[],"docker_compose_file":"services: {}\\n","features":["kms","tproxy-net"],"runner":"docker-compose"}'
+    )
     assert bundle["expected_bootchain"] == {"mrtd": "d" * 96}
     assert bundle["os_image_hash"] == "e" * 64
     assert bundle["rtmr3_binding"] == binding
@@ -1391,7 +1406,12 @@ def test_run_cvm_launch_attestation_verifier_persists_report_and_audit(monkeypat
             return SimpleNamespace(
                 policy={
                     "policy_template_version": "dev-v1",
-                    "app_compose": {"docker_compose_file": "services: {}\n"},
+                    "app_compose": {
+                        "allowed_envs": [],
+                        "docker_compose_file": "services: {}\n",
+                        "features": ["kms", "tproxy-net"],
+                        "runner": "docker-compose",
+                    },
                     "expected_bootchain": {"mrtd": "d" * 96},
                     "os_image_hash": "e" * 64,
                 }
@@ -1419,6 +1439,8 @@ def test_run_cvm_launch_attestation_verifier_persists_report_and_audit(monkeypat
     )
     metadata = json.loads(cvm_updates[0][4])
     assert metadata["policy_bundle"]["expected_bootchain"] == {"mrtd": "d" * 96}
+    assert metadata["policy_bundle"]["app_compose"]["features"] == ["kms", "tproxy-net"]
+    assert metadata["policy_bundle"]["app_compose_json"].startswith('{"allowed_envs":[]')
     assert conn.audit_calls[0]["action"] == "CVM_ATTESTATION_VERIFIED"
     assert conn.audit_calls[0]["after"]["source"] == "launch"
     operation_updates = [args for query, args in conn.execute_calls if "UPDATE operations" in query]

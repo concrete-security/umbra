@@ -1,5 +1,6 @@
 PasswordAuthentication no
-PermitRootLogin no
+PermitRootLogin prohibit-password
+AllowUsers dev
 PubkeyAuthentication yes
 AuthorizedKeysFile /run/ssh/authorized_keys/dev
 PermitUserEnvironment yes

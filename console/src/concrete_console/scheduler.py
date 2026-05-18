@@ -2343,6 +2343,9 @@ def build_cvm_policy_bundle(
         "security_cvm_fqdn": _row_value(snapshot, "security_cvm_fqdn"),
         "issued_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
+    if app_compose:
+        bundle["app_compose"] = app_compose
+        bundle["app_compose_json"] = json.dumps(app_compose, separators=(",", ":"))
     if connect_host:
         bundle["connect_host"] = connect_host
     if expected_bootchain:

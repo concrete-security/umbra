@@ -144,10 +144,23 @@ def build_dev_cvm_attestation_request(snapshot: Any) -> dict[str, Any]:
             "ATTESTATION_QUOTE_INVALID",
             {"reason": "policy_bundle_invalid"},
         )
+    app_compose_json = policy_bundle.get("app_compose_json")
+    app_compose = None
+    if isinstance(app_compose_json, str):
+        parsed_app_compose = json_payload(app_compose_json)
+        if isinstance(parsed_app_compose, dict):
+            app_compose = parsed_app_compose
+    if app_compose is None:
+        app_compose = policy_bundle.get("app_compose")
+    if isinstance(app_compose, dict):
+        app_compose = dict(app_compose)
+        app_compose["docker_compose_file"] = compose_template
+    else:
+        app_compose = {"docker_compose_file": compose_template}
     policy: dict[str, Any] = {
         "type": "dstack_tdx",
         "expected_image_measurement": _row_value(snapshot, "expected_image_measurement"),
-        "app_compose": {"docker_compose_file": compose_template},
+        "app_compose": app_compose,
         "rtmr3_binding": rtmr3_binding,
     }
     expected_bootchain = policy_bundle.get("expected_bootchain")

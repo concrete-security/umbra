@@ -82,6 +82,38 @@ def test_build_dev_cvm_attestation_request_uses_policy_bundle() -> None:
     }
 
 
+def test_build_dev_cvm_attestation_request_preserves_full_app_compose() -> None:
+    request = build_dev_cvm_attestation_request(
+        {
+            "fqdn": "cvm.example.com",
+            "expected_image_measurement": "a" * 96,
+            "metadata": {
+                "policy_bundle": {
+                    "compose_template": "services: {}\n",
+                    "app_compose_json": (
+                        '{"allowed_envs":[],"docker_compose_file":"stale",'
+                        '"features":["kms","tproxy-net"],"runner":"docker-compose"}'
+                    ),
+                    "app_compose": {
+                        "allowed_envs": ["wrong"],
+                        "docker_compose_file": "stale",
+                        "features": ["wrong"],
+                        "runner": "docker-compose",
+                    },
+                    "rtmr3_binding": {"cvm_id": str(UUID("00000000-0000-4000-8000-000000000031"))},
+                }
+            },
+        }
+    )
+
+    assert request["policy"]["app_compose"] == {
+        "allowed_envs": [],
+        "docker_compose_file": "services: {}\n",
+        "features": ["kms", "tproxy-net"],
+        "runner": "docker-compose",
+    }
+
+
 def test_build_security_cvm_attestation_request_uses_token_hashes() -> None:
     request = build_security_cvm_attestation_request(
         {

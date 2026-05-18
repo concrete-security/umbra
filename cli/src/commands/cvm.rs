@@ -894,9 +894,17 @@ pub(crate) fn write_policy_file(
 fn policy_document(bundle: &PolicyBundle) -> Value {
     let mut app_compose = bundle
         .extra
-        .get("app_compose")
-        .and_then(|value| value.as_object())
-        .cloned()
+        .get("app_compose_json")
+        .and_then(Value::as_str)
+        .and_then(|value| serde_json::from_str::<Value>(value).ok())
+        .and_then(|value| value.as_object().cloned())
+        .or_else(|| {
+            bundle
+                .extra
+                .get("app_compose")
+                .and_then(|value| value.as_object())
+                .cloned()
+        })
         .unwrap_or_default();
     app_compose.insert(
         "docker_compose_file".to_string(),
@@ -1172,6 +1180,22 @@ mod tests {
                     "connect_host".to_string(),
                     Value::String("app-443s.dstack.example.com".to_string()),
                 );
+                extra.insert(
+                    "app_compose".to_string(),
+                    json!({
+                        "allowed_envs": ["wrong"],
+                        "docker_compose_file": "stale",
+                        "features": ["wrong"],
+                        "runner": "docker-compose"
+                    }),
+                );
+                extra.insert(
+                    "app_compose_json".to_string(),
+                    Value::String(
+                        r#"{"allowed_envs":[],"docker_compose_file":"stale","features":["kms","tproxy-net"],"runner":"docker-compose"}"#
+                            .to_string(),
+                    ),
+                );
                 extra
             },
         };
@@ -1187,6 +1211,13 @@ mod tests {
             policy["app_compose"]["docker_compose_file"],
             Value::String("services: {}".to_string())
         );
+        assert_eq!(
+            policy["app_compose"]["features"],
+            json!(["kms", "tproxy-net"])
+        );
+        assert!(serde_json::to_string(&policy["app_compose"])
+            .expect("app_compose serializes")
+            .starts_with(r#"{"allowed_envs":[],"docker_compose_file":"#));
         assert_eq!(policy["rtmr3_binding"]["security_cvm_proxy_port"], 8080);
     }
 
