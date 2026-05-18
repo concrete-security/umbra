@@ -775,7 +775,8 @@ def resolve_security_cvm_provision_config(body: SecurityCVMCreate) -> dict[str, 
             {"component": "security_cvm_default_instance_type"},
         )
 
-    region = (body.region or raw.get("PHALA_REGION", "FR-PARIS-1")).strip()
+    default_region = raw.get("SECURITY_CVM_DEFAULT_REGION", "").strip()
+    region = (body.region or default_region or raw.get("PHALA_REGION", "FR-PARIS-1")).strip()
     if not region:
         raise api_error(
             422,

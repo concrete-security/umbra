@@ -466,7 +466,8 @@ def test_render_dev_cvm_compose_config_keeps_runtime_values_as_placeholders() ->
 
 def test_resolve_security_cvm_provision_config_uses_defaults(monkeypatch) -> None:
     monkeypatch.delenv("PHALA_DEFAULT_INSTANCE_TYPE", raising=False)
-    monkeypatch.setenv("PHALA_REGION", "FR-PARIS-1")
+    monkeypatch.setenv("SECURITY_CVM_DEFAULT_REGION", "FR-PARIS-1")
+    monkeypatch.setenv("PHALA_REGION", "US-ASHBURN-1")
     monkeypatch.setenv("SECURITY_CVM_IMAGE_REF", "ghcr.io/concrete-security/security-cvm/mitmproxy@sha256:abc")
     monkeypatch.setenv("SECURITY_CVM_IMAGE_MEASUREMENT", "B" * 96)
     monkeypatch.setenv("SECURITY_CVM_BASE_DOMAIN", "sc.example.com")
@@ -477,6 +478,29 @@ def test_resolve_security_cvm_provision_config_uses_defaults(monkeypatch) -> Non
     assert resolved["region"] == "FR-PARIS-1"
     assert resolved["expected_image_measurement"] == "b" * 96
     assert resolved["base_domain"] == "sc.example.com"
+
+
+def test_resolve_security_cvm_provision_config_falls_back_to_phala_region(monkeypatch) -> None:
+    monkeypatch.delenv("SECURITY_CVM_DEFAULT_REGION", raising=False)
+    monkeypatch.setenv("PHALA_REGION", "FR-PARIS-1")
+    monkeypatch.setenv("SECURITY_CVM_IMAGE_REF", "ghcr.io/concrete-security/security-cvm/mitmproxy@sha256:abc")
+    monkeypatch.setenv("SECURITY_CVM_IMAGE_MEASUREMENT", "B" * 96)
+    monkeypatch.setenv("SECURITY_CVM_BASE_DOMAIN", "sc.example.com")
+
+    resolved = resolve_security_cvm_provision_config(security_cvm_create())
+
+    assert resolved["region"] == "FR-PARIS-1"
+
+
+def test_resolve_security_cvm_provision_config_requires_region(monkeypatch) -> None:
+    monkeypatch.setenv("SECURITY_CVM_DEFAULT_REGION", "")
+    monkeypatch.setenv("PHALA_REGION", "")
+
+    with pytest.raises(HTTPException) as exc:
+        resolve_security_cvm_provision_config(security_cvm_create())
+
+    assert exc.value.status_code == 422
+    assert exc.value.detail["error"]["details"]["errors"][0]["field"] == "region"
 
 
 def test_resolve_security_cvm_provision_config_requires_image_pair(monkeypatch) -> None:
