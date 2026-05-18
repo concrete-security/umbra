@@ -359,9 +359,9 @@ fn read_config_file(config_dir: &Path) -> Option<ConfigFile> {
 }
 
 fn default_config_dir() -> PathBuf {
-    dirs::config_dir()
+    dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("concrete")
+        .join(".concrete")
 }
 
 fn env_bool(name: &str) -> Option<bool> {
