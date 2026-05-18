@@ -583,7 +583,8 @@ def resolve_cvm_launch_config(body: CVMCreate) -> dict[str, str]:
             {"component": "dev_cvm_default_instance_type"},
         )
 
-    region = (body.region or raw.get("DEV_CVM_DEFAULT_REGION", "")).strip()
+    default_region = raw.get("DEV_CVM_DEFAULT_REGION", "").strip()
+    region = (body.region or default_region or raw.get("PHALA_REGION", "FR-PARIS-1")).strip()
     if not region:
         raise api_error(
             422,

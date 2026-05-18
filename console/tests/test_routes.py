@@ -353,6 +353,7 @@ def test_cvm_create_rejects_duplicate_profile_ids() -> None:
 def test_resolve_cvm_launch_config_uses_defaults(monkeypatch) -> None:
     monkeypatch.delenv("DEV_CVM_DEFAULT_INSTANCE_TYPE", raising=False)
     monkeypatch.setenv("DEV_CVM_DEFAULT_REGION", "FR-PARIS-1")
+    monkeypatch.setenv("PHALA_REGION", "US-ASHBURN-1")
     monkeypatch.setenv("DEV_CVM_IMAGE", "ghcr.io/concrete-security/dev-cvm/user-sandbox@sha256:abc")
     monkeypatch.setenv("DEV_CVM_IMAGE_MEASUREMENT", "A" * 96)
     monkeypatch.setenv("CLOUDFLARE_BASE_DOMAIN", "dev.example.com")
@@ -365,8 +366,21 @@ def test_resolve_cvm_launch_config_uses_defaults(monkeypatch) -> None:
     assert resolved["base_domain"] == "dev.example.com"
 
 
-def test_resolve_cvm_launch_config_requires_region(monkeypatch) -> None:
+def test_resolve_cvm_launch_config_falls_back_to_phala_region(monkeypatch) -> None:
     monkeypatch.delenv("DEV_CVM_DEFAULT_REGION", raising=False)
+    monkeypatch.setenv("PHALA_REGION", "FR-PARIS-1")
+    monkeypatch.setenv("DEV_CVM_IMAGE", "ghcr.io/concrete-security/dev-cvm/user-sandbox@sha256:abc")
+    monkeypatch.setenv("DEV_CVM_IMAGE_MEASUREMENT", "A" * 96)
+    monkeypatch.setenv("CLOUDFLARE_BASE_DOMAIN", "dev.example.com")
+
+    resolved = resolve_cvm_launch_config(cvm_create())
+
+    assert resolved["region"] == "FR-PARIS-1"
+
+
+def test_resolve_cvm_launch_config_requires_region(monkeypatch) -> None:
+    monkeypatch.setenv("DEV_CVM_DEFAULT_REGION", "")
+    monkeypatch.setenv("PHALA_REGION", "")
 
     with pytest.raises(HTTPException) as exc:
         resolve_cvm_launch_config(cvm_create())
