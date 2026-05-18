@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime, timezone
 import logging
+import time
 from typing import Any, Callable, Mapping
 from urllib.parse import urlsplit
 from uuid import UUID
@@ -19,6 +20,8 @@ from concrete_security_cvm.traffic import TrafficLogEmitter, TrafficLogRecord
 
 
 logger = logging.getLogger(__name__)
+CONNECT_IDENTITY_TTL_SECONDS = 3600
+MAX_CONNECT_IDENTITIES = 4096
 
 
 ResponseFactory = Callable[[int, bytes, Mapping[str, str]], Any]
@@ -39,6 +42,7 @@ class SecurityCVMProxyAddon:
         self.control_state = control_state
         self.traffic_emitter = traffic_emitter
         self.response_factory = response_factory or mitmproxy_response_factory
+        self._connect_identities: dict[str, tuple[str, float]] = {}
 
     def http_connect(self, flow: Any) -> None:
         self._handle_proxy_flow(flow, connect_only=True)
@@ -71,7 +75,7 @@ class SecurityCVMProxyAddon:
         control_map = self.control_state.snapshot().control_map
         if connect_only or proxy_request.method == "CONNECT":
             result = enforce_connect_request(proxy_request, control_map)
-        elif cvm := _connect_cvm(flow, control_map):
+        elif cvm := _connect_cvm(flow, control_map, self._connect_identities):
             result = enforce_authenticated_request(proxy_request, cvm)
         else:
             result = enforce_request(proxy_request, control_map)
@@ -82,8 +86,26 @@ class SecurityCVMProxyAddon:
             if (connect_only or proxy_request.method == "CONNECT") and result.cvm is not None:
                 _metadata(flow)["concrete_connect_allowed"] = True
                 _metadata(flow)["concrete_cvm_id"] = str(result.cvm.cvm_id)
+                if key := _client_connection_key(flow):
+                    self._remember_connect_identity(key, result.cvm.cvm_id)
             return
         self._reject(flow, result)
+
+    def client_disconnected(self, client_conn: Any) -> None:
+        if key := _connection_key_from_connection(client_conn):
+            self._connect_identities.pop(key, None)
+
+    def _remember_connect_identity(self, key: str, cvm_id: UUID) -> None:
+        now = time.monotonic()
+        self._connect_identities[key] = (str(cvm_id), now)
+        if len(self._connect_identities) <= MAX_CONNECT_IDENTITIES:
+            return
+        cutoff = now - CONNECT_IDENTITY_TTL_SECONDS
+        stale_keys = [item_key for item_key, (_cvm_id, seen_at) in self._connect_identities.items() if seen_at < cutoff]
+        for item_key in stale_keys:
+            self._connect_identities.pop(item_key, None)
+        if len(self._connect_identities) > MAX_CONNECT_IDENTITIES:
+            self._connect_identities.clear()
 
     def response(self, flow: Any) -> None:
         traffic_log = _metadata(flow).pop("concrete_traffic_log", None)
@@ -277,8 +299,13 @@ def _metadata(flow: Any) -> dict[str, Any]:
     return flow.metadata
 
 
-def _connect_cvm(flow: Any, control_map: Any) -> Any:
+def _connect_cvm(flow: Any, control_map: Any, identities: Mapping[str, tuple[str, float]]) -> Any:
     raw = _metadata(flow).get("concrete_cvm_id")
+    if not isinstance(raw, str):
+        key = _client_connection_key(flow)
+        identity = identities.get(key) if key is not None else None
+        if identity is not None and time.monotonic() - identity[1] <= CONNECT_IDENTITY_TTL_SECONDS:
+            raw = identity[0]
     if not isinstance(raw, str):
         return None
     try:
@@ -286,3 +313,19 @@ def _connect_cvm(flow: Any, control_map: Any) -> Any:
     except ValueError:
         return None
     return control_map.lookup_cvm_id(cvm_id)
+
+
+def _client_connection_key(flow: Any) -> str | None:
+    return _connection_key_from_connection(getattr(flow, "client_conn", None))
+
+
+def _connection_key_from_connection(connection: Any) -> str | None:
+    if connection is None:
+        return None
+    for attr in ("address", "peername", "ip_address"):
+        value = getattr(connection, attr, None)
+        if isinstance(value, tuple) and len(value) >= 2:
+            return f"{value[0]}:{value[1]}"
+        if isinstance(value, str) and value:
+            return value
+    return f"id:{id(connection)}"

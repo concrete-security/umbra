@@ -196,11 +196,12 @@ def test_decrypted_https_request_reuses_connect_identity_without_proxy_auth() ->
     policy_body = policy()
     policy_body["blocked_destinations"] = []
     proxy_addon, queue = addon(policy_body)
-    flow = FakeFlow(FakeRequest(method="CONNECT", host="", path="/", authority="api.anthropic.com:443"))
+    connect_flow = FakeFlow(FakeRequest(method="CONNECT", host="", path="/", authority="api.anthropic.com:443"))
 
-    proxy_addon.http_connect(flow)
-    assert flow.response is None
-    flow.request = FakeRequest(headers={"Authorization": "Bearer concrete-proxy-injected"})
+    proxy_addon.http_connect(connect_flow)
+    assert connect_flow.response is None
+    flow = FakeFlow(FakeRequest(headers={"Authorization": "Bearer concrete-proxy-injected"}))
+    flow.client_conn = connect_flow.client_conn
     proxy_addon.request(flow)
 
     assert flow.response is None
