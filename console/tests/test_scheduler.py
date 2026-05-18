@@ -1387,7 +1387,10 @@ def test_run_cvm_launch_attestation_verifier_persists_report_and_audit(monkeypat
         actor_email="dev@example.com",
         entity_id=UUID("00000000-0000-4000-8000-000000000001"),
         state="PROVISIONING",
-        metadata={"policy_bundle": policy_bundle},
+        metadata={
+            "passthrough_host": "app-443s.dstack.example.com",
+            "policy_bundle": policy_bundle,
+        },
         image_measurement=None,
         rtmr3_digest=None,
         attestation_verified_at=None,
@@ -1413,7 +1416,7 @@ def test_run_cvm_launch_attestation_verifier_persists_report_and_audit(monkeypat
 
         async def generate_policy(self, *, domain, deploy_compose_yaml, connect_host=None):
             assert domain == "cvm-abc.dev.example.com"
-            assert connect_host is None
+            assert connect_host == "app-443s.dstack.example.com"
             assert deploy_compose_yaml == "services:\n  generated:\n"
             return SimpleNamespace(
                 policy={
@@ -1443,6 +1446,7 @@ def test_run_cvm_launch_attestation_verifier_persists_report_and_audit(monkeypat
 
     assert handled is True
     assert captured_request["kind"] == "dev_cvm"
+    assert captured_request["connect_host"] == "app-443s.dstack.example.com"
     cvm_updates = [args for query, args in conn.execute_calls if "UPDATE cvms" in query]
     assert cvm_updates[0][:3] == (
         UUID("00000000-0000-4000-8000-000000000031"),
@@ -1452,6 +1456,7 @@ def test_run_cvm_launch_attestation_verifier_persists_report_and_audit(monkeypat
     metadata = json.loads(cvm_updates[0][4])
     assert metadata["policy_bundle"]["expected_bootchain"] == {"mrtd": "d" * 96}
     assert metadata["policy_bundle"]["app_compose"]["features"] == ["kms", "tproxy-net"]
+    assert metadata["policy_bundle"]["connect_host"] == "app-443s.dstack.example.com"
     assert metadata["policy_bundle"]["app_compose_json"].startswith('{"allowed_envs":[]')
     assert conn.audit_calls[0]["action"] == "CVM_ATTESTATION_VERIFIED"
     assert conn.audit_calls[0]["after"]["source"] == "launch"

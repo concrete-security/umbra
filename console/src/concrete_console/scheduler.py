@@ -1390,10 +1390,11 @@ async def run_cvm_launch_attestation_verifier(operation_id: Any, snapshot: Any) 
         rtmr3_binding = policy_bundle.get("rtmr3_binding")
         if not isinstance(rtmr3_binding, dict):
             raise ShadeError("missing_rtmr3_binding", field="metadata.policy_bundle.rtmr3_binding")
+        connect_host = provider_passthrough_host(metadata)
         policy_result = await ShadeClient.from_settings().generate_policy(
             domain=_row_value(snapshot, "fqdn"),
             deploy_compose_yaml=deploy_compose_yaml,
-            connect_host=provider_passthrough_host(metadata),
+            connect_host=connect_host,
         )
         updated_metadata = metadata_with_policy_bundle(
             metadata,
@@ -1402,6 +1403,7 @@ async def run_cvm_launch_attestation_verifier(operation_id: Any, snapshot: Any) 
                 shade_policy=policy_result.policy,
                 rtmr3_binding=rtmr3_binding,
                 deploy_compose_yaml=deploy_compose_yaml,
+                connect_host=connect_host,
             ),
         )
     except ShadeError as exc:
