@@ -51,14 +51,48 @@ validate_authorized_keys() {
   [ "$count" -gt 0 ] || fail "authorized_keys must contain at least one key"
 }
 
+quote_authorized_key_env_literal() {
+  local key="$1"
+  local value="$2"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf 'environment="%s=%s",' "$key" "$value"
+}
+
 quote_authorized_key_env() {
   local key="$1"
-  printf 'environment="%s=%s",' "$key" "${!key}"
+  quote_authorized_key_env_literal "$key" "${!key}"
+}
+
+quote_placeholder_env_options() {
+  local placeholder_file="$1"
+  local line name value
+  declare -A seen=()
+
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ -z "$line" ] && continue
+    if [[ "$line" != *=* ]]; then
+      fail "invalid sandbox env placeholder line"
+    fi
+    name="${line%%=*}"
+    value="${line#*=}"
+    validate_placeholder_name "$name" || fail "invalid sandbox env placeholder name"
+    validate_placeholder_value "$value" || fail "invalid sandbox env placeholder value"
+    if [ -n "${seen[$name]+x}" ] && [ "${seen[$name]}" != "$value" ]; then
+      fail "conflicting sandbox env placeholder value"
+    fi
+    seen[$name]="$value"
+  done <"$placeholder_file"
+
+  for name in $(printf '%s\n' "${!seen[@]}" | sort); do
+    quote_authorized_key_env_literal "$name" "${seen[$name]}"
+  done
 }
 
 write_authorized_keys() {
   local source="$1"
   local target="$2"
+  local placeholder_file="${3:-}"
   local options
   options="$(
     quote_authorized_key_env HTTP_PROXY
@@ -73,6 +107,9 @@ write_authorized_keys() {
     quote_authorized_key_env PATH
     quote_authorized_key_env PIP_USER
     quote_authorized_key_env GH_CONFIG_DIR
+    if [ -n "$placeholder_file" ]; then
+      quote_placeholder_env_options "$placeholder_file"
+    fi
   )"
   options="${options%,}"
   : >"$target"
@@ -107,18 +144,6 @@ validate_placeholder_value() {
   [[ "$value" =~ AKIA[0-9A-Z]{16} ]] && return 1
   return 0
 }
-
-if [ "${CONCRETE_ENTRYPOINT_SELF_TEST:-}" = "validate-placeholder-value" ]; then
-  validate_placeholder_value "concrete-proxy-injected" \
-    || fail "self-test rejected benign placeholder value"
-  if validate_placeholder_value $'line\nbreak'; then
-    fail "self-test accepted newline placeholder value"
-  fi
-  if validate_placeholder_value "sk-ant-abcdefghijklmnopqrstuvwxyz"; then
-    fail "self-test accepted secret-shaped placeholder value"
-  fi
-  exit 0
-fi
 
 write_runtime_env() {
   local placeholder_file="$1"
@@ -168,6 +193,45 @@ ENV
   chmod 0644 "$output"
 }
 
+if [ "${CONCRETE_ENTRYPOINT_SELF_TEST:-}" = "validate-placeholder-value" ]; then
+  validate_placeholder_value "concrete-proxy-injected" \
+    || fail "self-test rejected benign placeholder value"
+  if validate_placeholder_value $'line\nbreak'; then
+    fail "self-test accepted newline placeholder value"
+  fi
+  if validate_placeholder_value "sk-ant-abcdefghijklmnopqrstuvwxyz"; then
+    fail "self-test accepted secret-shaped placeholder value"
+  fi
+
+  self_test_dir="$(mktemp -d)"
+  trap 'rm -rf "$self_test_dir"' EXIT
+  export HTTP_PROXY='http://dev-egress-forwarder:3128'
+  export HTTPS_PROXY='http://dev-egress-forwarder:3128'
+  export NO_PROXY='localhost,127.0.0.1,user-sandbox,dev-tunnel,dev-egress-forwarder'
+  export REQUESTS_CA_BUNDLE='/run/concrete/ca-bundle.pem'
+  export SSL_CERT_FILE='/run/concrete/ca-bundle.pem'
+  export CURL_CA_BUNDLE='/run/concrete/ca-bundle.pem'
+  export GIT_SSL_CAINFO='/run/concrete/ca-bundle.pem'
+  export NODE_EXTRA_CA_CERTS='/run/concrete/ca-bundle.pem'
+  export BASH_ENV='/run/concrete-env.sh'
+  export PATH="/home/dev/.local/bin:${PATH}"
+  export PIP_USER='1'
+  export GH_CONFIG_DIR='/home/dev/.local/share/gh'
+  printf 'VERIFY_PLACEHOLDER=non-secret-placeholder\nQUOTED_PLACEHOLDER=value"with\\slashes\n' \
+    >"${self_test_dir}/placeholders"
+  printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMockConcreteVerifyKeyForEntryPointTests test\n' \
+    >"${self_test_dir}/authorized_keys.source"
+  write_authorized_keys \
+    "${self_test_dir}/authorized_keys.source" \
+    "${self_test_dir}/authorized_keys" \
+    "${self_test_dir}/placeholders"
+  grep -F 'environment="VERIFY_PLACEHOLDER=non-secret-placeholder"' "${self_test_dir}/authorized_keys" >/dev/null \
+    || fail "self-test did not render sandbox env placeholder into authorized_keys"
+  grep -F 'environment="QUOTED_PLACEHOLDER=value\"with\\slashes"' "${self_test_dir}/authorized_keys" >/dev/null \
+    || fail "self-test did not escape sandbox env placeholder in authorized_keys"
+  exit 0
+fi
+
 mkdir -p /run/ssh/authorized_keys /run/ssh/user-ssh /run/sshd /run/concrete/sessions
 chown dev:dev /run/ssh/user-ssh /run/concrete/sessions
 chmod 0700 /run/concrete/sessions
@@ -200,7 +264,7 @@ validate_authorized_keys /run/concrete/authorized_keys.bootstrap
 cat /etc/ssl/certs/ca-certificates.crt /run/concrete/security-cvm-ca.pem >/run/concrete/ca-bundle.pem
 chmod 0644 /run/concrete/ca-bundle.pem
 write_runtime_env /run/concrete/sandbox-env-placeholders /run/concrete-env.sh
-write_authorized_keys /run/concrete/authorized_keys.bootstrap /run/ssh/authorized_keys/dev
+write_authorized_keys /run/concrete/authorized_keys.bootstrap /run/ssh/authorized_keys/dev /run/concrete/sandbox-env-placeholders
 
 ln -sfn /run/ssh/user-ssh /home/dev/.ssh
 mkdir -p /home/dev/.claude
