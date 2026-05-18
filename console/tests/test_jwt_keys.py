@@ -56,6 +56,7 @@ def write_ed25519_keypair(tmp_path):
     private_path = tmp_path / "private.pem"
     public_path = tmp_path / "public.jwks"
     private_path.write_bytes(private_pem)
+    private_path.chmod(0o600)
     public_path.write_text(json.dumps({"keys": [jwk]}))
     return private_path, public_path
 
@@ -107,6 +108,7 @@ def test_rs256_refuses_weak_rsa_key_at_startup(tmp_path) -> None:
     private_path = tmp_path / "private.pem"
     public_path = tmp_path / "public.jwks"
     private_path.write_bytes(private_pem)
+    private_path.chmod(0o600)
     public_path.write_text(json.dumps({"keys": [jwk]}))
 
     settings = JwtSettings(
@@ -144,6 +146,7 @@ def test_rotate_switches_active_kid_and_retains_old_verifier(tmp_path) -> None:
     ).access_token
     next_private_pem, next_jwk = generate_ed25519_material("next-key")
     private_path.write_bytes(next_private_pem)
+    private_path.chmod(0o600)
     public_path.write_text(json.dumps({"keys": [next_jwk]}))
 
     rotation = manager.rotate(new_kid="next-key", retire_old_after_seconds=3600)
@@ -180,6 +183,7 @@ def test_rotate_with_immediate_retirement_rejects_old_kid(tmp_path) -> None:
     ).access_token
     next_private_pem, next_jwk = generate_ed25519_material("next-key")
     private_path.write_bytes(next_private_pem)
+    private_path.chmod(0o600)
     public_path.write_text(json.dumps({"keys": [next_jwk]}))
 
     rotation = manager.rotate(new_kid="next-key", retire_old_after_seconds=0)
@@ -187,6 +191,24 @@ def test_rotate_with_immediate_retirement_rejects_old_kid(tmp_path) -> None:
     assert rotation.retiring_kids == ()
     with pytest.raises(jwt.InvalidTokenError, match="unknown kid"):
         manager.verify_access_token(old_token)
+
+
+def test_private_key_file_mode_must_be_restricted(tmp_path) -> None:
+    private_path, public_path = write_ed25519_keypair(tmp_path)
+    private_path.chmod(0o644)
+    settings = JwtSettings(
+        algorithm="EdDSA",
+        private_key_ref=f"file://{private_path}",
+        public_keys_ref=f"file://{public_path}",
+        active_kid="test-key",
+        issuer="issuer",
+        audience="audience",
+        access_ttl_seconds=3600,
+        leeway_seconds=0,
+    )
+
+    with pytest.raises(ValueError, match="JWT_PRIVATE_KEY_REF file mode must be 0400 or 0600"):
+        JwtManager(settings)
 
 
 def test_access_token_rejects_caller_supplied_key_headers(tmp_path) -> None:

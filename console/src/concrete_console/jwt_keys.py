@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import re
+import stat
 from threading import RLock
 from typing import Any
 from uuid import UUID, uuid4
@@ -62,6 +63,14 @@ def _file_ref_path(ref: str) -> Path:
     return Path(ref.removeprefix("file://"))
 
 
+def _read_private_key(ref: str) -> str:
+    path = _file_ref_path(ref)
+    mode = stat.S_IMODE(path.stat().st_mode)
+    if mode not in {0o400, 0o600}:
+        raise ValueError("JWT_PRIVATE_KEY_REF file mode must be 0400 or 0600")
+    return path.read_text()
+
+
 def _settings() -> JwtSettings:
     raw = load_settings().raw
     return JwtSettings(
@@ -91,7 +100,7 @@ def _load_key_material(settings: JwtSettings, *, active_kid: str) -> tuple[str, 
     if not KID_RE.fullmatch(active_kid):
         raise ValueError("JWT active kid has invalid characters")
 
-    private_key = _file_ref_path(settings.private_key_ref).read_text()
+    private_key = _read_private_key(settings.private_key_ref)
     jwks = json.loads(_file_ref_path(settings.public_keys_ref).read_text())
     keys: dict[str, VerifyingKey] = {}
     for jwk in jwks.get("keys", []):
