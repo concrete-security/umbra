@@ -469,6 +469,7 @@ fn base_ssh_command(
         .arg("-o")
         .arg("ConnectTimeout=30");
     if let Some(identity_file) = identity_file {
+        ssh.arg("-o").arg("IdentitiesOnly=yes");
         ssh.arg("-i").arg(identity_file);
     }
     if allocate_tty {
@@ -946,6 +947,27 @@ mod tests {
             per_cvm_policy_path(Path::new("/tmp/concrete"), "cvm-1"),
             PathBuf::from("/tmp/concrete/cvms/cvm-1.atls-policy.json")
         );
+    }
+
+    #[test]
+    fn explicit_identity_file_disables_agent_key_fanout() {
+        let prepared = PreparedSsh {
+            cvm_id: "cvm-1".to_string(),
+            fqdn: "cvm.example.com".to_string(),
+            proxy_command: "concrete tunnel cvm.example.com".to_string(),
+        };
+        let ssh = base_ssh_command(&prepared, Some(Path::new("/tmp/concrete-key")), false);
+        let args: Vec<String> = ssh
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["-o", "IdentitiesOnly=yes"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["-i", "/tmp/concrete-key"]));
     }
 
     #[test]
