@@ -30,13 +30,16 @@ def payload(token: bytes, etag: str) -> ControlMap:
 
 
 class FakeClient:
-    def __init__(self, results: list[PollResult]) -> None:
+    def __init__(self, results: list[PollResult | Exception]) -> None:
         self.results = results
         self.etags: list[str | None] = []
 
     async def poll_once(self, *, etag: str | None = None) -> PollResult:
         self.etags.append(etag)
-        return self.results.pop(0)
+        result = self.results.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
 
 
 def test_poll_control_plane_once_swaps_on_200_and_keeps_map_on_304() -> None:
@@ -82,3 +85,32 @@ def test_poll_loop_applies_jittered_sleep_between_iterations() -> None:
 
     assert sleeps == [6.0]
     assert state.snapshot().control_map.lookup_proxy_token("two") is not None
+
+
+def test_poll_loop_keeps_running_after_transient_poll_failure() -> None:
+    state = ControlPlaneState()
+    client = FakeClient(
+        [
+            RuntimeError("console unavailable"),
+            PollResult(control_map=payload(b"recovered", '"recovered"'), etag='"recovered"', not_modified=False),
+        ]
+    )
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    asyncio.run(
+        run_control_plane_poll_loop(
+            client,  # type: ignore[arg-type]
+            state,
+            interval_seconds=5.0,
+            jitter_seconds=0.0,
+            sleep=fake_sleep,
+            random_uniform=lambda low, high: 0.0,
+            max_iterations=2,
+        )
+    )
+
+    assert sleeps == [5.0]
+    assert state.snapshot().control_map.lookup_proxy_token("recovered") is not None

@@ -3,10 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import asyncio
+import logging
 import random
 from typing import Awaitable, Callable
 
 from concrete_security_cvm.control import ControlMap, SCControlClient
+
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -53,7 +57,10 @@ async def run_control_plane_poll_loop(
         raise ValueError("jitter_seconds must be non-negative")
     iterations = 0
     while max_iterations is None or iterations < max_iterations:
-        await poll_control_plane_once(client, state)
+        try:
+            await poll_control_plane_once(client, state)
+        except Exception as exc:
+            log.warning("control_plane_poll_failed", extra={"error_type": type(exc).__name__})
         iterations += 1
         if max_iterations is not None and iterations >= max_iterations:
             break

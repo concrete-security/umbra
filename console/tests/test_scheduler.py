@@ -1680,7 +1680,7 @@ def test_execute_cvm_launch_await_sc_pull_waits_before_timeout(monkeypatch) -> N
     assert conn.execute_calls == []
 
 
-def test_execute_cvm_launch_await_sc_pull_falls_forward_after_timeout(monkeypatch) -> None:
+def test_execute_cvm_launch_await_sc_pull_fails_after_timeout(monkeypatch) -> None:
     token_created_at = scheduler.datetime.now(scheduler.timezone.utc) - scheduler.timedelta(seconds=20)
     snapshot = launch_snapshot(
         operation_updated_at=scheduler.datetime.now(scheduler.timezone.utc),
@@ -1700,13 +1700,23 @@ def test_execute_cvm_launch_await_sc_pull_falls_forward_after_timeout(monkeypatc
         return LaunchFakePool(conn)
 
     monkeypatch.setattr(scheduler, "get_pool", fake_get_pool)
+    failures: list[tuple[UUID, str, dict[str, object]]] = []
+
+    async def fake_mark_cvm_launch_failed(operation_id, *, code, details):
+        failures.append((operation_id, code, details))
+
+    monkeypatch.setattr(scheduler, "mark_cvm_launch_failed", fake_mark_cvm_launch_failed)
 
     asyncio.run(scheduler.execute_cvm_launch_await_sc_pull_operation(UUID("00000000-0000-4000-8000-000000000030")))
 
-    assert len(conn.execute_calls) == 1
-    query, args = conn.execute_calls[0]
-    assert "progress_step = $2" in query
-    assert args == (UUID("00000000-0000-4000-8000-000000000030"), "policy_push", 80)
+    assert conn.execute_calls == []
+    assert failures == [
+        (
+            UUID("00000000-0000-4000-8000-000000000030"),
+            "SC_PULL_TIMEOUT",
+            {"elapsed_seconds": 20, "timeout_seconds": 15},
+        )
+    ]
 
 
 class FinaliseConn:

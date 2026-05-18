@@ -1500,8 +1500,17 @@ async def execute_cvm_launch_await_sc_pull_operation(operation_id: Any) -> None:
         operation_id=str(operation_id),
         cvm_id=str(_row_value(snapshot, "cvm_id")),
         security_cvm_id=str(_row_value(snapshot, "security_cvm_id")),
+        elapsed_seconds=int(elapsed.total_seconds()),
+        timeout_seconds=int(timeout.total_seconds()),
     )
-    await advance_cvm_launch_step(operation_id, "policy_push")
+    await mark_cvm_launch_failed(
+        operation_id,
+        code="SC_PULL_TIMEOUT",
+        details={
+            "elapsed_seconds": int(elapsed.total_seconds()),
+            "timeout_seconds": int(timeout.total_seconds()),
+        },
+    )
 
 
 async def execute_cvm_launch_policy_push_operation(operation_id: Any) -> None:
