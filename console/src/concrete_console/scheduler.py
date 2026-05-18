@@ -35,6 +35,9 @@ from concrete_console.resources import (
 
 log = logger()
 _last_successful_tick_monotonic: float | None = None
+_last_traffic_prune_wall: datetime | None = None
+TRAFFIC_LOG_PRUNE_LOCK_ID = 884_422_001
+TRAFFIC_LOG_DELETE_CHUNK = 10_000
 OPERATION_START_STEPS = {
     "audit.export": ("materialize", 20),
     "cvm.launch": ("phala_deploy", 20),
@@ -62,6 +65,7 @@ SECURITY_CVM_PROVISION_EXECUTABLE_STEPS = {
     "phala_deploy",
     "cf_txt_create",
     "cf_cname_create",
+    "await_phala_running",
     "verify_attestation",
     "fetch_ca",
     "finalise",
@@ -69,6 +73,7 @@ SECURITY_CVM_PROVISION_EXECUTABLE_STEPS = {
 SECURITY_CVM_PROVISION_PROGRESS = {
     "cf_txt_create": 40,
     "cf_cname_create": 50,
+    "await_phala_running": 55,
     "verify_attestation": 60,
     "fetch_ca": 80,
     "finalise": 90,
@@ -447,6 +452,9 @@ async def execute_security_cvm_provision_operation(operation_id: Any, step: str)
         return
     if step == "cf_cname_create":
         await execute_security_cvm_cname_operation(operation_id)
+        return
+    if step == "await_phala_running":
+        await execute_security_cvm_await_phala_running_operation(operation_id)
         return
     if step == "verify_attestation":
         await execute_security_cvm_attestation_gate_operation(operation_id)
@@ -834,7 +842,7 @@ async def execute_security_cvm_cname_operation(operation_id: Any) -> None:
         await mark_security_cvm_provision_failed(operation_id, code="SECURITY_CVM_NOT_FOUND", details={"state": "missing_target"})
         return
     if _row_value(snapshot, "cname_dns_record_id"):
-        await advance_security_cvm_provision_step(operation_id, "verify_attestation")
+        await advance_security_cvm_provision_step(operation_id, "await_phala_running")
         return
     gateway_host = provider_gateway_host(_row_value(snapshot, "metadata"))
     if gateway_host is None:
@@ -861,6 +869,24 @@ async def execute_security_cvm_cname_operation(operation_id: Any) -> None:
         )
         return
     await persist_security_cvm_dns_record(operation_id, snapshot, field="cname", record_id=record_id)
+
+
+async def execute_security_cvm_await_phala_running_operation(operation_id: Any) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        snapshot = await fetch_security_cvm_provision_snapshot(conn, operation_id)
+    if snapshot is None:
+        await mark_security_cvm_provision_failed(operation_id, code="SECURITY_CVM_NOT_FOUND", details={"state": "missing_target"})
+        return
+    if _row_value(snapshot, "state") == "RUNNING":
+        await advance_security_cvm_provision_step(operation_id, "verify_attestation")
+        return
+    log.info(
+        "security_cvm_await_phala_pending",
+        operation_id=str(operation_id),
+        security_cvm_id=str(_row_value(snapshot, "id")),
+        state=_row_value(snapshot, "state"),
+    )
 
 
 async def execute_security_cvm_attestation_gate_operation(operation_id: Any) -> None:
@@ -980,7 +1006,8 @@ async def run_security_cvm_provision_attestation_verifier(operation_id: Any, sna
                     metadata = $5::jsonb,
                     updated_at = now()
                 WHERE id = $1
-                  AND state = 'PROVISIONING'
+                  AND state IN ('PROVISIONING', 'RUNNING')
+                  AND deleted_at IS NULL
                 """,
                 _row_value(snapshot, "id"),
                 report.image_measurement,
@@ -1065,7 +1092,8 @@ async def execute_security_cvm_finalise_operation(operation_id: Any) -> None:
                     ca_export_token_stashed_at = NULL,
                     updated_at = now()
                 WHERE id = $1
-                  AND state = 'PROVISIONING'
+                  AND state = 'RUNNING'
+                  AND deleted_at IS NULL
                 """,
                 _row_value(snapshot, "id"),
             )
@@ -2430,7 +2458,7 @@ async def persist_security_cvm_dns_record(operation_id: Any, snapshot: Any, *, f
         next_step = "cf_cname_create"
     elif field == "cname":
         column = "cname_dns_record_id"
-        next_step = "verify_attestation"
+        next_step = "await_phala_running"
     else:
         raise ValueError("unknown Security CVM DNS record field")
     pool = await get_pool()
@@ -2472,7 +2500,8 @@ async def persist_security_cvm_ca_pem(operation_id: Any, *, security_cvm_id: Any
                 SET ca_cert_pem = $2,
                     updated_at = now()
                 WHERE id = $1
-                  AND state = 'PROVISIONING'
+                  AND state = 'RUNNING'
+                  AND deleted_at IS NULL
                 """,
                 security_cvm_id,
                 ca_pem,
@@ -2542,7 +2571,9 @@ async def mark_security_cvm_provision_failed(operation_id: Any, *, code: str, de
                         error_reason = $2,
                         updated_at = now()
                     WHERE id = $1
-                      AND state = 'PROVISIONING'
+                      AND state IN ('PROVISIONING', 'RUNNING')
+                      AND deleted_at IS NULL
+                      AND ca_cert_pem IS NULL
                     """,
                     row["target_id"],
                     code,
@@ -2951,17 +2982,250 @@ def _as_utc(value: datetime) -> datetime:
     return value.astimezone(timezone.utc)
 
 
+def traffic_log_retention_days() -> int:
+    raw = load_settings().raw.get("TRAFFIC_LOG_RETENTION_DAYS", "90").strip() or "90"
+    try:
+        days = int(raw)
+    except ValueError:
+        return 90
+    return min(max(days, 7), 730)
+
+
+def security_cvm_provisioning_meta_dict(metadata: Any) -> dict[str, Any]:
+    base = json_payload(metadata or {})
+    return dict(base) if isinstance(base, dict) else {}
+
+
+def security_cvm_metadata_phala_failed_since(metadata: dict[str, Any]) -> datetime | None:
+    prov = metadata.get("provisioning")
+    if not isinstance(prov, dict):
+        return None
+    raw = prov.get("phala_failed_since")
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        return _as_utc(datetime.fromisoformat(raw.replace("Z", "+00:00")))
+    except ValueError:
+        return None
+
+
+def security_cvm_metadata_with_phala_failed(metadata: dict[str, Any], *, failed_at: datetime | None) -> dict[str, Any]:
+    out = dict(metadata)
+    prov = out.get("provisioning")
+    if not isinstance(prov, dict):
+        prov = {}
+    else:
+        prov = dict(prov)
+    if failed_at is None:
+        prov.pop("phala_failed_since", None)
+    elif "phala_failed_since" not in prov:
+        prov["phala_failed_since"] = failed_at.isoformat().replace("+00:00", "Z")
+    if prov:
+        out["provisioning"] = prov
+    else:
+        out.pop("provisioning", None)
+    return out
+
+
+async def fetch_security_cvm_await_phala_candidates(conn: Any) -> list[Any]:
+    async with conn.transaction():
+        return list(
+            await conn.fetch(
+                """
+                SELECT
+                    sc.id,
+                    sc.entity_id,
+                    sc.metadata,
+                    o.id AS operation_id
+                FROM security_cvms sc
+                JOIN operations o ON o.target_id = sc.id
+                WHERE sc.state = 'PROVISIONING'
+                  AND sc.deleted_at IS NULL
+                  AND o.kind = 'security_cvm.provision'
+                  AND o.status = 'running'
+                  AND o.progress_step = 'await_phala_running'
+                  AND sc.metadata ? 'app_id'
+                ORDER BY sc.created_at
+                LIMIT 10
+                FOR UPDATE OF sc SKIP LOCKED
+                """
+            )
+        )
+
+
+async def reconcile_security_cvm_await_phala(conn: Any) -> list[str]:
+    from concrete_console.tee_provider.phala import PhalaClient, PhalaError
+
+    try:
+        client = PhalaClient.from_settings(timeout_seconds=30.0)
+    except PhalaError as exc:
+        log.warning("security_cvm_await_phala_skipped", reason=exc.code)
+        return []
+
+    advanced: list[str] = []
+    rows = await fetch_security_cvm_await_phala_candidates(conn)
+    now = datetime.now(timezone.utc)
+    for row in rows:
+        app_id = provider_app_id(_row_value(row, "metadata"))
+        if app_id is None:
+            continue
+        try:
+            provider_status = await client.status(app_id)
+        except PhalaError as exc:
+            log.warning(
+                "security_cvm_await_phala_status_failed",
+                security_cvm_id=str(_row_value(row, "id")),
+                reason=exc.code,
+            )
+            continue
+        meta = security_cvm_provisioning_meta_dict(_row_value(row, "metadata"))
+        if provider_status == "RUNNING":
+            cleared = security_cvm_metadata_with_phala_failed(meta, failed_at=None)
+            async with conn.transaction():
+                result = await conn.execute(
+                    """
+                    UPDATE security_cvms
+                    SET state = 'RUNNING',
+                        metadata = $2::jsonb,
+                        updated_at = now()
+                    WHERE id = $1
+                      AND state = 'PROVISIONING'
+                      AND deleted_at IS NULL
+                    """,
+                    _row_value(row, "id"),
+                    json.dumps(cleared),
+                )
+                if result == "UPDATE 1":
+                    advanced.append(str(_row_value(row, "id")))
+            continue
+        if provider_status == "FAILED":
+            first_failed = security_cvm_metadata_phala_failed_since(meta)
+            updated = security_cvm_metadata_with_phala_failed(meta, failed_at=first_failed or now)
+            async with conn.transaction():
+                await conn.execute(
+                    """
+                    UPDATE security_cvms
+                    SET metadata = $2::jsonb,
+                        updated_at = now()
+                    WHERE id = $1
+                      AND state = 'PROVISIONING'
+                      AND deleted_at IS NULL
+                    """,
+                    _row_value(row, "id"),
+                    json.dumps(updated),
+                )
+            failed_since = first_failed or now
+            if (now - failed_since).total_seconds() > 300:
+                await mark_security_cvm_provision_failed(
+                    _row_value(row, "operation_id"),
+                    code="PHALA_NEVER_RUNNING",
+                    details={"elapsed_seconds": int((now - failed_since).total_seconds())},
+                )
+            continue
+        if security_cvm_metadata_phala_failed_since(meta) is not None:
+            cleared = security_cvm_metadata_with_phala_failed(meta, failed_at=None)
+            async with conn.transaction():
+                await conn.execute(
+                    """
+                    UPDATE security_cvms
+                    SET metadata = $2::jsonb,
+                        updated_at = now()
+                    WHERE id = $1
+                      AND state = 'PROVISIONING'
+                      AND deleted_at IS NULL
+                    """,
+                    _row_value(row, "id"),
+                    json.dumps(cleared),
+                )
+    return advanced
+
+
+async def prune_traffic_logs_one_chunk(conn: Any, *, cutoff: datetime, limit: int) -> int:
+    status = await conn.execute(
+        """
+        DELETE FROM traffic_logs
+        WHERE id IN (
+            SELECT id FROM traffic_logs
+            WHERE timestamp < $1
+            ORDER BY timestamp
+            LIMIT $2
+        )
+        """,
+        cutoff,
+        limit,
+    )
+    return deleted_row_count(status)
+
+
+async def prune_traffic_log_batches_one_chunk(conn: Any, *, cutoff: datetime, limit: int) -> int:
+    status = await conn.execute(
+        """
+        DELETE FROM traffic_log_batches
+        WHERE id IN (
+            SELECT id FROM traffic_log_batches tlb
+            WHERE tlb.accepted_at < $1
+              AND NOT EXISTS (SELECT 1 FROM traffic_logs tl WHERE tl.batch_id = tlb.id)
+            ORDER BY tlb.accepted_at
+            LIMIT $2
+        )
+        """,
+        cutoff,
+        limit,
+    )
+    return deleted_row_count(status)
+
+
+async def prune_traffic_logs_retention_pass(conn: Any) -> tuple[int, int]:
+    cutoff = datetime.now(timezone.utc) - timedelta(days=traffic_log_retention_days())
+    logs_total = 0
+    batches_total = 0
+    while True:
+        async with conn.transaction():
+            n = await prune_traffic_logs_one_chunk(conn, cutoff=cutoff, limit=TRAFFIC_LOG_DELETE_CHUNK)
+        logs_total += n
+        if n < TRAFFIC_LOG_DELETE_CHUNK:
+            break
+    while True:
+        async with conn.transaction():
+            n = await prune_traffic_log_batches_one_chunk(conn, cutoff=cutoff, limit=TRAFFIC_LOG_DELETE_CHUNK)
+        batches_total += n
+        if n < TRAFFIC_LOG_DELETE_CHUNK:
+            break
+    return logs_total, batches_total
+
+
+async def maybe_prune_traffic_logs_retention(conn: Any) -> list[str]:
+    global _last_traffic_prune_wall
+    now = datetime.now(timezone.utc)
+    if _last_traffic_prune_wall is not None and (now - _last_traffic_prune_wall).total_seconds() < 86400:
+        return []
+    locked = await conn.fetchval("SELECT pg_try_advisory_lock($1)", TRAFFIC_LOG_PRUNE_LOCK_ID)
+    if not locked:
+        return []
+    try:
+        logs_pruned, batches_pruned = await prune_traffic_logs_retention_pass(conn)
+    finally:
+        await conn.execute("SELECT pg_advisory_unlock($1)", TRAFFIC_LOG_PRUNE_LOCK_ID)
+    _last_traffic_prune_wall = now
+    if logs_pruned or batches_pruned:
+        log.info("RETENTION_PRUNED", traffic_logs_deleted=logs_pruned, traffic_log_batches_deleted=batches_pruned)
+        return [f"maintenance:traffic_logs:{logs_pruned}:{batches_pruned}"]
+    return []
+
+
 async def run_reconciliation_pass(*, include_orphans: bool = True) -> ReconciliationSummary:
     pool = await get_pool()
     async with pool.acquire() as conn:
         cvms_advanced = await reconcile_dev_cvm_provider_drift(conn)
-        security_cvms_advanced = await reconcile_security_cvm_provider_drift(conn)
+        security_cvms_advanced = await reconcile_security_cvm_await_phala(conn)
+        security_cvms_advanced.extend(await reconcile_security_cvm_provider_drift(conn))
         orphans_cleaned = await cleanup_orphan_dns_records(conn) if include_orphans else []
         orphans_cleaned.extend(await prune_expired_auth_flow_rows(conn))
         orphans_cleaned.extend(await prune_expired_reconciler_rows(conn))
         operation_prune_count = await prune_expired_operations(conn)
         if operation_prune_count:
             orphans_cleaned.append(f"maintenance:operations:{operation_prune_count}")
+        orphans_cleaned.extend(await maybe_prune_traffic_logs_retention(conn))
         security_cvms_advanced.extend(await reconcile_security_cvm_attestations(conn))
         cvms_advanced.extend(await reconcile_dev_cvm_attestations(conn))
         await publish_audit_anchor_if_due(conn)

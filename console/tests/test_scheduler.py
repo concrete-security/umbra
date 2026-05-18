@@ -955,6 +955,7 @@ def test_execute_security_cvm_phala_deploy_materializes_env_and_metadata(monkeyp
 def test_execute_security_cvm_finalise_scrubs_stash_and_materializes_result(monkeypatch) -> None:
     conn = SecurityProvisionFakeConn(
         security_cvm_snapshot(
+            state="RUNNING",
             ca_cert_pem="-----BEGIN CERTIFICATE-----\nca\n-----END CERTIFICATE-----\n",
             image_measurement="b" * 96,
             rtmr3_digest="d" * 96,

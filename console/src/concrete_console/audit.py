@@ -259,8 +259,9 @@ async def redact_user_audit_trail(conn: asyncpg.Connection, *, email: str, repla
         )
         prev_hash = row_hash
 
+    from concrete_console.audit_anchor import publish_audit_chain_redaction_reanchor
 
-def _json_payload(value: Any) -> Any:
+    await publish_audit_chain_redaction_reanchor(conn, first_redacted_seq=int(rows[first_changed_index]["seq"]))
     if isinstance(value, str):
         return json.loads(value)
     return value

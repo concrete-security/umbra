@@ -68,6 +68,7 @@ RUN echo 'dev:100000:65536' >/etc/subuid \
     && chown -R dev:dev /home/dev
 
 COPY cvms/dev/user-sandbox/sshd_config /etc/ssh/sshd_config
+COPY cvms/dev/user-sandbox/concrete-update-agents.sh /etc/profile.d/concrete-update-agents.sh
 COPY cvms/dev/user-sandbox/entrypoint.sh /entrypoint.sh
 COPY cvms/dev/user-sandbox/concrete-dev-tunnel.py /usr/local/bin/concrete-dev-tunnel
 COPY cvms/dev/user-sandbox/concrete-dev-egress-forwarder.py /usr/local/bin/concrete-dev-egress-forwarder

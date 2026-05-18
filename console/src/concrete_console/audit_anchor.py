@@ -196,9 +196,9 @@ async def publish_audit_anchor(
         """
         INSERT INTO audit_anchors (
             id, last_seq, last_row_hash, external_anchor_uri, external_anchor_digest,
-            anchored_at, anchored_by
+            anchored_at, anchored_by, redaction_event_seq
         )
-        VALUES ($1, $2, $3, $4, $5, $6, NULL)
+        VALUES ($1, $2, $3, $4, $5, $6, NULL, NULL)
         """,
         anchor_id,
         last_seq,
@@ -216,6 +216,60 @@ async def publish_audit_anchor(
         external_anchor_digest=digest,
         anchored_at=anchored_at,
     )
+
+
+async def publish_audit_chain_redaction_reanchor(conn: Any, *, first_redacted_seq: int) -> None:
+    latest = await conn.fetchrow(
+        """
+        SELECT seq, row_hash
+        FROM audit_events
+        ORDER BY seq DESC
+        LIMIT 1
+        """
+    )
+    if latest is None:
+        return
+    last_seq = int(latest["seq"])
+    last_row_hash = str(latest["row_hash"])
+    anchored_at = datetime.now(timezone.utc)
+    target = configured_anchor_target()
+    anchor_id = uuid4()
+    console_kid = load_settings().raw.get("JWT_ACTIVE_KID", "").strip()
+    payload = anchor_payload(
+        last_seq=last_seq,
+        last_row_hash=last_row_hash,
+        anchored_at=anchored_at,
+        console_kid=console_kid,
+    )
+    digest = anchor_digest(payload)
+    if target:
+        postgres_target = parse_postgres_anchor_target(target)
+        external_uri = f"{postgres_target.public_uri}#anchors/{anchor_id}"
+        await write_postgres_anchor(
+            postgres_target,
+            anchor_id=anchor_id,
+            payload=payload,
+            payload_sha256=digest,
+        )
+    else:
+        external_uri = f"internal:redaction#anchors/{anchor_id}"
+    await conn.execute(
+        """
+        INSERT INTO audit_anchors (
+            id, last_seq, last_row_hash, external_anchor_uri, external_anchor_digest,
+            anchored_at, anchored_by, redaction_event_seq
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, NULL, $7)
+        """,
+        anchor_id,
+        last_seq,
+        last_row_hash,
+        external_uri,
+        digest,
+        anchored_at,
+        first_redacted_seq,
+    )
+    log.info("audit_redaction_anchor_published", last_seq=last_seq, redaction_event_seq=first_redacted_seq)
 
 
 async def write_postgres_anchor(

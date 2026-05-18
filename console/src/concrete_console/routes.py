@@ -4127,6 +4127,7 @@ async def fetch_live_security_cvm_id(conn: asyncpg.Connection, entity_id: UUID) 
         WHERE entity_id = $1
           AND state = 'RUNNING'
           AND deleted_at IS NULL
+          AND ca_cert_pem IS NOT NULL
         ORDER BY created_at DESC
         LIMIT 1
         """,
