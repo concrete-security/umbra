@@ -4,7 +4,13 @@ import hashlib
 from concrete_security_cvm.control import ControlMap
 import pytest
 
-from concrete_security_cvm.enforcement import DLPScanTimeout, ProxyRequest, enforce_request, find_dlp_match
+from concrete_security_cvm.enforcement import (
+    DLPScanTimeout,
+    ProxyRequest,
+    enforce_connect_request,
+    enforce_request,
+    find_dlp_match,
+)
 
 
 def policy() -> dict[str, object]:
@@ -125,6 +131,19 @@ def test_allowed_request_strips_proxy_auth_and_injects_real_header_after_dlp() -
     assert result.traffic_log.cvm_id.hex == "00000000000040008000000000000010"
 
 
+def test_allowed_connect_uses_host_port_gate_without_request_log() -> None:
+    policy_body = policy()
+    policy_body["blocked_destinations"] = []
+
+    result = enforce_connect_request(request(method="CONNECT", path="/"), control_map(policy_body))
+
+    assert result.allowed is True
+    assert result.response_code is None
+    assert result.traffic_log is None
+    assert "proxy-authorization" not in result.upstream_headers
+    assert result.upstream_headers["authorization"] == "Bearer concrete-proxy-injected"
+
+
 def test_blocked_destination_returns_403_and_records_traffic_log() -> None:
     result = enforce_request(request(path="/v1/files/upload"), control_map())
 
@@ -135,6 +154,18 @@ def test_blocked_destination_returns_403_and_records_traffic_log() -> None:
     assert result.traffic_log is not None
     assert result.traffic_log.response_code == 403
     assert "proxy-authorization" not in result.upstream_headers
+
+
+def test_blocked_connect_uses_host_port_gate_and_records_traffic_log() -> None:
+    result = enforce_connect_request(request(method="CONNECT", path="/v1/messages"), control_map())
+
+    assert result.allowed is False
+    assert result.response_code == 403
+    assert result.reason == "blocked_destination"
+    assert result.matched_policy_id == "block.upload"
+    assert result.traffic_log is not None
+    assert result.traffic_log.method == "CONNECT"
+    assert result.traffic_log.response_code == 403
 
 
 def test_dlp_scans_sandbox_headers_before_secret_injection() -> None:

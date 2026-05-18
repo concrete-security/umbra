@@ -35,13 +35,21 @@ class FakeRequest:
         self,
         *,
         headers: dict[str, str] | None = None,
+        method: str = "POST",
+        scheme: str = "https",
+        host: str = "api.anthropic.com",
+        port: int = 443,
         path: str = "/v1/messages?api_key=not-logged",
+        authority: str | None = None,
+        pretty_url: str | None = None,
     ) -> None:
-        self.scheme = "https"
-        self.host = "api.anthropic.com"
-        self.port = 443
-        self.method = "POST"
+        self.scheme = scheme
+        self.host = host
+        self.port = port
+        self.method = method
         self.path = path
+        self.authority = authority
+        self.pretty_url = pretty_url
         self.headers = headers or {
             "Proxy-Authorization": "Bearer proxy-token",
             "Authorization": "Bearer concrete-proxy-injected",
@@ -62,11 +70,11 @@ def response_factory(status_code: int, content: bytes, headers: Mapping[str, str
     return FakeResponse(status_code=status_code, raw_content=content, headers=headers)
 
 
-def addon() -> tuple[SecurityCVMProxyAddon, TrafficLogQueue]:
+def addon(policy_body: dict[str, object] | None = None) -> tuple[SecurityCVMProxyAddon, TrafficLogQueue]:
     queue = TrafficLogQueue(max_entries=100, max_bytes=100_000)
     client = TrafficLogClient(console_url="https://console.example.com", ingest_token="ingest")
     emitter = TrafficLogEmitter(queue=queue, client=client)
-    state = ControlPlaneState(control_map())
+    state = ControlPlaneState(control_map(policy_body))
     return (
         SecurityCVMProxyAddon(control_state=state, traffic_emitter=emitter, response_factory=response_factory),
         queue,
@@ -169,6 +177,21 @@ def test_allowed_request_strips_proxy_auth_injects_secret_and_logs_after_respons
     assert "concrete_traffic_log" not in flow.metadata
 
 
+def test_allowed_connect_uses_authority_and_does_not_log_before_http_request() -> None:
+    policy_body = policy()
+    policy_body["blocked_destinations"] = []
+    proxy_addon, queue = addon(policy_body)
+    flow = FakeFlow(FakeRequest(method="CONNECT", host="", path="/", pretty_url="api.anthropic.com:443"))
+
+    proxy_addon.http_connect(flow)
+    proxy_addon.request(flow)
+
+    assert flow.response is None
+    assert len(queue) == 0
+    assert "Proxy-Authorization" not in flow.request.headers
+    assert "proxy-authorization" not in flow.request.headers
+
+
 def test_blocked_request_sets_403_and_emits_sanitized_traffic_log() -> None:
     proxy_addon, queue = addon()
     flow = FakeFlow(FakeRequest(path="/v1/files/upload?secret=not-logged"))
@@ -181,6 +204,20 @@ def test_blocked_request_sets_403_and_emits_sanitized_traffic_log() -> None:
     assert flow.response.raw_content == b"Concrete Proxy: Destination blocked by policy\n"
     assert batch is not None
     assert batch.records[0].path == "/v1/files/upload"
+    assert batch.records[0].response_code == 403
+
+
+def test_blocked_connect_sets_403_and_emits_sanitized_traffic_log() -> None:
+    proxy_addon, queue = addon()
+    flow = FakeFlow(FakeRequest(method="CONNECT", host="", path="/", authority="api.anthropic.com:443"))
+
+    proxy_addon.http_connect(flow)
+    batch = queue.drain_batch()
+
+    assert flow.response is not None
+    assert flow.response.status_code == 403
+    assert batch is not None
+    assert batch.records[0].method == "CONNECT"
     assert batch.records[0].response_code == 403
 
 

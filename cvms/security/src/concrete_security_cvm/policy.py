@@ -69,6 +69,9 @@ class DestinationRule:
             and any(path.startswith(prefix) for prefix in self.path_prefixes)
         )
 
+    def matches_tunnel(self, *, scheme: str, host: str, port: int) -> bool:
+        return self.scheme == scheme.lower() and self._host_matches(host.lower().rstrip(".")) and port in self.ports
+
     def _host_matches(self, host: str) -> bool:
         if self.host.startswith("*."):
             suffix = self.host[2:]
@@ -142,6 +145,20 @@ class EffectivePolicy:
                 return PolicyDecision(False, "blocked_destination", rule.rule_id)
         for rule in self.allowed_destinations:
             if rule.matches(**request):
+                return PolicyDecision(True, "allowed_destination", rule.rule_id)
+        return PolicyDecision(False, "destination_not_allowed")
+
+    def decide_tunnel(self, *, scheme: str, host: str, port: int) -> PolicyDecision:
+        request = {
+            "scheme": scheme,
+            "host": host,
+            "port": port,
+        }
+        for rule in self.blocked_destinations:
+            if rule.matches_tunnel(**request):
+                return PolicyDecision(False, "blocked_destination", rule.rule_id)
+        for rule in self.allowed_destinations:
+            if rule.matches_tunnel(**request):
                 return PolicyDecision(True, "allowed_destination", rule.rule_id)
         return PolicyDecision(False, "destination_not_allowed")
 

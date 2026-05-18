@@ -7,7 +7,7 @@ from typing import Any, Callable, Mapping
 from urllib.parse import urlsplit
 
 from concrete_security_cvm.control_loop import ControlPlaneState
-from concrete_security_cvm.enforcement import EnforcementResult, ProxyRequest, enforce_request
+from concrete_security_cvm.enforcement import EnforcementResult, ProxyRequest, enforce_connect_request, enforce_request
 from concrete_security_cvm.traffic import TrafficLogEmitter, TrafficLogRecord
 
 
@@ -33,7 +33,24 @@ class SecurityCVMProxyAddon:
         self.traffic_emitter = traffic_emitter
         self.response_factory = response_factory or mitmproxy_response_factory
 
+    def http_connect(self, flow: Any) -> None:
+        self._handle_proxy_flow(flow, connect_only=True)
+
     def request(self, flow: Any) -> None:
+        self._handle_proxy_flow(flow, connect_only=False)
+
+    def _handle_proxy_flow(self, flow: Any, *, connect_only: bool) -> None:
+        if getattr(flow, "response", None) is not None:
+            return
+        request = getattr(flow, "request", None)
+        raw_method = getattr(request, "method", None)
+        if (
+            not connect_only
+            and isinstance(raw_method, str)
+            and raw_method.upper() == "CONNECT"
+            and _metadata(flow).get("concrete_connect_allowed") is True
+        ):
+            return
         try:
             proxy_request = proxy_request_from_flow(flow)
         except FlowTranslationError as exc:
@@ -44,11 +61,16 @@ class SecurityCVMProxyAddon:
             )
             logger.info("proxy_request_malformed", extra={"reason": str(exc)})
             return
-        result = enforce_request(proxy_request, self.control_state.snapshot().control_map)
+        if connect_only or proxy_request.method == "CONNECT":
+            result = enforce_connect_request(proxy_request, self.control_state.snapshot().control_map)
+        else:
+            result = enforce_request(proxy_request, self.control_state.snapshot().control_map)
         if result.allowed:
             _replace_headers(flow.request.headers, result.upstream_headers)
             if result.traffic_log is not None:
                 _metadata(flow)["concrete_traffic_log"] = result.traffic_log
+            if connect_only or proxy_request.method == "CONNECT":
+                _metadata(flow)["concrete_connect_allowed"] = True
             return
         self._reject(flow, result)
 
@@ -90,10 +112,10 @@ def proxy_request_from_flow(flow: Any) -> ProxyRequest:
     request = getattr(flow, "request", None)
     if request is None:
         raise FlowTranslationError("missing request")
-    host = _required_str(getattr(request, "host", None), "host").lower().rstrip(".")
     method = _required_str(getattr(request, "method", None), "method").upper()
     scheme = _request_scheme(request, method)
-    port = int(getattr(request, "port", 443 if scheme == "https" else 80))
+    host = _request_host(request, method).lower().rstrip(".")
+    port = _request_port(request, method, scheme)
     path = _path_without_query(getattr(request, "path", None))
     return ProxyRequest(
         source_ip=_connection_host(getattr(flow, "client_conn", None), fallback="unknown"),
@@ -135,6 +157,54 @@ def _request_scheme(request: Any, method: str) -> str:
     if method == "CONNECT":
         return "https"
     return "http"
+
+
+def _request_host(request: Any, method: str) -> str:
+    for attr in ("host", "pretty_host"):
+        value = getattr(request, attr, None)
+        if isinstance(value, str) and value:
+            return value
+    if method == "CONNECT":
+        host, _port = _split_connect_authority(_connect_authority(request))
+        if host:
+            return host
+    raise FlowTranslationError("missing host")
+
+
+def _request_port(request: Any, method: str, scheme: str) -> int:
+    raw = getattr(request, "port", None)
+    if isinstance(raw, int) and 1 <= raw <= 65535:
+        return raw
+    if method == "CONNECT":
+        _host, port = _split_connect_authority(_connect_authority(request))
+        if port is not None:
+            return port
+    return 443 if scheme == "https" else 80
+
+
+def _connect_authority(request: Any) -> str:
+    for attr in ("authority", "pretty_url", "url", "path"):
+        value = getattr(request, attr, None)
+        if isinstance(value, str) and value:
+            return value
+    raise FlowTranslationError("missing CONNECT authority")
+
+
+def _split_connect_authority(value: str) -> tuple[str, int | None]:
+    target = value
+    if "://" in target:
+        parsed = urlsplit(target)
+        if parsed.hostname:
+            return parsed.hostname, parsed.port
+    target = target.lstrip("/")
+    if not target or "/" in target:
+        return "", None
+    host, separator, port_text = target.rpartition(":")
+    if separator and host and port_text.isdigit():
+        port = int(port_text)
+        if 1 <= port <= 65535:
+            return host.strip("[]"), port
+    return target, None
 
 
 def _headers_to_dict(headers: Any) -> dict[str, str]:

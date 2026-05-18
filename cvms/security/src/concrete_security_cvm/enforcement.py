@@ -119,6 +119,48 @@ def enforce_request(
     )
 
 
+def enforce_connect_request(request: ProxyRequest, control_map: ControlMap) -> EnforcementResult:
+    headers = normalize_headers(request.headers)
+    token = extract_proxy_bearer(headers)
+    if token is None:
+        return EnforcementResult(
+            allowed=False,
+            response_code=407,
+            reason="proxy_auth_missing",
+            cvm=None,
+            upstream_headers={},
+            traffic_log=None,
+        )
+    cvm = control_map.lookup_proxy_token(token)
+    if cvm is None:
+        return EnforcementResult(
+            allowed=False,
+            response_code=407,
+            reason="proxy_auth_unknown",
+            cvm=None,
+            upstream_headers={},
+            traffic_log=None,
+        )
+
+    upstream_headers = strip_proxy_authorization(headers)
+    decision = cvm.merged_policy.decide_tunnel(
+        scheme=request.scheme,
+        host=request.host,
+        port=request.port,
+    )
+    if not decision.allowed:
+        return _blocked_result(request, cvm, upstream_headers, decision.reason, decision.rule_id)
+    return EnforcementResult(
+        allowed=True,
+        response_code=None,
+        reason="allowed",
+        cvm=cvm,
+        upstream_headers=upstream_headers,
+        traffic_log=None,
+        matched_policy_id=decision.rule_id,
+    )
+
+
 def extract_proxy_bearer(headers: Mapping[str, str]) -> str | None:
     raw = headers.get("proxy-authorization")
     if raw is None:
