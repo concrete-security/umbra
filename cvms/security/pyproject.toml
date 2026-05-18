@@ -18,6 +18,7 @@ mitmproxy = ["mitmproxy>=11,<12"]
 concrete-security-mitmproxy = "concrete_security_cvm.mitmproxy_runtime:main"
 concrete-security-management = "concrete_security_cvm.management_http:main"
 concrete-security-runtime = "concrete_security_cvm.runtime:main"
+concrete-security-proxy-tunnel = "concrete_security_cvm.proxy_tunnel:main"
 
 [build-system]
 requires = ["hatchling"]

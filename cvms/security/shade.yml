@@ -4,15 +4,18 @@ app:
 services:
   mitmproxy:
     networks: [proxy]
+  proxy-tunnel:
+    networks: [proxy]
 
 cvm:
   domain: ${SECURITY_CVM_FQDN}
   routes:
+    - path: /concrete/proxy
+      service: proxy-tunnel
+      port: 8082
+      websocket: true
+      cors: false
     - path: /ca.pem
       service: mitmproxy
       port: 8081
-      cors: false
-    - path: /
-      service: mitmproxy
-      port: 8080
       cors: false

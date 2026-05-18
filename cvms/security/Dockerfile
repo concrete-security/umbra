@@ -23,6 +23,6 @@ RUN uv pip install --system --no-cache ".[mitmproxy]"
 
 USER security-cvm
 
-EXPOSE 8080 8081
+EXPOSE 8080 8081 8082
 
 CMD ["concrete-security-mitmproxy"]

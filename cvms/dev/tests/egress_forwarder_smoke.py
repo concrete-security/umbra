@@ -19,6 +19,13 @@ def load_forwarder_module():
 
 
 async def fake_security_cvm(reader, writer):
+    upgrade = await reader.readuntil(b"\r\n\r\n")
+    assert b"GET /concrete/proxy HTTP/1.1" in upgrade
+    assert b"Host: sc.example.com" in upgrade
+    assert b"Upgrade: concrete-proxy\r\n" in upgrade
+    assert b"Proxy-Authorization" not in upgrade
+    writer.write(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: concrete-proxy\r\nConnection: Upgrade\r\n\r\n")
+    await writer.drain()
     request = await reader.readuntil(b"\r\n\r\n")
     assert b"CONNECT example.com:443 HTTP/1.1" in request
     assert b"Proxy-Authorization: Bearer real-proxy-token\r\n" in request

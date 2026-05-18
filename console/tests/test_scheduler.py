@@ -757,6 +757,18 @@ def test_security_cvm_provider_name_is_concrete_scoped() -> None:
     )
 
 
+def test_render_security_cvm_shade_config_routes_proxy_tunnel_websocket() -> None:
+    shade = scheduler.render_security_cvm_shade_config(security_cvm_snapshot(), name="concrete-v0-sc-test")
+
+    assert "name: concrete-v0-sc-test" in shade
+    assert "domain: sc-abc.sc.example.com" in shade
+    assert "proxy-tunnel:" in shade
+    assert "path: /concrete/proxy" in shade
+    assert "service: proxy-tunnel" in shade
+    assert "websocket: true" in shade
+    assert "path: /ca.pem" in shade
+
+
 class AsyncContext:
     def __init__(self, value=None):
         self.value = value

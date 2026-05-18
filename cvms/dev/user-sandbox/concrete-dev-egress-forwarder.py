@@ -17,6 +17,8 @@ from urllib.parse import urlsplit
 
 MAX_HEADER_BYTES = 65536
 READ_SIZE = 65536
+DEFAULT_SECURITY_CVM_PROXY_PATH = "/concrete/proxy"
+DEFAULT_SECURITY_CVM_PROXY_UPGRADE = "concrete-proxy"
 HOP_BY_HOP_HEADERS = {
     "connection",
     "keep-alive",
@@ -37,6 +39,8 @@ class ForwarderConfig:
     security_cvm_fqdn: str
     security_cvm_connect_host: str | None
     security_cvm_public_port: int
+    security_cvm_proxy_path: str
+    security_cvm_proxy_upgrade: str
     proxy_token: str
     atls_policy_path: Path
     ca_cert_path: Path
@@ -76,6 +80,20 @@ def optional_host_env(name: str) -> str | None:
         return None
     if any(character in value for character in "\r\n\t\0"):
         raise RuntimeError(f"{name} must not contain control characters")
+    return value
+
+
+def optional_path_env(name: str, default: str) -> str:
+    value = os.environ.get(name, default).strip()
+    if not value.startswith("/") or any(character in value for character in "\r\n\t\0"):
+        raise RuntimeError(f"{name} must be an absolute path without control characters")
+    return value
+
+
+def optional_token_env(name: str, default: str) -> str:
+    value = os.environ.get(name, default).strip()
+    if not value or any(character in value for character in "\r\n\t\0"):
+        raise RuntimeError(f"{name} must not be empty or contain control characters")
     return value
 
 
@@ -134,6 +152,8 @@ def load_config(runtime_dir: Path = Path("/run/concrete")) -> ForwarderConfig:
         security_cvm_fqdn=required_env("SECURITY_CVM_FQDN"),
         security_cvm_connect_host=optional_host_env("SECURITY_CVM_CONNECT_HOST"),
         security_cvm_public_port=int(os.environ.get("SECURITY_CVM_PUBLIC_PORT", "443")),
+        security_cvm_proxy_path=optional_path_env("SECURITY_CVM_PROXY_PATH", DEFAULT_SECURITY_CVM_PROXY_PATH),
+        security_cvm_proxy_upgrade=optional_token_env("SECURITY_CVM_PROXY_UPGRADE", DEFAULT_SECURITY_CVM_PROXY_UPGRADE),
         proxy_token=proxy_token,
         atls_policy_path=policy_path,
         ca_cert_path=ca_path,
@@ -252,6 +272,38 @@ async def open_verified_upstream(config: ForwarderConfig) -> VerifiedUpstream:
     return VerifiedUpstream(reader=reader, writer=writer, process=process)
 
 
+async def open_security_proxy_tunnel(upstream: VerifiedUpstream, config: ForwarderConfig) -> None:
+    host = config.security_cvm_fqdn
+    if config.security_cvm_public_port != 443:
+        host = f"{host}:{config.security_cvm_public_port}"
+    request = (
+        f"GET {config.security_cvm_proxy_path} HTTP/1.1\r\n"
+        f"Host: {host}\r\n"
+        "Connection: Upgrade\r\n"
+        f"Upgrade: {config.security_cvm_proxy_upgrade}\r\n"
+        "\r\n"
+    )
+    upstream.writer.write(request.encode("ascii"))
+    await upstream.writer.drain()
+    response = await read_response_headers(upstream.reader)
+    status_line = response.split(b"\r\n", 1)[0].split()
+    status = status_line[1] if len(status_line) >= 2 and response.startswith(b"HTTP/") else b"000"
+    if status != b"101":
+        raise ConnectionError(f"Security CVM proxy tunnel upgrade failed: HTTP {status.decode('ascii', errors='replace')}")
+
+
+async def read_response_headers(reader: asyncio.StreamReader) -> bytes:
+    try:
+        response = await reader.readuntil(b"\r\n\r\n")
+    except asyncio.IncompleteReadError as exc:
+        raise ConnectionError("upstream closed before response headers") from exc
+    except asyncio.LimitOverrunError as exc:
+        raise ConnectionError("upstream response headers too large") from exc
+    if len(response) > MAX_HEADER_BYTES:
+        raise ConnectionError("upstream response headers too large")
+    return response
+
+
 async def close_verified_upstream(upstream: VerifiedUpstream) -> None:
     upstream.writer.close()
     await upstream.writer.wait_closed()
@@ -329,11 +381,12 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             destination = request.target
 
         upstream = await open_verified_upstream(config)
+        await open_security_proxy_tunnel(upstream, config)
         upstream.writer.write(encode_request_line_and_headers(request, config.proxy_token))
         await upstream.writer.drain()
 
         if request.method == "CONNECT":
-            response = await upstream.reader.readuntil(b"\r\n\r\n")
+            response = await read_response_headers(upstream.reader)
             writer.write(response)
             await writer.drain()
             status_parts = response.split(b"\r\n", 1)[0].split()
