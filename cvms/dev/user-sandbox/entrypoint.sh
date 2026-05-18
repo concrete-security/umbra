@@ -97,7 +97,7 @@ validate_placeholder_name() {
 validate_placeholder_value() {
   local value="$1"
   case "$value" in
-    *$'\n'*|*$'\0'*)
+    *$'\n'*)
       return 1
       ;;
   esac
@@ -107,6 +107,18 @@ validate_placeholder_value() {
   [[ "$value" =~ AKIA[0-9A-Z]{16} ]] && return 1
   return 0
 }
+
+if [ "${CONCRETE_ENTRYPOINT_SELF_TEST:-}" = "validate-placeholder-value" ]; then
+  validate_placeholder_value "concrete-proxy-injected" \
+    || fail "self-test rejected benign placeholder value"
+  if validate_placeholder_value $'line\nbreak'; then
+    fail "self-test accepted newline placeholder value"
+  fi
+  if validate_placeholder_value "sk-ant-abcdefghijklmnopqrstuvwxyz"; then
+    fail "self-test accepted secret-shaped placeholder value"
+  fi
+  exit 0
+fi
 
 write_runtime_env() {
   local placeholder_file="$1"
