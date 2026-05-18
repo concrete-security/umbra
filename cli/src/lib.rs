@@ -15,6 +15,8 @@ mod session;
 pub use exit::ExitStatus;
 
 pub fn run() -> ExitCode {
+    install_default_crypto_provider();
+
     let args = match cli::Cli::try_parse() {
         Ok(args) => args,
         Err(err) => {
@@ -90,4 +92,8 @@ pub fn run() -> ExitCode {
         cli::Command::Version => commands::version::run(json_output),
     };
     ExitCode::from(status)
+}
+
+fn install_default_crypto_provider() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 }

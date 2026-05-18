@@ -440,6 +440,11 @@ def require_cvm_profile_mutable(row: asyncpg.Record | dict, *, action: str) -> N
         )
 
 
+def require_cvm_owner_or_manager(row: asyncpg.Record | dict, current_user: CurrentUser) -> None:
+    if row["owner_id"] != current_user.id and "CVM_MANAGE" not in current_user.permissions:
+        raise api_error(404, "NOT_FOUND", "resource not found")
+
+
 def require_matching_etag(current: str, if_match: str | None) -> None:
     if not if_match:
         raise api_error(428, "PRECONDITION_REQUIRED", "missing If-Match header", {"etag": current})
@@ -3543,7 +3548,6 @@ async def terminate_cvm(
     current_user: CurrentUser = Depends(require_current_user),
     pool: asyncpg.Pool = Depends(get_pool),
 ) -> Any:
-    current_user.require_permission("CVM_MANAGE")
     idempotency_key_value = optional_idempotency_key(idempotency_key)
     route = f"POST /api/v1/cvms/{cvm_id}/actions/terminate"
     body_sha256 = request_body_sha256(await request.body())
@@ -3568,6 +3572,7 @@ async def terminate_cvm(
                     return JSONResponse(status_code=cached.status_code, content=cached.body, headers=cached.headers)
 
             cvm = await lock_cvm_for_lifecycle_action(conn, cvm_id=cvm_id, current_user=current_user)
+            require_cvm_owner_or_manager(cvm, current_user)
             if if_match is not None:
                 require_matching_etag(cvm_etag(cvm), if_match)
             if cvm["state"] == "TERMINATED":
@@ -3867,7 +3872,7 @@ async def lock_cvm_for_lifecycle_action(
 ) -> asyncpg.Record:
     row = await conn.fetchrow(
         """
-        SELECT id, entity_id, state::text AS state, metadata, policy_version, updated_at
+        SELECT id, entity_id, owner_id, state::text AS state, metadata, policy_version, updated_at
         FROM cvms
         WHERE id = $1
           AND entity_id = $2

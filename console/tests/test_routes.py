@@ -29,6 +29,7 @@ from concrete_console.routes import (
     policy_sha256,
     redacted_security_cvm_provision_result,
     profile_etag,
+    require_cvm_owner_or_manager,
     require_cvm_profile_mutable,
     require_idempotency_key,
     require_if_match,
@@ -129,6 +130,31 @@ def test_cvm_etag_includes_policy_version() -> None:
 def test_cvm_provider_app_id_reads_phala_metadata() -> None:
     assert cvm_provider_app_id(cvm_row(metadata={"app_id": "app-123"})) == "app-123"
     assert cvm_provider_app_id(cvm_row(metadata={})) is None
+
+
+def test_require_cvm_owner_or_manager_allows_owner_without_manage() -> None:
+    require_cvm_owner_or_manager(
+        cvm_row(owner_id=UUID("00000000-0000-4000-8000-000000000020")),
+        SimpleNamespace(id=UUID("00000000-0000-4000-8000-000000000020"), permissions=["CVM_LAUNCH"]),
+    )
+
+
+def test_require_cvm_owner_or_manager_allows_manager_for_other_owner() -> None:
+    require_cvm_owner_or_manager(
+        cvm_row(owner_id=UUID("00000000-0000-4000-8000-000000000021")),
+        SimpleNamespace(id=UUID("00000000-0000-4000-8000-000000000020"), permissions=["CVM_MANAGE"]),
+    )
+
+
+def test_require_cvm_owner_or_manager_hides_other_owner_without_manage() -> None:
+    with pytest.raises(HTTPException) as exc:
+        require_cvm_owner_or_manager(
+            cvm_row(owner_id=UUID("00000000-0000-4000-8000-000000000021")),
+            SimpleNamespace(id=UUID("00000000-0000-4000-8000-000000000020"), permissions=["CVM_LAUNCH"]),
+        )
+
+    assert exc.value.status_code == 404
+    assert exc.value.detail["error"]["code"] == "NOT_FOUND"
 
 
 def test_apply_provider_cvm_lifecycle_action_calls_phala(monkeypatch) -> None:

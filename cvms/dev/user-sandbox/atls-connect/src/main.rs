@@ -10,10 +10,16 @@ const MAX_STDIN_BYTES: u64 = 1024 * 1024;
 
 #[tokio::main]
 async fn main() {
+    install_default_crypto_provider();
+
     if let Err(error) = run().await {
         eprintln!("concrete-atls-connect: {error}");
         std::process::exit(1);
     }
+}
+
+fn install_default_crypto_provider() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 }
 
 async fn run() -> Result<()> {

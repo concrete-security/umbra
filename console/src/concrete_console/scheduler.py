@@ -1483,7 +1483,7 @@ async def execute_cvm_launch_await_sc_pull_operation(operation_id: Any) -> None:
         )
         await advance_cvm_launch_step(operation_id, "policy_push")
         return
-    elapsed = datetime.now(timezone.utc) - _row_value(snapshot, "operation_updated_at")
+    elapsed = datetime.now(timezone.utc) - proxy_token_created_at
     timeout = timedelta(seconds=sc_pull_propagation_timeout_seconds())
     if elapsed < timeout:
         log.info(

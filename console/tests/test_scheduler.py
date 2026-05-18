@@ -1649,7 +1649,7 @@ def test_execute_cvm_launch_await_sc_pull_waits_before_timeout(monkeypatch) -> N
 def test_execute_cvm_launch_await_sc_pull_falls_forward_after_timeout(monkeypatch) -> None:
     token_created_at = scheduler.datetime.now(scheduler.timezone.utc) - scheduler.timedelta(seconds=20)
     snapshot = launch_snapshot(
-        operation_updated_at=token_created_at,
+        operation_updated_at=scheduler.datetime.now(scheduler.timezone.utc),
         actor_id=UUID("00000000-0000-4000-8000-000000000020"),
         actor_email="dev@example.com",
         entity_id=UUID("00000000-0000-4000-8000-000000000001"),
