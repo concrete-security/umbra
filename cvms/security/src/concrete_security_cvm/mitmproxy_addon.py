@@ -5,9 +5,16 @@ from datetime import datetime, timezone
 import logging
 from typing import Any, Callable, Mapping
 from urllib.parse import urlsplit
+from uuid import UUID
 
 from concrete_security_cvm.control_loop import ControlPlaneState
-from concrete_security_cvm.enforcement import EnforcementResult, ProxyRequest, enforce_connect_request, enforce_request
+from concrete_security_cvm.enforcement import (
+    EnforcementResult,
+    ProxyRequest,
+    enforce_authenticated_request,
+    enforce_connect_request,
+    enforce_request,
+)
 from concrete_security_cvm.traffic import TrafficLogEmitter, TrafficLogRecord
 
 
@@ -61,16 +68,20 @@ class SecurityCVMProxyAddon:
             )
             logger.info("proxy_request_malformed", extra={"reason": str(exc)})
             return
+        control_map = self.control_state.snapshot().control_map
         if connect_only or proxy_request.method == "CONNECT":
-            result = enforce_connect_request(proxy_request, self.control_state.snapshot().control_map)
+            result = enforce_connect_request(proxy_request, control_map)
+        elif cvm := _connect_cvm(flow, control_map):
+            result = enforce_authenticated_request(proxy_request, cvm)
         else:
-            result = enforce_request(proxy_request, self.control_state.snapshot().control_map)
+            result = enforce_request(proxy_request, control_map)
         if result.allowed:
             _replace_headers(flow.request.headers, result.upstream_headers)
             if result.traffic_log is not None:
                 _metadata(flow)["concrete_traffic_log"] = result.traffic_log
-            if connect_only or proxy_request.method == "CONNECT":
+            if (connect_only or proxy_request.method == "CONNECT") and result.cvm is not None:
                 _metadata(flow)["concrete_connect_allowed"] = True
+                _metadata(flow)["concrete_cvm_id"] = str(result.cvm.cvm_id)
             return
         self._reject(flow, result)
 
@@ -264,3 +275,14 @@ def _metadata(flow: Any) -> dict[str, Any]:
         return metadata
     flow.metadata = {}
     return flow.metadata
+
+
+def _connect_cvm(flow: Any, control_map: Any) -> Any:
+    raw = _metadata(flow).get("concrete_cvm_id")
+    if not isinstance(raw, str):
+        return None
+    try:
+        cvm_id = UUID(raw)
+    except ValueError:
+        return None
+    return control_map.lookup_cvm_id(cvm_id)

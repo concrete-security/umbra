@@ -7,6 +7,7 @@ import pytest
 from concrete_security_cvm.enforcement import (
     DLPScanTimeout,
     ProxyRequest,
+    enforce_authenticated_request,
     enforce_connect_request,
     enforce_request,
     find_dlp_match,
@@ -129,6 +130,22 @@ def test_allowed_request_strips_proxy_auth_and_injects_real_header_after_dlp() -
     assert result.traffic_log is not None
     assert result.traffic_log.response_code is None
     assert result.traffic_log.cvm_id.hex == "00000000000040008000000000000010"
+
+
+def test_authenticated_request_reuses_connect_identity_without_proxy_auth() -> None:
+    cvm = control_map().lookup_proxy_token("proxy-token")
+    assert cvm is not None
+
+    result = enforce_authenticated_request(
+        request(headers={"Authorization": "Bearer concrete-proxy-injected"}),
+        cvm,
+    )
+
+    assert result.allowed is True
+    assert result.response_code is None
+    assert result.traffic_log is not None
+    assert result.traffic_log.cvm_id.hex == "00000000000040008000000000000010"
+    assert result.upstream_headers["authorization"] == "Bearer sk-ant-real"
 
 
 def test_allowed_connect_uses_host_port_gate_without_request_log() -> None:

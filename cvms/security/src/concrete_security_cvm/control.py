@@ -45,6 +45,12 @@ class ControlMap:
     def lookup_proxy_token(self, token: str) -> DevCVMControlEntry | None:
         return self.entries_by_proxy_token_hash.get(hashlib.sha256(token.encode("utf-8")).hexdigest())
 
+    def lookup_cvm_id(self, cvm_id: UUID) -> DevCVMControlEntry | None:
+        for entry in self.entries_by_proxy_token_hash.values():
+            if entry.cvm_id == cvm_id:
+                return entry
+        return None
+
 
 @dataclass(frozen=True)
 class PollResult:

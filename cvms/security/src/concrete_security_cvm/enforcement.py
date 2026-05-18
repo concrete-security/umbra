@@ -73,6 +73,22 @@ def enforce_request(
             traffic_log=None,
         )
 
+    return enforce_authenticated_request(
+        request,
+        cvm,
+        dlp_timeout_seconds=dlp_timeout_seconds,
+        dlp_now=dlp_now,
+    )
+
+
+def enforce_authenticated_request(
+    request: ProxyRequest,
+    cvm: DevCVMControlEntry,
+    *,
+    dlp_timeout_seconds: float = DLP_SCAN_TIMEOUT_SECONDS,
+    dlp_now: Callable[[], float] = time.monotonic,
+) -> EnforcementResult:
+    headers = normalize_headers(request.headers)
     upstream_headers = strip_proxy_authorization(headers)
     decision = cvm.merged_policy.decide(
         scheme=request.scheme,

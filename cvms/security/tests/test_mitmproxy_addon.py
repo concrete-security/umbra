@@ -192,6 +192,30 @@ def test_allowed_connect_uses_authority_and_does_not_log_before_http_request() -
     assert "proxy-authorization" not in flow.request.headers
 
 
+def test_decrypted_https_request_reuses_connect_identity_without_proxy_auth() -> None:
+    policy_body = policy()
+    policy_body["blocked_destinations"] = []
+    proxy_addon, queue = addon(policy_body)
+    flow = FakeFlow(FakeRequest(method="CONNECT", host="", path="/", authority="api.anthropic.com:443"))
+
+    proxy_addon.http_connect(flow)
+    assert flow.response is None
+    flow.request = FakeRequest(headers={"Authorization": "Bearer concrete-proxy-injected"})
+    proxy_addon.request(flow)
+
+    assert flow.response is None
+    assert flow.request.headers["authorization"] == "Bearer sk-ant-real"
+    flow.response = FakeResponse(status_code=201, raw_content=b"{}", headers={})
+    proxy_addon.response(flow)
+    batch = queue.drain_batch()
+
+    assert batch is not None
+    assert len(batch.records) == 1
+    assert batch.records[0].cvm_id == CVM_ID
+    assert batch.records[0].method == "POST"
+    assert batch.records[0].response_code == 201
+
+
 def test_blocked_request_sets_403_and_emits_sanitized_traffic_log() -> None:
     proxy_addon, queue = addon()
     flow = FakeFlow(FakeRequest(path="/v1/files/upload?secret=not-logged"))
