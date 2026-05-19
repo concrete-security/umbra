@@ -12,8 +12,13 @@ touch "$_marker" 2>/dev/null || true
 (
   nohup bash -c '
     set +e
+    export NPM_CONFIG_IGNORE_SCRIPTS=true
+    export NPM_CONFIG_AUDIT=false
     if command -v npm >/dev/null 2>&1; then
-      npm update -g @anthropic-ai/claude-code @openai/codex >/dev/null 2>&1 &
+      npm install -g @openai/codex --prefix /home/dev/.local >/dev/null 2>&1 &
+    fi
+    if [ -x /usr/local/lib/concrete/claude.real ]; then
+      /usr/local/lib/concrete/claude.real update >/dev/null 2>&1 &
     fi
     if command -v gh >/dev/null 2>&1; then
       gh upgrade >/dev/null 2>&1 &

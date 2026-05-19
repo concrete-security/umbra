@@ -33,6 +33,12 @@ def main() -> None:
     )
     require("visudo -cf /etc/sudoers.d/dev" in dockerfile, "sudoers drop-in must be validated")
     require("dev:100000:65536" in dockerfile, "dev subuid/subgid range must be configured")
+    require("claude.real" in dockerfile, "claude must be baked into the image")
+    require("@openai/codex" in dockerfile, "codex must be baked into the image")
+    require("concrete-agent-claude.sh" in dockerfile, "claude wrapper must be installed")
+    require("concrete-agent-codex.sh" in dockerfile, "codex wrapper must be installed")
+    require("nodejs.org/dist" in dockerfile, "node must be installed from official tarball")
+    require("gh auth git-credential" in dockerfile, "gh git credential helper must be configured")
     require(
         re.search(r"^USER\s+", dockerfile, re.MULTILINE) is None,
         "entrypoint must keep running as root",
