@@ -3946,10 +3946,10 @@ async def apply_cvm_state_action(
     current_user: CurrentUser,
     response: Response,
 ) -> dict:
-    current_user.require_permission("CVM_MANAGE")
     async with pool.acquire() as conn:
         async with conn.transaction():
             cvm = await lock_cvm_for_lifecycle_action(conn, cvm_id=cvm_id, current_user=current_user)
+            require_cvm_owner_or_manager(cvm, current_user)
             if if_match is not None:
                 require_matching_etag(cvm_etag(cvm), if_match)
             if cvm["state"] == target_state:
