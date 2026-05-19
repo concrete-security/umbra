@@ -203,7 +203,7 @@ def test_apply_provider_cvm_lifecycle_action_wraps_phala_error(monkeypatch) -> N
 
     assert exc.value.status_code == 502
     assert exc.value.detail["error"]["code"] == "UPSTREAM_ERROR"
-    assert exc.value.detail["error"]["details"] == {"adapter": "phala", "reason": "cli_failed"}
+    assert exc.value.detail["error"]["details"] == {"adapter": "cvm_provider", "reason": "cli_failed"}
 
 
 def test_security_cvm_provider_app_id_reads_phala_metadata() -> None:
@@ -245,7 +245,7 @@ def test_terminate_provider_security_cvm_wraps_phala_error(monkeypatch) -> None:
 
     assert exc.value.status_code == 502
     assert exc.value.detail["error"]["code"] == "UPSTREAM_ERROR"
-    assert exc.value.detail["error"]["details"] == {"adapter": "phala", "reason": "cli_failed"}
+    assert exc.value.detail["error"]["details"] == {"adapter": "cvm_provider", "reason": "cli_failed"}
 
 
 def test_deprovision_security_cvm_dns_records_uses_security_zone(monkeypatch) -> None:
@@ -872,7 +872,7 @@ def test_validate_reconcile_dependencies_requires_phala(monkeypatch) -> None:
         validate_reconcile_dependencies(include_orphans=False)
 
     assert exc.value.status_code == 503
-    assert exc.value.detail["error"]["details"]["component"] == "phala_adapter"
+    assert exc.value.detail["error"]["details"]["component"] == "cvm_provider_adapter"
 
 
 def test_validate_reconcile_dependencies_requires_cloudflare_for_orphans(monkeypatch) -> None:

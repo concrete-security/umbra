@@ -41,8 +41,10 @@ TRAFFIC_LOG_DELETE_CHUNK = 10_000
 OPERATION_START_STEPS = {
     "audit.export": ("materialize", 20),
     "cvm.launch": ("phala_deploy", 20),
+    "cvm.update": ("provider_update", 20),
     "cvm.terminate": ("phala_terminate", 25),
     "security_cvm.provision": ("phala_deploy", 20),
+    "security_cvm.update": ("provider_update", 20),
 }
 CVM_LAUNCH_EXECUTABLE_STEPS = {
     "phala_deploy",
@@ -61,6 +63,19 @@ CVM_LAUNCH_PROGRESS = {
     "policy_push": 80,
     "finalise": 90,
 }
+CVM_UPDATE_EXECUTABLE_STEPS = {
+    "provider_update",
+    "verify_attestation",
+    "await_sc_pull",
+    "policy_push",
+    "finalise",
+}
+CVM_UPDATE_PROGRESS = {
+    "verify_attestation": 45,
+    "await_sc_pull": 60,
+    "policy_push": 75,
+    "finalise": 90,
+}
 SECURITY_CVM_PROVISION_EXECUTABLE_STEPS = {
     "phala_deploy",
     "cf_txt_create",
@@ -76,6 +91,19 @@ SECURITY_CVM_PROVISION_PROGRESS = {
     "await_phala_running": 55,
     "verify_attestation": 60,
     "fetch_ca": 80,
+    "finalise": 90,
+}
+SECURITY_CVM_UPDATE_EXECUTABLE_STEPS = {
+    "provider_update",
+    "await_provider_running",
+    "verify_attestation",
+    "fetch_ca",
+    "finalise",
+}
+SECURITY_CVM_UPDATE_PROGRESS = {
+    "await_provider_running": 40,
+    "verify_attestation": 55,
+    "fetch_ca": 75,
     "finalise": 90,
 }
 AUDIT_EXPORT_EXECUTABLE_STEPS = {"materialize"}
@@ -312,7 +340,11 @@ def executable_running_operation(row: Any) -> bool:
     return (kind == "cvm.terminate" and step == "phala_terminate") or (
         kind == "cvm.launch" and step in CVM_LAUNCH_EXECUTABLE_STEPS
     ) or (
+        kind == "cvm.update" and step in CVM_UPDATE_EXECUTABLE_STEPS
+    ) or (
         kind == "security_cvm.provision" and step in SECURITY_CVM_PROVISION_EXECUTABLE_STEPS
+    ) or (
+        kind == "security_cvm.update" and step in SECURITY_CVM_UPDATE_EXECUTABLE_STEPS
     ) or (
         kind == "audit.export" and step in AUDIT_EXPORT_EXECUTABLE_STEPS
     )
@@ -363,12 +395,28 @@ async def execute_running_operation(operation_id: Any) -> bool:
             handler=lambda: execute_cvm_launch_operation(operation_id, step),
         )
         return True
+    if kind == "cvm.update" and step in CVM_UPDATE_EXECUTABLE_STEPS:
+        await execute_operation_step_with_logging(
+            operation_id,
+            kind=kind,
+            step=step,
+            handler=lambda: execute_cvm_update_operation(operation_id, step),
+        )
+        return True
     if kind == "security_cvm.provision" and step in SECURITY_CVM_PROVISION_EXECUTABLE_STEPS:
         await execute_operation_step_with_logging(
             operation_id,
             kind=kind,
             step=step,
             handler=lambda: execute_security_cvm_provision_operation(operation_id, step),
+        )
+        return True
+    if kind == "security_cvm.update" and step in SECURITY_CVM_UPDATE_EXECUTABLE_STEPS:
+        await execute_operation_step_with_logging(
+            operation_id,
+            kind=kind,
+            step=step,
+            handler=lambda: execute_security_cvm_update_operation(operation_id, step),
         )
         return True
     if kind == "audit.export" and step in AUDIT_EXPORT_EXECUTABLE_STEPS:
@@ -443,6 +491,24 @@ async def execute_cvm_launch_operation(operation_id: Any, step: str) -> None:
         return
 
 
+async def execute_cvm_update_operation(operation_id: Any, step: str) -> None:
+    if step == "provider_update":
+        await execute_cvm_update_phala_operation(operation_id)
+        return
+    if step == "verify_attestation":
+        await execute_cvm_update_attestation_gate_operation(operation_id)
+        return
+    if step == "await_sc_pull":
+        await execute_cvm_update_await_sc_pull_operation(operation_id)
+        return
+    if step == "policy_push":
+        await execute_cvm_update_policy_push_operation(operation_id)
+        return
+    if step == "finalise":
+        await execute_cvm_update_finalise_operation(operation_id)
+        return
+
+
 async def execute_security_cvm_provision_operation(operation_id: Any, step: str) -> None:
     if step == "phala_deploy":
         await execute_security_cvm_phala_deploy_operation(operation_id)
@@ -464,6 +530,24 @@ async def execute_security_cvm_provision_operation(operation_id: Any, step: str)
         return
     if step == "finalise":
         await execute_security_cvm_finalise_operation(operation_id)
+        return
+
+
+async def execute_security_cvm_update_operation(operation_id: Any, step: str) -> None:
+    if step == "provider_update":
+        await execute_security_cvm_update_phala_operation(operation_id)
+        return
+    if step == "await_provider_running":
+        await execute_security_cvm_update_await_phala_running_operation(operation_id)
+        return
+    if step == "verify_attestation":
+        await execute_security_cvm_update_attestation_gate_operation(operation_id)
+        return
+    if step == "fetch_ca":
+        await execute_security_cvm_update_fetch_ca_operation(operation_id)
+        return
+    if step == "finalise":
+        await execute_security_cvm_update_finalise_operation(operation_id)
         return
 
 
@@ -1133,6 +1217,413 @@ async def execute_security_cvm_finalise_operation(operation_id: Any) -> None:
             )
 
 
+async def execute_security_cvm_update_phala_operation(operation_id: Any) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        snapshot = await fetch_security_cvm_update_snapshot(conn, operation_id)
+    if snapshot is None:
+        await mark_security_cvm_update_failed(operation_id, code="SECURITY_CVM_NOT_FOUND", details={"state": "missing_target"})
+        return
+    if _row_value(snapshot, "state") not in {"RUNNING", "STOPPED", "FAILED"}:
+        await mark_security_cvm_update_failed(operation_id, code="INVALID_STATE", details={"state": _row_value(snapshot, "state")})
+        return
+    deployment_id = provider_deployment_id(_row_value(snapshot, "metadata"))
+    if deployment_id is None:
+        await mark_security_cvm_update_failed(
+            operation_id,
+            code="PROVIDER_DEPLOYMENT_MISSING",
+            details={"field": "metadata.deployment_id"},
+        )
+        return
+    try:
+        update_material = security_cvm_update_material()
+    except ValueError as exc:
+        await mark_security_cvm_update_failed(
+            operation_id,
+            code=str(exc),
+            details={"component": "security_cvm_update_config"},
+        )
+        return
+
+    from concrete_console.shade_provider.shade import ShadeClient, ShadeError
+    from concrete_console.tee_provider import CvmProviderError, cvm_provider_from_settings
+
+    env: dict[str, str] | None = None
+    bearers: dict[str, str] | None = None
+    try:
+        name = security_cvm_provider_name_from_metadata(snapshot)
+        shade_result = await ShadeClient.from_settings().build(
+            shade_config_yaml=render_security_cvm_shade_config(snapshot, name=name),
+            app_compose_yaml=update_material["compose_config"],
+        )
+        bearers = mint_security_cvm_provision_bearers()
+        await persist_security_cvm_update_bearers(
+            operation_id,
+            snapshot,
+            ingest_token_hash=bearers["ingest_token_hash"],
+            ca_export_token_hash=bearers["ca_export_token_hash"],
+            ca_export_token_plaintext=bearers["ca_export_token"],
+        )
+        env = build_security_cvm_provision_env(
+            snapshot,
+            ingest_token=bearers["ingest_token"],
+            ca_export_token=bearers["ca_export_token"],
+        )
+        deploy_result = await cvm_provider_from_settings().update_deployment(
+            deployment_id=deployment_id,
+            compose_yaml=shade_result.compose_yaml,
+            env=env,
+        )
+    except ShadeError as exc:
+        await mark_security_cvm_update_failed(
+            operation_id,
+            code="SHADE_BUILD_FAILED",
+            details={"adapter": "shade", "reason": exc.code},
+        )
+        return
+    except CvmProviderError as exc:
+        await mark_security_cvm_update_failed(
+            operation_id,
+            code="PROVIDER_UPDATE_FAILED",
+            details={"adapter": "cvm_provider", "reason": exc.code},
+        )
+        return
+    finally:
+        if env is not None:
+            env["CONSOLE_INGEST_TOKEN"] = ""
+            env["CA_EXPORT_TOKEN"] = ""
+        if bearers is not None:
+            bearers["ingest_token"] = ""
+            bearers["ca_export_token"] = ""
+
+    metadata = security_cvm_update_metadata(
+        _row_value(snapshot, "metadata"),
+        name=name,
+        deployment_id=deploy_result.deployment_id,
+        gateway_host=deploy_result.gateway_host,
+        status=deploy_result.status,
+        deploy_compose_yaml=shade_result.compose_yaml,
+    )
+    if _row_value(snapshot, "ca_cert_pem"):
+        metadata["previous_ca_cert_sha256"] = sha256_text(_row_value(snapshot, "ca_cert_pem"))
+    await persist_security_cvm_update_provider_result(
+        operation_id,
+        snapshot,
+        metadata=metadata,
+        compose_config=update_material["compose_config"],
+        expected_image_measurement=update_material["expected_image_measurement"],
+    )
+
+
+async def execute_security_cvm_update_await_phala_running_operation(operation_id: Any) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        snapshot = await fetch_security_cvm_update_snapshot(conn, operation_id)
+    if snapshot is None:
+        await mark_security_cvm_update_failed(operation_id, code="SECURITY_CVM_NOT_FOUND", details={"state": "missing_target"})
+        return
+    deployment_id = provider_deployment_id(_row_value(snapshot, "metadata"))
+    if deployment_id is None:
+        await mark_security_cvm_update_failed(
+            operation_id,
+            code="PROVIDER_DEPLOYMENT_MISSING",
+            details={"field": "metadata.deployment_id"},
+        )
+        return
+
+    from concrete_console.tee_provider import CvmProviderError, cvm_provider_from_settings
+
+    try:
+        provider_status = await cvm_provider_from_settings(timeout_seconds=30.0).status(deployment_id)
+    except CvmProviderError as exc:
+        log.warning(
+            "security_cvm_update_provider_status_failed",
+            security_cvm_id=str(_row_value(snapshot, "id")),
+            reason=exc.code,
+        )
+        return
+    if provider_status == "RUNNING":
+        await advance_security_cvm_update_step(operation_id, "verify_attestation")
+        return
+    if provider_status == "FAILED":
+        await mark_security_cvm_update_failed(
+            operation_id,
+            code="PROVIDER_UPDATE_FAILED",
+            details={"adapter": "cvm_provider", "reason": "provider_status_failed"},
+            mark_security_cvm_failed=True,
+        )
+        return
+    log.info(
+        "security_cvm_update_await_provider_pending",
+        operation_id=str(operation_id),
+        security_cvm_id=str(_row_value(snapshot, "id")),
+        provider_status=provider_status,
+    )
+
+
+async def execute_security_cvm_update_attestation_gate_operation(operation_id: Any) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        snapshot = await fetch_security_cvm_update_snapshot(conn, operation_id)
+    if snapshot is None:
+        await mark_security_cvm_update_failed(operation_id, code="SECURITY_CVM_NOT_FOUND", details={"state": "missing_target"})
+        return
+    if _row_value(snapshot, "image_measurement") is None or _row_value(snapshot, "attestation_verified_at") is None:
+        verified = await run_security_cvm_update_attestation_verifier(operation_id, snapshot)
+        if verified:
+            return
+        log.info(
+            "security_cvm_update_attestation_waiting",
+            operation_id=str(operation_id),
+            security_cvm_id=str(_row_value(snapshot, "id")),
+        )
+        return
+    if _row_value(snapshot, "image_measurement") != _row_value(snapshot, "expected_image_measurement"):
+        await mark_security_cvm_update_failed(
+            operation_id,
+            code="ATTESTATION_IMAGE_MISMATCH",
+            details={
+                "expected": _row_value(snapshot, "expected_image_measurement"),
+                "actual": _row_value(snapshot, "image_measurement"),
+            },
+            mark_security_cvm_failed=True,
+        )
+        return
+    if _row_value(snapshot, "rtmr3_digest") is None:
+        await mark_security_cvm_update_failed(
+            operation_id,
+            code="ATTESTATION_RTMR_MISMATCH",
+            details={"state": "missing_rtmr3_digest"},
+            mark_security_cvm_failed=True,
+        )
+        return
+    await advance_security_cvm_update_step(operation_id, "fetch_ca")
+
+
+async def run_security_cvm_update_attestation_verifier(operation_id: Any, snapshot: Any) -> bool:
+    from concrete_console.attestation import (
+        AtlasVerifierClient,
+        AttestationVerifierError,
+        AttestationVerifierUnavailable,
+        build_security_cvm_attestation_request,
+        verify_with_fetch_retries,
+    )
+
+    try:
+        verifier = AtlasVerifierClient.from_settings()
+    except AttestationVerifierUnavailable:
+        return False
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        token_hashes = await fetch_security_cvm_token_hashes(conn, _row_value(snapshot, "id"))
+    try:
+        request = build_security_cvm_attestation_request(
+            snapshot,
+            token_hashes=token_hashes,
+            console_url=load_settings().raw.get("CONSOLE_URL", "http://localhost:8000"),
+        )
+        report = await verify_with_fetch_retries(
+            verifier,
+            request,
+            timeout_seconds=security_cvm_attestation_timeout_seconds(),
+        )
+    except AttestationVerifierUnavailable:
+        return False
+    except AttestationVerifierError as exc:
+        await mark_security_cvm_update_failed(operation_id, code=exc.code, details=exc.details, mark_security_cvm_failed=True)
+        return True
+
+    if report.image_measurement != _row_value(snapshot, "expected_image_measurement"):
+        await mark_security_cvm_update_failed(
+            operation_id,
+            code="ATTESTATION_IMAGE_MISMATCH",
+            details={
+                "expected_image_measurement": _row_value(snapshot, "expected_image_measurement"),
+                "reported_image_measurement": report.image_measurement,
+            },
+            mark_security_cvm_failed=True,
+        )
+        return True
+
+    from concrete_console.shade_provider.shade import ShadeClient, ShadeError
+
+    try:
+        deploy_compose_yaml = deployed_compose_from_metadata(_row_value(snapshot, "metadata"))
+        if deploy_compose_yaml is None:
+            raise ShadeError("missing_deploy_compose", field="metadata.deploy_compose_yaml")
+        policy_result = await ShadeClient.from_settings().generate_policy(
+            domain=_row_value(snapshot, "fqdn"),
+            deploy_compose_yaml=deploy_compose_yaml,
+            connect_host=provider_passthrough_host(_row_value(snapshot, "metadata")),
+        )
+    except ShadeError as exc:
+        await mark_security_cvm_update_failed(
+            operation_id,
+            code="SHADE_BUILD_FAILED",
+            details={"adapter": "shade", "reason": exc.code},
+        )
+        return True
+
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            verified_at = datetime.now(timezone.utc)
+            await conn.execute(
+                """
+                UPDATE security_cvms
+                SET image_measurement = $2,
+                    rtmr3_digest = $3,
+                    attestation_verified_at = $4,
+                    metadata = $5::jsonb,
+                    updated_at = now()
+                WHERE id = $1
+                  AND state IN ('RUNNING', 'STOPPED', 'FAILED')
+                  AND deleted_at IS NULL
+                """,
+                _row_value(snapshot, "id"),
+                report.image_measurement,
+                report.rtmr3_digest,
+                verified_at,
+                json.dumps(metadata_with_atls_policy(_row_value(snapshot, "metadata"), policy_result.policy)),
+            )
+            await insert_audit_event(
+                conn,
+                entity_id=_row_value(snapshot, "entity_id"),
+                actor_id=_row_value(snapshot, "actor_id"),
+                actor_email=_row_value(snapshot, "actor_email"),
+                action="SECURITY_CVM_ATTESTATION_VERIFIED",
+                target_type="security_cvm",
+                target_id=_row_value(snapshot, "id"),
+                before={
+                    "image_measurement": _row_value(snapshot, "image_measurement"),
+                    "rtmr3_digest": _row_value(snapshot, "rtmr3_digest"),
+                },
+                after={
+                    "image_measurement": report.image_measurement,
+                    "rtmr3_digest": report.rtmr3_digest,
+                    "attestation_verified_at": verified_at.isoformat().replace("+00:00", "Z"),
+                    "source": "update",
+                },
+            )
+            await advance_security_cvm_update_step_with_conn(conn, operation_id, "fetch_ca")
+    return True
+
+
+async def execute_security_cvm_update_fetch_ca_operation(operation_id: Any) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        snapshot = await fetch_security_cvm_update_snapshot(conn, operation_id)
+    if snapshot is None:
+        await mark_security_cvm_update_failed(operation_id, code="SECURITY_CVM_NOT_FOUND", details={"state": "missing_target"})
+        return
+    if not security_cvm_ca_export_stash_available(snapshot):
+        await mark_security_cvm_update_failed(operation_id, code="CA_EXPORT_TTL_EXPIRED", details={})
+        return
+    try:
+        ca_pem = await fetch_security_cvm_ca_pem(
+            fqdn=_row_value(snapshot, "fqdn"),
+            connect_host=provider_passthrough_host(_row_value(snapshot, "metadata")),
+            ca_export_token=_row_value(snapshot, "ca_export_token_plaintext"),
+        )
+    except SecurityCVMCAFetchError as exc:
+        await mark_security_cvm_update_failed(
+            operation_id,
+            code="CA_FETCH_FAILED",
+            details={"http_status": exc.http_status},
+        )
+        return
+    await persist_security_cvm_update_ca_pem(operation_id, security_cvm_id=_row_value(snapshot, "id"), ca_pem=ca_pem)
+
+
+async def execute_security_cvm_update_finalise_operation(operation_id: Any) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        snapshot = await fetch_security_cvm_update_snapshot(conn, operation_id)
+    if snapshot is None:
+        await mark_security_cvm_update_failed(operation_id, code="SECURITY_CVM_NOT_FOUND", details={"state": "missing_target"})
+        return
+    if not _row_value(snapshot, "ca_cert_pem"):
+        await mark_security_cvm_update_failed(operation_id, code="CA_FETCH_FAILED", details={"state": "missing_ca_cert"})
+        return
+    metadata = json_payload(_row_value(snapshot, "metadata") or {})
+    previous_ca_sha256 = metadata.get("previous_ca_cert_sha256") if isinstance(metadata, dict) else None
+    current_ca_sha256 = sha256_text(_row_value(snapshot, "ca_cert_pem"))
+    ca_changed = previous_ca_sha256 != current_ca_sha256
+    final_metadata = dict(metadata) if isinstance(metadata, dict) else {}
+    final_metadata.pop("previous_ca_cert_sha256", None)
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                """
+                UPDATE security_cvms
+                SET state = 'RUNNING',
+                    error_reason = NULL,
+                    metadata = $2::jsonb,
+                    ca_export_token_plaintext = NULL,
+                    ca_export_token_stashed_at = NULL,
+                    policy_version = policy_version + 1,
+                    updated_at = now()
+                WHERE id = $1
+                  AND state IN ('RUNNING', 'STOPPED', 'FAILED')
+                  AND deleted_at IS NULL
+                """,
+                _row_value(snapshot, "id"),
+                json.dumps(final_metadata),
+            )
+            impacted_dev_cvms: list[str] = []
+            if ca_changed:
+                impacted_rows = await conn.fetch(
+                    """
+                    UPDATE cvms
+                    SET error_reason = 'SECURITY_CVM_REBIND_REQUIRED',
+                        updated_at = now()
+                    WHERE security_cvm_id = $1
+                      AND state IN ('RUNNING', 'STOPPED')
+                      AND deleted_at IS NULL
+                    RETURNING id
+                    """,
+                    _row_value(snapshot, "id"),
+                )
+                impacted_dev_cvms = [str(row["id"]) for row in impacted_rows]
+            security_cvm_payload = await fetch_security_cvm_resource_for_scheduler(conn, _row_value(snapshot, "id"))
+            result = {
+                "security_cvm": security_cvm_payload,
+                "dev_cvms_requiring_update": impacted_dev_cvms,
+            }
+            await insert_audit_event(
+                conn,
+                entity_id=_row_value(snapshot, "entity_id"),
+                actor_id=_row_value(snapshot, "actor_id"),
+                actor_email=_row_value(snapshot, "actor_email"),
+                action="SECURITY_CVM_UPDATED",
+                target_type="security_cvm",
+                target_id=_row_value(snapshot, "id"),
+                before={"state": _row_value(snapshot, "state")},
+                after={
+                    "state": "RUNNING",
+                    "ca_changed": ca_changed,
+                    "dev_cvms_requiring_update": impacted_dev_cvms,
+                },
+            )
+            await conn.execute(
+                """
+                UPDATE operations
+                SET status = 'succeeded',
+                    progress_step = 'finalise',
+                    progress_percent = 100,
+                    result = $2::jsonb,
+                    error = NULL,
+                    updated_at = now(),
+                    expires_at = $3
+                WHERE id = $1
+                  AND kind = 'security_cvm.update'
+                  AND status = 'running'
+                """,
+                operation_id,
+                json.dumps(result),
+                operation_expiry(),
+            )
+
+
 async def execute_cvm_launch_phala_deploy_operation(operation_id: Any) -> None:
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -1572,11 +2063,14 @@ async def execute_cvm_launch_finalise_operation(operation_id: Any) -> None:
                 UPDATE cvms
                 SET state = 'RUNNING',
                     error_reason = NULL,
+                    atls_policy_bundle = $2::jsonb,
+                    atls_policy_revision = atls_policy_revision + 1,
                     updated_at = now()
                 WHERE id = $1
                   AND state = 'PROVISIONING'
                 """,
                 _row_value(snapshot, "cvm_id"),
+                json.dumps(metadata["policy_bundle"]),
             )
             cvm_payload = await fetch_cvm_resource_for_scheduler(conn, _row_value(snapshot, "cvm_id"))
             policy_version = await conn.fetchval(
@@ -1641,6 +2135,408 @@ async def execute_cvm_launch_finalise_operation(operation_id: Any) -> None:
                     updated_at = now(),
                     expires_at = $3
                 WHERE id = $1
+                  AND status = 'running'
+                """,
+                operation_id,
+                json.dumps(result),
+                operation_expiry(),
+            )
+
+
+async def execute_cvm_update_phala_operation(operation_id: Any) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        snapshot = await fetch_cvm_update_snapshot(conn, operation_id)
+        if snapshot is not None:
+            public_keys = await fetch_cvm_launch_public_keys(conn, _row_value(snapshot, "cvm_id"))
+            profile_rows = await fetch_cvm_launch_profile_policies(conn, _row_value(snapshot, "cvm_id"))
+    if snapshot is None:
+        await mark_cvm_update_failed(operation_id, code="CVM_NOT_FOUND", details={"state": "missing_target"})
+        return
+    if _row_value(snapshot, "state") not in {"RUNNING", "STOPPED", "FAILED"}:
+        await mark_cvm_update_failed(operation_id, code="INVALID_STATE", details={"state": _row_value(snapshot, "state")})
+        return
+    if not _row_value(snapshot, "security_cvm_ca_cert_pem"):
+        await mark_cvm_update_failed(
+            operation_id,
+            code="SECURITY_CVM_CA_UNAVAILABLE",
+            details={"component": "security_cvm_ca_cert"},
+        )
+        return
+    if stored_security_cvm_atls_policy(snapshot) is None:
+        await mark_cvm_update_failed(
+            operation_id,
+            code="SECURITY_CVM_ATLS_POLICY_UNAVAILABLE",
+            details={"component": "security_cvm_atls_policy"},
+        )
+        return
+    deployment_id = provider_deployment_id(_row_value(snapshot, "metadata"))
+    if deployment_id is None:
+        await mark_cvm_update_failed(operation_id, code="PROVIDER_DEPLOYMENT_MISSING", details={"field": "metadata.deployment_id"})
+        return
+    try:
+        update_material = dev_cvm_update_material()
+    except ValueError as exc:
+        await mark_cvm_update_failed(operation_id, code=str(exc), details={"component": "dev_cvm_update_config"})
+        return
+
+    from concrete_console.shade_provider.shade import ShadeClient, ShadeError
+    from concrete_console.tee_provider import CvmProviderError, cvm_provider_from_settings
+
+    proxy_token = secrets.token_urlsafe(32)
+    try:
+        env, binding = build_cvm_launch_env(
+            snapshot,
+            public_keys=public_keys,
+            profile_rows=profile_rows,
+            proxy_token=proxy_token,
+        )
+        shade_result = await ShadeClient.from_settings().build(
+            shade_config_yaml=render_dev_cvm_shade_config(snapshot, name=cvm_provider_name_from_metadata(snapshot)),
+            app_compose_yaml=update_material["compose_config"],
+        )
+        deploy_result = await cvm_provider_from_settings().update_deployment(
+            deployment_id=deployment_id,
+            compose_yaml=shade_result.compose_yaml,
+            env=env,
+        )
+    except ShadeError as exc:
+        await mark_cvm_update_failed(
+            operation_id,
+            code="SHADE_BUILD_FAILED",
+            details={"adapter": "shade", "reason": exc.code},
+        )
+        return
+    except CvmProviderError as exc:
+        await mark_cvm_update_failed(
+            operation_id,
+            code="PROVIDER_UPDATE_FAILED",
+            details={"adapter": "cvm_provider", "reason": exc.code},
+        )
+        return
+    finally:
+        if "env" in locals():
+            env["SECURITY_CVM_PROXY_TOKEN"] = ""
+        proxy_token = ""
+
+    policy_snapshot = dict(snapshot)
+    policy_snapshot["compose_config"] = update_material["compose_config"]
+    pending_policy_bundle = build_cvm_policy_bundle(
+        policy_snapshot,
+        rtmr3_binding=binding,
+        deploy_compose_yaml=shade_result.compose_yaml,
+        connect_host=phala_passthrough_host(deploy_result.deployment_id, deploy_result.gateway_host),
+    )
+    metadata = cvm_update_metadata(
+        _row_value(snapshot, "metadata"),
+        deployment_id=deploy_result.deployment_id,
+        gateway_host=deploy_result.gateway_host,
+        status=deploy_result.status,
+        pending_policy_bundle=pending_policy_bundle,
+    )
+    await persist_cvm_update_provider_result(
+        operation_id,
+        cvm_id=_row_value(snapshot, "cvm_id"),
+        actor_id=_row_value(snapshot, "actor_id"),
+        metadata=metadata,
+        compose_config=update_material["compose_config"],
+        expected_image_measurement=update_material["expected_image_measurement"],
+        proxy_token_hash=binding["security_cvm_proxy_token_sha256"],
+    )
+
+
+async def execute_cvm_update_attestation_gate_operation(operation_id: Any) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        snapshot = await fetch_cvm_update_snapshot(conn, operation_id)
+    if snapshot is None:
+        await mark_cvm_update_failed(operation_id, code="CVM_NOT_FOUND", details={"state": "missing_target"})
+        return
+    if _row_value(snapshot, "image_measurement") is None or _row_value(snapshot, "attestation_verified_at") is None:
+        verified = await run_cvm_update_attestation_verifier(operation_id, snapshot)
+        if verified:
+            return
+        if _row_value(snapshot, "image_measurement") is None or _row_value(snapshot, "attestation_verified_at") is None:
+            log.info(
+                "cvm_update_attestation_waiting",
+                operation_id=str(operation_id),
+                cvm_id=str(_row_value(snapshot, "cvm_id")),
+            )
+        return
+    if _row_value(snapshot, "image_measurement") != _row_value(snapshot, "expected_image_measurement"):
+        await mark_cvm_update_failed(
+            operation_id,
+            code="ATTESTATION_IMAGE_MISMATCH",
+            details={
+                "expected": _row_value(snapshot, "expected_image_measurement"),
+                "actual": _row_value(snapshot, "image_measurement"),
+            },
+            mark_cvm_failed=True,
+        )
+        return
+    if _row_value(snapshot, "rtmr3_digest") is None:
+        await mark_cvm_update_failed(
+            operation_id,
+            code="ATTESTATION_RTMR_MISMATCH",
+            details={"state": "missing_rtmr3_digest"},
+            mark_cvm_failed=True,
+        )
+        return
+    await advance_cvm_update_step(operation_id, "await_sc_pull")
+
+
+async def run_cvm_update_attestation_verifier(operation_id: Any, snapshot: Any) -> bool:
+    from concrete_console.attestation import (
+        AtlasVerifierClient,
+        AttestationVerifierError,
+        AttestationVerifierUnavailable,
+        build_dev_cvm_attestation_request,
+        verify_with_fetch_retries,
+    )
+
+    try:
+        verifier = AtlasVerifierClient.from_settings()
+        request_snapshot = snapshot_with_pending_policy_bundle(snapshot)
+        request = build_dev_cvm_attestation_request(request_snapshot)
+        report = await verify_with_fetch_retries(
+            verifier,
+            request,
+            timeout_seconds=dev_cvm_attestation_timeout_seconds(),
+        )
+    except AttestationVerifierUnavailable:
+        return False
+    except AttestationVerifierError as exc:
+        await mark_cvm_update_failed(operation_id, code=exc.code, details=exc.details, mark_cvm_failed=True)
+        return True
+
+    if report.image_measurement != _row_value(snapshot, "expected_image_measurement"):
+        await mark_cvm_update_failed(
+            operation_id,
+            code="ATTESTATION_IMAGE_MISMATCH",
+            details={
+                "expected_image_measurement": _row_value(snapshot, "expected_image_measurement"),
+                "reported_image_measurement": report.image_measurement,
+            },
+            mark_cvm_failed=True,
+        )
+        return True
+
+    from concrete_console.shade_provider.shade import ShadeClient, ShadeError
+
+    try:
+        metadata = json_payload(_row_value(snapshot, "metadata") or {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+        pending_policy_bundle = metadata.get("pending_policy_bundle")
+        if not isinstance(pending_policy_bundle, dict):
+            raise ShadeError("missing_policy_bundle", field="metadata.pending_policy_bundle")
+        deploy_compose_yaml = pending_policy_bundle.get("deploy_compose_yaml")
+        if not isinstance(deploy_compose_yaml, str) or not deploy_compose_yaml:
+            raise ShadeError("missing_deploy_compose", field="metadata.pending_policy_bundle.deploy_compose_yaml")
+        rtmr3_binding = pending_policy_bundle.get("rtmr3_binding")
+        if not isinstance(rtmr3_binding, dict):
+            raise ShadeError("missing_rtmr3_binding", field="metadata.pending_policy_bundle.rtmr3_binding")
+        connect_host = provider_passthrough_host(metadata)
+        policy_result = await ShadeClient.from_settings().generate_policy(
+            domain=_row_value(snapshot, "fqdn"),
+            deploy_compose_yaml=deploy_compose_yaml,
+            connect_host=connect_host,
+        )
+        updated_bundle = build_cvm_policy_bundle(
+            snapshot,
+            shade_policy=policy_result.policy,
+            rtmr3_binding=rtmr3_binding,
+            deploy_compose_yaml=deploy_compose_yaml,
+            connect_host=connect_host,
+        )
+        updated_metadata = metadata_with_pending_policy_bundle(metadata, updated_bundle)
+    except ShadeError as exc:
+        await mark_cvm_update_failed(
+            operation_id,
+            code="SHADE_BUILD_FAILED",
+            details={"adapter": "shade", "reason": exc.code},
+        )
+        return True
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            verified_at = datetime.now(timezone.utc)
+            await conn.execute(
+                """
+                UPDATE cvms
+                SET image_measurement = $2,
+                    rtmr3_digest = $3,
+                    attestation_verified_at = $4,
+                    metadata = $5::jsonb,
+                    updated_at = now()
+                WHERE id = $1
+                  AND state IN ('RUNNING', 'STOPPED', 'FAILED')
+                  AND deleted_at IS NULL
+                """,
+                _row_value(snapshot, "cvm_id"),
+                report.image_measurement,
+                report.rtmr3_digest,
+                verified_at,
+                json.dumps(updated_metadata),
+            )
+            await insert_audit_event(
+                conn,
+                entity_id=_row_value(snapshot, "entity_id"),
+                actor_id=_row_value(snapshot, "actor_id"),
+                actor_email=_row_value(snapshot, "actor_email"),
+                action="CVM_ATTESTATION_VERIFIED",
+                target_type="cvm",
+                target_id=_row_value(snapshot, "cvm_id"),
+                before={
+                    "image_measurement": _row_value(snapshot, "image_measurement"),
+                    "rtmr3_digest": _row_value(snapshot, "rtmr3_digest"),
+                },
+                after={
+                    "image_measurement": report.image_measurement,
+                    "rtmr3_digest": report.rtmr3_digest,
+                    "attestation_verified_at": verified_at.isoformat().replace("+00:00", "Z"),
+                    "source": "update",
+                },
+            )
+            await advance_cvm_update_step_with_conn(conn, operation_id, "await_sc_pull")
+    return True
+
+
+async def execute_cvm_update_await_sc_pull_operation(operation_id: Any) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        snapshot = await fetch_cvm_update_snapshot(conn, operation_id)
+    if snapshot is None:
+        await mark_cvm_update_failed(operation_id, code="CVM_NOT_FOUND", details={"state": "missing_target"})
+        return
+    proxy_token_created_at = _row_value(snapshot, "proxy_token_created_at")
+    if proxy_token_created_at is None:
+        await mark_cvm_update_failed(operation_id, code="PROXY_AUTH_MISSING", details={"state": "missing_proxy_token"})
+        return
+    last_pull_at = _row_value(snapshot, "security_cvm_last_policy_pull_at")
+    if last_pull_at is not None and last_pull_at >= proxy_token_created_at:
+        await advance_cvm_update_step(operation_id, "policy_push")
+        return
+    elapsed = datetime.now(timezone.utc) - proxy_token_created_at
+    timeout = timedelta(seconds=sc_pull_propagation_timeout_seconds())
+    if elapsed < timeout:
+        log.info(
+            "cvm_update_awaiting_sc_pull",
+            operation_id=str(operation_id),
+            cvm_id=str(_row_value(snapshot, "cvm_id")),
+            security_cvm_id=str(_row_value(snapshot, "security_cvm_id")),
+            elapsed_seconds=int(elapsed.total_seconds()),
+            timeout_seconds=int(timeout.total_seconds()),
+        )
+        return
+    await mark_cvm_update_failed(
+        operation_id,
+        code="SC_PULL_TIMEOUT",
+        details={
+            "elapsed_seconds": int(elapsed.total_seconds()),
+            "timeout_seconds": int(timeout.total_seconds()),
+        },
+    )
+
+
+async def execute_cvm_update_policy_push_operation(operation_id: Any) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        snapshot = await fetch_cvm_update_snapshot(conn, operation_id)
+    if snapshot is None:
+        await mark_cvm_update_failed(operation_id, code="CVM_NOT_FOUND", details={"state": "missing_target"})
+        return
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                """
+                UPDATE cvms
+                SET policy_version = policy_version + 1,
+                    updated_at = now()
+                WHERE id = $1
+                """,
+                _row_value(snapshot, "cvm_id"),
+            )
+            await conn.execute(
+                """
+                UPDATE security_cvms
+                SET policy_version = policy_version + 1,
+                    updated_at = now()
+                WHERE id = $1
+                """,
+                _row_value(snapshot, "security_cvm_id"),
+            )
+            await advance_cvm_update_step_with_conn(conn, operation_id, "finalise")
+
+
+async def execute_cvm_update_finalise_operation(operation_id: Any) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        snapshot = await fetch_cvm_update_snapshot(conn, operation_id)
+    if snapshot is None:
+        await mark_cvm_update_failed(operation_id, code="CVM_NOT_FOUND", details={"state": "missing_target"})
+        return
+    metadata = json_payload(_row_value(snapshot, "metadata") or {})
+    if not isinstance(metadata, dict) or not isinstance(metadata.get("pending_policy_bundle"), dict):
+        await mark_cvm_update_failed(
+            operation_id,
+            code="POLICY_BUNDLE_MISSING",
+            details={"field": "metadata.pending_policy_bundle"},
+        )
+        return
+    policy_bundle = metadata["pending_policy_bundle"]
+    final_metadata = metadata_with_policy_bundle(metadata, policy_bundle)
+    final_metadata.pop("pending_policy_bundle", None)
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                """
+                UPDATE cvms
+                SET state = 'RUNNING',
+                    error_reason = NULL,
+                    metadata = $2::jsonb,
+                    atls_policy_bundle = $3::jsonb,
+                    atls_policy_revision = atls_policy_revision + 1,
+                    updated_at = now()
+                WHERE id = $1
+                  AND state IN ('RUNNING', 'STOPPED', 'FAILED')
+                  AND deleted_at IS NULL
+                """,
+                _row_value(snapshot, "cvm_id"),
+                json.dumps(final_metadata),
+                json.dumps(policy_bundle),
+            )
+            cvm_payload = await fetch_cvm_resource_for_scheduler(conn, _row_value(snapshot, "cvm_id"))
+            result = {"cvm": cvm_payload, "policy_bundle": policy_bundle}
+            await insert_audit_event(
+                conn,
+                entity_id=_row_value(snapshot, "entity_id"),
+                actor_id=_row_value(snapshot, "actor_id"),
+                actor_email=_row_value(snapshot, "actor_email"),
+                action="CVM_UPDATED",
+                target_type="cvm",
+                target_id=_row_value(snapshot, "cvm_id"),
+                before={"state": _row_value(snapshot, "state")},
+                after={
+                    "state": "RUNNING",
+                    "image_measurement": _row_value(snapshot, "image_measurement"),
+                    "rtmr3_digest": _row_value(snapshot, "rtmr3_digest"),
+                    "atls_policy_revision": (_row_value(snapshot, "atls_policy_revision") or 0) + 1,
+                },
+            )
+            await conn.execute(
+                """
+                UPDATE operations
+                SET status = 'succeeded',
+                    progress_step = 'finalise',
+                    progress_percent = 100,
+                    result = $2::jsonb,
+                    error = NULL,
+                    updated_at = now(),
+                    expires_at = $3
+                WHERE id = $1
+                  AND kind = 'cvm.update'
                   AND status = 'running'
                 """,
                 operation_id,
@@ -1954,6 +2850,45 @@ async def fetch_security_cvm_provision_snapshot(conn: Any, operation_id: Any) ->
     )
 
 
+async def fetch_security_cvm_update_snapshot(conn: Any, operation_id: Any) -> Any | None:
+    return await conn.fetchrow(
+        """
+        SELECT
+            sc.id,
+            o.id AS operation_id,
+            o.actor_id,
+            o.actor_email,
+            o.updated_at AS operation_updated_at,
+            sc.entity_id,
+            sc.state::text AS state,
+            sc.fqdn,
+            sc.instance_type,
+            sc.region,
+            sc.metadata,
+            sc.compose_config,
+            sc.txt_dns_record_id,
+            sc.cname_dns_record_id,
+            sc.proxy_port,
+            sc.ca_cert_pem,
+            sc.ca_cert_pem AS previous_ca_cert_pem,
+            sc.ca_export_token_plaintext,
+            sc.ca_export_token_stashed_at,
+            sc.expected_image_measurement,
+            sc.image_measurement,
+            sc.rtmr3_digest,
+            sc.attestation_verified_at,
+            sc.policy_version
+        FROM operations o
+        JOIN security_cvms sc ON sc.id = o.target_id
+        WHERE o.id = $1
+          AND o.kind = 'security_cvm.update'
+          AND o.status = 'running'
+          AND sc.deleted_at IS NULL
+        """,
+        operation_id,
+    )
+
+
 async def fetch_cvm_launch_snapshot(conn: Any, operation_id: Any) -> Any | None:
     return await conn.fetchrow(
         """
@@ -2009,6 +2944,67 @@ async def fetch_cvm_launch_snapshot(conn: Any, operation_id: Any) -> Any | None:
         WHERE o.id = $1
           AND o.kind = 'cvm.launch'
           AND o.status = 'running'
+        """,
+        operation_id,
+    )
+
+
+async def fetch_cvm_update_snapshot(conn: Any, operation_id: Any) -> Any | None:
+    return await conn.fetchrow(
+        """
+        SELECT
+            o.id AS operation_id,
+            o.actor_id,
+            o.actor_email,
+            o.updated_at AS operation_updated_at,
+            o.target_id AS cvm_id,
+            c.entity_id,
+            c.state::text AS state,
+            c.fqdn,
+            c.instance_type,
+            c.region,
+            c.metadata,
+            c.compose_config,
+            c.expected_image_measurement,
+            c.image_measurement,
+            c.rtmr3_digest,
+            c.attestation_verified_at,
+            c.policy_version,
+            c.atls_policy_bundle,
+            c.atls_policy_revision,
+            c.security_cvm_id,
+            sc.fqdn AS security_cvm_fqdn,
+            COALESCE(sc.proxy_port, 8080) AS security_cvm_proxy_port,
+            sc.ca_cert_pem AS security_cvm_ca_cert_pem,
+            sc.metadata AS security_cvm_metadata,
+            sc.expected_image_measurement AS security_cvm_expected_image_measurement,
+            sc.image_measurement AS security_cvm_image_measurement,
+            sc.rtmr3_digest AS security_cvm_rtmr3_digest,
+            sc.compose_config AS security_cvm_compose_config,
+            sc.last_policy_pull_at AS security_cvm_last_policy_pull_at,
+            sc.last_policy_pull_etag AS security_cvm_last_policy_pull_etag,
+            proxy_token.created_at AS proxy_token_created_at
+        FROM operations o
+        JOIN cvms c ON c.id = o.target_id
+        JOIN security_cvms sc
+          ON sc.id = c.security_cvm_id
+         AND sc.state = 'RUNNING'
+         AND sc.deleted_at IS NULL
+        LEFT JOIN LATERAL (
+            SELECT spt.created_at
+            FROM service_principal_tokens spt
+            WHERE spt.principal_type = 'dev_cvm'
+              AND spt.principal_id = c.id
+              AND spt.purpose = 'PROXY_AUTH'
+              AND spt.deleted_at IS NULL
+              AND spt.expires_at IS NULL
+            ORDER BY spt.created_at DESC
+            LIMIT 1
+        ) proxy_token ON true
+        WHERE o.id = $1
+          AND o.kind = 'cvm.update'
+          AND o.status = 'running'
+          AND c.deleted_at IS NULL
         """,
         operation_id,
     )
@@ -2276,6 +3272,22 @@ def provider_passthrough_host(metadata: Any) -> str | None:
     return None
 
 
+def provider_deployment_id(metadata: Any) -> str | None:
+    current = json_payload(metadata or {})
+    if not isinstance(current, dict):
+        return None
+    deployment_id = current.get("deployment_id") or current.get("app_id")
+    return deployment_id if isinstance(deployment_id, str) and deployment_id else None
+
+
+def provider_name(metadata: Any) -> str | None:
+    current = json_payload(metadata or {})
+    if not isinstance(current, dict):
+        return None
+    provider = current.get("provider")
+    return provider if isinstance(provider, str) and provider else None
+
+
 def security_cvm_provision_metadata(
     *,
     name: str,
@@ -2289,6 +3301,8 @@ def security_cvm_provision_metadata(
     metadata: dict[str, Any] = {
         "provider": "phala",
         "name": name,
+        "deployment_id": app_id,
+        "connect_host": passthrough_host,
         "app_id": app_id,
         "gateway_host": gateway_host,
         "passthrough_host": passthrough_host,
@@ -2298,6 +3312,45 @@ def security_cvm_provision_metadata(
     if atls_policy is not None:
         metadata["atls_policy"] = atls_policy
     return metadata
+
+
+def security_cvm_update_metadata(
+    metadata: Any,
+    *,
+    name: str,
+    deployment_id: str,
+    gateway_host: str,
+    status: str,
+    deploy_compose_yaml: str,
+) -> dict[str, Any]:
+    current = json_payload(metadata or {})
+    if not isinstance(current, dict):
+        current = {}
+    passthrough_host = phala_passthrough_host(deployment_id, gateway_host)
+    updated = dict(current)
+    updated.update(
+        {
+            "provider": current.get("provider", "phala"),
+            "name": name,
+            "deployment_id": deployment_id,
+            "connect_host": passthrough_host,
+            "app_id": deployment_id,
+            "gateway_host": gateway_host,
+            "passthrough_host": passthrough_host,
+            "status": status,
+            "deploy_compose_yaml": deploy_compose_yaml,
+        }
+    )
+    return updated
+
+
+def security_cvm_provider_name_from_metadata(snapshot: Any) -> str:
+    metadata = json_payload(_row_value(snapshot, "metadata") or {})
+    if isinstance(metadata, dict):
+        name = metadata.get("name")
+        if isinstance(name, str) and name:
+            return name
+    return security_cvm_provider_name(_row_value(snapshot, "id"))
 
 
 def metadata_with_atls_policy(metadata: Any, policy: dict[str, Any]) -> dict[str, Any]:
@@ -2316,6 +3369,28 @@ def metadata_with_policy_bundle(metadata: Any, policy_bundle: dict[str, Any]) ->
     updated = dict(current)
     updated["policy_bundle"] = policy_bundle
     return updated
+
+
+def metadata_with_pending_policy_bundle(metadata: Any, policy_bundle: dict[str, Any]) -> dict[str, Any]:
+    current = json_payload(metadata or {})
+    if not isinstance(current, dict):
+        current = {}
+    updated = dict(current)
+    updated["pending_policy_bundle"] = policy_bundle
+    return updated
+
+
+def snapshot_with_pending_policy_bundle(snapshot: Any) -> dict[str, Any]:
+    row = dict(snapshot)
+    metadata = json_payload(row.get("metadata") or {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+    pending_policy_bundle = metadata.get("pending_policy_bundle")
+    if isinstance(pending_policy_bundle, dict):
+        metadata = dict(metadata)
+        metadata["policy_bundle"] = pending_policy_bundle
+        row["metadata"] = metadata
+    return row
 
 
 def deployed_compose_from_metadata(metadata: Any) -> str | None:
@@ -2381,12 +3456,51 @@ def cvm_launch_metadata(
     return {
         "provider": "phala",
         "name": name,
+        "deployment_id": app_id,
+        "connect_host": passthrough_host,
         "app_id": app_id,
         "gateway_host": gateway_host,
         "passthrough_host": passthrough_host,
         "status": status,
         "policy_bundle": policy_bundle,
     }
+
+
+def cvm_update_metadata(
+    metadata: Any,
+    *,
+    deployment_id: str,
+    gateway_host: str,
+    status: str,
+    pending_policy_bundle: dict[str, Any],
+) -> dict[str, Any]:
+    current = json_payload(metadata or {})
+    if not isinstance(current, dict):
+        current = {}
+    passthrough_host = phala_passthrough_host(deployment_id, gateway_host)
+    updated = dict(current)
+    updated.update(
+        {
+            "provider": current.get("provider", "phala"),
+            "deployment_id": deployment_id,
+            "connect_host": passthrough_host,
+            "app_id": deployment_id,
+            "gateway_host": gateway_host,
+            "passthrough_host": passthrough_host,
+            "status": status,
+            "pending_policy_bundle": pending_policy_bundle,
+        }
+    )
+    return updated
+
+
+def cvm_provider_name_from_metadata(snapshot: Any) -> str:
+    metadata = json_payload(_row_value(snapshot, "metadata") or {})
+    if isinstance(metadata, dict):
+        name = metadata.get("name")
+        if isinstance(name, str) and name:
+            return name
+    return cvm_launch_provider_name(_row_value(snapshot, "cvm_id"))
 
 
 async def persist_security_cvm_phala_result(operation_id: Any, snapshot: Any, *, metadata: dict[str, Any]) -> None:
@@ -2412,8 +3526,12 @@ async def persist_security_cvm_phala_result(operation_id: Any, snapshot: Any, *,
                 action="SECURITY_CVM_PROVISIONING_STARTED",
                 target_type="security_cvm",
                 target_id=_row_value(snapshot, "id"),
-                before={"metadata": _row_value(snapshot, "metadata")},
-                after={"metadata": metadata},
+                before={"provider": provider_name(_row_value(snapshot, "metadata"))},
+                after={
+                    "provider": metadata.get("provider", "unknown"),
+                    "deployment_recorded": True,
+                    "connect_host_recorded": bool(metadata.get("connect_host") or metadata.get("passthrough_host")),
+                },
             )
             await advance_security_cvm_provision_step_with_conn(conn, operation_id, "cf_txt_create")
 
@@ -2469,6 +3587,91 @@ async def persist_security_cvm_provision_bearers(
                 _row_value(snapshot, "id"),
                 ca_export_token_plaintext,
             )
+
+
+async def persist_security_cvm_update_bearers(
+    operation_id: Any,
+    snapshot: Any,
+    *,
+    ingest_token_hash: str,
+    ca_export_token_hash: str,
+    ca_export_token_plaintext: str,
+) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                """
+                UPDATE service_principal_tokens
+                SET expires_at = COALESCE(expires_at, now() + INTERVAL '1 hour')
+                WHERE principal_type = 'security_cvm'
+                  AND principal_id = $1
+                  AND purpose IN ('INGEST', 'CA_EXPORT')
+                  AND deleted_at IS NULL
+                  AND expires_at IS NULL
+                """,
+                _row_value(snapshot, "id"),
+            )
+            await conn.executemany(
+                """
+                INSERT INTO service_principal_tokens (
+                    principal_type,
+                    principal_id,
+                    purpose,
+                    token_hash
+                )
+                VALUES ('security_cvm', $1, $2, $3)
+                """,
+                [
+                    (_row_value(snapshot, "id"), "INGEST", ingest_token_hash),
+                    (_row_value(snapshot, "id"), "CA_EXPORT", ca_export_token_hash),
+                ],
+            )
+            await conn.execute(
+                """
+                UPDATE security_cvms
+                SET ca_export_token_plaintext = $2,
+                    ca_export_token_stashed_at = now(),
+                    updated_at = now()
+                WHERE id = $1
+                  AND state IN ('RUNNING', 'STOPPED', 'FAILED')
+                """,
+                _row_value(snapshot, "id"),
+                ca_export_token_plaintext,
+            )
+
+
+async def persist_security_cvm_update_provider_result(
+    operation_id: Any,
+    snapshot: Any,
+    *,
+    metadata: dict[str, Any],
+    compose_config: str,
+    expected_image_measurement: str,
+) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                """
+                UPDATE security_cvms
+                SET metadata = $2::jsonb,
+                    compose_config = $3,
+                    expected_image_measurement = $4,
+                    image_measurement = NULL,
+                    rtmr3_digest = NULL,
+                    attestation_verified_at = NULL,
+                    updated_at = now()
+                WHERE id = $1
+                  AND state IN ('RUNNING', 'STOPPED', 'FAILED')
+                  AND deleted_at IS NULL
+                """,
+                _row_value(snapshot, "id"),
+                json.dumps(metadata),
+                compose_config,
+                expected_image_measurement,
+            )
+            await advance_security_cvm_update_step_with_conn(conn, operation_id, "await_provider_running")
 async def persist_security_cvm_dns_record(operation_id: Any, snapshot: Any, *, field: str, record_id: str) -> None:
     if field == "txt":
         column = "txt_dns_record_id"
@@ -2526,6 +3729,25 @@ async def persist_security_cvm_ca_pem(operation_id: Any, *, security_cvm_id: Any
             await advance_security_cvm_provision_step_with_conn(conn, operation_id, "finalise")
 
 
+async def persist_security_cvm_update_ca_pem(operation_id: Any, *, security_cvm_id: Any, ca_pem: str) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                """
+                UPDATE security_cvms
+                SET ca_cert_pem = $2,
+                    updated_at = now()
+                WHERE id = $1
+                  AND state IN ('RUNNING', 'STOPPED', 'FAILED')
+                  AND deleted_at IS NULL
+                """,
+                security_cvm_id,
+                ca_pem,
+            )
+            await advance_security_cvm_update_step_with_conn(conn, operation_id, "finalise")
+
+
 async def advance_security_cvm_provision_step(operation_id: Any, next_step: str) -> None:
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -2546,6 +3768,29 @@ async def advance_security_cvm_provision_step_with_conn(conn: Any, operation_id:
         operation_id,
         next_step,
         SECURITY_CVM_PROVISION_PROGRESS[next_step],
+    )
+
+
+async def advance_security_cvm_update_step(operation_id: Any, next_step: str) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await advance_security_cvm_update_step_with_conn(conn, operation_id, next_step)
+
+
+async def advance_security_cvm_update_step_with_conn(conn: Any, operation_id: Any, next_step: str) -> None:
+    await conn.execute(
+        """
+        UPDATE operations
+        SET progress_step = $2,
+            progress_percent = GREATEST(progress_percent, $3),
+            updated_at = now()
+        WHERE id = $1
+          AND kind = 'security_cvm.update'
+          AND status = 'running'
+        """,
+        operation_id,
+        next_step,
+        SECURITY_CVM_UPDATE_PROGRESS[next_step],
     )
 
 
@@ -2606,6 +3851,76 @@ async def mark_security_cvm_provision_failed(operation_id: Any, *, code: str, de
                         target_id=row["target_id"],
                         before={"state": row["state"], "error_reason": row["error_reason"]},
                         after={"state": "FAILED", "error_reason": code},
+                    )
+            await conn.execute(
+                """
+                UPDATE operations
+                SET status = 'failed',
+                    error = $2::jsonb,
+                    updated_at = now(),
+                    expires_at = $3
+                WHERE id = $1
+                  AND status = 'running'
+                """,
+                operation_id,
+                json.dumps(operation_error_payload({"code": code, "details": details})),
+                operation_expiry(),
+            )
+
+
+async def mark_security_cvm_update_failed(
+    operation_id: Any,
+    *,
+    code: str,
+    details: dict[str, Any],
+    mark_security_cvm_failed: bool = False,
+) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """
+                SELECT
+                    o.target_id,
+                    o.actor_id,
+                    o.actor_email,
+                    sc.entity_id,
+                    sc.state::text AS state,
+                    sc.error_reason
+                FROM operations o
+                LEFT JOIN security_cvms sc ON sc.id = o.target_id
+                WHERE o.id = $1
+                  AND o.kind = 'security_cvm.update'
+                """,
+                operation_id,
+            )
+            if row is not None and row["target_id"] is not None:
+                await scrub_security_cvm_plaintext_stash_with_conn(conn, row["target_id"])
+                if mark_security_cvm_failed:
+                    await conn.execute(
+                        """
+                        UPDATE security_cvms
+                        SET state = 'FAILED',
+                            error_reason = $2,
+                            updated_at = now()
+                        WHERE id = $1
+                          AND state IN ('RUNNING', 'STOPPED', 'FAILED')
+                          AND deleted_at IS NULL
+                        """,
+                        row["target_id"],
+                        code,
+                    )
+                if row["entity_id"] is not None:
+                    await insert_audit_event(
+                        conn,
+                        entity_id=row["entity_id"],
+                        actor_id=row["actor_id"],
+                        actor_email=row["actor_email"],
+                        action="SECURITY_CVM_UPDATE_FAILED",
+                        target_type="security_cvm",
+                        target_id=row["target_id"],
+                        before={"state": row["state"], "error_reason": row["error_reason"]},
+                        after={"state": "FAILED" if mark_security_cvm_failed else row["state"], "error_reason": code},
                     )
             await conn.execute(
                 """
@@ -2717,6 +4032,80 @@ async def persist_cvm_launch_phala_result(
             )
 
 
+async def persist_cvm_update_provider_result(
+    operation_id: Any,
+    *,
+    cvm_id: Any,
+    actor_id: Any,
+    metadata: dict[str, Any],
+    compose_config: str,
+    expected_image_measurement: str,
+    proxy_token_hash: str,
+) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                """
+                UPDATE service_principal_tokens
+                SET expires_at = COALESCE(expires_at, now() + INTERVAL '10 minutes')
+                WHERE principal_type = 'dev_cvm'
+                  AND principal_id = $1
+                  AND purpose = 'PROXY_AUTH'
+                  AND deleted_at IS NULL
+                  AND expires_at IS NULL
+                """,
+                cvm_id,
+            )
+            await conn.execute(
+                """
+                INSERT INTO service_principal_tokens (
+                    principal_type,
+                    principal_id,
+                    purpose,
+                    token_hash
+                )
+                VALUES ('dev_cvm', $1, 'PROXY_AUTH', $2)
+                """,
+                cvm_id,
+                proxy_token_hash,
+            )
+            await conn.execute(
+                """
+                UPDATE cvms
+                SET metadata = $2::jsonb,
+                    compose_config = $3,
+                    expected_image_measurement = $4,
+                    image_measurement = NULL,
+                    rtmr3_digest = NULL,
+                    attestation_verified_at = NULL,
+                    updated_at = now()
+                WHERE id = $1
+                  AND state IN ('RUNNING', 'STOPPED', 'FAILED')
+                  AND deleted_at IS NULL
+                """,
+                cvm_id,
+                json.dumps(metadata),
+                compose_config,
+                expected_image_measurement,
+            )
+            await conn.execute(
+                """
+                UPDATE operations
+                SET progress_step = 'verify_attestation',
+                    progress_percent = $3,
+                    updated_at = now()
+                WHERE id = $1
+                  AND target_id = $2
+                  AND kind = 'cvm.update'
+                  AND status = 'running'
+                """,
+                operation_id,
+                cvm_id,
+                CVM_UPDATE_PROGRESS["verify_attestation"],
+            )
+
+
 async def persist_cvm_dns_record(operation_id: Any, *, cvm_id: Any, field: str, record_id: str) -> None:
     if field == "txt":
         column = "txt_dns_record_id"
@@ -2766,6 +4155,29 @@ async def advance_cvm_launch_step_with_conn(conn: Any, operation_id: Any, next_s
     )
 
 
+async def advance_cvm_update_step(operation_id: Any, next_step: str) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await advance_cvm_update_step_with_conn(conn, operation_id, next_step)
+
+
+async def advance_cvm_update_step_with_conn(conn: Any, operation_id: Any, next_step: str) -> None:
+    await conn.execute(
+        """
+        UPDATE operations
+        SET progress_step = $2,
+            progress_percent = GREATEST(progress_percent, $3),
+            updated_at = now()
+        WHERE id = $1
+          AND kind = 'cvm.update'
+          AND status = 'running'
+        """,
+        operation_id,
+        next_step,
+        CVM_UPDATE_PROGRESS[next_step],
+    )
+
+
 async def mark_cvm_launch_failed(operation_id: Any, *, code: str, details: dict[str, Any]) -> None:
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -2803,6 +4215,75 @@ async def mark_cvm_launch_failed(operation_id: Any, *, code: str, details: dict[
                     row["target_id"],
                     code,
                 )
+            await conn.execute(
+                """
+                UPDATE operations
+                SET status = 'failed',
+                    error = $2::jsonb,
+                    updated_at = now(),
+                    expires_at = $3
+                WHERE id = $1
+                  AND status = 'running'
+                """,
+                operation_id,
+                json.dumps(operation_error_payload({"code": code, "details": details})),
+                operation_expiry(),
+            )
+
+
+async def mark_cvm_update_failed(
+    operation_id: Any,
+    *,
+    code: str,
+    details: dict[str, Any],
+    mark_cvm_failed: bool = False,
+) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """
+                SELECT
+                    o.target_id,
+                    o.actor_id,
+                    o.actor_email,
+                    c.entity_id,
+                    c.state::text AS state,
+                    c.error_reason
+                FROM operations o
+                LEFT JOIN cvms c ON c.id = o.target_id
+                WHERE o.id = $1
+                  AND o.kind = 'cvm.update'
+                """,
+                operation_id,
+            )
+            if row is not None and row["target_id"] is not None:
+                if mark_cvm_failed:
+                    await conn.execute(
+                        """
+                        UPDATE cvms
+                        SET state = 'FAILED',
+                            error_reason = $2,
+                            updated_at = now()
+                        WHERE id = $1
+                          AND state IN ('RUNNING', 'STOPPED', 'FAILED')
+                          AND deleted_at IS NULL
+                        """,
+                        row["target_id"],
+                        code,
+                    )
+                if row["entity_id"] is not None:
+                    await insert_audit_event(
+                        conn,
+                        entity_id=row["entity_id"],
+                        actor_id=row["actor_id"],
+                        actor_email=row["actor_email"],
+                        action="CVM_UPDATE_FAILED",
+                        target_type="cvm",
+                        target_id=row["target_id"],
+                        before={"state": row["state"], "error_reason": row["error_reason"]},
+                        after={"state": "FAILED" if mark_cvm_failed else row["state"], "error_reason": code},
+                    )
             await conn.execute(
                 """
                 UPDATE operations
@@ -2965,6 +4446,42 @@ def provider_app_id(metadata: Any) -> str | None:
         return None
     app_id = metadata.get("app_id")
     return app_id if isinstance(app_id, str) and app_id else None
+
+
+def dev_cvm_update_material() -> dict[str, str]:
+    raw = load_settings().raw
+    image = raw.get("DEV_CVM_IMAGE", "").strip()
+    measurement = raw.get("DEV_CVM_IMAGE_MEASUREMENT", "").strip().lower()
+    if not image:
+        raise ValueError("DEV_CVM_IMAGE_UNCONFIGURED")
+    if not is_hex_measurement(measurement):
+        raise ValueError("DEV_CVM_IMAGE_MEASUREMENT_UNCONFIGURED")
+    from concrete_console.routes import render_dev_cvm_compose_config
+
+    return {
+        "compose_config": render_dev_cvm_compose_config({"image": image}),
+        "expected_image_measurement": measurement,
+    }
+
+
+def security_cvm_update_material() -> dict[str, str]:
+    raw = load_settings().raw
+    image = raw.get("SECURITY_CVM_IMAGE_REF", "").strip()
+    measurement = raw.get("SECURITY_CVM_IMAGE_MEASUREMENT", "").strip().lower()
+    if not image:
+        raise ValueError("SECURITY_CVM_IMAGE_UNCONFIGURED")
+    if not is_hex_measurement(measurement):
+        raise ValueError("SECURITY_CVM_IMAGE_MEASUREMENT_UNCONFIGURED")
+    from concrete_console.routes import render_security_cvm_compose_config
+
+    return {
+        "compose_config": render_security_cvm_compose_config({"image_ref": image}),
+        "expected_image_measurement": measurement,
+    }
+
+
+def is_hex_measurement(value: str) -> bool:
+    return len(value) == 96 and all(char in "0123456789abcdef" for char in value)
 
 
 def operation_expiry() -> datetime:
@@ -3841,10 +5358,15 @@ async def fetch_security_cvm_token_hashes(conn: Any, security_cvm_id: Any) -> di
           AND principal_id = $1
           AND purpose IN ('INGEST', 'CA_EXPORT')
           AND deleted_at IS NULL
+          AND (expires_at IS NULL OR expires_at > now())
+        ORDER BY purpose::text, expires_at NULLS FIRST, issued_at DESC
         """,
         security_cvm_id,
     )
-    return {row["purpose"]: row["token_hash"] for row in rows}
+    hashes: dict[str, str] = {}
+    for row in rows:
+        hashes.setdefault(row["purpose"], row["token_hash"])
+    return hashes
 
 
 def attestation_drift_kind(

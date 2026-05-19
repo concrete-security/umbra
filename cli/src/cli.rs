@@ -369,6 +369,9 @@ pub enum CvmCommand {
         cvm_id: String,
     },
 
+    /// Update an existing Dev CVM in place.
+    Update(CvmUpdateArgs),
+
     /// Terminate a Dev CVM.
     Terminate(CvmTerminateArgs),
 }
@@ -406,6 +409,20 @@ pub struct CvmTerminateArgs {
     pub no_wait: bool,
 
     /// Maximum seconds to wait for termination completion.
+    #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u32).range(1..=86400))]
+    pub wait_timeout_seconds: u32,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct CvmUpdateArgs {
+    /// Dev CVM UUID.
+    pub cvm_id: String,
+
+    /// Submit the update request and return the operation handle without polling.
+    #[arg(long)]
+    pub no_wait: bool,
+
+    /// Maximum seconds to wait for update completion.
     #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u32).range(1..=86400))]
     pub wait_timeout_seconds: u32,
 }
@@ -626,6 +643,9 @@ pub enum SecurityCvmCommand {
     /// Launch the current entity Security CVM.
     Launch(SecurityCvmLaunchArgs),
 
+    /// Update the current entity Security CVM in place.
+    Update(SecurityCvmUpdateArgs),
+
     /// Terminate the current entity Security CVM.
     Terminate,
 
@@ -648,6 +668,17 @@ pub struct SecurityCvmLaunchArgs {
     pub no_wait: bool,
 
     /// Maximum seconds to wait for launch completion.
+    #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u32).range(1..=86400))]
+    pub wait_timeout_seconds: u32,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct SecurityCvmUpdateArgs {
+    /// Submit the update and return the operation handle without polling.
+    #[arg(long)]
+    pub no_wait: bool,
+
+    /// Maximum seconds to wait for update completion.
     #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u32).range(1..=86400))]
     pub wait_timeout_seconds: u32,
 }

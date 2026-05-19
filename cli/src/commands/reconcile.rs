@@ -148,11 +148,11 @@ mod tests {
 
     #[test]
     fn console_error_message_includes_component() {
-        let body = r#"{"error":{"code":"SERVICE_UNAVAILABLE","message":"Phala adapter is not configured","details":{"component":"phala_adapter"}}}"#;
+        let body = r#"{"error":{"code":"SERVICE_UNAVAILABLE","message":"CVM provider adapter is not configured","details":{"component":"cvm_provider_adapter"}}}"#;
 
         assert_eq!(
             console_error_message(body).as_deref(),
-            Some("Phala adapter is not configured (phala_adapter)")
+            Some("CVM provider adapter is not configured (cvm_provider_adapter)")
         );
     }
 

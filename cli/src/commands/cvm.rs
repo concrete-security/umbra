@@ -18,7 +18,7 @@ use serde_json::{json, Map, Value};
 use uuid::Uuid;
 
 use crate::{
-    cli::{CvmCommand, CvmLaunchArgs, CvmTerminateArgs},
+    cli::{CvmCommand, CvmLaunchArgs, CvmTerminateArgs, CvmUpdateArgs},
     commands::{auth, operation_debug},
     config::ResolvedConfig,
     exit::ExitStatus,
@@ -188,6 +188,7 @@ pub fn run(command: CvmCommand, config: &ResolvedConfig, json: bool) -> ExitStat
         CvmCommand::Stop { cvm_id } => {
             lifecycle_action(config, &cvm_id, LifecycleAction::Stop, json)
         }
+        CvmCommand::Update(args) => update(config, args, json),
         CvmCommand::Terminate(args) => terminate(config, args, json),
     }
 }
@@ -375,6 +376,73 @@ fn lifecycle_action(
         }
     };
     print_lifecycle_result(action, &cvm, json_output);
+    ExitStatus::Ok
+}
+
+fn update(config: &ResolvedConfig, args: CvmUpdateArgs, json_output: bool) -> ExitStatus {
+    if let Err(message) = validate_uuid("CVM_ID", &args.cvm_id) {
+        eprintln!("{message}");
+        return ExitStatus::Usage;
+    }
+    let (console_url, session) = match console_session(config) {
+        Ok(value) => value,
+        Err((status, message)) => {
+            eprintln!("{message}");
+            return status;
+        }
+    };
+    let current = match fetch_cvm_with_etag(console_url, &session, &args.cvm_id) {
+        Ok(value) => value,
+        Err((status, message)) => {
+            eprintln!("{message}");
+            return status;
+        }
+    };
+    let operation = match submit_update(
+        console_url,
+        &session.access_token,
+        &args.cvm_id,
+        &current.etag,
+    ) {
+        Ok(value) => value,
+        Err((status, message)) => {
+            eprintln!("{message}");
+            return status;
+        }
+    };
+    if args.no_wait {
+        print_operation(&operation, json_output, false);
+        return ExitStatus::Ok;
+    }
+    let operation = match wait_for_operation(
+        console_url,
+        &session.access_token,
+        operation,
+        Duration::from_secs(u64::from(args.wait_timeout_seconds)),
+        json_output,
+    ) {
+        Ok(value) => value,
+        Err((status, message)) => {
+            eprintln!("{message}");
+            return status;
+        }
+    };
+    let result = match cvm_launch_result(&operation) {
+        Ok(value) => value,
+        Err(message) => {
+            eprintln!("{message}");
+            return ExitStatus::Error;
+        }
+    };
+    let policy_file =
+        match write_policy_file(&config.config_dir, &result.policy_bundle, &result.cvm.id) {
+            Ok(value) => value,
+            Err(message) => {
+                eprintln!("{message}");
+                return ExitStatus::Error;
+            }
+        };
+    print_update_result(result.cvm, policy_file, json_output);
     ExitStatus::Ok
 }
 
@@ -666,6 +734,27 @@ fn submit_lifecycle_action(
             )
         })?;
     read_cvm_with_etag(response, action.as_str())
+}
+
+fn submit_update(
+    console_url: &str,
+    access_token: &str,
+    cvm_id: &str,
+    etag: &str,
+) -> Result<Operation, (ExitStatus, String)> {
+    let response = Client::new()
+        .post(format!("{console_url}/api/v1/cvms/{cvm_id}/actions/update"))
+        .bearer_auth(access_token)
+        .header(IF_MATCH, etag)
+        .header("Idempotency-Key", Uuid::new_v4().to_string())
+        .send()
+        .map_err(|err| {
+            (
+                ExitStatus::Error,
+                format!("[error] failed to submit CVM update: {err}"),
+            )
+        })?;
+    read_json_response(response, "submit CVM update")
 }
 
 fn submit_terminate(
@@ -1064,6 +1153,25 @@ fn print_lifecycle_result(action: LifecycleAction, cvm: &Cvm, json_output: bool)
         );
     } else {
         println!("{} {}", action.past_tense(), cvm_summary(cvm));
+    }
+}
+
+fn print_update_result(cvm: Cvm, policy_file: PathBuf, json_output: bool) {
+    if json_output {
+        let output = CvmLaunchOutput {
+            cvm,
+            policy_file_path: policy_file.display().to_string(),
+        };
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&output).expect("CVM update output serializes")
+        );
+    } else {
+        println!(
+            "updated {} policy_file={}",
+            cvm_summary(&cvm),
+            policy_file.display()
+        );
     }
 }
 

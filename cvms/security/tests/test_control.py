@@ -56,6 +56,22 @@ def test_control_map_resolves_proxy_token_hash() -> None:
     assert control_map.lookup_proxy_token("wrong-token") is None
 
 
+def test_control_map_accepts_old_and_new_proxy_tokens_during_overlap() -> None:
+    cvm_id = "00000000-0000-4000-8000-000000000010"
+    control_map = ControlMap.from_console_payload(
+        {
+            "entries": [
+                entry(cvm_id=cvm_id, proxy_token_hash=hashlib.sha256(b"old-token").hexdigest()),
+                entry(cvm_id=cvm_id, proxy_token_hash=hashlib.sha256(b"new-token").hexdigest()),
+            ]
+        }
+    )
+
+    assert control_map.lookup_proxy_token("old-token") is not None
+    assert control_map.lookup_proxy_token("new-token") is not None
+    assert len(control_map.entries_by_proxy_token_hash) == 2
+
+
 def test_control_map_drops_malformed_policy_to_deny_all() -> None:
     control_map = ControlMap.from_console_payload({"entries": [entry(merged_policy={"unknown": []})]})
 

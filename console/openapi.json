@@ -2111,6 +2111,94 @@
         "summary": "Terminate Cvm"
       }
     },
+    "/api/v1/cvms/{cvm_id}/actions/update": {
+      "post": {
+        "operationId": "update_cvm_api_v1_cvms__cvm_id__actions_update_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "cvm_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Cvm Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "If-Match"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Update Cvm Api V1 Cvms  Cvm Id  Actions Update Post"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Cvm"
+      }
+    },
     "/api/v1/cvms/{cvm_id}/policy-bundle": {
       "get": {
         "operationId": "get_cvm_policy_bundle_api_v1_cvms__cvm_id__policy_bundle_get",
@@ -3077,6 +3165,78 @@
           }
         },
         "summary": "Create Security Cvm"
+      }
+    },
+    "/api/v1/entities/{entity_id}/security-cvm/actions/update": {
+      "post": {
+        "operationId": "update_security_cvm_api_v1_entities__entity_id__security_cvm_actions_update_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "entity_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Entity Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Update Security Cvm Api V1 Entities  Entity Id  Security Cvm Actions Update Post"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Security Cvm"
       }
     },
     "/api/v1/entities/{entity_id}/security-cvm/attestation": {

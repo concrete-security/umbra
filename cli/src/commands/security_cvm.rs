@@ -12,7 +12,10 @@ use serde_json::{Map, Value};
 use uuid::Uuid;
 
 use crate::{
-    cli::{SecurityCvmAttestationArgs, SecurityCvmCommand, SecurityCvmLaunchArgs},
+    cli::{
+        SecurityCvmAttestationArgs, SecurityCvmCommand, SecurityCvmLaunchArgs,
+        SecurityCvmUpdateArgs,
+    },
     commands::{auth, operation_debug},
     config::ResolvedConfig,
     exit::ExitStatus,
@@ -97,6 +100,12 @@ struct SecurityCvmProvisionResult {
     ca_export_token: String,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+struct SecurityCvmUpdateResult {
+    security_cvm: SecurityCvm,
+    dev_cvms_requiring_update: Vec<String>,
+}
+
 enum OperationPoll {
     Operation(Box<Operation>),
     RateLimited(Duration),
@@ -106,6 +115,7 @@ pub fn run(command: SecurityCvmCommand, config: &ResolvedConfig, json: bool) -> 
     match command {
         SecurityCvmCommand::Show => show(config, json),
         SecurityCvmCommand::Launch(args) => launch(config, args, json),
+        SecurityCvmCommand::Update(args) => update(config, args, json),
         SecurityCvmCommand::Terminate => terminate(config, json),
         SecurityCvmCommand::Attestation(args) => attestation(config, args, json),
     }
@@ -174,6 +184,49 @@ fn launch(config: &ResolvedConfig, args: SecurityCvmLaunchArgs, json_output: boo
         }
     };
     print_launch_result(&result, json_output);
+    ExitStatus::Ok
+}
+
+fn update(config: &ResolvedConfig, args: SecurityCvmUpdateArgs, json_output: bool) -> ExitStatus {
+    let (console_url, session) = match console_session(config) {
+        Ok(value) => value,
+        Err((status, message)) => {
+            eprintln!("{message}");
+            return status;
+        }
+    };
+    let operation = match submit_update(console_url, &session) {
+        Ok(value) => value,
+        Err((status, message)) => {
+            eprintln!("{message}");
+            return status;
+        }
+    };
+    if args.no_wait {
+        print_operation(&operation, json_output, false);
+        return ExitStatus::Ok;
+    }
+    let operation = match wait_for_operation(
+        console_url,
+        &session.access_token,
+        operation,
+        Duration::from_secs(u64::from(args.wait_timeout_seconds)),
+        json_output,
+    ) {
+        Ok(value) => value,
+        Err((status, message)) => {
+            eprintln!("{message}");
+            return status;
+        }
+    };
+    let result = match security_cvm_update_result(&operation) {
+        Ok(value) => value,
+        Err(message) => {
+            eprintln!("{message}");
+            return ExitStatus::Error;
+        }
+    };
+    print_update_result(&result, json_output);
     ExitStatus::Ok
 }
 
@@ -275,6 +328,24 @@ fn submit_launch(
             )
         })?;
     read_json_response(response, "submit Security CVM launch")
+}
+
+fn submit_update(console_url: &str, session: &Session) -> Result<Operation, (ExitStatus, String)> {
+    let response = Client::new()
+        .post(format!(
+            "{console_url}/api/v1/entities/{}/security-cvm/actions/update",
+            session.entity.id
+        ))
+        .bearer_auth(&session.access_token)
+        .header("Idempotency-Key", Uuid::new_v4().to_string())
+        .send()
+        .map_err(|err| {
+            (
+                ExitStatus::Error,
+                format!("[error] failed to submit Security CVM update: {err}"),
+            )
+        })?;
+    read_json_response(response, "submit Security CVM update")
 }
 
 fn submit_terminate(
@@ -438,6 +509,14 @@ fn security_cvm_launch_result(operation: &Operation) -> Result<SecurityCvmProvis
         .map_err(|err| format!("[error] malformed Security CVM launch result: {err}"))
 }
 
+fn security_cvm_update_result(operation: &Operation) -> Result<SecurityCvmUpdateResult, String> {
+    let result = operation.result.clone().ok_or_else(|| {
+        "[error] Security CVM update operation succeeded without result".to_string()
+    })?;
+    serde_json::from_value::<SecurityCvmUpdateResult>(result)
+        .map_err(|err| format!("[error] malformed Security CVM update result: {err}"))
+}
+
 fn error_for_response(response: Response, action: &str) -> (ExitStatus, String) {
     let status = response.status();
     let exit = if status == reqwest::StatusCode::UNAUTHORIZED {
@@ -565,6 +644,23 @@ fn print_launch_result(result: &SecurityCvmProvisionResult, json_output: bool) {
         }
         println!("ca_export_token={}", result.ca_export_token);
         println!("{}", security_cvm_summary(&result.security_cvm));
+    }
+}
+
+fn print_update_result(result: &SecurityCvmUpdateResult, json_output: bool) {
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(result).expect("Security CVM update output serializes")
+        );
+    } else {
+        println!("updated {}", security_cvm_summary(&result.security_cvm));
+        if !result.dev_cvms_requiring_update.is_empty() {
+            eprintln!(
+                "dev_cvms_requiring_update={}",
+                result.dev_cvms_requiring_update.join(",")
+            );
+        }
     }
 }
 

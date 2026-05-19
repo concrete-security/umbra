@@ -111,8 +111,10 @@ PROVIDER_CVM_SYNC_ACTION_TIMEOUT_SECONDS = 30.0
 OPERATION_KIND_PERMISSIONS = {
     "audit.export": "AUDIT_EXPORT",
     "cvm.launch": "CVM_LAUNCH",
+    "cvm.update": "CVM_MANAGE",
     "cvm.terminate": "CVM_MANAGE",
     "security_cvm.provision": "SECURITY_CVM_CONFIGURE",
+    "security_cvm.update": "SECURITY_CVM_CONFIGURE",
 }
 SECURITY_CVM_PROVISION_KIND = "security_cvm.provision"
 SECURITY_CVM_PROVISION_REDACTION = "<redacted-after-first-read>"
@@ -2875,8 +2877,8 @@ def validate_reconcile_dependencies(*, include_orphans: bool) -> None:
         raise api_error(
             503,
             "SERVICE_UNAVAILABLE",
-            "Phala adapter is not configured",
-            {"component": "phala_adapter"},
+            "CVM provider adapter is not configured",
+            {"component": "cvm_provider_adapter"},
         )
     if include_orphans and (
         not raw.get("CLOUDFLARE_API_TOKEN", "").strip()
@@ -3467,7 +3469,7 @@ async def get_cvm_policy_bundle(
     async with pool.acquire() as conn:
         cvm = await conn.fetchrow(
             """
-            SELECT id, owner_id, state::text AS state
+            SELECT id, owner_id, state::text AS state, atls_policy_bundle
             FROM cvms
             WHERE id = $1
               AND entity_id = $2
@@ -3487,20 +3489,7 @@ async def get_cvm_policy_bundle(
                 "policy bundle is unavailable for terminated CVM",
                 {"state": "cvm_terminated"},
             )
-        bundle = await conn.fetchval(
-            """
-            SELECT result -> 'policy_bundle'
-            FROM operations
-            WHERE kind = 'cvm.launch'
-              AND status = 'succeeded'
-              AND target_type = 'cvm'
-              AND target_id = $1
-              AND result ? 'policy_bundle'
-            ORDER BY updated_at DESC, created_at DESC
-            LIMIT 1
-            """,
-            cvm_id,
-        )
+        bundle = cvm["atls_policy_bundle"]
     if bundle is None:
         raise api_error(
             503,
@@ -3556,6 +3545,111 @@ async def stop_cvm(
         current_user=current_user,
         response=response,
     )
+
+
+@router.post("/cvms/{cvm_id}/actions/update", status_code=202)
+async def update_cvm(
+    cvm_id: UUID,
+    request: Request,
+    if_match: Annotated[str | None, Header(alias="If-Match")] = None,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+    current_user: CurrentUser = Depends(require_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> Any:
+    idempotency_key_value = optional_idempotency_key(idempotency_key)
+    route = f"POST /api/v1/cvms/{cvm_id}/actions/update"
+    body_sha256 = request_body_sha256(await request.body())
+    operation_id = uuid4()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            if idempotency_key_value is not None:
+                await acquire_idempotency_lock(
+                    conn,
+                    credential_id=str(current_user.id),
+                    idempotency_key=idempotency_key_value,
+                    route=route,
+                )
+                cached = await lookup_idempotency_response(
+                    conn,
+                    credential_id=str(current_user.id),
+                    idempotency_key=idempotency_key_value,
+                    route=route,
+                    body_sha256=body_sha256,
+                )
+                if cached is not None:
+                    return JSONResponse(status_code=cached.status_code, content=cached.body, headers=cached.headers)
+
+            cvm = await lock_cvm_for_lifecycle_action(conn, cvm_id=cvm_id, current_user=current_user)
+            require_cvm_owner_or_manager(cvm, current_user)
+            if if_match is not None:
+                require_matching_etag(cvm_etag(cvm), if_match)
+            await ensure_no_active_operation(conn, target_id=cvm_id, state=cvm["state"])
+            if cvm["state"] not in {"RUNNING", "STOPPED", "FAILED"}:
+                raise api_error(
+                    409,
+                    "CONFLICT",
+                    "cannot update CVM from current state",
+                    {"state": cvm["state"]},
+                )
+            if cvm_provider_deployment_id(cvm) is None:
+                raise api_error(
+                    409,
+                    "CONFLICT",
+                    "CVM has no provider deployment to update",
+                    {"state": "provider_deployment_missing"},
+                )
+            row = await conn.fetchrow(
+                """
+                INSERT INTO operations (
+                    id,
+                    kind,
+                    status,
+                    actor_id,
+                    actor_email,
+                    target_type,
+                    target_id,
+                    idempotency_key,
+                    request_body_sha256,
+                    progress_step,
+                    progress_percent
+                )
+                VALUES ($1, 'cvm.update', 'pending', $2, $3, 'cvm', $4, $5, $6, 'queued', 0)
+                RETURNING
+                    id,
+                    kind,
+                    status::text AS status,
+                    actor_id,
+                    actor_email,
+                    target_type,
+                    target_id,
+                    progress_step,
+                    progress_percent,
+                    result,
+                    error,
+                    result_disclosed_at,
+                    created_at,
+                    updated_at,
+                    expires_at
+                """,
+                operation_id,
+                current_user.id,
+                current_user.email,
+                cvm_id,
+                idempotency_key_value,
+                body_sha256 if idempotency_key_value is not None else None,
+            )
+            response_body = operation_resource(row)
+            if idempotency_key_value is not None:
+                await store_idempotency_response(
+                    conn,
+                    credential_id=str(current_user.id),
+                    idempotency_key=idempotency_key_value,
+                    route=route,
+                    body_sha256=body_sha256,
+                    status_code=202,
+                    response_body=response_body,
+                )
+            return response_body
 
 
 @router.post("/cvms/{cvm_id}/actions/terminate", status_code=202)
@@ -3914,23 +4008,31 @@ def cvm_provider_app_id(row: asyncpg.Record | dict) -> str | None:
     return app_id if isinstance(app_id, str) and app_id else None
 
 
+def cvm_provider_deployment_id(row: asyncpg.Record | dict) -> str | None:
+    metadata = json_payload(dict(row).get("metadata", {}))
+    if not isinstance(metadata, dict):
+        return None
+    deployment_id = metadata.get("deployment_id") or metadata.get("app_id")
+    return deployment_id if isinstance(deployment_id, str) and deployment_id else None
+
+
 async def apply_provider_cvm_lifecycle_action(*, app_id: str, action: str) -> None:
-    from concrete_console.tee_provider.phala import PhalaClient, PhalaError
+    from concrete_console.tee_provider import CvmProviderError, cvm_provider_from_settings
 
     try:
-        client = PhalaClient.from_settings(timeout_seconds=PROVIDER_CVM_SYNC_ACTION_TIMEOUT_SECONDS)
+        client = cvm_provider_from_settings(timeout_seconds=PROVIDER_CVM_SYNC_ACTION_TIMEOUT_SECONDS)
         if action == "start":
             await client.start(app_id)
         elif action == "stop":
             await client.stop(app_id)
         else:
             raise RuntimeError(f"unsupported provider CVM action: {action}")
-    except PhalaError as exc:
+    except CvmProviderError as exc:
         raise api_error(
             502,
             "UPSTREAM_ERROR",
             "Dev CVM provider lifecycle action failed",
-            {"adapter": "phala", "reason": exc.code},
+            {"adapter": "cvm_provider", "reason": exc.code},
         ) from exc
 
 
@@ -3986,6 +4088,31 @@ async def apply_cvm_state_action(
                 after={"state": target_state},
             )
     return await fetch_visible_cvm_resource(pool, cvm_id=cvm_id, current_user=current_user, response=response)
+
+
+async def ensure_no_active_operation(conn: asyncpg.Connection, *, target_id: UUID, state: str) -> None:
+    active_operation = await conn.fetchrow(
+        """
+        SELECT id, kind
+        FROM operations
+        WHERE target_id = $1
+          AND status IN ('pending', 'running')
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        target_id,
+    )
+    if active_operation is not None:
+        raise api_error(
+            409,
+            "CONFLICT",
+            "resource already has an active operation",
+            {
+                "state": state,
+                "operation_id": str(active_operation["id"]),
+                "operation_kind": active_operation["kind"],
+            },
+        )
 
 
 async def bump_cvm_policy_version(conn: asyncpg.Connection, cvm_id: UUID) -> None:
@@ -4412,17 +4539,25 @@ def security_cvm_provider_app_id(row: asyncpg.Record | dict) -> str | None:
     return app_id if isinstance(app_id, str) and app_id else None
 
 
+def security_cvm_provider_deployment_id(row: asyncpg.Record | dict) -> str | None:
+    metadata = json_payload(dict(row).get("metadata", {}))
+    if not isinstance(metadata, dict):
+        return None
+    deployment_id = metadata.get("deployment_id") or metadata.get("app_id")
+    return deployment_id if isinstance(deployment_id, str) and deployment_id else None
+
+
 async def terminate_provider_security_cvm(*, app_id: str) -> None:
-    from concrete_console.tee_provider.phala import PhalaClient, PhalaError
+    from concrete_console.tee_provider import CvmProviderError, cvm_provider_from_settings
 
     try:
-        await PhalaClient.from_settings().delete(app_id)
-    except PhalaError as exc:
+        await cvm_provider_from_settings().delete(app_id)
+    except CvmProviderError as exc:
         raise api_error(
             502,
             "UPSTREAM_ERROR",
             "Security CVM provider termination failed",
-            {"adapter": "phala", "reason": exc.code},
+            {"adapter": "cvm_provider", "reason": exc.code},
         ) from exc
 
 
@@ -4573,6 +4708,109 @@ async def delete_security_cvm(
     return security_cvm_resource(terminated)
 
 
+@router.post("/entities/{entity_id}/security-cvm/actions/update", status_code=202)
+async def update_security_cvm(
+    entity_id: UUID,
+    request: Request,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+    current_user: CurrentUser = Depends(require_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> Any:
+    current_user.require_entity(entity_id)
+    current_user.require_permission("SECURITY_CVM_CONFIGURE")
+    idempotency_key_value = optional_idempotency_key(idempotency_key)
+    route = f"POST /api/v1/entities/{entity_id}/security-cvm/actions/update"
+    body_sha256 = request_body_sha256(await request.body())
+    operation_id = uuid4()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            if idempotency_key_value is not None:
+                await acquire_idempotency_lock(
+                    conn,
+                    credential_id=str(current_user.id),
+                    idempotency_key=idempotency_key_value,
+                    route=route,
+                )
+                cached = await lookup_idempotency_response(
+                    conn,
+                    credential_id=str(current_user.id),
+                    idempotency_key=idempotency_key_value,
+                    route=route,
+                    body_sha256=body_sha256,
+                )
+                if cached is not None:
+                    return JSONResponse(status_code=cached.status_code, content=cached.body, headers=cached.headers)
+
+            row = await lock_security_cvm_for_decommission(conn, entity_id)
+            await ensure_no_active_operation(conn, target_id=row["id"], state=row["state"])
+            if row["state"] not in {"RUNNING", "STOPPED", "FAILED"}:
+                raise api_error(
+                    409,
+                    "CONFLICT",
+                    "cannot update Security CVM from current state",
+                    {"state": row["state"]},
+                )
+            if security_cvm_provider_deployment_id(row) is None:
+                raise api_error(
+                    409,
+                    "CONFLICT",
+                    "Security CVM has no provider deployment to update",
+                    {"state": "provider_deployment_missing"},
+                )
+            op_row = await conn.fetchrow(
+                """
+                INSERT INTO operations (
+                    id,
+                    kind,
+                    status,
+                    actor_id,
+                    actor_email,
+                    target_type,
+                    target_id,
+                    idempotency_key,
+                    request_body_sha256,
+                    progress_step,
+                    progress_percent
+                )
+                VALUES ($1, 'security_cvm.update', 'pending', $2, $3, 'security_cvm', $4, $5, $6, 'queued', 0)
+                RETURNING
+                    id,
+                    kind,
+                    status::text AS status,
+                    actor_id,
+                    actor_email,
+                    target_type,
+                    target_id,
+                    progress_step,
+                    progress_percent,
+                    result,
+                    error,
+                    result_disclosed_at,
+                    created_at,
+                    updated_at,
+                    expires_at
+                """,
+                operation_id,
+                current_user.id,
+                current_user.email,
+                row["id"],
+                idempotency_key_value,
+                body_sha256 if idempotency_key_value is not None else None,
+            )
+            response_body = operation_resource(op_row)
+            if idempotency_key_value is not None:
+                await store_idempotency_response(
+                    conn,
+                    credential_id=str(current_user.id),
+                    idempotency_key=idempotency_key_value,
+                    route=route,
+                    body_sha256=body_sha256,
+                    status_code=202,
+                    response_body=response_body,
+                )
+            return response_body
+
+
 @router.get("/entities/{entity_id}/security-cvm/attestation")
 async def get_security_cvm_attestation(
     entity_id: UUID,
@@ -4669,10 +4907,15 @@ async def fetch_security_cvm_token_hashes(conn: asyncpg.Connection, security_cvm
           AND principal_id = $1
           AND purpose IN ('INGEST', 'CA_EXPORT')
           AND deleted_at IS NULL
+          AND (expires_at IS NULL OR expires_at > now())
+        ORDER BY purpose::text, expires_at NULLS FIRST, issued_at DESC
         """,
         security_cvm_id,
     )
-    return {row["purpose"]: row["token_hash"] for row in rows}
+    hashes: dict[str, str] = {}
+    for row in rows:
+        hashes.setdefault(row["purpose"], row["token_hash"])
+    return hashes
 
 
 def row_value(row: Any, key: str) -> Any:

@@ -62,6 +62,16 @@ def test_pending_operation_start_progress_advances_known_sagas() -> None:
         progress_step="queued",
         progress_percent=0,
     ) == ("phala_terminate", 25)
+    assert scheduler.pending_operation_start_progress(
+        "cvm.update",
+        progress_step="queued",
+        progress_percent=0,
+    ) == ("provider_update", 20)
+    assert scheduler.pending_operation_start_progress(
+        "security_cvm.update",
+        progress_step="queued",
+        progress_percent=0,
+    ) == ("provider_update", 20)
 
 
 def test_pending_operation_start_progress_ignores_unknown_kind() -> None:
@@ -442,6 +452,41 @@ def test_provider_app_id_parses_json_metadata() -> None:
     assert scheduler.provider_app_id({"app_id": "app-123"}) == "app-123"
     assert scheduler.provider_app_id('{"app_id": "app-123"}') == "app-123"
     assert scheduler.provider_app_id({}) is None
+
+
+def test_provider_deployment_id_prefers_neutral_metadata() -> None:
+    assert scheduler.provider_deployment_id({"deployment_id": "dep-123", "app_id": "app-123"}) == "dep-123"
+    assert scheduler.provider_deployment_id({"app_id": "app-123"}) == "app-123"
+    assert scheduler.provider_deployment_id({}) is None
+
+
+def test_cvm_update_metadata_keeps_pending_policy_bundle() -> None:
+    metadata = scheduler.cvm_update_metadata(
+        {"provider": "phala", "policy_bundle": {"old": True}},
+        deployment_id="dep-123",
+        gateway_host="gateway.example.com",
+        status="RUNNING",
+        pending_policy_bundle={"new": True},
+    )
+
+    assert metadata["deployment_id"] == "dep-123"
+    assert metadata["connect_host"] == "dep-123-443s.gateway.example.com"
+    assert metadata["pending_policy_bundle"] == {"new": True}
+    assert metadata["policy_bundle"] == {"old": True}
+
+
+def test_snapshot_with_pending_policy_bundle_overrides_active_policy_for_attestation() -> None:
+    snapshot = launch_snapshot(
+        metadata={
+            "policy_bundle": {"old": True},
+            "pending_policy_bundle": {"new": True},
+        }
+    )
+
+    updated = scheduler.snapshot_with_pending_policy_bundle(snapshot)
+
+    assert updated["metadata"]["policy_bundle"] == {"new": True}
+    assert snapshot["metadata"]["policy_bundle"] == {"old": True}
 
 
 def security_atls_policy(**overrides):
@@ -826,6 +871,27 @@ class LaunchFakePool:
         return AsyncContext(self.conn)
 
 
+class CvmUpdateFinaliseConn:
+    def __init__(self, snapshot):
+        self.snapshot = snapshot
+        self.execute_calls: list[tuple[str, tuple[object, ...]]] = []
+        self.audit_calls: list[dict[str, object]] = []
+
+    def transaction(self):
+        return AsyncContext()
+
+    async def fetchrow(self, query, *args):
+        if "FROM operations o" in query and "JOIN cvms c" in query:
+            return self.snapshot
+        if "JOIN users owner" in query:
+            return cvm_resource_row()
+        raise AssertionError(f"unexpected fetchrow query: {query}")
+
+    async def execute(self, query, *args):
+        self.execute_calls.append((query, args))
+        return "UPDATE 1"
+
+
 class SecurityProvisionFakeConn:
     def __init__(self, snapshot):
         self.snapshot = snapshot
@@ -889,6 +955,27 @@ def test_build_security_cvm_provision_env_includes_shade_acme_dns01_env(monkeypa
 
     assert env["CLOUDFLARE_API_TOKEN"] == "cf-token"
     assert env["CLOUDFLARE_PROPAGATION_SECONDS"] == "60"
+
+
+def test_fetch_security_cvm_token_hashes_prefers_current_overlap_token() -> None:
+    class TokenConn:
+        async def fetch(self, query, *args):
+            assert "expires_at IS NULL OR expires_at > now()" in query
+            return [
+                {"purpose": "CA_EXPORT", "token_hash": "new-ca"},
+                {"purpose": "CA_EXPORT", "token_hash": "old-ca"},
+                {"purpose": "INGEST", "token_hash": "new-ingest"},
+                {"purpose": "INGEST", "token_hash": "old-ingest"},
+            ]
+
+    hashes = asyncio.run(
+        scheduler.fetch_security_cvm_token_hashes(
+            TokenConn(),
+            UUID("00000000-0000-4000-8000-000000000041"),
+        )
+    )
+
+    assert hashes == {"CA_EXPORT": "new-ca", "INGEST": "new-ingest"}
 
 
 def test_security_cvm_token_stash_expires_after_one_hour() -> None:
@@ -1092,6 +1179,53 @@ def test_execute_cvm_launch_phala_deploy_requires_security_cvm_atls_policy(monke
         "message": "security cvm atls policy unavailable",
         "details": {"component": "security_cvm_atls_policy"},
     }
+
+
+def test_execute_cvm_update_finalise_materializes_current_policy_bundle(monkeypatch) -> None:
+    pending_bundle = {
+        "compose_template": "services: {}\n",
+        "deploy_compose_yaml": "services:\n  generated:\n",
+        "rtmr3_binding": {"cvm_id": "00000000-0000-4000-8000-000000000031"},
+    }
+    snapshot = launch_snapshot(
+        actor_id=UUID("00000000-0000-4000-8000-000000000020"),
+        actor_email="dev@example.com",
+        entity_id=UUID("00000000-0000-4000-8000-000000000001"),
+        state="STOPPED",
+        metadata={
+            "deployment_id": "dep-123",
+            "policy_bundle": {"old": True},
+            "pending_policy_bundle": pending_bundle,
+        },
+        atls_policy_revision=2,
+        image_measurement="a" * 96,
+        rtmr3_digest="d" * 96,
+        attestation_verified_at=scheduler.datetime.now(scheduler.timezone.utc),
+    )
+    conn = CvmUpdateFinaliseConn(snapshot)
+
+    async def fake_get_pool():
+        return LaunchFakePool(conn)
+
+    async def fake_insert_audit_event(_conn, **kwargs):
+        conn.audit_calls.append(kwargs)
+
+    monkeypatch.setattr(scheduler, "get_pool", fake_get_pool)
+    monkeypatch.setattr(scheduler, "insert_audit_event", fake_insert_audit_event)
+
+    asyncio.run(scheduler.execute_cvm_update_finalise_operation(UUID("00000000-0000-4000-8000-000000000030")))
+
+    cvm_updates = [args for query, args in conn.execute_calls if "atls_policy_bundle = $3::jsonb" in query]
+    assert len(cvm_updates) == 1
+    metadata = json.loads(cvm_updates[0][1])
+    assert metadata["policy_bundle"] == pending_bundle
+    assert "pending_policy_bundle" not in metadata
+    assert json.loads(cvm_updates[0][2]) == pending_bundle
+    operation_updates = [args for query, args in conn.execute_calls if "kind = 'cvm.update'" in query]
+    result = json.loads(operation_updates[0][1])
+    assert result["policy_bundle"] == pending_bundle
+    assert conn.audit_calls[0]["action"] == "CVM_UPDATED"
+    assert conn.audit_calls[0]["after"]["atls_policy_revision"] == 3
 
 
 class AttestationGateConn:
