@@ -46,24 +46,24 @@ async def delete_concrete_cvms(client: PhalaClient, *, out: TextIO = sys.stderr)
             raise PhalaCleanupError(f"concrete Phala CVM {name} has no app id in list response")
         await client.delete(app_id)
         deleted += 1
-        print(f"down: deleted Phala CVM {name} ({app_id})", file=out)
+        print(f"clean-phala: deleted Phala CVM {name} ({app_id})", file=out)
     if deleted == 0:
-        print("down: no concrete-v0 Phala CVMs found", file=out)
+        print("clean-phala: no concrete-v0 Phala CVMs found", file=out)
     return CleanupSummary(deleted=deleted)
 
 
 async def run() -> int:
     if not os.environ.get("PHALA_API_TOKEN"):
-        print("down: PHALA_API_TOKEN is not set; skipping Phala CVM cleanup", file=sys.stderr)
+        print("clean-phala: PHALA_API_TOKEN is not set; skipping Phala CVM cleanup", file=sys.stderr)
         return 0
     try:
         client = PhalaClient.from_settings()
         await delete_concrete_cvms(client)
     except PhalaCleanupError as exc:
-        print(f"down: Phala CVM cleanup failed: {exc}", file=sys.stderr)
+        print(f"clean-phala: Phala CVM cleanup failed: {exc}", file=sys.stderr)
         return 1
     except PhalaError as exc:
-        print(f"down: Phala CVM cleanup failed: {exc.code}", file=sys.stderr)
+        print(f"clean-phala: Phala CVM cleanup failed: {exc.code}", file=sys.stderr)
         if exc.output:
             print(exc.output, file=sys.stderr)
         return 1
