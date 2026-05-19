@@ -25,15 +25,6 @@ decode_b64_to_file() {
   chmod "$mode" "$path"
 }
 
-write_secret_file() {
-  local name="$1"
-  local path="$2"
-  local mode="$3"
-  required_env "$name"
-  printf '%s' "${!name}" >"$path"
-  chmod "$mode" "$path"
-}
-
 validate_authorized_keys() {
   local input="$1"
   local count=0
@@ -236,6 +227,10 @@ mkdir -p /run/ssh/authorized_keys /run/ssh/user-ssh /run/sshd /run/concrete/sess
 chown dev:dev /run/ssh/user-ssh /run/concrete/sessions
 chmod 0700 /run/concrete/sessions
 
+if [ -n "${SECURITY_CVM_PROXY_TOKEN+x}" ] || [ -n "${SECURITY_CVM_ATLS_POLICY_B64+x}" ]; then
+  fail "forwarder-only Security CVM material must not be injected into user-sandbox"
+fi
+
 export HTTP_PROXY='http://dev-egress-forwarder:3128'
 export HTTPS_PROXY='http://dev-egress-forwarder:3128'
 export NO_PROXY='localhost,127.0.0.1,user-sandbox,dev-tunnel,dev-egress-forwarder'
@@ -250,14 +245,12 @@ export PIP_USER='1'
 export GH_CONFIG_DIR='/home/dev/.local/share/gh'
 
 decode_b64_to_file SECURITY_CVM_CA_CERT_B64 /run/concrete/security-cvm-ca.pem 0444
-decode_b64_to_file SECURITY_CVM_ATLS_POLICY_B64 /run/concrete/security-cvm.atls-policy.json 0444
-write_secret_file SECURITY_CVM_PROXY_TOKEN /run/concrete/proxy-token 0400
 decode_b64_to_file AUTHORIZED_SSH_KEYS_B64 /run/concrete/authorized_keys.bootstrap 0644
 printf '%s' "${SANDBOX_ENV_PLACEHOLDERS_B64:-}" | base64 -d >/run/concrete/sandbox-env-placeholders \
   || fail "invalid base64 in SANDBOX_ENV_PLACEHOLDERS_B64"
 chmod 0444 /run/concrete/sandbox-env-placeholders
 
-unset SECURITY_CVM_CA_CERT_B64 SECURITY_CVM_ATLS_POLICY_B64 SECURITY_CVM_PROXY_TOKEN AUTHORIZED_SSH_KEYS_B64 SANDBOX_ENV_PLACEHOLDERS_B64
+unset SECURITY_CVM_CA_CERT_B64 AUTHORIZED_SSH_KEYS_B64 SANDBOX_ENV_PLACEHOLDERS_B64
 
 [ -s /run/concrete/security-cvm-ca.pem ] || fail "Security CVM CA is empty"
 validate_authorized_keys /run/concrete/authorized_keys.bootstrap
