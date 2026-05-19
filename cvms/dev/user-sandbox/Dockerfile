@@ -55,16 +55,24 @@ RUN install -m 0755 -d /etc/apt/keyrings \
 
 COPY cvms/dev/user-sandbox/docker-daemon.json /etc/docker/daemon.json
 
-RUN echo 'dev:100000:65536' >/etc/subuid \
+RUN groupadd --gid 1001 dev \
+    && useradd --uid 1001 --gid 1001 --create-home --home-dir /home/dev --shell /bin/bash dev \
+    && usermod -aG sudo,docker dev \
+    && echo 'dev ALL=(ALL) NOPASSWD:ALL' >/etc/sudoers.d/dev \
+    && chmod 0440 /etc/sudoers.d/dev \
+    && visudo -cf /etc/sudoers.d/dev \
+    && echo 'dev:100000:65536' >/etc/subuid \
     && echo 'dev:100000:65536' >/etc/subgid \
-    && useradd -u 0 -o -m -d /home/dev -s /bin/bash dev \
-    && passwd -d dev \
     && mkdir -p \
+      /home/dev/workspaces \
       /home/dev/.local/bin \
+      /home/dev/.local/share/gh \
       /home/dev/.cache \
       /home/dev/.npm \
       /home/dev/.claude \
       /home/dev/.codex \
+      /home/dev/.cursor-server \
+      /home/dev/.vscode-server \
     && chown -R dev:dev /home/dev
 
 COPY cvms/dev/user-sandbox/sshd_config /etc/ssh/sshd_config

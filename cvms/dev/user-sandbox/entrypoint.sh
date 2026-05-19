@@ -184,6 +184,28 @@ ENV
   chmod 0644 "$output"
 }
 
+ensure_runtime_dev_dir() {
+  local mode="$1"
+  local path="$2"
+  install -d -o dev -g dev -m "$mode" "$path"
+}
+
+ensure_dev_dir_if_missing() {
+  local mode="$1"
+  local path="$2"
+  if [ ! -e "$path" ]; then
+    install -d -o dev -g dev -m "$mode" "$path"
+  fi
+}
+
+ensure_dev_file_if_missing() {
+  local mode="$1"
+  local path="$2"
+  if [ ! -e "$path" ]; then
+    install -o dev -g dev -m "$mode" /dev/null "$path"
+  fi
+}
+
 if [ "${CONCRETE_ENTRYPOINT_SELF_TEST:-}" = "validate-placeholder-value" ]; then
   validate_placeholder_value "concrete-proxy-injected" \
     || fail "self-test rejected benign placeholder value"
@@ -223,9 +245,25 @@ if [ "${CONCRETE_ENTRYPOINT_SELF_TEST:-}" = "validate-placeholder-value" ]; then
   exit 0
 fi
 
-mkdir -p /run/ssh/authorized_keys /run/ssh/user-ssh /run/sshd /run/concrete/sessions
-chown dev:dev /run/ssh/user-ssh /run/concrete/sessions
-chmod 0700 /run/concrete/sessions
+if [ "$(id -u)" -ne 0 ]; then
+  fail "entrypoint must run as root"
+fi
+
+mkdir -p /run/ssh/authorized_keys /run/sshd /run/concrete
+ensure_runtime_dev_dir 0700 /run/ssh/user-ssh
+ensure_runtime_dev_dir 0700 /run/concrete/sessions
+ensure_dev_dir_if_missing 0755 /home/dev/workspaces
+ensure_dev_dir_if_missing 0755 /home/dev/.local
+ensure_dev_dir_if_missing 0755 /home/dev/.local/bin
+ensure_dev_dir_if_missing 0755 /home/dev/.local/share
+ensure_dev_dir_if_missing 0755 /home/dev/.local/share/gh
+ensure_dev_dir_if_missing 0755 /home/dev/.cache
+ensure_dev_dir_if_missing 0755 /home/dev/.npm
+ensure_dev_dir_if_missing 0755 /home/dev/.claude
+ensure_dev_dir_if_missing 0755 /home/dev/.codex
+ensure_dev_dir_if_missing 0755 /home/dev/.cursor-server
+ensure_dev_dir_if_missing 0755 /home/dev/.vscode-server
+ensure_dev_file_if_missing 0600 /home/dev/.claude/.claude.json
 
 if [ -n "${SECURITY_CVM_PROXY_TOKEN+x}" ] || [ -n "${SECURITY_CVM_ATLS_POLICY_B64+x}" ]; then
   fail "forwarder-only Security CVM material must not be injected into user-sandbox"
@@ -259,6 +297,9 @@ chmod 0644 /run/concrete/ca-bundle.pem
 write_runtime_env /run/concrete/sandbox-env-placeholders /run/concrete-env.sh
 write_authorized_keys /run/concrete/authorized_keys.bootstrap /run/ssh/authorized_keys/dev /run/concrete/sandbox-env-placeholders
 
+if [ -e /home/dev/.ssh ] && [ ! -L /home/dev/.ssh ]; then
+  fail "/home/dev/.ssh exists and is not a symlink"
+fi
 ln -sfn /run/ssh/user-ssh /home/dev/.ssh
 mkdir -p /home/dev/.claude
 ln -sfn /home/dev/.claude/.claude.json /home/dev/.claude.json
