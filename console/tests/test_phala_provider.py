@@ -17,6 +17,9 @@ from concrete_console.tee_provider.phala import (
 )
 
 
+TEST_CLI_TIMEOUT_SECONDS = 30
+
+
 def write_fake_cli(tmp_path: Path, source: str) -> Path:
     cli = tmp_path / "fake-phala.py"
     cli.write_text("#!/usr/bin/env python3\n" + textwrap.dedent(source))
@@ -90,6 +93,8 @@ def test_deploy_stages_files_with_private_modes_and_cleans(tmp_path) -> None:
         assert "PHALA_API_TOKEN" not in os.environ
         assert os.environ["PHALA_CLOUD_API_KEY"] == "phala-token"
         assert sys.argv[1:4] == ["deploy", "--name", "concrete-v0-cvm-smoke"]
+        assert sys.argv[sys.argv.index("--instance-type") + 1] == "tdx.small"
+        assert sys.argv[sys.argv.index("--region") + 1] == "FR-PARIS-1"
         compose_path = sys.argv[sys.argv.index("--compose") + 1]
         env_path = sys.argv[sys.argv.index("-e") + 1]
         assert stat.S_IMODE(os.stat(compose_path).st_mode) == 0o600
@@ -100,13 +105,15 @@ def test_deploy_stages_files_with_private_modes_and_cleans(tmp_path) -> None:
         print(json.dumps({{"app_id": "app-123", "gateway_host": "gateway.example.com", "status": "running"}}))
         """,
     )
-    client = PhalaClient(cli_path=str(cli), api_token="phala-token", timeout_seconds=5)
+    client = PhalaClient(cli_path=str(cli), api_token="phala-token", timeout_seconds=TEST_CLI_TIMEOUT_SECONDS)
 
     result = run(
         client.deploy(
             name="concrete-v0-cvm-smoke",
             compose_yaml="services: {}\n",
             env={"SECURITY_CVM_PROXY_TOKEN": "proxy-token"},
+            instance_type="tdx.small",
+            region="FR-PARIS-1",
         )
     )
 
@@ -137,7 +144,7 @@ def test_deploy_falls_back_to_cvms_get_when_cli_stdout_is_empty(tmp_path) -> Non
         open({str(marker)!r}, "w").write(json.dumps(sys.argv[1:]))
         """,
     )
-    client = PhalaClient(cli_path=str(cli), api_token="phala-token", timeout_seconds=5)
+    client = PhalaClient(cli_path=str(cli), api_token="phala-token", timeout_seconds=TEST_CLI_TIMEOUT_SECONDS)
 
     result = run(client.deploy(name="concrete-v0-cvm-smoke", compose_yaml="services: {}\n", env={}))
 
@@ -147,6 +154,37 @@ def test_deploy_falls_back_to_cvms_get_when_cli_stdout_is_empty(tmp_path) -> Non
     assert result.app_id == "app-123"
     assert result.gateway_host == "dstack.example.com"
     assert result.status == "STOPPED"
+
+
+def test_deploy_parses_progress_prefixed_json_and_fetches_gateway(tmp_path) -> None:
+    marker = tmp_path / "argv.json"
+    cli = write_fake_cli(
+        tmp_path,
+        f"""
+        import json
+        import sys
+
+        if sys.argv[1:3] == ["cvms", "get"]:
+            open({str(marker)!r}, "w").write(json.dumps(sys.argv[1:]))
+            print(json.dumps({{
+                "app_id": "app-123",
+                "gateway": {{"base_domain": "dstack.example.com"}},
+                "status": "running"
+            }}))
+            raise SystemExit(0)
+
+        print("Provisioning CVM concrete-v0-cvm-smoke...")
+        print(json.dumps({{"success": True, "app_id": "app-123", "name": "concrete-v0-cvm-smoke"}}))
+        """,
+    )
+    client = PhalaClient(cli_path=str(cli), api_token="phala-token", timeout_seconds=TEST_CLI_TIMEOUT_SECONDS)
+
+    result = run(client.deploy(name="concrete-v0-cvm-smoke", compose_yaml="services: {}\n", env={}))
+
+    assert json.loads(marker.read_text()) == ["cvms", "get", "app-123", "--json"]
+    assert result.app_id == "app-123"
+    assert result.gateway_host == "dstack.example.com"
+    assert result.status == "RUNNING"
 
 
 def test_update_uses_phala_deploy_with_cvm_id(tmp_path) -> None:
@@ -161,7 +199,7 @@ def test_update_uses_phala_deploy_with_cvm_id(tmp_path) -> None:
         print(json.dumps({{"app_id": "app-123", "gateway_host": "gateway.example.com", "status": "active"}}))
         """,
     )
-    client = PhalaClient(cli_path=str(cli), api_token="phala-token", timeout_seconds=5)
+    client = PhalaClient(cli_path=str(cli), api_token="phala-token", timeout_seconds=TEST_CLI_TIMEOUT_SECONDS)
 
     result = run(client.update(app_id="app-123", compose_yaml="services: {}\n", env={}))
 
@@ -200,7 +238,7 @@ def test_nonzero_cli_output_is_redacted(tmp_path) -> None:
         cli_path=str(cli),
         api_token="phala-token",
         redaction_patterns=compile_redaction_patterns(r"secret-[0-9]+"),
-        timeout_seconds=5,
+        timeout_seconds=TEST_CLI_TIMEOUT_SECONDS,
     )
 
     with pytest.raises(PhalaError) as exc:
@@ -221,7 +259,7 @@ def test_info_validates_response_fields(tmp_path) -> None:
         print(json.dumps({"app_id": "bad app id", "gateway_host": "gateway.example.com"}))
         """,
     )
-    client = PhalaClient(cli_path=str(cli), api_token="phala-token", timeout_seconds=5)
+    client = PhalaClient(cli_path=str(cli), api_token="phala-token", timeout_seconds=TEST_CLI_TIMEOUT_SECONDS)
 
     with pytest.raises(PhalaError) as exc:
         run(client.info("app-123"))
@@ -240,7 +278,7 @@ def test_delete_tolerates_not_found(tmp_path) -> None:
         raise SystemExit(1)
         """,
     )
-    client = PhalaClient(cli_path=str(cli), api_token="phala-token", timeout_seconds=5)
+    client = PhalaClient(cli_path=str(cli), api_token="phala-token", timeout_seconds=TEST_CLI_TIMEOUT_SECONDS)
 
     run(client.delete("app-123"))
 
@@ -255,7 +293,7 @@ def test_get_raises_not_found(tmp_path) -> None:
         raise SystemExit(1)
         """,
     )
-    client = PhalaClient(cli_path=str(cli), api_token="phala-token", timeout_seconds=5)
+    client = PhalaClient(cli_path=str(cli), api_token="phala-token", timeout_seconds=TEST_CLI_TIMEOUT_SECONDS)
 
     with pytest.raises(PhalaNotFound):
         run(client.info("app-123"))
@@ -276,7 +314,7 @@ def test_list_filters_to_concrete_v0_names(tmp_path) -> None:
         }))
         """,
     )
-    client = PhalaClient(cli_path=str(cli), api_token="phala-token", timeout_seconds=5)
+    client = PhalaClient(cli_path=str(cli), api_token="phala-token", timeout_seconds=TEST_CLI_TIMEOUT_SECONDS)
 
     rows = run(client.list())
 

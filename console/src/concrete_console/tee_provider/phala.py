@@ -87,22 +87,30 @@ class PhalaClient:
             timeout_seconds=300.0 if timeout_seconds is None else timeout_seconds,
         )
 
-    async def deploy(self, *, name: str, compose_yaml: str, env: dict[str, str]) -> PhalaDeployResult:
+    async def deploy(
+        self,
+        *,
+        name: str,
+        compose_yaml: str,
+        env: dict[str, str],
+        instance_type: str | None = None,
+        region: str | None = None,
+    ) -> PhalaDeployResult:
         validate_concrete_cvm_name(name)
         async with staged_compose_and_env(compose_yaml=compose_yaml, env=env) as staged:
-            stdout = await self._run_text(
-                [
-                    "deploy",
-                    "--name",
-                    name,
-                    "--compose",
-                    str(staged.compose_path),
-                    "-e",
-                    str(staged.env_path),
-                    "--wait",
-                    "--json",
-                ]
-            )
+            args = [
+                "deploy",
+                "--name",
+                name,
+                "--compose",
+                str(staged.compose_path),
+                "-e",
+                str(staged.env_path),
+            ]
+            append_optional_arg(args, "--instance-type", instance_type)
+            append_optional_arg(args, "--region", region)
+            args.extend(["--wait", "--json"])
+            stdout = await self._run_text(args)
         return await self._deploy_result_from_stdout(stdout, fallback_lookup=name)
 
     async def update(self, *, app_id: str, compose_yaml: str, env: dict[str, str]) -> PhalaDeployResult:
@@ -160,9 +168,22 @@ class PhalaClient:
     async def _deploy_result_from_stdout(self, stdout: str, *, fallback_lookup: str) -> PhalaDeployResult:
         if stdout.strip():
             try:
-                return deploy_result_from_payload(json.loads(stdout))
-            except (json.JSONDecodeError, PhalaError):
-                pass
+                payload = json_object_from_text(stdout)
+            except json.JSONDecodeError as exc:
+                raise PhalaError(
+                    "invalid_json",
+                    output=scrub_output(stdout, self.api_token, self.redaction_patterns),
+                ) from exc
+            if payload.get("success") is False:
+                raise PhalaError("cli_failed", output=scrub_output(stdout, self.api_token, self.redaction_patterns))
+            try:
+                return deploy_result_from_payload(payload)
+            except PhalaError as exc:
+                if exc.code == "invalid_response":
+                    lookup = first_string(payload, ("app_id", "appId", "id"), ("app", "cvm"), required=False)
+                    if lookup:
+                        return await self.info(lookup)
+                raise
         return await self.info(fallback_lookup)
 
     async def _run_json(self, args: list[str]) -> Any:
@@ -245,6 +266,20 @@ def deploy_result_from_payload(payload: Any) -> PhalaDeployResult:
     )
 
 
+def json_object_from_text(text: str) -> dict[str, Any]:
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(text):
+        if char != "{":
+            continue
+        try:
+            payload, _end = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            return payload
+    raise json.JSONDecodeError("no JSON object found", text, 0)
+
+
 def first_string(
     payload: dict[str, Any],
     keys: tuple[str, ...],
@@ -316,6 +351,11 @@ def validate_app_id(app_id: str) -> None:
 def validate_gateway_host(gateway_host: str) -> None:
     if not DNS_HOST_RE.fullmatch(gateway_host):
         raise PhalaError("invalid_response", field="gateway_host")
+
+
+def append_optional_arg(args: list[str], flag: str, value: str | None) -> None:
+    if isinstance(value, str) and value.strip():
+        args.extend([flag, value.strip()])
 
 
 def concrete_cvm_name(row: dict[str, Any]) -> str | None:

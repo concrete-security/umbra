@@ -1017,10 +1017,12 @@ def test_execute_security_cvm_phala_deploy_materializes_env_and_metadata(monkeyp
         def from_settings(cls):
             return cls()
 
-        async def deploy(self, *, name, compose_yaml, env):
+        async def deploy(self, *, name, compose_yaml, env, instance_type=None, region=None):
             captured["name"] = name
             captured["compose_yaml"] = compose_yaml
             captured["env"] = dict(env)
+            captured["instance_type"] = instance_type
+            captured["region"] = region
             return SimpleNamespace(app_id="sc-app-123", gateway_host="gateway.example.com", status="RUNNING")
 
     async def fake_insert_audit_event(_conn, **kwargs):
@@ -1047,6 +1049,8 @@ def test_execute_security_cvm_phala_deploy_materializes_env_and_metadata(monkeyp
     env = captured["env"]
     assert isinstance(env, dict)
     assert captured["name"] == "concrete-v0-sc-0000000000004000"
+    assert captured["instance_type"] == "tdx.small"
+    assert captured["region"] == "FR-PARIS-1"
     assert "domain: sc-abc.sc.example.com" in str(captured["shade_config_yaml"])
     assert env["CONSOLE_INGEST_TOKEN"] == "ingest-plaintext"
     assert env["CA_EXPORT_TOKEN"] == "ca-export-plaintext"
@@ -1122,10 +1126,12 @@ def test_execute_cvm_launch_phala_deploy_persists_hash_only(monkeypatch) -> None
         def from_settings(cls):
             return cls()
 
-        async def deploy(self, *, name, compose_yaml, env):
+        async def deploy(self, *, name, compose_yaml, env, instance_type=None, region=None):
             captured["name"] = name
             captured["compose_yaml"] = compose_yaml
             captured["env"] = dict(env)
+            captured["instance_type"] = instance_type
+            captured["region"] = region
             return SimpleNamespace(app_id="app-123", gateway_host="gateway.example.com", status="RUNNING")
 
     monkeypatch.setattr(scheduler, "get_pool", fake_get_pool)
@@ -1137,6 +1143,8 @@ def test_execute_cvm_launch_phala_deploy_persists_hash_only(monkeypatch) -> None
     env = captured["env"]
     assert isinstance(env, dict)
     assert captured["name"] == "concrete-v0-cvm-0000000000004000"
+    assert captured["instance_type"] == "tdx.small"
+    assert captured["region"] == "FR-PARIS-1"
     assert env["SECURITY_CVM_PROXY_TOKEN"]
     proxy_token_hash = hashlib.sha256(env["SECURITY_CVM_PROXY_TOKEN"].encode("utf-8")).hexdigest()
     assert any("UPDATE service_principal_tokens" in query for query, _args in conn.execute_calls)

@@ -849,6 +849,8 @@ async def execute_security_cvm_phala_deploy_operation(operation_id: Any) -> None
             name=name,
             compose_yaml=shade_result.compose_yaml,
             env=env,
+            instance_type=_row_value(snapshot, "instance_type"),
+            region=_row_value(snapshot, "region"),
         )
     except ShadeError as exc:
         await mark_security_cvm_provision_failed(
@@ -1676,6 +1678,8 @@ async def execute_cvm_launch_phala_deploy_operation(operation_id: Any) -> None:
             name=name,
             compose_yaml=shade_result.compose_yaml,
             env=env,
+            instance_type=_row_value(snapshot, "instance_type"),
+            region=_row_value(snapshot, "region"),
         )
     except ShadeError as exc:
         await mark_cvm_launch_failed(

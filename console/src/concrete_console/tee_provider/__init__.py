@@ -36,8 +36,25 @@ class CvmProvider:
             raise CvmProviderError(exc.code, provider="phala") from exc
         return cls(provider="phala", client=client)
 
-    async def deploy(self, *, name: str, compose_yaml: str, env: dict[str, str]) -> CvmProviderDeploymentResult:
-        return self._result(await self._call("deploy", name=name, compose_yaml=compose_yaml, env=env))
+    async def deploy(
+        self,
+        *,
+        name: str,
+        compose_yaml: str,
+        env: dict[str, str],
+        instance_type: str | None = None,
+        region: str | None = None,
+    ) -> CvmProviderDeploymentResult:
+        return self._result(
+            await self._call(
+                "deploy",
+                name=name,
+                compose_yaml=compose_yaml,
+                env=env,
+                instance_type=instance_type,
+                region=region,
+            )
+        )
 
     async def update_deployment(
         self,
