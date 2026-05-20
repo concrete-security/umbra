@@ -3,9 +3,9 @@ resolver = "2"
 members = ["cli", "cvms/dev/user-sandbox/atls-connect"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-license = "Proprietary"
+license-file = "LICENSE.txt"
 repository = "https://github.com/concrete-security/concrete"
 
 [profile.release]
