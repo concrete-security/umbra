@@ -207,6 +207,32 @@ ensure_claude_config() {
   fi
 }
 
+ensure_claude_native_install() {
+  local version
+  local target
+  local current
+  version="$(cat /usr/local/lib/concrete/claude.version 2>/dev/null || true)"
+  if [ -z "$version" ]; then
+    fail "missing Claude version metadata"
+  fi
+  if [ ! -x /usr/local/lib/concrete/claude.real ]; then
+    fail "missing baked Claude binary"
+  fi
+
+  target="/home/dev/.local/share/claude/versions/${version}"
+  install -d -o dev -g dev -m 0755 /home/dev/.local/share/claude/versions
+  if [ ! -x "$target" ]; then
+    install -o dev -g dev -m 0755 /usr/local/lib/concrete/claude.real "$target"
+  fi
+
+  current="$(readlink -f /home/dev/.local/bin/claude 2>/dev/null || true)"
+  if [ -x /home/dev/.local/bin/claude ] && [ "$current" != "/usr/local/bin/claude" ]; then
+    return
+  fi
+  ln -sfn "$target" /home/dev/.local/bin/claude
+  chown -h dev:dev /home/dev/.local/bin/claude
+}
+
 if [ "${CONCRETE_ENTRYPOINT_SELF_TEST:-}" = "validate-placeholder-value" ]; then
   validate_placeholder_value "concrete-proxy-injected" \
     || fail "self-test rejected benign placeholder value"
@@ -265,6 +291,7 @@ ensure_dev_dir_if_missing 0755 /home/dev/.codex
 ensure_dev_dir_if_missing 0755 /home/dev/.cursor-server
 ensure_dev_dir_if_missing 0755 /home/dev/.vscode-server
 ensure_claude_config /home/dev/.claude/.claude.json
+ensure_claude_native_install
 
 if [ -n "${SECURITY_CVM_PROXY_TOKEN+x}" ] || [ -n "${SECURITY_CVM_ATLS_POLICY_B64+x}" ]; then
   fail "forwarder-only Security CVM material must not be injected into user-sandbox"

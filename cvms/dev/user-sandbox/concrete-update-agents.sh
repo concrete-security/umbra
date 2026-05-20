@@ -17,7 +17,9 @@ touch "$_marker" 2>/dev/null || true
     if command -v npm >/dev/null 2>&1; then
       npm install -g @openai/codex --prefix /home/dev/.local >/dev/null 2>&1 &
     fi
-    if [ -x /usr/local/lib/concrete/claude.real ]; then
+    if [ -x /home/dev/.local/bin/claude ]; then
+      /home/dev/.local/bin/claude update >/dev/null 2>&1 &
+    elif [ -x /usr/local/lib/concrete/claude.real ]; then
       /usr/local/lib/concrete/claude.real update >/dev/null 2>&1 &
     fi
     if command -v gh >/dev/null 2>&1; then

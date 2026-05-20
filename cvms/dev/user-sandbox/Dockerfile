@@ -72,6 +72,8 @@ RUN set -a \
     && tar -xzf /tmp/claude.tar.gz -C /usr/local/lib/concrete \
     && mv /usr/local/lib/concrete/claude /usr/local/lib/concrete/claude.real \
     && chmod 0755 /usr/local/lib/concrete/claude.real \
+    && printf '%s\n' "${CLAUDE_VERSION}" >/usr/local/lib/concrete/claude.version \
+    && chmod 0644 /usr/local/lib/concrete/claude.version \
     && rm /tmp/claude.tar.gz \
     && curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz" -o /tmp/gh.tar.gz \
     && echo "${GH_SHA256}  /tmp/gh.tar.gz" | sha256sum -c - \

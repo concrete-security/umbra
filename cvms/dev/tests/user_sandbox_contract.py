@@ -16,6 +16,8 @@ def main() -> None:
     compose = (ROOT / "cvms" / "dev" / "docker-compose.yml").read_text()
     entrypoint = (SANDBOX / "entrypoint.sh").read_text()
     claude_wrapper = (SANDBOX / "concrete-agent-claude.sh").read_text()
+    update_agents = (SANDBOX / "concrete-update-agents.sh").read_text()
+    profile = (SANDBOX / "concrete-env-profile.sh").read_text()
     sshd_config = (SANDBOX / "sshd_config").read_text().splitlines()
 
     require("groupadd --gid 1001 dev" in dockerfile, "dev group must use GID 1001")
@@ -61,6 +63,7 @@ def main() -> None:
     )
     require("dev:100000:65536" in dockerfile, "dev subuid/subgid range must be configured")
     require("claude.real" in dockerfile, "claude must be baked into the image")
+    require("claude.version" in dockerfile, "claude version metadata must be baked into the image")
     require("@openai/codex" in dockerfile, "codex must be baked into the image")
     require("concrete-agent-claude.sh" in dockerfile, "claude wrapper must be installed")
     require(
@@ -101,6 +104,20 @@ def main() -> None:
     require(
         "ensure_claude_config /home/dev/.claude/.claude.json" in entrypoint,
         "Claude config must be initialized as valid JSON",
+    )
+    require(
+        "ensure_claude_native_install" in entrypoint
+        and "/home/dev/.local/bin/claude" in entrypoint
+        and "/home/dev/.local/share/claude/versions" in entrypoint,
+        "entrypoint must seed Claude's native install path inside the persistent .local volume",
+    )
+    require(
+        "/home/dev/.local/bin/claude update" in update_agents,
+        "Claude updater must use the native install path when present",
+    )
+    require(
+        '"$(id -u)" = "1001"' in profile and "concrete-update-agents.sh" in profile,
+        "dev login profile must start the non-blocking agent updater",
     )
     require(
         "/home/dev/.ssh exists and is not a symlink" in entrypoint,
