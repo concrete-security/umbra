@@ -7,10 +7,11 @@ from typing import Any
 
 
 class CvmProviderError(RuntimeError):
-    def __init__(self, code: str, *, provider: str = "unknown"):
+    def __init__(self, code: str, *, provider: str = "unknown", output: str = ""):
         super().__init__(code)
         self.code = code
         self.provider = provider
+        self.output = output
 
 
 @dataclass(frozen=True)
@@ -33,7 +34,7 @@ class CvmProvider:
         try:
             client = PhalaClient.from_settings(timeout_seconds=timeout_seconds)
         except PhalaError as exc:
-            raise CvmProviderError(exc.code, provider="phala") from exc
+            raise CvmProviderError(exc.code, provider="phala", output=exc.output) from exc
         return cls(provider="phala", client=client)
 
     async def deploy(
@@ -75,6 +76,9 @@ class CvmProvider:
     async def status(self, deployment_id: str) -> str:
         return await self._call("status", deployment_id)
 
+    async def deployment_compose_sha256(self, deployment_id: str) -> str:
+        return await self._call("compose_file_sha256", deployment_id)
+
     async def start(self, deployment_id: str) -> None:
         await self._call("start", deployment_id)
 
@@ -90,7 +94,7 @@ class CvmProvider:
         try:
             return await getattr(self.client, method)(*args, **kwargs)
         except PhalaError as exc:
-            raise CvmProviderError(exc.code, provider=self.provider) from exc
+            raise CvmProviderError(exc.code, provider=self.provider, output=exc.output) from exc
 
     def _result(self, result: Any) -> CvmProviderDeploymentResult:
         return CvmProviderDeploymentResult(

@@ -14,6 +14,18 @@ from concrete_console.config import load_settings
 
 DEFAULT_UV_BIN = "uv"
 DNS_HOST_RE = re.compile(r"^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$")
+SENSITIVE_OUTPUT_KEY_RE = re.compile(
+    r"(authorization|bearer|token|secret|password|private_key|device_code|polling_secret|id_token|access_token|api_key)",
+    re.IGNORECASE,
+)
+SENSITIVE_OUTPUT_ENV_ASSIGNMENT_RE = re.compile(
+    r"\b([A-Za-z_][A-Za-z0-9_]*(?:AUTHORIZATION|BEARER|TOKEN|SECRET|PASSWORD|PRIVATE_KEY|DEVICE_CODE|POLLING_SECRET|ID_TOKEN|ACCESS_TOKEN|API_KEY)[A-Za-z0-9_]*)=([^\s]+)",
+    re.IGNORECASE,
+)
+SENSITIVE_OUTPUT_JSON_FIELD_RE = re.compile(
+    r'("?[A-Za-z_][A-Za-z0-9_]*(?:AUTHORIZATION|BEARER|TOKEN|SECRET|PASSWORD|PRIVATE_KEY|DEVICE_CODE|POLLING_SECRET|ID_TOKEN|ACCESS_TOKEN|API_KEY)[A-Za-z0-9_]*"?\s*:\s*)"([^"]*)"',
+    re.IGNORECASE,
+)
 SUBPROCESS_ENV_ALLOWLIST = ("PATH", "HOME", "LANG", "LC_ALL", "UV_CACHE_DIR", "UV_PROJECT_ENVIRONMENT")
 
 
@@ -152,7 +164,7 @@ class ShadeClient:
             raise ShadeError("cli_timeout") from exc
         stdout = stdout_bytes.decode("utf-8", errors="replace")
         stderr = stderr_bytes.decode("utf-8", errors="replace")
-        output = "\n".join(part for part in (stdout, stderr) if part)
+        output = scrub_output("\n".join(part for part in (stdout, stderr) if part))
         if process.returncode != 0:
             raise ShadeError("cli_failed", output=output)
         return stdout
@@ -236,6 +248,23 @@ def validate_hostname(hostname: str) -> None:
 def validate_nonempty(value: str, *, field: str) -> None:
     if not isinstance(value, str) or not value.strip():
         raise ShadeError("invalid_input", field=field)
+
+
+def scrub_output(output: str) -> str:
+    scrubbed = output
+    for secret in configured_sensitive_values():
+        scrubbed = scrubbed.replace(secret, "[redacted]")
+    scrubbed = SENSITIVE_OUTPUT_ENV_ASSIGNMENT_RE.sub(r"\1=[redacted]", scrubbed)
+    scrubbed = SENSITIVE_OUTPUT_JSON_FIELD_RE.sub(r'\1"[redacted]"', scrubbed)
+    return scrubbed
+
+
+def configured_sensitive_values() -> tuple[str, ...]:
+    values: list[str] = []
+    for key, value in load_settings().raw.items():
+        if value and len(value) >= 8 and SENSITIVE_OUTPUT_KEY_RE.search(key):
+            values.append(value)
+    return tuple(values)
 
 
 def write_private_file(path: Path, content: str) -> None:

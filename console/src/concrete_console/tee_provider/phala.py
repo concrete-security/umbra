@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import suppress
 from dataclasses import dataclass
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -20,6 +21,19 @@ APP_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 CONCRETE_CVM_NAME_RE = re.compile(r"^concrete-v0-(?:cvm|sc)-[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$")
 DNS_HOST_RE = re.compile(r"^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$")
 ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+VM_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", re.IGNORECASE)
+SENSITIVE_OUTPUT_KEY_RE = re.compile(
+    r"(authorization|bearer|token|secret|password|private_key|device_code|polling_secret|id_token|access_token|api_key)",
+    re.IGNORECASE,
+)
+SENSITIVE_OUTPUT_ENV_ASSIGNMENT_RE = re.compile(
+    r"\b([A-Za-z_][A-Za-z0-9_]*(?:AUTHORIZATION|BEARER|TOKEN|SECRET|PASSWORD|PRIVATE_KEY|DEVICE_CODE|POLLING_SECRET|ID_TOKEN|ACCESS_TOKEN|API_KEY)[A-Za-z0-9_]*)=([^\s]+)",
+    re.IGNORECASE,
+)
+SENSITIVE_OUTPUT_JSON_FIELD_RE = re.compile(
+    r'("?[A-Za-z_][A-Za-z0-9_]*(?:AUTHORIZATION|BEARER|TOKEN|SECRET|PASSWORD|PRIVATE_KEY|DEVICE_CODE|POLLING_SECRET|ID_TOKEN|ACCESS_TOKEN|API_KEY)[A-Za-z0-9_]*"?\s*:\s*)"([^"]*)"',
+    re.IGNORECASE,
+)
 PHALA_STATUS_MAP = {
     "running": "RUNNING",
     "active": "RUNNING",
@@ -30,6 +44,7 @@ PHALA_STATUS_MAP = {
     "booting": "PENDING",
     "initializing": "PENDING",
     "pulling": "PENDING",
+    "updating": "PENDING",
     "stopped": "STOPPED",
     "stopping": "STOPPED",
     "paused": "STOPPED",
@@ -43,6 +58,54 @@ PHALA_STATUS_MAP = {
     "removed": "TERMINATED",
 }
 SUBPROCESS_ENV_ALLOWLIST = ("PATH", "HOME", "LANG", "LC_ALL")
+PHALA_COMPOSE_FILE_HASH_HELPER = r"""
+import { createHash } from "node:crypto";
+import { pathToFileURL } from "node:url";
+
+async function importPhalaCloud() {
+  try {
+    return await import("@phala/cloud");
+  } catch (_error) {
+    const moduleDir = process.env.PHALA_NODE_MODULES_DIR || "/app/node_modules";
+    return await import(`${pathToFileURL(moduleDir).href}/@phala/cloud/dist/index.mjs`);
+  }
+}
+
+function cleanAppId(value) {
+  return String(value || "").replace(/^app_/, "").replace(/^0x/, "").toLowerCase();
+}
+
+async function main() {
+  const [rawAppId] = process.argv.slice(1);
+  if (!rawAppId) {
+    throw new Error("usage: <app-id>");
+  }
+
+  const appId = cleanAppId(rawAppId);
+  const { createClient, getCvmComposeFile } = await importPhalaCloud();
+  const client = createClient({ apiKey: process.env.PHALA_CLOUD_API_KEY });
+  const appCompose = await getCvmComposeFile(client, { app_id: appId }, { schema: false });
+  const composeYaml = appCompose && typeof appCompose.docker_compose_file === "string" ? appCompose.docker_compose_file : "";
+  if (!composeYaml) {
+    throw new Error("provider did not return docker_compose_file");
+  }
+  console.log(JSON.stringify({
+    sha256: createHash("sha256").update(composeYaml, "utf8").digest("hex"),
+  }));
+}
+
+main().catch((error) => {
+  console.error(JSON.stringify({
+    error: {
+      name: error && error.name ? error.name : "Error",
+      message: error && error.message ? error.message : String(error),
+      status: error && error.status ? error.status : undefined,
+      code: error && error.code ? error.code : undefined,
+    },
+  }));
+  process.exit(1);
+});
+"""
 
 
 class PhalaError(RuntimeError):
@@ -70,6 +133,7 @@ class PhalaDeployResult:
 class PhalaClient:
     cli_path: str
     api_token: str
+    node_path: str = "node"
     redaction_patterns: tuple[re.Pattern[str], ...] = ()
     timeout_seconds: float = 300.0
 
@@ -83,6 +147,7 @@ class PhalaClient:
         return cls(
             cli_path=raw.get("PHALA_CLI_PATH", DEFAULT_PHALA_CLI_PATH).strip() or DEFAULT_PHALA_CLI_PATH,
             api_token=api_token,
+            node_path=raw.get("PHALA_NODE_PATH", "node").strip() or "node",
             redaction_patterns=patterns,
             timeout_seconds=300.0 if timeout_seconds is None else timeout_seconds,
         )
@@ -115,21 +180,38 @@ class PhalaClient:
 
     async def update(self, *, app_id: str, compose_yaml: str, env: dict[str, str]) -> PhalaDeployResult:
         validate_app_id(app_id)
+        info = await self.info(app_id)
+        update_identifier = update_identifier_from_info(info.raw) or app_id
         async with staged_compose_and_env(compose_yaml=compose_yaml, env=env) as staged:
             stdout = await self._run_text(
                 [
                     "deploy",
                     "--cvm-id",
-                    app_id,
+                    update_identifier,
                     "--compose",
                     str(staged.compose_path),
                     "-e",
                     str(staged.env_path),
-                    "--wait",
                     "--json",
                 ]
             )
         return await self._deploy_result_from_stdout(stdout, fallback_lookup=app_id)
+
+    async def compose_file_sha256(self, app_id: str) -> str:
+        validate_app_id(app_id)
+        stdout = await self._run_node_text(
+            [
+                "--input-type=module",
+                "-e",
+                PHALA_COMPOSE_FILE_HASH_HELPER,
+                app_id,
+            ]
+        )
+        payload = json_object_from_text(stdout)
+        digest = payload.get("sha256")
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise PhalaError("invalid_response", output=scrub_output(stdout, self.api_token, self.redaction_patterns))
+        return digest
 
     async def info(self, app_id: str) -> PhalaDeployResult:
         validate_app_id(app_id)
@@ -194,8 +276,14 @@ class PhalaClient:
             raise PhalaError("invalid_json", output=scrub_output(stdout, self.api_token, self.redaction_patterns)) from exc
 
     async def _run_text(self, args: list[str]) -> str:
+        return await self._run_command_text(self.cli_path, args)
+
+    async def _run_node_text(self, args: list[str]) -> str:
+        return await self._run_command_text(self.node_path, args)
+
+    async def _run_command_text(self, command: str, args: list[str]) -> str:
         process = await asyncio.create_subprocess_exec(
-            self.cli_path,
+            command,
             *args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -348,6 +436,18 @@ def validate_app_id(app_id: str) -> None:
         raise PhalaError("invalid_response", field="app_id")
 
 
+def update_identifier_from_info(payload: dict[str, Any]) -> str:
+    vm_uuid = payload.get("vm_uuid")
+    if isinstance(vm_uuid, str) and VM_UUID_RE.fullmatch(vm_uuid):
+        return vm_uuid
+    nested = payload.get("cvm")
+    if isinstance(nested, dict):
+        nested_vm_uuid = nested.get("vm_uuid")
+        if isinstance(nested_vm_uuid, str) and VM_UUID_RE.fullmatch(nested_vm_uuid):
+            return nested_vm_uuid
+    return ""
+
+
 def validate_gateway_host(gateway_host: str) -> None:
     if not DNS_HOST_RE.fullmatch(gateway_host):
         raise PhalaError("invalid_response", field="gateway_host")
@@ -377,9 +477,21 @@ def compile_redaction_patterns(raw_patterns: str) -> tuple[re.Pattern[str], ...]
 
 def scrub_output(output: str, api_token: str, patterns: tuple[re.Pattern[str], ...]) -> str:
     scrubbed = output.replace(api_token, "[redacted]") if api_token else output
+    for secret in configured_sensitive_values():
+        scrubbed = scrubbed.replace(secret, "[redacted]")
     for pattern in patterns:
         scrubbed = pattern.sub("[redacted]", scrubbed)
+    scrubbed = SENSITIVE_OUTPUT_ENV_ASSIGNMENT_RE.sub(r"\1=[redacted]", scrubbed)
+    scrubbed = SENSITIVE_OUTPUT_JSON_FIELD_RE.sub(r'\1"[redacted]"', scrubbed)
     return scrubbed
+
+
+def configured_sensitive_values() -> tuple[str, ...]:
+    values: list[str] = []
+    for key, value in load_settings().raw.items():
+        if value and len(value) >= 8 and SENSITIVE_OUTPUT_KEY_RE.search(key):
+            values.append(value)
+    return tuple(values)
 
 
 def phala_subprocess_env(api_token: str) -> dict[str, str]:

@@ -67,6 +67,7 @@ def test_pending_operation_start_progress_advances_known_sagas() -> None:
         progress_step="queued",
         progress_percent=0,
     ) == ("provider_update", 20)
+    assert scheduler.CVM_UPDATE_PROGRESS["await_provider_running"] == 35
     assert scheduler.pending_operation_start_progress(
         "security_cvm.update",
         progress_step="queued",
@@ -83,6 +84,101 @@ def test_pending_operation_start_progress_ignores_unknown_kind() -> None:
         )
         is None
     )
+
+
+def test_provider_error_log_fields_truncates_output() -> None:
+    from concrete_console.tee_provider import CvmProviderError
+
+    output = "x" * (scheduler.PROVIDER_ERROR_OUTPUT_LOG_LIMIT + 1)
+    fields = scheduler.provider_error_log_fields(CvmProviderError("cli_failed", provider="phala", output=output))
+
+    assert fields["adapter"] == "cvm_provider"
+    assert fields["provider"] == "phala"
+    assert fields["reason"] == "cli_failed"
+    assert fields["provider_output"] == output[: scheduler.PROVIDER_ERROR_OUTPUT_LOG_LIMIT]
+    assert fields["provider_output_truncated"] is True
+
+
+def test_shade_error_is_transient_connect_failure() -> None:
+    from concrete_console.shade_provider.shade import ShadeError
+
+    transient = ShadeError(
+        "cli_failed",
+        output=(
+            "Error: Failed to connect to cvm-abc.example.com via gateway.example.com: "
+            "[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol"
+        ),
+    )
+    assert scheduler.shade_error_is_transient_connect_failure(transient) is True
+    assert scheduler.shade_error_is_transient_connect_failure(ShadeError("cli_failed", output="invalid input")) is False
+    assert scheduler.shade_error_is_transient_connect_failure(ShadeError("cli_timeout")) is False
+
+
+def test_generate_policy_with_connect_retries_eventually_succeeds(monkeypatch) -> None:
+    from concrete_console.shade_provider.shade import ShadeError
+
+    attempts = {"count": 0}
+    sleeps: list[float] = []
+
+    class FakeShadeClient:
+        async def generate_policy(self, *, domain, deploy_compose_yaml, connect_host=None):
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                raise ShadeError(
+                    "cli_failed",
+                    output="Error: Failed to connect to cvm-abc.example.com via gateway.example.com: connection reset",
+                )
+            return SimpleNamespace(policy={"policy_template_version": "dev-v1", "app_compose": {}})
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(scheduler.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(scheduler.time, "monotonic", lambda: 0.0)
+
+    result = asyncio.run(
+        scheduler.generate_policy_with_connect_retries(
+            FakeShadeClient(),
+            domain="cvm-abc.example.com",
+            deploy_compose_yaml="services: {}\n",
+            connect_host="gateway.example.com",
+            timeout_seconds=60,
+        )
+    )
+
+    assert attempts["count"] == 2
+    assert sleeps == [10.0]
+    assert result.policy["policy_template_version"] == "dev-v1"
+
+
+def test_shade_error_log_fields_truncates_output() -> None:
+    from concrete_console.shade_provider.shade import ShadeError
+
+    output = "x" * (scheduler.PROVIDER_ERROR_OUTPUT_LOG_LIMIT + 1)
+    fields = scheduler.shade_error_log_fields(ShadeError("cli_failed", field="policy", output=output))
+
+    assert fields["adapter"] == "shade"
+    assert fields["reason"] == "cli_failed"
+    assert fields["field"] == "policy"
+    assert fields["shade_output"] == output[: scheduler.PROVIDER_ERROR_OUTPUT_LOG_LIMIT]
+    assert fields["shade_output_truncated"] is True
+
+
+def test_provider_update_timeout_defaults_to_long_update_window(monkeypatch) -> None:
+    monkeypatch.delenv("PROVIDER_UPDATE_TIMEOUT_SECONDS", raising=False)
+
+    assert scheduler.provider_update_timeout_seconds() == 900
+
+
+def test_provider_update_timeout_validates_bounds(monkeypatch) -> None:
+    monkeypatch.setenv("PROVIDER_UPDATE_TIMEOUT_SECONDS", "299")
+
+    try:
+        scheduler.provider_update_timeout_seconds()
+    except RuntimeError as exc:
+        assert "between 300 and 1800" in str(exc)
+    else:
+        raise AssertionError("expected invalid provider update timeout")
 
 
 def test_claim_active_operations_uses_skip_locked() -> None:
@@ -145,6 +241,9 @@ def test_executable_running_operation_recognizes_terminate_step() -> None:
     )
     assert scheduler.executable_running_operation(
         operation_row(kind="cvm.launch", status="running", progress_step="finalise")
+    )
+    assert scheduler.executable_running_operation(
+        operation_row(kind="cvm.update", status="running", progress_step="await_provider_running")
     )
     assert scheduler.executable_running_operation(
         operation_row(kind="security_cvm.provision", status="running", progress_step="phala_deploy")
@@ -473,6 +572,17 @@ def test_cvm_update_metadata_keeps_pending_policy_bundle() -> None:
     assert metadata["connect_host"] == "dep-123-443s.gateway.example.com"
     assert metadata["pending_policy_bundle"] == {"new": True}
     assert metadata["policy_bundle"] == {"old": True}
+    assert metadata["provider_update_submitted_at"].endswith("Z")
+
+
+def test_pending_update_deploy_compose_sha256_uses_pending_bundle() -> None:
+    assert (
+        scheduler.pending_update_deploy_compose_sha256(
+            {"pending_policy_bundle": {"deploy_compose_yaml": "services: {}\n"}}
+        )
+        == "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52"
+    )
+    assert scheduler.pending_update_deploy_compose_sha256({}) is None
 
 
 def test_snapshot_with_pending_policy_bundle_overrides_active_policy_for_attestation() -> None:
@@ -892,6 +1002,33 @@ class CvmUpdateFinaliseConn:
         return "UPDATE 1"
 
 
+class CvmUpdateAwaitProviderConn:
+    def __init__(self, snapshot):
+        self.snapshot = snapshot
+        self.execute_calls: list[tuple[str, tuple[object, ...]]] = []
+
+    def transaction(self):
+        return AsyncContext()
+
+    async def fetchrow(self, query, *args):
+        if "LEFT JOIN cvms c ON c.id = o.target_id" in query:
+            return {
+                "target_id": self.snapshot["cvm_id"],
+                "actor_id": self.snapshot.get("actor_id"),
+                "actor_email": self.snapshot.get("actor_email"),
+                "entity_id": self.snapshot.get("entity_id"),
+                "state": self.snapshot["state"],
+                "error_reason": self.snapshot.get("error_reason"),
+            }
+        if "FROM operations o" in query:
+            return self.snapshot
+        raise AssertionError(f"unexpected fetchrow query: {query}")
+
+    async def execute(self, query, *args):
+        self.execute_calls.append((query, args))
+        return "UPDATE 1"
+
+
 class SecurityProvisionFakeConn:
     def __init__(self, snapshot):
         self.snapshot = snapshot
@@ -1158,6 +1295,8 @@ def test_execute_cvm_launch_phala_deploy_persists_hash_only(monkeypatch) -> None
     assert metadata["passthrough_host"] == "app-123-443s.gateway.example.com"
     assert metadata["policy_bundle"]["connect_host"] == "app-123-443s.gateway.example.com"
     assert metadata["policy_bundle"]["deploy_compose_yaml"] == "services:\n  app:\n    image: generated\n"
+    assert "app_compose" not in metadata["policy_bundle"]
+    assert "app_compose_json" not in metadata["policy_bundle"]
     assert "expected_bootchain" not in metadata["policy_bundle"]
     assert metadata["policy_bundle"]["rtmr3_binding"]["security_cvm_proxy_token_sha256"] == proxy_token_hash
     progress_calls = [args for query, args in conn.execute_calls if "progress_step = 'cf_txt_create'" in query]
@@ -1168,6 +1307,145 @@ def test_execute_cvm_launch_phala_deploy_persists_hash_only(monkeypatch) -> None
             40,
         )
     ]
+
+
+def test_execute_cvm_update_persists_thin_pending_policy_bundle(monkeypatch) -> None:
+    class CvmUpdateDeployConn(LaunchFakeConn):
+        async def fetchrow(self, query, *args):
+            if "FROM operations o" in query and "JOIN cvms c" in query:
+                return launch_snapshot(
+                    operation_id=UUID("00000000-0000-4000-8000-000000000030"),
+                    actor_id=UUID("00000000-0000-4000-8000-000000000020"),
+                    actor_email="dev@example.com",
+                    entity_id=UUID("00000000-0000-4000-8000-000000000001"),
+                    state="RUNNING",
+                    metadata={
+                        "provider": "phala",
+                        "deployment_id": "dep-123",
+                        "name": "concrete-v0-cvm-0000000000004000",
+                        "policy_bundle": {"old": True},
+                    },
+                    security_cvm_id=UUID("00000000-0000-4000-8000-000000000041"),
+                )
+            return await super().fetchrow(query, *args)
+
+    conn = CvmUpdateDeployConn()
+    captured: dict[str, object] = {}
+
+    async def fake_get_pool():
+        return LaunchFakePool(conn)
+
+    class FakeShadeClient:
+        @classmethod
+        def from_settings(cls):
+            return cls()
+
+        async def build(self, *, shade_config_yaml, app_compose_yaml):
+            captured["app_compose_yaml"] = app_compose_yaml
+            return SimpleNamespace(compose_yaml="services:\n  app:\n    image: updated\n")
+
+    class FakeProvider:
+        async def update_deployment(self, *, deployment_id, compose_yaml, env):
+            captured["deployment_id"] = deployment_id
+            captured["compose_yaml"] = compose_yaml
+            captured["env"] = dict(env)
+            return SimpleNamespace(deployment_id="dep-123", gateway_host="gateway.example.com", status="RUNNING")
+
+    monkeypatch.setattr(scheduler, "get_pool", fake_get_pool)
+    monkeypatch.setattr(
+        scheduler,
+        "dev_cvm_update_material",
+        lambda: {"compose_config": "services:\n  app:\n    image: updated-source\n", "expected_image_measurement": "b" * 96},
+    )
+    monkeypatch.setattr("concrete_console.shade_provider.shade.ShadeClient", FakeShadeClient)
+    monkeypatch.setattr("concrete_console.tee_provider.cvm_provider_from_settings", lambda timeout_seconds=None: FakeProvider())
+
+    asyncio.run(scheduler.execute_cvm_update_phala_operation(UUID("00000000-0000-4000-8000-000000000030")))
+
+    assert captured["deployment_id"] == "dep-123"
+    assert captured["app_compose_yaml"] == "services:\n  app:\n    image: updated-source\n"
+    assert captured["compose_yaml"] == "services:\n  app:\n    image: updated\n"
+    metadata_calls = [args for query, args in conn.execute_calls if "UPDATE cvms" in query and "compose_config = $3" in query]
+    assert len(metadata_calls) == 1
+    metadata = json.loads(metadata_calls[0][1])
+    pending_bundle = metadata["pending_policy_bundle"]
+    assert metadata["policy_bundle"] == {"old": True}
+    assert pending_bundle["connect_host"] == "dep-123-443s.gateway.example.com"
+    assert pending_bundle["deploy_compose_yaml"] == "services:\n  app:\n    image: updated\n"
+    assert "app_compose" not in pending_bundle
+    assert "app_compose_json" not in pending_bundle
+
+
+def test_execute_cvm_update_await_provider_running_checks_compose_hash(monkeypatch) -> None:
+    pending_bundle = {"deploy_compose_yaml": "services: {}\n"}
+    metadata = {
+        "deployment_id": "dep-123",
+        "pending_policy_bundle": pending_bundle,
+        "provider_update_submitted_at": scheduler.datetime.now(scheduler.timezone.utc)
+        .isoformat()
+        .replace("+00:00", "Z"),
+    }
+    conn = CvmUpdateAwaitProviderConn(launch_snapshot(state="RUNNING", metadata=metadata))
+
+    async def fake_get_pool():
+        return LaunchFakePool(conn)
+
+    class FakeProvider:
+        async def status(self, deployment_id):
+            assert deployment_id == "dep-123"
+            return "RUNNING"
+
+        async def deployment_compose_sha256(self, deployment_id):
+            assert deployment_id == "dep-123"
+            return scheduler.pending_update_deploy_compose_sha256(metadata)
+
+    monkeypatch.setattr(scheduler, "get_pool", fake_get_pool)
+    monkeypatch.setattr("concrete_console.tee_provider.cvm_provider_from_settings", lambda timeout_seconds=None: FakeProvider())
+
+    asyncio.run(scheduler.execute_cvm_update_await_provider_running_operation(UUID("00000000-0000-4000-8000-000000000030")))
+
+    progress_calls = [args for query, args in conn.execute_calls if "kind = 'cvm.update'" in query and "progress_step = $2" in query]
+    assert progress_calls == [(UUID("00000000-0000-4000-8000-000000000030"), "verify_attestation", 45)]
+
+
+def test_execute_cvm_update_await_provider_running_fails_on_stale_compose_after_timeout(monkeypatch) -> None:
+    submitted_at = scheduler.datetime.now(scheduler.timezone.utc) - scheduler.timedelta(
+        seconds=scheduler.provider_update_timeout_seconds() + 1
+    )
+    metadata = {
+        "deployment_id": "dep-123",
+        "pending_policy_bundle": {"deploy_compose_yaml": "services: {}\n"},
+        "provider_update_submitted_at": submitted_at.isoformat().replace("+00:00", "Z"),
+    }
+    conn = CvmUpdateAwaitProviderConn(launch_snapshot(state="RUNNING", metadata=metadata))
+
+    async def fake_get_pool():
+        return LaunchFakePool(conn)
+
+    class FakeProvider:
+        async def status(self, deployment_id):
+            assert deployment_id == "dep-123"
+            return "RUNNING"
+
+        async def deployment_compose_sha256(self, deployment_id):
+            assert deployment_id == "dep-123"
+            return "0" * 64
+
+    async def fake_insert_audit_event(_conn, **_kwargs):
+        return None
+
+    monkeypatch.setattr(scheduler, "get_pool", fake_get_pool)
+    monkeypatch.setattr("concrete_console.tee_provider.cvm_provider_from_settings", lambda timeout_seconds=None: FakeProvider())
+    monkeypatch.setattr(scheduler, "insert_audit_event", fake_insert_audit_event)
+
+    asyncio.run(scheduler.execute_cvm_update_await_provider_running_operation(UUID("00000000-0000-4000-8000-000000000030")))
+
+    operation_updates = [args for query, args in conn.execute_calls if "UPDATE operations" in query and "status = 'failed'" in query]
+    assert len(operation_updates) == 1
+    error = json.loads(operation_updates[0][1])
+    assert error["code"] == "PROVIDER_COMPOSE_NOT_APPLIED"
+    assert error["details"]["expected_compose_sha256"] == scheduler.pending_update_deploy_compose_sha256(metadata)
+    assert error["details"]["provider_compose_sha256"] == "0" * 64
 
 
 def test_execute_cvm_launch_phala_deploy_requires_security_cvm_atls_policy(monkeypatch) -> None:
@@ -1519,8 +1797,7 @@ def test_run_cvm_launch_attestation_verifier_persists_report_and_audit(monkeypat
     policy_bundle = {
         "compose_template": "services: {}\n",
         "deploy_compose_yaml": "services:\n  generated:\n",
-        "expected_bootchain": {"mrtd": "d" * 96},
-        "os_image_hash": "e" * 64,
+        "connect_host": "app-443s.dstack.example.com",
         "rtmr3_binding": {"cvm_id": "00000000-0000-4000-8000-000000000031"},
     }
     snapshot = launch_snapshot(
@@ -1541,15 +1818,10 @@ def test_run_cvm_launch_attestation_verifier_persists_report_and_audit(monkeypat
     )
     conn = AttestationPersistConn()
     captured_request: dict[str, object] = {}
+    captured_policy: dict[str, object] = {}
 
     async def fake_get_pool():
         return LaunchFakePool(conn)
-
-    class FakeVerifier:
-        async def verify(self, request, *, timeout_seconds):
-            captured_request.update(request)
-            assert timeout_seconds == 180
-            return attestation.AttestationReport(image_measurement="a" * 96, rtmr3_digest="d" * 96)
 
     class FakeShadeClient:
         @classmethod
@@ -1557,9 +1829,9 @@ def test_run_cvm_launch_attestation_verifier_persists_report_and_audit(monkeypat
             return cls()
 
         async def generate_policy(self, *, domain, deploy_compose_yaml, connect_host=None):
-            assert domain == "cvm-abc.dev.example.com"
-            assert connect_host == "app-443s.dstack.example.com"
-            assert deploy_compose_yaml == "services:\n  generated:\n"
+            captured_policy["domain"] = domain
+            captured_policy["deploy_compose_yaml"] = deploy_compose_yaml
+            captured_policy["connect_host"] = connect_host
             return SimpleNamespace(
                 policy={
                     "policy_template_version": "dev-v1",
@@ -1574,12 +1846,18 @@ def test_run_cvm_launch_attestation_verifier_persists_report_and_audit(monkeypat
                 }
             )
 
+    class FakeVerifier:
+        async def verify(self, request, *, timeout_seconds):
+            captured_request.update(request)
+            assert timeout_seconds == 180
+            return attestation.AttestationReport(image_measurement="a" * 96, rtmr3_digest="d" * 96)
+
     async def fake_insert_audit_event(_conn, **kwargs):
         conn.audit_calls.append(kwargs)
 
     monkeypatch.setattr(scheduler, "get_pool", fake_get_pool)
-    monkeypatch.setattr(attestation.AtlasVerifierClient, "from_settings", classmethod(lambda cls: FakeVerifier()))
     monkeypatch.setattr("concrete_console.shade_provider.shade.ShadeClient", FakeShadeClient)
+    monkeypatch.setattr(attestation.AtlasVerifierClient, "from_settings", classmethod(lambda cls: FakeVerifier()))
     monkeypatch.setattr(scheduler, "insert_audit_event", fake_insert_audit_event)
 
     handled = asyncio.run(
@@ -1587,8 +1865,14 @@ def test_run_cvm_launch_attestation_verifier_persists_report_and_audit(monkeypat
     )
 
     assert handled is True
+    assert captured_policy == {
+        "domain": "cvm-abc.dev.example.com",
+        "deploy_compose_yaml": "services:\n  generated:\n",
+        "connect_host": "app-443s.dstack.example.com",
+    }
     assert captured_request["kind"] == "dev_cvm"
     assert captured_request["connect_host"] == "app-443s.dstack.example.com"
+    assert captured_request["policy"]["app_compose"]["features"] == ["kms", "tproxy-net"]
     cvm_updates = [args for query, args in conn.execute_calls if "UPDATE cvms" in query]
     assert cvm_updates[0][:3] == (
         UUID("00000000-0000-4000-8000-000000000031"),
@@ -1604,6 +1888,108 @@ def test_run_cvm_launch_attestation_verifier_persists_report_and_audit(monkeypat
     assert conn.audit_calls[0]["after"]["source"] == "launch"
     operation_updates = [args for query, args in conn.execute_calls if "UPDATE operations" in query]
     assert operation_updates == [(UUID("00000000-0000-4000-8000-000000000030"), "await_sc_pull", 70)]
+
+
+def test_run_cvm_update_attestation_verifier_generates_full_pending_policy(monkeypatch) -> None:
+    pending_bundle = {
+        "compose_template": "services:\n  app:\n    image: updated-source\n",
+        "deploy_compose_yaml": "services:\n  app:\n    image: updated\n",
+        "connect_host": "dep-123-443s.gateway.example.com",
+        "rtmr3_binding": {"cvm_id": "00000000-0000-4000-8000-000000000031"},
+    }
+    snapshot = launch_snapshot(
+        operation_updated_at=scheduler.datetime.now(scheduler.timezone.utc),
+        actor_id=UUID("00000000-0000-4000-8000-000000000020"),
+        actor_email="dev@example.com",
+        entity_id=UUID("00000000-0000-4000-8000-000000000001"),
+        state="RUNNING",
+        compose_config="services:\n  app:\n    image: updated-source\n",
+        metadata={
+            "connect_host": "dep-123-443s.gateway.example.com",
+            "policy_bundle": {"old": True},
+            "pending_policy_bundle": pending_bundle,
+            "provider_update_submitted_at": scheduler.datetime.now(scheduler.timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z"),
+        },
+        expected_image_measurement="b" * 96,
+        image_measurement="a" * 96,
+        rtmr3_digest="c" * 96,
+        attestation_verified_at=scheduler.datetime.now(scheduler.timezone.utc),
+        security_cvm_id=UUID("00000000-0000-4000-8000-000000000041"),
+    )
+    conn = AttestationPersistConn()
+    captured_request: dict[str, object] = {}
+    captured_policy: dict[str, object] = {}
+
+    async def fake_get_pool():
+        return LaunchFakePool(conn)
+
+    class FakeShadeClient:
+        @classmethod
+        def from_settings(cls):
+            return cls()
+
+        async def generate_policy(self, *, domain, deploy_compose_yaml, connect_host=None):
+            captured_policy["domain"] = domain
+            captured_policy["deploy_compose_yaml"] = deploy_compose_yaml
+            captured_policy["connect_host"] = connect_host
+            return SimpleNamespace(
+                policy={
+                    "policy_template_version": "dev-v1",
+                    "app_compose": {
+                        "allowed_envs": [],
+                        "docker_compose_file": "services:\n  app:\n    image: updated\n",
+                        "features": ["kms", "tproxy-net"],
+                        "runner": "docker-compose",
+                    },
+                    "expected_bootchain": {"mrtd": "d" * 96},
+                    "os_image_hash": "e" * 64,
+                }
+            )
+
+    class FakeVerifier:
+        async def verify(self, request, *, timeout_seconds):
+            captured_request.update(request)
+            assert timeout_seconds == 180
+            return attestation.AttestationReport(image_measurement="b" * 96, rtmr3_digest="d" * 96)
+
+    async def fake_insert_audit_event(_conn, **kwargs):
+        conn.audit_calls.append(kwargs)
+
+    monkeypatch.setattr(scheduler, "get_pool", fake_get_pool)
+    monkeypatch.setattr("concrete_console.shade_provider.shade.ShadeClient", FakeShadeClient)
+    monkeypatch.setattr(attestation.AtlasVerifierClient, "from_settings", classmethod(lambda cls: FakeVerifier()))
+    monkeypatch.setattr(scheduler, "insert_audit_event", fake_insert_audit_event)
+
+    handled = asyncio.run(
+        scheduler.run_cvm_update_attestation_verifier(UUID("00000000-0000-4000-8000-000000000030"), snapshot)
+    )
+
+    assert handled is True
+    assert captured_policy == {
+        "domain": "cvm-abc.dev.example.com",
+        "deploy_compose_yaml": "services:\n  app:\n    image: updated\n",
+        "connect_host": "dep-123-443s.gateway.example.com",
+    }
+    assert captured_request["kind"] == "dev_cvm"
+    assert captured_request["connect_host"] == "dep-123-443s.gateway.example.com"
+    assert captured_request["policy"]["expected_image_measurement"] == "b" * 96
+    assert captured_request["policy"]["app_compose"]["features"] == ["kms", "tproxy-net"]
+    cvm_updates = [args for query, args in conn.execute_calls if "UPDATE cvms" in query]
+    assert cvm_updates[0][:3] == (
+        UUID("00000000-0000-4000-8000-000000000031"),
+        "b" * 96,
+        "d" * 96,
+    )
+    metadata = json.loads(cvm_updates[0][4])
+    assert metadata["policy_bundle"] == {"old": True}
+    assert metadata["pending_policy_bundle"]["app_compose"]["features"] == ["kms", "tproxy-net"]
+    assert metadata["pending_policy_bundle"]["app_compose_json"].startswith('{"allowed_envs":[]')
+    assert conn.audit_calls[0]["action"] == "CVM_ATTESTATION_VERIFIED"
+    assert conn.audit_calls[0]["after"]["source"] == "update"
+    operation_updates = [args for query, args in conn.execute_calls if "UPDATE operations" in query]
+    assert operation_updates == [(UUID("00000000-0000-4000-8000-000000000030"), "await_sc_pull", 60)]
 
 
 def test_reconcile_security_cvm_attestation_refresh_persists_success(monkeypatch) -> None:

@@ -65,12 +65,14 @@ CVM_LAUNCH_PROGRESS = {
 }
 CVM_UPDATE_EXECUTABLE_STEPS = {
     "provider_update",
+    "await_provider_running",
     "verify_attestation",
     "await_sc_pull",
     "policy_push",
     "finalise",
 }
 CVM_UPDATE_PROGRESS = {
+    "await_provider_running": 35,
     "verify_attestation": 45,
     "await_sc_pull": 60,
     "policy_push": 75,
@@ -106,6 +108,7 @@ SECURITY_CVM_UPDATE_PROGRESS = {
     "fetch_ca": 75,
     "finalise": 90,
 }
+PROVIDER_ERROR_OUTPUT_LOG_LIMIT = 12_000
 AUDIT_EXPORT_EXECUTABLE_STEPS = {"materialize"}
 AUDIT_EXPORT_ROW_CAP = 1_000_000
 SECURITY_CVM_TOKEN_PLAINTEXT_TTL_SECONDS = 3600
@@ -116,6 +119,57 @@ class ReconciliationSummary:
     cvms_advanced: list[str]
     security_cvms_advanced: list[str]
     orphans_cleaned: list[str]
+
+
+def provider_error_log_fields(exc: Any) -> dict[str, Any]:
+    fields: dict[str, Any] = {
+        "adapter": "cvm_provider",
+        "provider": getattr(exc, "provider", "unknown"),
+        "reason": getattr(exc, "code", "unknown"),
+    }
+    output = getattr(exc, "output", "")
+    if isinstance(output, str) and output:
+        fields["provider_output"] = output[:PROVIDER_ERROR_OUTPUT_LOG_LIMIT]
+        fields["provider_output_truncated"] = len(output) > PROVIDER_ERROR_OUTPUT_LOG_LIMIT
+    return fields
+
+
+def shade_error_log_fields(exc: Any) -> dict[str, Any]:
+    fields: dict[str, Any] = {
+        "adapter": "shade",
+        "reason": getattr(exc, "code", "unknown"),
+    }
+    field = getattr(exc, "field", None)
+    if isinstance(field, str) and field:
+        fields["field"] = field
+    output = getattr(exc, "output", "")
+    if isinstance(output, str) and output:
+        fields["shade_output"] = output[:PROVIDER_ERROR_OUTPUT_LOG_LIMIT]
+        fields["shade_output_truncated"] = len(output) > PROVIDER_ERROR_OUTPUT_LOG_LIMIT
+    return fields
+
+
+def shade_error_is_compose_mismatch(exc: Any) -> bool:
+    output = getattr(exc, "output", "")
+    return getattr(exc, "code", "") == "cli_failed" and isinstance(output, str) and "docker-compose mismatch" in output
+
+
+def shade_error_is_transient_connect_failure(exc: Any) -> bool:
+    if getattr(exc, "code", "") != "cli_failed":
+        return False
+    output = getattr(exc, "output", "")
+    if not isinstance(output, str):
+        return False
+    markers = (
+        "Failed to connect to",
+        "UNEXPECTED_EOF_WHILE_READING",
+        "Connection refused",
+        "Connection reset",
+        "tls handshake eof",
+        "TLS handshake",
+    )
+    lowered = output.lower()
+    return any(marker.lower() in lowered for marker in markers)
 
 
 def reconciler_interval_seconds() -> float:
@@ -148,6 +202,17 @@ def sc_pull_propagation_timeout_seconds() -> int:
         raise RuntimeError("SC_PULL_PROPAGATION_TIMEOUT_SECONDS must be an integer") from exc
     if timeout < 0 or timeout > 300:
         raise RuntimeError("SC_PULL_PROPAGATION_TIMEOUT_SECONDS must be between 0 and 300")
+    return timeout
+
+
+def provider_update_timeout_seconds() -> int:
+    raw = load_settings().raw.get("PROVIDER_UPDATE_TIMEOUT_SECONDS", "900").strip() or "900"
+    try:
+        timeout = int(raw)
+    except ValueError as exc:
+        raise RuntimeError("PROVIDER_UPDATE_TIMEOUT_SECONDS must be an integer") from exc
+    if timeout < 300 or timeout > 1800:
+        raise RuntimeError("PROVIDER_UPDATE_TIMEOUT_SECONDS must be between 300 and 1800")
     return timeout
 
 
@@ -494,6 +559,9 @@ async def execute_cvm_launch_operation(operation_id: Any, step: str) -> None:
 async def execute_cvm_update_operation(operation_id: Any, step: str) -> None:
     if step == "provider_update":
         await execute_cvm_update_phala_operation(operation_id)
+        return
+    if step == "await_provider_running":
+        await execute_cvm_update_await_provider_running_operation(operation_id)
         return
     if step == "verify_attestation":
         await execute_cvm_update_attestation_gate_operation(operation_id)
@@ -853,6 +921,7 @@ async def execute_security_cvm_phala_deploy_operation(operation_id: Any) -> None
             region=_row_value(snapshot, "region"),
         )
     except ShadeError as exc:
+        log.warning("shade_adapter_failed", operation_id=str(operation_id), **shade_error_log_fields(exc))
         await mark_security_cvm_provision_failed(
             operation_id,
             code="SHADE_BUILD_FAILED",
@@ -1072,6 +1141,7 @@ async def run_security_cvm_provision_attestation_verifier(operation_id: Any, sna
             connect_host=provider_passthrough_host(_row_value(snapshot, "metadata")),
         )
     except ShadeError as exc:
+        log.warning("shade_adapter_failed", operation_id=str(operation_id), **shade_error_log_fields(exc))
         await compensate_security_cvm_provision_resources(snapshot)
         await mark_security_cvm_provision_failed(
             operation_id,
@@ -1271,12 +1341,15 @@ async def execute_security_cvm_update_phala_operation(operation_id: Any) -> None
             ingest_token=bearers["ingest_token"],
             ca_export_token=bearers["ca_export_token"],
         )
-        deploy_result = await cvm_provider_from_settings().update_deployment(
+        deploy_result = await cvm_provider_from_settings(
+            timeout_seconds=provider_update_timeout_seconds()
+        ).update_deployment(
             deployment_id=deployment_id,
             compose_yaml=shade_result.compose_yaml,
             env=env,
         )
     except ShadeError as exc:
+        log.warning("shade_adapter_failed", operation_id=str(operation_id), **shade_error_log_fields(exc))
         await mark_security_cvm_update_failed(
             operation_id,
             code="SHADE_BUILD_FAILED",
@@ -1284,6 +1357,11 @@ async def execute_security_cvm_update_phala_operation(operation_id: Any) -> None
         )
         return
     except CvmProviderError as exc:
+        log.warning(
+            "security_cvm_update_provider_update_failed",
+            operation_id=str(operation_id),
+            **provider_error_log_fields(exc),
+        )
         await mark_security_cvm_update_failed(
             operation_id,
             code="PROVIDER_UPDATE_FAILED",
@@ -1459,6 +1537,7 @@ async def run_security_cvm_update_attestation_verifier(operation_id: Any, snapsh
             connect_host=provider_passthrough_host(_row_value(snapshot, "metadata")),
         )
     except ShadeError as exc:
+        log.warning("shade_adapter_failed", operation_id=str(operation_id), **shade_error_log_fields(exc))
         await mark_security_cvm_update_failed(
             operation_id,
             code="SHADE_BUILD_FAILED",
@@ -1682,6 +1761,7 @@ async def execute_cvm_launch_phala_deploy_operation(operation_id: Any) -> None:
             region=_row_value(snapshot, "region"),
         )
     except ShadeError as exc:
+        log.warning("shade_adapter_failed", operation_id=str(operation_id), **shade_error_log_fields(exc))
         await mark_cvm_launch_failed(
             operation_id,
             code="SHADE_BUILD_FAILED",
@@ -1842,15 +1922,32 @@ async def run_cvm_launch_attestation_verifier(operation_id: Any, snapshot: Any) 
         build_dev_cvm_attestation_request,
         verify_with_fetch_retries,
     )
+    from concrete_console.shade_provider.shade import ShadeError
 
     try:
         verifier = AtlasVerifierClient.from_settings()
-        request = build_dev_cvm_attestation_request(snapshot)
+        policy_bundle = await materialize_cvm_policy_bundle_for_attestation(
+            snapshot,
+            bundle_key="policy_bundle",
+        )
+        metadata = metadata_with_policy_bundle(_row_value(snapshot, "metadata"), policy_bundle)
+        request_snapshot = dict(snapshot)
+        request_snapshot["metadata"] = metadata
+        request = build_dev_cvm_attestation_request(request_snapshot)
         report = await verify_with_fetch_retries(
             verifier,
             request,
             timeout_seconds=dev_cvm_attestation_timeout_seconds(),
         )
+    except ShadeError as exc:
+        log.warning("shade_adapter_failed", operation_id=str(operation_id), **shade_error_log_fields(exc))
+        await compensate_cvm_launch_resources(snapshot)
+        await mark_cvm_launch_failed(
+            operation_id,
+            code="SHADE_BUILD_FAILED",
+            details={"adapter": "shade", "reason": exc.code},
+        )
+        return True
     except AttestationVerifierUnavailable:
         return False
     except AttestationVerifierError as exc:
@@ -1867,46 +1964,6 @@ async def run_cvm_launch_attestation_verifier(operation_id: Any, snapshot: Any) 
                 "expected_image_measurement": _row_value(snapshot, "expected_image_measurement"),
                 "reported_image_measurement": report.image_measurement,
             },
-        )
-        return True
-
-    from concrete_console.shade_provider.shade import ShadeClient, ShadeError
-
-    try:
-        metadata = json_payload(_row_value(snapshot, "metadata") or {})
-        if not isinstance(metadata, dict):
-            metadata = {}
-        policy_bundle = metadata.get("policy_bundle")
-        if not isinstance(policy_bundle, dict):
-            raise ShadeError("missing_policy_bundle", field="metadata.policy_bundle")
-        deploy_compose_yaml = deployed_compose_from_metadata(metadata)
-        if deploy_compose_yaml is None:
-            raise ShadeError("missing_deploy_compose", field="metadata.policy_bundle.deploy_compose_yaml")
-        rtmr3_binding = policy_bundle.get("rtmr3_binding")
-        if not isinstance(rtmr3_binding, dict):
-            raise ShadeError("missing_rtmr3_binding", field="metadata.policy_bundle.rtmr3_binding")
-        connect_host = provider_passthrough_host(metadata)
-        policy_result = await ShadeClient.from_settings().generate_policy(
-            domain=_row_value(snapshot, "fqdn"),
-            deploy_compose_yaml=deploy_compose_yaml,
-            connect_host=connect_host,
-        )
-        updated_metadata = metadata_with_policy_bundle(
-            metadata,
-            build_cvm_policy_bundle(
-                snapshot,
-                shade_policy=policy_result.policy,
-                rtmr3_binding=rtmr3_binding,
-                deploy_compose_yaml=deploy_compose_yaml,
-                connect_host=connect_host,
-            ),
-        )
-    except ShadeError as exc:
-        await compensate_cvm_launch_resources(snapshot)
-        await mark_cvm_launch_failed(
-            operation_id,
-            code="SHADE_BUILD_FAILED",
-            details={"adapter": "shade", "reason": exc.code},
         )
         return True
 
@@ -1929,7 +1986,7 @@ async def run_cvm_launch_attestation_verifier(operation_id: Any, snapshot: Any) 
                 report.image_measurement,
                 report.rtmr3_digest,
                 verified_at,
-                json.dumps(updated_metadata),
+                json.dumps(metadata),
             )
             await insert_audit_event(
                 conn,
@@ -2195,16 +2252,21 @@ async def execute_cvm_update_phala_operation(operation_id: Any) -> None:
             profile_rows=profile_rows,
             proxy_token=proxy_token,
         )
-        shade_result = await ShadeClient.from_settings().build(
+        shade_client = ShadeClient.from_settings()
+        shade_result = await shade_client.build(
             shade_config_yaml=render_dev_cvm_shade_config(snapshot, name=cvm_provider_name_from_metadata(snapshot)),
             app_compose_yaml=update_material["compose_config"],
         )
-        deploy_result = await cvm_provider_from_settings().update_deployment(
+        deploy_result = await cvm_provider_from_settings(
+            timeout_seconds=provider_update_timeout_seconds()
+        ).update_deployment(
             deployment_id=deployment_id,
             compose_yaml=shade_result.compose_yaml,
             env=env,
         )
+        connect_host = phala_passthrough_host(deploy_result.deployment_id, deploy_result.gateway_host)
     except ShadeError as exc:
+        log.warning("shade_adapter_failed", operation_id=str(operation_id), **shade_error_log_fields(exc))
         await mark_cvm_update_failed(
             operation_id,
             code="SHADE_BUILD_FAILED",
@@ -2212,6 +2274,11 @@ async def execute_cvm_update_phala_operation(operation_id: Any) -> None:
         )
         return
     except CvmProviderError as exc:
+        log.warning(
+            "cvm_update_provider_update_failed",
+            operation_id=str(operation_id),
+            **provider_error_log_fields(exc),
+        )
         await mark_cvm_update_failed(
             operation_id,
             code="PROVIDER_UPDATE_FAILED",
@@ -2229,7 +2296,7 @@ async def execute_cvm_update_phala_operation(operation_id: Any) -> None:
         policy_snapshot,
         rtmr3_binding=binding,
         deploy_compose_yaml=shade_result.compose_yaml,
-        connect_host=phala_passthrough_host(deploy_result.deployment_id, deploy_result.gateway_host),
+        connect_host=connect_host,
     )
     metadata = cvm_update_metadata(
         _row_value(snapshot, "metadata"),
@@ -2246,6 +2313,81 @@ async def execute_cvm_update_phala_operation(operation_id: Any) -> None:
         compose_config=update_material["compose_config"],
         expected_image_measurement=update_material["expected_image_measurement"],
         proxy_token_hash=binding["security_cvm_proxy_token_sha256"],
+    )
+
+
+async def execute_cvm_update_await_provider_running_operation(operation_id: Any) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        snapshot = await fetch_cvm_update_snapshot(conn, operation_id)
+    if snapshot is None:
+        await mark_cvm_update_failed(operation_id, code="CVM_NOT_FOUND", details={"state": "missing_target"})
+        return
+    deployment_id = provider_deployment_id(_row_value(snapshot, "metadata"))
+    if deployment_id is None:
+        await mark_cvm_update_failed(operation_id, code="PROVIDER_DEPLOYMENT_MISSING", details={"field": "metadata.deployment_id"})
+        return
+
+    from concrete_console.tee_provider import CvmProviderError, cvm_provider_from_settings
+
+    try:
+        provider = cvm_provider_from_settings(timeout_seconds=30.0)
+        provider_status = await provider.status(deployment_id)
+    except CvmProviderError as exc:
+        log.warning(
+            "cvm_update_provider_status_failed",
+            cvm_id=str(_row_value(snapshot, "cvm_id")),
+            reason=exc.code,
+        )
+        return
+    if provider_status == "RUNNING":
+        expected_compose_sha256 = pending_update_deploy_compose_sha256(_row_value(snapshot, "metadata"))
+        if expected_compose_sha256 is not None:
+            try:
+                provider_compose_sha256 = await provider.deployment_compose_sha256(deployment_id)
+            except CvmProviderError as exc:
+                log.warning(
+                    "cvm_update_provider_compose_hash_failed",
+                    operation_id=str(operation_id),
+                    cvm_id=str(_row_value(snapshot, "cvm_id")),
+                    **provider_error_log_fields(exc),
+                )
+                return
+            if provider_compose_sha256 != expected_compose_sha256:
+                if cvm_update_provider_wait_timed_out(snapshot):
+                    await mark_cvm_update_failed(
+                        operation_id,
+                        code="PROVIDER_COMPOSE_NOT_APPLIED",
+                        details={
+                            "adapter": "cvm_provider",
+                            "expected_compose_sha256": expected_compose_sha256,
+                            "provider_compose_sha256": provider_compose_sha256,
+                        },
+                    )
+                    return
+                log.info(
+                    "cvm_update_provider_compose_waiting",
+                    operation_id=str(operation_id),
+                    cvm_id=str(_row_value(snapshot, "cvm_id")),
+                    expected_compose_sha256=expected_compose_sha256,
+                    provider_compose_sha256=provider_compose_sha256,
+                )
+                return
+        await advance_cvm_update_step(operation_id, "verify_attestation")
+        return
+    if provider_status == "FAILED":
+        await mark_cvm_update_failed(
+            operation_id,
+            code="PROVIDER_UPDATE_FAILED",
+            details={"adapter": "cvm_provider", "reason": "provider_status_failed"},
+            mark_cvm_failed=True,
+        )
+        return
+    log.info(
+        "cvm_update_await_provider_pending",
+        operation_id=str(operation_id),
+        cvm_id=str(_row_value(snapshot, "cvm_id")),
+        provider_status=provider_status,
     )
 
 
@@ -2297,16 +2439,39 @@ async def run_cvm_update_attestation_verifier(operation_id: Any, snapshot: Any) 
         build_dev_cvm_attestation_request,
         verify_with_fetch_retries,
     )
+    from concrete_console.shade_provider.shade import ShadeError
 
     try:
         verifier = AtlasVerifierClient.from_settings()
-        request_snapshot = snapshot_with_pending_policy_bundle(snapshot)
+        pending_policy_bundle = await materialize_cvm_policy_bundle_for_attestation(
+            snapshot,
+            bundle_key="pending_policy_bundle",
+        )
+        metadata = metadata_with_pending_policy_bundle(_row_value(snapshot, "metadata"), pending_policy_bundle)
+        request_snapshot = dict(snapshot)
+        request_snapshot["metadata"] = metadata
+        request_snapshot = snapshot_with_pending_policy_bundle(request_snapshot)
         request = build_dev_cvm_attestation_request(request_snapshot)
         report = await verify_with_fetch_retries(
             verifier,
             request,
             timeout_seconds=dev_cvm_attestation_timeout_seconds(),
         )
+    except ShadeError as exc:
+        log.warning("shade_adapter_failed", operation_id=str(operation_id), **shade_error_log_fields(exc))
+        if shade_error_is_compose_mismatch(exc) and not cvm_update_provider_wait_timed_out(snapshot):
+            log.info(
+                "cvm_update_attestation_compose_waiting",
+                operation_id=str(operation_id),
+                cvm_id=str(_row_value(snapshot, "cvm_id")),
+            )
+            return False
+        await mark_cvm_update_failed(
+            operation_id,
+            code="SHADE_BUILD_FAILED",
+            details={"adapter": "shade", "reason": exc.code},
+        )
+        return True
     except AttestationVerifierUnavailable:
         return False
     except AttestationVerifierError as exc:
@@ -2325,42 +2490,7 @@ async def run_cvm_update_attestation_verifier(operation_id: Any, snapshot: Any) 
         )
         return True
 
-    from concrete_console.shade_provider.shade import ShadeClient, ShadeError
-
-    try:
-        metadata = json_payload(_row_value(snapshot, "metadata") or {})
-        if not isinstance(metadata, dict):
-            metadata = {}
-        pending_policy_bundle = metadata.get("pending_policy_bundle")
-        if not isinstance(pending_policy_bundle, dict):
-            raise ShadeError("missing_policy_bundle", field="metadata.pending_policy_bundle")
-        deploy_compose_yaml = pending_policy_bundle.get("deploy_compose_yaml")
-        if not isinstance(deploy_compose_yaml, str) or not deploy_compose_yaml:
-            raise ShadeError("missing_deploy_compose", field="metadata.pending_policy_bundle.deploy_compose_yaml")
-        rtmr3_binding = pending_policy_bundle.get("rtmr3_binding")
-        if not isinstance(rtmr3_binding, dict):
-            raise ShadeError("missing_rtmr3_binding", field="metadata.pending_policy_bundle.rtmr3_binding")
-        connect_host = provider_passthrough_host(metadata)
-        policy_result = await ShadeClient.from_settings().generate_policy(
-            domain=_row_value(snapshot, "fqdn"),
-            deploy_compose_yaml=deploy_compose_yaml,
-            connect_host=connect_host,
-        )
-        updated_bundle = build_cvm_policy_bundle(
-            snapshot,
-            shade_policy=policy_result.policy,
-            rtmr3_binding=rtmr3_binding,
-            deploy_compose_yaml=deploy_compose_yaml,
-            connect_host=connect_host,
-        )
-        updated_metadata = metadata_with_pending_policy_bundle(metadata, updated_bundle)
-    except ShadeError as exc:
-        await mark_cvm_update_failed(
-            operation_id,
-            code="SHADE_BUILD_FAILED",
-            details={"adapter": "shade", "reason": exc.code},
-        )
-        return True
+    updated_metadata = metadata
 
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -3397,6 +3527,83 @@ def snapshot_with_pending_policy_bundle(snapshot: Any) -> dict[str, Any]:
     return row
 
 
+async def generate_policy_with_connect_retries(
+    shade: Any,
+    *,
+    domain: str,
+    deploy_compose_yaml: str,
+    connect_host: str | None,
+    timeout_seconds: int,
+    retry_seconds: float = 10.0,
+) -> Any:
+    from concrete_console.shade_provider.shade import ShadeError
+
+    deadline = time.monotonic() + max(timeout_seconds, 0)
+    retry_delay = max(retry_seconds, 0.0)
+    last_error: ShadeError | None = None
+    while True:
+        try:
+            return await shade.generate_policy(
+                domain=domain,
+                deploy_compose_yaml=deploy_compose_yaml,
+                connect_host=connect_host,
+            )
+        except ShadeError as exc:
+            last_error = exc
+            if not shade_error_is_transient_connect_failure(exc):
+                raise
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or (retry_delay > 0 and remaining < retry_delay):
+                raise
+            log.info(
+                "shade_policy_connect_waiting",
+                domain=domain,
+                connect_host=connect_host,
+                reason=exc.code,
+            )
+            await asyncio.sleep(min(retry_delay, remaining))
+    raise last_error  # pragma: no cover
+
+
+async def materialize_cvm_policy_bundle_for_attestation(snapshot: Any, *, bundle_key: str) -> dict[str, Any]:
+    from concrete_console.shade_provider.shade import ShadeClient, ShadeError
+
+    metadata = json_payload(_row_value(snapshot, "metadata") or {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+    policy_bundle = metadata.get(bundle_key)
+    if not isinstance(policy_bundle, dict):
+        raise ShadeError("missing_policy_bundle", field=f"metadata.{bundle_key}")
+    deploy_compose_yaml = policy_bundle.get("deploy_compose_yaml")
+    if not isinstance(deploy_compose_yaml, str) or not deploy_compose_yaml:
+        raise ShadeError("missing_deploy_compose", field=f"metadata.{bundle_key}.deploy_compose_yaml")
+    rtmr3_binding = policy_bundle.get("rtmr3_binding")
+    if not isinstance(rtmr3_binding, dict):
+        raise ShadeError("missing_rtmr3_binding", field=f"metadata.{bundle_key}.rtmr3_binding")
+    if "app_compose" in policy_bundle or "app_compose_json" in policy_bundle:
+        return dict(policy_bundle)
+
+    connect_host = provider_passthrough_host(metadata)
+    if connect_host is None:
+        value = policy_bundle.get("connect_host")
+        if isinstance(value, str) and value.strip():
+            connect_host = value.strip()
+    policy_result = await generate_policy_with_connect_retries(
+        ShadeClient.from_settings(),
+        domain=_row_value(snapshot, "fqdn"),
+        deploy_compose_yaml=deploy_compose_yaml,
+        connect_host=connect_host,
+        timeout_seconds=dev_cvm_attestation_timeout_seconds(),
+    )
+    return build_cvm_policy_bundle(
+        snapshot,
+        shade_policy=policy_result.policy,
+        rtmr3_binding=rtmr3_binding,
+        deploy_compose_yaml=deploy_compose_yaml,
+        connect_host=connect_host,
+    )
+
+
 def deployed_compose_from_metadata(metadata: Any) -> str | None:
     current = json_payload(metadata or {})
     if not isinstance(current, dict):
@@ -3492,10 +3699,50 @@ def cvm_update_metadata(
             "gateway_host": gateway_host,
             "passthrough_host": passthrough_host,
             "status": status,
+            "provider_update_submitted_at": timestamp(datetime.now(timezone.utc)),
             "pending_policy_bundle": pending_policy_bundle,
         }
     )
     return updated
+
+
+def pending_update_deploy_compose_yaml(metadata: Any) -> str | None:
+    current = json_payload(metadata or {})
+    if not isinstance(current, dict):
+        return None
+    pending_policy_bundle = current.get("pending_policy_bundle")
+    if not isinstance(pending_policy_bundle, dict):
+        return None
+    compose_yaml = pending_policy_bundle.get("deploy_compose_yaml")
+    return compose_yaml if isinstance(compose_yaml, str) and compose_yaml else None
+
+
+def pending_update_deploy_compose_sha256(metadata: Any) -> str | None:
+    compose_yaml = pending_update_deploy_compose_yaml(metadata)
+    if compose_yaml is None:
+        return None
+    return hashlib.sha256(compose_yaml.encode("utf-8")).hexdigest()
+
+
+def cvm_update_provider_submitted_at(metadata: Any) -> datetime | None:
+    current = json_payload(metadata or {})
+    if not isinstance(current, dict):
+        return None
+    value = current.get("provider_update_submitted_at")
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return _as_utc(datetime.fromisoformat(value.replace("Z", "+00:00")))
+    except ValueError:
+        return None
+
+
+def cvm_update_provider_wait_timed_out(snapshot: Any) -> bool:
+    submitted_at = cvm_update_provider_submitted_at(_row_value(snapshot, "metadata"))
+    if submitted_at is None:
+        return False
+    elapsed = datetime.now(timezone.utc) - submitted_at
+    return elapsed > timedelta(seconds=provider_update_timeout_seconds())
 
 
 def cvm_provider_name_from_metadata(snapshot: Any) -> str:
@@ -4096,7 +4343,7 @@ async def persist_cvm_update_provider_result(
             await conn.execute(
                 """
                 UPDATE operations
-                SET progress_step = 'verify_attestation',
+                SET progress_step = 'await_provider_running',
                     progress_percent = $3,
                     updated_at = now()
                 WHERE id = $1
@@ -4106,7 +4353,7 @@ async def persist_cvm_update_provider_result(
                 """,
                 operation_id,
                 cvm_id,
-                CVM_UPDATE_PROGRESS["verify_attestation"],
+                CVM_UPDATE_PROGRESS["await_provider_running"],
             )
 
 

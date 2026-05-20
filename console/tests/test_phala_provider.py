@@ -5,7 +5,9 @@ import textwrap
 
 import pytest
 
+from concrete_console.tee_provider import CvmProvider, CvmProviderError
 from concrete_console.tee_provider.phala import (
+    PHALA_COMPOSE_FILE_HASH_HELPER,
     PhalaClient,
     PhalaError,
     PhalaNotFound,
@@ -34,6 +36,7 @@ def run(awaitable):
 def test_normalize_status_maps_known_values() -> None:
     assert normalize_status("running") == "RUNNING"
     assert normalize_status("Booting") == "PENDING"
+    assert normalize_status("updating") == "PENDING"
     assert normalize_status("crashed") == "FAILED"
     assert normalize_status("removed") == "TERMINATED"
     assert normalize_status("surprising") == "UNKNOWN"
@@ -78,6 +81,50 @@ def test_scrub_output_redacts_api_token_and_configured_patterns() -> None:
     scrubbed = scrub_output("token phala-token and secret-123", "phala-token", patterns)
 
     assert scrubbed == "token [redacted] and [redacted]"
+
+
+def test_scrub_output_redacts_sensitive_assignments_and_configured_secrets(monkeypatch) -> None:
+    monkeypatch.setenv("GHCR_TOKEN", "ghp_configuredsecret1234567890")
+
+    scrubbed = scrub_output(
+        'SECURITY_CVM_PROXY_TOKEN=proxy-token\n{"CA_EXPORT_TOKEN":"ca-token","image":"unchanged"}\n'
+        "configured ghp_configuredsecret1234567890",
+        "phala-token",
+        (),
+    )
+
+    assert "proxy-token" not in scrubbed
+    assert "ca-token" not in scrubbed
+    assert "ghp_configuredsecret1234567890" not in scrubbed
+    assert "SECURITY_CVM_PROXY_TOKEN=[redacted]" in scrubbed
+    assert '"CA_EXPORT_TOKEN":"[redacted]"' in scrubbed
+    assert '"image":"unchanged"' in scrubbed
+
+
+def test_provider_adapter_preserves_scrubbed_phala_output() -> None:
+    class FailingClient:
+        async def update(self, **_kwargs):
+            raise PhalaError("cli_failed", output="image pull denied")
+
+    provider = CvmProvider(provider="phala", client=FailingClient())
+
+    with pytest.raises(CvmProviderError) as exc:
+        run(provider.update_deployment(deployment_id="app-123", compose_yaml="services: {}\n", env={}))
+
+    assert exc.value.code == "cli_failed"
+    assert exc.value.provider == "phala"
+    assert exc.value.output == "image pull denied"
+
+
+def test_provider_adapter_reads_deployment_compose_hash() -> None:
+    class HashClient:
+        async def compose_file_sha256(self, app_id):
+            assert app_id == "app-123"
+            return "a" * 64
+
+    provider = CvmProvider(provider="phala", client=HashClient())
+
+    assert run(provider.deployment_compose_sha256("app-123")) == "a" * 64
 
 
 def test_deploy_stages_files_with_private_modes_and_cleans(tmp_path) -> None:
@@ -187,7 +234,7 @@ def test_deploy_parses_progress_prefixed_json_and_fetches_gateway(tmp_path) -> N
     assert result.status == "RUNNING"
 
 
-def test_update_uses_phala_deploy_with_cvm_id(tmp_path) -> None:
+def test_update_uses_phala_deploy_cvm_id(tmp_path) -> None:
     marker = tmp_path / "argv.json"
     cli = write_fake_cli(
         tmp_path,
@@ -195,21 +242,71 @@ def test_update_uses_phala_deploy_with_cvm_id(tmp_path) -> None:
         import json
         import sys
 
-        open({str(marker)!r}, "w").write(json.dumps(sys.argv[1:]))
+        if sys.argv[1:3] == ["cvms", "get"]:
+            print(json.dumps({{
+                "app_id": "app-123",
+                "vm_uuid": "a8dcb43d-7c46-4d5d-b026-192409368bbc",
+                "gateway": {{"base_domain": "dstack.example.com"}},
+                "status": "running"
+            }}))
+            raise SystemExit(0)
+
+        compose_path = sys.argv[sys.argv.index("--compose") + 1]
+        env_path = sys.argv[sys.argv.index("-e") + 1]
+        open({str(marker)!r}, "w").write(json.dumps({{
+            "argv": sys.argv[1:],
+            "compose": open(compose_path).read(),
+            "env": open(env_path).read(),
+        }}))
         print(json.dumps({{"app_id": "app-123", "gateway_host": "gateway.example.com", "status": "active"}}))
         """,
     )
-    client = PhalaClient(cli_path=str(cli), api_token="phala-token", timeout_seconds=TEST_CLI_TIMEOUT_SECONDS)
+    client = PhalaClient(
+        cli_path=str(cli),
+        api_token="phala-token",
+        timeout_seconds=TEST_CLI_TIMEOUT_SECONDS,
+    )
 
-    result = run(client.update(app_id="app-123", compose_yaml="services: {}\n", env={}))
+    result = run(client.update(app_id="app-123", compose_yaml="services: {}\n", env={"TOKEN": "value"}))
 
-    argv = json.loads(marker.read_text())
-    assert argv[:3] == ["deploy", "--cvm-id", "app-123"]
-    assert "--compose" in argv
-    assert "-e" in argv
-    assert "--wait" in argv
+    seen = json.loads(marker.read_text())
+    argv = seen["argv"]
+    assert argv[:3] == ["deploy", "--cvm-id", "a8dcb43d-7c46-4d5d-b026-192409368bbc"]
+    assert "--wait" not in argv
     assert "--json" in argv
+    assert seen["compose"] == "services: {}\n"
+    assert "TOKEN=value\n" in seen["env"]
     assert result.status == "RUNNING"
+
+
+def test_compose_file_sha256_uses_node_helper(tmp_path) -> None:
+    marker = tmp_path / "argv.json"
+    node = write_fake_cli(
+        tmp_path,
+        f"""
+        import json
+        import sys
+
+        open({str(marker)!r}, "w").write(json.dumps({{"argv": sys.argv[1:], "app_id": sys.argv[-1]}}))
+        print(json.dumps({{"sha256": {"b" * 64!r}}}))
+        """,
+    )
+    client = PhalaClient(
+        cli_path="/unused/phala",
+        api_token="phala-token",
+        node_path=str(node),
+        timeout_seconds=TEST_CLI_TIMEOUT_SECONDS,
+    )
+
+    assert run(client.compose_file_sha256("app-123")) == "b" * 64
+    seen = json.loads(marker.read_text())
+    assert seen["argv"][:2] == ["--input-type=module", "-e"]
+    assert seen["app_id"] == "app-123"
+
+
+def test_compose_file_hash_helper_reads_provider_compose_file() -> None:
+    assert "getCvmComposeFile" in PHALA_COMPOSE_FILE_HASH_HELPER
+    assert "docker_compose_file" in PHALA_COMPOSE_FILE_HASH_HELPER
 
 
 def test_deploy_rejects_non_concrete_name(tmp_path) -> None:

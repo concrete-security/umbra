@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from concrete_console.shade_provider.shade import ShadeClient, ShadeError
+from concrete_console.shade_provider.shade import ShadeClient, ShadeError, scrub_output
 
 
 def run(awaitable):
@@ -176,6 +176,17 @@ def test_cli_failure_raises_shade_error(tmp_path: Path) -> None:
 
     assert exc.value.code == "cli_failed"
     assert "shade failed" in exc.value.output
+
+
+def test_scrub_output_redacts_secret_like_values(monkeypatch) -> None:
+    monkeypatch.setenv("CONCRETE_API_TOKEN", "super-secret-token")
+
+    scrubbed = scrub_output('CONCRETE_API_TOKEN=super-secret-token {"access_token":"other-secret"}')
+
+    assert "super-secret-token" not in scrubbed
+    assert "other-secret" not in scrubbed
+    assert "CONCRETE_API_TOKEN=[redacted]" in scrubbed
+    assert '"access_token":"[redacted]"' in scrubbed
 
 
 def test_from_settings_requires_existing_shade_dir(monkeypatch, tmp_path: Path) -> None:
