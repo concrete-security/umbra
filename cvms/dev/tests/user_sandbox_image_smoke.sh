@@ -16,6 +16,13 @@ docker run --rm --entrypoint bash "${IMAGE_TAG}" -lc '
   done
   test -x /usr/local/lib/concrete/claude.real
   test -f /usr/local/lib/node_modules/@openai/codex/bin/codex.js
+  shadow_password="$(getent shadow dev | cut -d: -f2)"
+  case "${shadow_password}" in
+    ""|!*)
+      echo "dev account shadow password field must not be empty or locked" >&2
+      exit 1
+      ;;
+  esac
   claude --version >/dev/null
   codex --version >/dev/null
   node --version | grep -q "^v22\\."

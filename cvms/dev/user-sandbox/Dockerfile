@@ -83,8 +83,11 @@ RUN set -a \
     && rm -f /usr/local/bin/codex \
     && rm /tmp/tool-versions.env
 
+# OpenSSH rejects shadow entries that start with "!" before public-key auth.
+# Keep password login impossible without leaving the account locked.
 RUN groupadd --gid 1001 dev \
     && useradd --uid 1001 --gid 1001 --create-home --home-dir /home/dev --shell /bin/bash dev \
+    && usermod --password '*' dev \
     && usermod -aG sudo,docker dev \
     && echo 'dev ALL=(ALL) NOPASSWD:ALL' >/etc/sudoers.d/dev \
     && chmod 0440 /etc/sudoers.d/dev \

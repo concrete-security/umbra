@@ -13,6 +13,7 @@ def require(condition: bool, message: str) -> None:
 
 def main() -> None:
     dockerfile = (SANDBOX / "Dockerfile").read_text()
+    compose = (ROOT / "cvms" / "dev" / "docker-compose.yml").read_text()
     entrypoint = (SANDBOX / "entrypoint.sh").read_text()
     sshd_config = (SANDBOX / "sshd_config").read_text().splitlines()
 
@@ -23,6 +24,10 @@ def main() -> None:
     )
     require("useradd -u 0" not in dockerfile, "dev must not be created as UID 0")
     require("passwd -d dev" not in dockerfile, "dev must not receive an empty password")
+    require(
+        "usermod --password '*' dev" in dockerfile,
+        "dev account must be usable for SSH public-key auth without an empty password",
+    )
     require(
         "usermod -aG sudo,docker dev" in dockerfile,
         "dev must be in sudo and docker groups",
@@ -72,6 +77,14 @@ def main() -> None:
         "entrypoint must fail instead of rewriting a persisted .ssh directory",
     )
     require("chown -R" not in entrypoint, "entrypoint must not recursively chown volumes")
+    require(
+        re.search(r"dev-egress-forwarder:.*?healthcheck:\s+disable:\s+true", compose, re.DOTALL) is not None,
+        "forwarder must disable the inherited sshd image healthcheck",
+    )
+    require(
+        re.search(r"dev-tunnel:.*?healthcheck:\s+disable:\s+true", compose, re.DOTALL) is not None,
+        "tunnel must disable the inherited sshd image healthcheck",
+    )
 
 
 if __name__ == "__main__":

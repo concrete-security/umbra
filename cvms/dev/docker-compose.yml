@@ -42,6 +42,8 @@ services:
   dev-egress-forwarder:
     image: "${DEV_CVM_IMAGE:?set DEV_CVM_IMAGE to a digest-pinned GHCR image}"
     entrypoint: ["concrete-dev-egress-forwarder"]
+    healthcheck:
+      disable: true
     read_only: true
     tmpfs:
       - /tmp
@@ -66,6 +68,8 @@ services:
   dev-tunnel:
     image: "${DEV_CVM_IMAGE:?set DEV_CVM_IMAGE to a digest-pinned GHCR image}"
     entrypoint: ["concrete-dev-tunnel"]
+    healthcheck:
+      disable: true
     read_only: true
     tmpfs:
       - /tmp
