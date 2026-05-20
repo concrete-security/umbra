@@ -204,7 +204,41 @@ def validate_absolute_target(target: str) -> None:
         raise ValueError("HTTP proxy requests must use absolute-form http(s) URLs")
 
 
-def encode_request_line_and_headers(request: ProxyRequest, proxy_token: str) -> bytes:
+def header_values(request: ProxyRequest, header_name: str) -> list[str]:
+    wanted = header_name.lower()
+    return [value for name, value in request.headers if name.lower() == wanted]
+
+
+def single_header_value(request: ProxyRequest, header_name: str) -> str | None:
+    values = header_values(request, header_name)
+    if not values:
+        return None
+    if len(values) > 1:
+        raise ValueError(f"multiple {header_name} headers are not supported")
+    return values[0]
+
+
+def parse_content_length(request: ProxyRequest) -> int:
+    value = single_header_value(request, "content-length")
+    if value is None:
+        return 0
+    if not value.isdigit():
+        raise ValueError("invalid Content-Length header")
+    length = int(value)
+    if length < 0:
+        raise ValueError("invalid Content-Length header")
+    return length
+
+
+def transfer_encoding_is_chunked(request: ProxyRequest) -> bool:
+    values = header_values(request, "transfer-encoding")
+    if not values:
+        return False
+    codings = ",".join(values).lower().split(",")
+    return any(coding.strip() == "chunked" for coding in codings)
+
+
+def encode_request_line_and_headers(request: ProxyRequest, proxy_token: str, *, close_after_response: bool = False) -> bytes:
     lines = [f"{request.method} {request.target} {request.version}"]
     host_seen = False
     for name, value in filtered_headers(request.headers):
@@ -213,6 +247,8 @@ def encode_request_line_and_headers(request: ProxyRequest, proxy_token: str) -> 
         lines.append(f"{name}: {value}")
     if request.method == "CONNECT" and not host_seen:
         lines.append(f"Host: {request.target}")
+    if close_after_response:
+        lines.append("Connection: close")
     lines.append(f"Proxy-Authorization: Bearer {proxy_token}")
     return ("\r\n".join(lines) + "\r\n\r\n").encode("iso-8859-1")
 
@@ -342,6 +378,54 @@ async def copy_stream(reader: asyncio.StreamReader, writer: asyncio.StreamWriter
         pass
 
 
+async def relay_fixed_request_body(
+    reader: asyncio.StreamReader, writer: asyncio.StreamWriter, request: ProxyRequest
+) -> int:
+    content_length = parse_content_length(request)
+    if content_length > 0 and transfer_encoding_is_chunked(request):
+        raise ValueError("request must not use both Content-Length and chunked Transfer-Encoding")
+    if content_length > 0:
+        body = await reader.readexactly(content_length)
+        writer.write(body)
+        await writer.drain()
+        return len(body)
+    if transfer_encoding_is_chunked(request):
+        relayed = 0
+        while True:
+            line = await reader.readuntil(b"\r\n")
+            writer.write(line)
+            relayed += len(line)
+            size_text = line.split(b";", 1)[0].strip()
+            try:
+                chunk_size = int(size_text, 16)
+            except ValueError as exc:
+                raise ValueError("invalid chunked request body") from exc
+            if chunk_size == 0:
+                while True:
+                    trailer = await reader.readuntil(b"\r\n")
+                    writer.write(trailer)
+                    relayed += len(trailer)
+                    if trailer == b"\r\n":
+                        await writer.drain()
+                        return relayed
+            chunk = await reader.readexactly(chunk_size + 2)
+            writer.write(chunk)
+            relayed += len(chunk)
+            await writer.drain()
+    return 0
+
+
+async def relay_response_until_close(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> int:
+    total = 0
+    while True:
+        data = await reader.read(READ_SIZE)
+        if not data:
+            return total
+        total += len(data)
+        writer.write(data)
+        await writer.drain()
+
+
 async def bridge(
     left_reader: asyncio.StreamReader,
     left_writer: asyncio.StreamWriter,
@@ -382,7 +466,13 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
 
         upstream = await open_verified_upstream(config)
         await open_security_proxy_tunnel(upstream, config)
-        upstream.writer.write(encode_request_line_and_headers(request, config.proxy_token))
+        upstream.writer.write(
+            encode_request_line_and_headers(
+                request,
+                config.proxy_token,
+                close_after_response=request.method != "CONNECT",
+            )
+        )
         await upstream.writer.drain()
 
         if request.method == "CONNECT":
@@ -393,7 +483,10 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             status_code = status_parts[1] if len(status_parts) >= 2 and response.startswith(b"HTTP/") else b"000"
             if status_code != b"200":
                 return
-        client_bytes, upstream_bytes = await bridge(reader, writer, upstream.reader, upstream.writer)
+            client_bytes, upstream_bytes = await bridge(reader, writer, upstream.reader, upstream.writer)
+        else:
+            client_bytes = await relay_fixed_request_body(reader, upstream.writer, request)
+            upstream_bytes = await relay_response_until_close(upstream.reader, writer)
     except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, ConnectionError, ValueError, OSError) as exc:
         log(f"connection_error peer={peer!r} destination={destination!r} reason={exc}")
         if not writer.is_closing():

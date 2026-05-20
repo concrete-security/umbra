@@ -39,6 +39,31 @@ async def fake_security_cvm(reader, writer):
     await writer.wait_closed()
 
 
+async def fake_security_cvm_http(reader, writer):
+    upgrade = await reader.readuntil(b"\r\n\r\n")
+    assert b"GET /concrete/proxy HTTP/1.1" in upgrade
+    assert b"Proxy-Authorization" not in upgrade
+    writer.write(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: concrete-proxy\r\nConnection: Upgrade\r\n\r\n")
+    await writer.drain()
+
+    request = await reader.readuntil(b"\r\n\r\n")
+    assert b"GET http://archive.ubuntu.com/ubuntu/dists/noble/InRelease HTTP/1.1" in request
+    assert b"Proxy-Authorization: Bearer real-proxy-token\r\n" in request
+    assert b"Connection: close\r\n" in request
+    assert b"noble-updates" not in request
+
+    writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+    await writer.drain()
+    try:
+        extra = await asyncio.wait_for(reader.read(1), timeout=0.1)
+    except asyncio.TimeoutError:
+        extra = b""
+    assert extra == b""
+
+    writer.close()
+    await writer.wait_closed()
+
+
 def write_fake_connect_helper(directory: Path, relay_port: int) -> Path:
     helper = directory / "fake-atls-connect.py"
     helper.write_text(
@@ -132,6 +157,35 @@ async def smoke():
         await server.wait_closed()
     security_cvm.close()
     await security_cvm.wait_closed()
+
+    security_cvm_http = await asyncio.start_server(fake_security_cvm_http, "127.0.0.1", 0)
+    relay_port = security_cvm_http.sockets[0].getsockname()[1]
+    with tempfile.TemporaryDirectory() as temp:
+        helper = write_fake_connect_helper(Path(temp), relay_port)
+        runtime_dir = Path(temp) / "run"
+        set_forwarder_env(helper)
+        config = forwarder.load_config(runtime_dir)
+        server = await asyncio.start_server(lambda r, w: forwarder.handle_client(r, w, config), "127.0.0.1", 0)
+        forwarder_port = server.sockets[0].getsockname()[1]
+        reader, writer = await asyncio.open_connection("127.0.0.1", forwarder_port)
+        writer.write(
+            b"GET http://archive.ubuntu.com/ubuntu/dists/noble/InRelease HTTP/1.1\r\n"
+            b"Host: archive.ubuntu.com\r\n"
+            b"\r\n"
+            b"GET http://archive.ubuntu.com/ubuntu/dists/noble-updates/InRelease HTTP/1.1\r\n"
+            b"Host: archive.ubuntu.com\r\n"
+            b"\r\n"
+        )
+        await writer.drain()
+        response = await reader.read()
+        assert b"HTTP/1.1 200 OK" in response
+        assert response.count(b"HTTP/1.1") == 1
+        writer.close()
+        await writer.wait_closed()
+        server.close()
+        await server.wait_closed()
+    security_cvm_http.close()
+    await security_cvm_http.wait_closed()
 
 
 if __name__ == "__main__":
