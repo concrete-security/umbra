@@ -91,6 +91,7 @@ pub fn run_agent(
             return ExitStatus::Error;
         }
     };
+    let program_command = agent_program_command(program);
     let session_name = match session_name(args.name.as_deref(), program) {
         Ok(value) => value,
         Err(message) => {
@@ -102,7 +103,7 @@ pub fn run_agent(
         SshInvocation {
             cvm_id: args.cvm_id.as_deref(),
             identity_file: args.identity_file.as_deref(),
-            remote_command: dtach_remote_command(&session_name, program),
+            remote_command: dtach_remote_command(&session_name, &program_command),
             allocate_tty: true,
         },
         config,
@@ -748,6 +749,27 @@ fn dtach_remote_command(session_name: &str, program_command: &str) -> String {
     )
 }
 
+fn agent_program_command(program: &str) -> String {
+    if program != "claude" {
+        return program.to_string();
+    }
+    let script = r#"mkdir -p "$HOME/.claude"
+if [ -e "$HOME/.claude.json" ] && [ ! -L "$HOME/.claude.json" ]; then
+  if [ ! -s "$HOME/.claude.json" ]; then
+    printf '{}\n' >"$HOME/.claude.json"
+    chmod 600 "$HOME/.claude.json"
+  fi
+else
+  if [ ! -s "$HOME/.claude/.claude.json" ]; then
+    printf '{}\n' >"$HOME/.claude/.claude.json"
+    chmod 600 "$HOME/.claude/.claude.json"
+  fi
+  ln -sfn "$HOME/.claude/.claude.json" "$HOME/.claude.json"
+fi
+exec claude"#;
+    format!("bash -lc {}", shell_quote(script))
+}
+
 fn ps_remote_command() -> String {
     "dir=/run/concrete/sessions; [ -d \"$dir\" ] || exit 0; for sock in \"$dir\"/*.sock; do [ -e \"$sock\" ] || continue; name=${sock##*/}; name=${name%.sock}; if fuser \"$sock\" >/dev/null 2>&1 || lsof \"$sock\" >/dev/null 2>&1; then attached=true; else attached=false; fi; created=$(stat -c %Y \"$sock\" 2>/dev/null || stat -f %m \"$sock\"); printf '%s\\t%s\\t%s\\n' \"$name\" \"$attached\" \"$created\"; done".to_string()
 }
@@ -980,6 +1002,16 @@ mod tests {
         assert!(validate_session_name("bad/name").is_err());
         assert!(validate_session_name("bad name").is_err());
         assert!(validate_session_name("bad;name").is_err());
+    }
+
+    #[test]
+    fn claude_agent_command_repairs_empty_config() {
+        let command = agent_program_command("claude");
+        assert!(command.starts_with("bash -lc "));
+        assert!(command.contains(".claude/.claude.json"));
+        assert!(command.contains("printf"));
+        assert!(command.contains("exec claude"));
+        assert_eq!(agent_program_command("codex"), "codex");
     }
 
     #[test]

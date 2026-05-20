@@ -79,7 +79,7 @@ docker compose -p "$PROJECT" -f "$ROOT/cvms/dev/docker-compose.yml" -f "$TMPDIR/
       -o UserKnownHostsFile=/dev/null \
       -o IdentitiesOnly=yes \
       -o PasswordAuthentication=no \
-      dev@user-sandbox '"'"'test "$(id -u)" = 1001 && test "$VERIFY_PLACEHOLDER" = compose-smoke'"'"'
+      dev@user-sandbox '"'"'test "$(id -u)" = 1001 && test "$VERIFY_PLACEHOLDER" = compose-smoke && test -L /home/dev/.claude.json && python3 -m json.tool /home/dev/.claude.json >/dev/null'"'"'
   ' <"$TMPDIR/id_ed25519"
 
 python3 - "$tunnel_port" <<'PY'

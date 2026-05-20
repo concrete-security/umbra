@@ -15,6 +15,7 @@ def main() -> None:
     dockerfile = (SANDBOX / "Dockerfile").read_text()
     compose = (ROOT / "cvms" / "dev" / "docker-compose.yml").read_text()
     entrypoint = (SANDBOX / "entrypoint.sh").read_text()
+    claude_wrapper = (SANDBOX / "concrete-agent-claude.sh").read_text()
     sshd_config = (SANDBOX / "sshd_config").read_text().splitlines()
 
     require("groupadd --gid 1001 dev" in dockerfile, "dev group must use GID 1001")
@@ -62,6 +63,10 @@ def main() -> None:
     require("claude.real" in dockerfile, "claude must be baked into the image")
     require("@openai/codex" in dockerfile, "codex must be baked into the image")
     require("concrete-agent-claude.sh" in dockerfile, "claude wrapper must be installed")
+    require(
+        "printf '{}\\n' >/home/dev/.claude/.claude.json" in claude_wrapper,
+        "claude wrapper must repair empty volume-backed config",
+    )
     require("concrete-agent-codex.sh" in dockerfile, "codex wrapper must be installed")
     require("nodejs.org/dist" in dockerfile, "node must be installed from official tarball")
     require("gh auth git-credential" in dockerfile, "gh git credential helper must be configured")
@@ -92,6 +97,10 @@ def main() -> None:
     require(
         "ensure_dev_dir_if_missing 0755 /home/dev/workspaces" in entrypoint,
         "workspace volume must not be recursively migrated",
+    )
+    require(
+        "ensure_claude_config /home/dev/.claude/.claude.json" in entrypoint,
+        "Claude config must be initialized as valid JSON",
     )
     require(
         "/home/dev/.ssh exists and is not a symlink" in entrypoint,

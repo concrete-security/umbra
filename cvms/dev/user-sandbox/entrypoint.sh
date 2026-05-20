@@ -198,11 +198,12 @@ ensure_dev_dir_if_missing() {
   fi
 }
 
-ensure_dev_file_if_missing() {
-  local mode="$1"
-  local path="$2"
-  if [ ! -e "$path" ]; then
-    install -o dev -g dev -m "$mode" /dev/null "$path"
+ensure_claude_config() {
+  local path="$1"
+  if [ ! -s "$path" ]; then
+    printf '{}\n' >"$path"
+    chown dev:dev "$path"
+    chmod 0600 "$path"
   fi
 }
 
@@ -263,7 +264,7 @@ ensure_dev_dir_if_missing 0755 /home/dev/.claude
 ensure_dev_dir_if_missing 0755 /home/dev/.codex
 ensure_dev_dir_if_missing 0755 /home/dev/.cursor-server
 ensure_dev_dir_if_missing 0755 /home/dev/.vscode-server
-ensure_dev_file_if_missing 0600 /home/dev/.claude/.claude.json
+ensure_claude_config /home/dev/.claude/.claude.json
 
 if [ -n "${SECURITY_CVM_PROXY_TOKEN+x}" ] || [ -n "${SECURITY_CVM_ATLS_POLICY_B64+x}" ]; then
   fail "forwarder-only Security CVM material must not be injected into user-sandbox"
