@@ -36,7 +36,28 @@ def main() -> None:
         "dev ALL=(ALL) NOPASSWD:ALL" in dockerfile,
         "dev must have passwordless sudo",
     )
+    require(
+        "env_keep += \"HTTP_PROXY HTTPS_PROXY http_proxy https_proxy NO_PROXY no_proxy" in dockerfile,
+        "sudo must preserve proxy env for root-run tools",
+    )
     require("visudo -cf /etc/sudoers.d/dev" in dockerfile, "sudoers drop-in must be validated")
+    require(
+        "apt-concrete-proxy.conf /etc/apt/apt.conf.d/95concrete-proxy" in dockerfile,
+        "APT must be configured to use the Concrete forwarder",
+    )
+    apt_proxy = (SANDBOX / "apt-concrete-proxy.conf").read_text()
+    require(
+        'Acquire::http::Proxy "http://dev-egress-forwarder:3128";' in apt_proxy,
+        "APT HTTP traffic must use the Concrete forwarder",
+    )
+    require(
+        'Acquire::https::Proxy "http://dev-egress-forwarder:3128";' in apt_proxy,
+        "APT HTTPS traffic must use the Concrete forwarder",
+    )
+    require(
+        'Acquire::https::CaInfo "/run/concrete/ca-bundle.pem";' in apt_proxy,
+        "APT HTTPS must trust the runtime Security CVM CA bundle",
+    )
     require("dev:100000:65536" in dockerfile, "dev subuid/subgid range must be configured")
     require("claude.real" in dockerfile, "claude must be baked into the image")
     require("@openai/codex" in dockerfile, "codex must be baked into the image")

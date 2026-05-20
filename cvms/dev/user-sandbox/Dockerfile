@@ -89,7 +89,10 @@ RUN groupadd --gid 1001 dev \
     && useradd --uid 1001 --gid 1001 --create-home --home-dir /home/dev --shell /bin/bash dev \
     && usermod --password '*' dev \
     && usermod -aG sudo,docker dev \
-    && echo 'dev ALL=(ALL) NOPASSWD:ALL' >/etc/sudoers.d/dev \
+    && { \
+      echo 'dev ALL=(ALL) NOPASSWD:ALL'; \
+      echo 'Defaults:dev env_keep += "HTTP_PROXY HTTPS_PROXY http_proxy https_proxy NO_PROXY no_proxy REQUESTS_CA_BUNDLE SSL_CERT_FILE CURL_CA_BUNDLE GIT_SSL_CAINFO NODE_EXTRA_CA_CERTS"'; \
+    } >/etc/sudoers.d/dev \
     && chmod 0440 /etc/sudoers.d/dev \
     && visudo -cf /etc/sudoers.d/dev \
     && echo 'dev:100000:65536' >/etc/subuid \
@@ -112,6 +115,7 @@ RUN groupadd --gid 1001 dev \
     && chown dev:dev /home/dev/.gitconfig
 
 COPY cvms/dev/user-sandbox/sshd_config /etc/ssh/sshd_config
+COPY cvms/dev/user-sandbox/apt-concrete-proxy.conf /etc/apt/apt.conf.d/95concrete-proxy
 COPY cvms/dev/user-sandbox/concrete-env-profile.sh /etc/profile.d/concrete-env.sh
 COPY cvms/dev/user-sandbox/concrete-update-agents.sh /usr/local/lib/concrete/concrete-update-agents.sh
 COPY cvms/dev/user-sandbox/concrete-agent-claude.sh /usr/local/bin/claude
