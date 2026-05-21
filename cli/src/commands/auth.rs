@@ -16,7 +16,7 @@ use zeroize::Zeroizing;
 
 use crate::{
     cli::AuthCommand,
-    config::ResolvedConfig,
+    config::{self, ConfigSource, ResolvedConfig},
     exit::ExitStatus,
     session::{self, Entity, Session},
 };
@@ -122,10 +122,11 @@ struct SessionFile {
 pub fn run(command: AuthCommand, config: &ResolvedConfig, json: bool) -> ExitStatus {
     match command {
         AuthCommand::Login {
+            login_url,
             provider,
             device,
             no_browser,
-        } => login(config, json, provider, device || no_browser),
+        } => login(config, json, login_url, provider, device || no_browser),
         AuthCommand::Logout => logout(config, json),
         AuthCommand::Status => status(config, json),
         AuthCommand::Refresh => refresh(config, json),
@@ -136,6 +137,7 @@ pub fn run(command: AuthCommand, config: &ResolvedConfig, json: bool) -> ExitSta
 fn login(
     config: &ResolvedConfig,
     json_output: bool,
+    console_url_arg: Option<String>,
     provider: Option<String>,
     device: bool,
 ) -> ExitStatus {
@@ -144,16 +146,25 @@ fn login(
         eprintln!("[usage] unsupported OIDC provider: {provider}");
         return ExitStatus::Usage;
     }
-    let console_url = match config.require_console_url() {
+    let console_url_value = match selected_console_url(config, console_url_arg.as_deref()) {
         Ok(value) => value,
         Err(message) => {
             eprintln!("{message}");
             return ExitStatus::Usage;
         }
     };
+    let console_url = console_url_value.as_str();
+    let persist_console_url =
+        console_url_arg.is_some() || config.console_url_source == ConfigSource::Flag;
     let client = Client::new();
     if !device {
-        return match loopback_login(&client, config, console_url, json_output) {
+        return match loopback_login(
+            &client,
+            config,
+            console_url,
+            persist_console_url,
+            json_output,
+        ) {
             Ok(()) => ExitStatus::Ok,
             Err((status, message)) => {
                 eprintln!("{message}");
@@ -193,6 +204,7 @@ fn login(
         &client,
         console_url,
         &config.config_dir,
+        persist_console_url,
         token_pair,
         json_output,
     ) {
@@ -204,10 +216,30 @@ fn login(
     }
 }
 
+fn selected_console_url(config: &ResolvedConfig, arg: Option<&str>) -> Result<String, String> {
+    let value = match arg {
+        Some(value) => value,
+        None => config.require_console_url()?,
+    };
+    let value = value.trim().trim_end_matches('/');
+    if value.is_empty() {
+        return Err("[usage] CONSOLE_URL must not be empty".to_string());
+    }
+    let parsed = Url::parse(value).map_err(|err| format!("[usage] invalid CONSOLE_URL: {err}"))?;
+    if parsed.scheme() != "https" && parsed.scheme() != "http" {
+        return Err("[usage] CONSOLE_URL must start with https:// or http://".to_string());
+    }
+    if parsed.host_str().is_none() {
+        return Err("[usage] CONSOLE_URL must include a host".to_string());
+    }
+    Ok(value.to_string())
+}
+
 fn loopback_login(
     client: &Client,
     config: &ResolvedConfig,
     console_url: &str,
+    persist_console_url: bool,
     json_output: bool,
 ) -> Result<(), (ExitStatus, String)> {
     let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|err| {
@@ -269,6 +301,7 @@ fn loopback_login(
         client,
         console_url,
         &config.config_dir,
+        persist_console_url,
         token_pair,
         json_output,
     )
@@ -511,6 +544,7 @@ fn complete_login(
     client: &Client,
     console_url: &str,
     config_dir: &std::path::Path,
+    persist_console_url: bool,
     token_pair: TokenPair,
     json_output: bool,
 ) -> Result<(), (ExitStatus, String)> {
@@ -558,6 +592,10 @@ fn complete_login(
             .map(|seconds| now + chrono::Duration::seconds(seconds)),
     };
     session::write_atomic(config_dir, &session).map_err(|message| (ExitStatus::Error, message))?;
+    if persist_console_url {
+        config::persist_string_values(config_dir, &[("console_url", console_url.to_string())])
+            .map_err(|message| (ExitStatus::Error, message))?;
+    }
     if json_output {
         println!(
             "{}",

@@ -378,8 +378,8 @@ pub enum CvmCommand {
 
 #[derive(clap::Args, Debug)]
 pub struct CvmLaunchArgs {
-    /// SSH key UUID to install. Repeat for multiple keys.
-    #[arg(long = "ssh-key", required = true)]
+    /// SSH key UUID to install. Repeat for multiple keys. Defaults to all registered keys, or creates/registers a local Ed25519 key.
+    #[arg(long = "ssh-key")]
     pub ssh_keys: Vec<String>,
 
     /// Phala instance type. Defaults to config or Console defaults.
@@ -805,6 +805,10 @@ pub enum UserPermissionsCommand {
 pub enum AuthCommand {
     /// Authenticate against the Console.
     Login {
+        /// Console URL to save before logging in, for example https://console.example.com.
+        #[arg(value_name = "CONSOLE_URL")]
+        login_url: Option<String>,
+
         /// OIDC provider to use. Only google is supported in v0.
         #[arg(long)]
         provider: Option<String>,

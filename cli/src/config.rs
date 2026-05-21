@@ -1,9 +1,14 @@
 use std::{
     env, fs,
+    fs::OpenOptions,
+    io::Write,
     path::{Path, PathBuf},
 };
 
 use serde::Deserialize;
+
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 #[derive(Debug, Default, Deserialize)]
 struct ConfigFile {
@@ -88,7 +93,7 @@ impl OutputFormat {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigSource {
     Flag,
     Env,
@@ -352,6 +357,63 @@ impl ResolvedConfig {
     }
 }
 
+pub(crate) fn persist_string_values(
+    config_dir: &Path,
+    values: &[(&str, String)],
+) -> Result<(), String> {
+    fs::create_dir_all(config_dir)
+        .map_err(|err| format!("[error] failed to create config directory: {err}"))?;
+    #[cfg(unix)]
+    {
+        fs::set_permissions(config_dir, fs::Permissions::from_mode(0o700)).map_err(|err| {
+            format!("[error] failed to tighten config directory permissions: {err}")
+        })?;
+    }
+
+    let target = config_dir.join("config.toml");
+    let mut table = match fs::read_to_string(&target) {
+        Ok(data) => data.parse::<toml::Table>().map_err(|err| {
+            format!(
+                "[error] failed to parse existing config {}: {err}",
+                target.display()
+            )
+        })?,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => toml::Table::new(),
+        Err(err) => {
+            return Err(format!(
+                "[error] failed to read existing config {}: {err}",
+                target.display()
+            ))
+        }
+    };
+    for (key, value) in values {
+        table.insert((*key).to_string(), toml::Value::String(value.clone()));
+    }
+    let data = toml::to_string_pretty(&table)
+        .map_err(|err| format!("[error] failed to serialize config: {err}"))?;
+    let tmp = config_dir.join(format!(".config.{}.tmp", std::process::id()));
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = options
+        .open(&tmp)
+        .map_err(|err| format!("[error] failed to create temporary config file: {err}"))?;
+    file.write_all(data.as_bytes())
+        .and_then(|_| file.sync_all())
+        .map_err(|err| format!("[error] failed to write config file: {err}"))?;
+    fs::rename(&tmp, &target)
+        .map_err(|err| format!("[error] failed to install config file: {err}"))?;
+    #[cfg(unix)]
+    {
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o600))
+            .map_err(|err| format!("[error] failed to tighten config file permissions: {err}"))?;
+    }
+    Ok(())
+}
+
 fn read_config_file(config_dir: &Path) -> Option<ConfigFile> {
     let path = config_dir.join("config.toml");
     let data = fs::read_to_string(path).ok()?;
@@ -398,7 +460,12 @@ fn verbose_log_level(verbose: u8) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_bool, parse_output, verbose_log_level, OutputFormat};
+    use super::{parse_bool, parse_output, persist_string_values, verbose_log_level, OutputFormat};
+    use std::fs;
+
+    fn temp_config_dir() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("concrete-config-test-{}", uuid::Uuid::new_v4()))
+    }
 
     #[test]
     fn parse_bool_accepts_spec_values() {
@@ -424,5 +491,42 @@ mod tests {
         assert_eq!(verbose_log_level(1), "info");
         assert_eq!(verbose_log_level(2), "debug");
         assert_eq!(verbose_log_level(3), "trace");
+    }
+
+    #[test]
+    fn persist_string_values_merges_existing_config() {
+        let config_dir = temp_config_dir();
+        fs::create_dir_all(&config_dir).expect("config dir created");
+        fs::write(
+            config_dir.join("config.toml"),
+            "output = \"json\"\nconsole_url = \"https://old.example.com\"\n",
+        )
+        .expect("config written");
+
+        persist_string_values(
+            &config_dir,
+            &[
+                ("console_url", "https://console.example.com".to_string()),
+                ("default_cvm", "cvm-1".to_string()),
+            ],
+        )
+        .expect("config persisted");
+
+        let data = fs::read_to_string(config_dir.join("config.toml")).expect("config readable");
+        let table = data.parse::<toml::Table>().expect("valid toml");
+        assert_eq!(
+            table.get("console_url").and_then(toml::Value::as_str),
+            Some("https://console.example.com")
+        );
+        assert_eq!(
+            table.get("default_cvm").and_then(toml::Value::as_str),
+            Some("cvm-1")
+        );
+        assert_eq!(
+            table.get("output").and_then(toml::Value::as_str),
+            Some("json")
+        );
+
+        fs::remove_dir_all(config_dir).expect("test config dir removed");
     }
 }
