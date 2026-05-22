@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs,
     io::{self, Read},
     path::Path,
@@ -6,14 +7,15 @@ use std::{
 
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::{
     cli::{KeyAddArgs, KeyCommand},
-    commands::auth,
     config::ResolvedConfig,
+    console::{console_session, read_empty_response, read_json_response},
     exit::ExitStatus,
+    style,
 };
 
 #[derive(Debug, Deserialize)]
@@ -29,6 +31,9 @@ struct ConsoleSshKey {
     fingerprint: String,
     public_key: String,
     created_at: String,
+
+    #[serde(flatten, default, skip_serializing)]
+    extra: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -54,17 +59,17 @@ pub fn run(command: KeyCommand, config: &ResolvedConfig, json: bool) -> ExitStat
 }
 
 fn list(config: &ResolvedConfig, json_output: bool) -> ExitStatus {
-    let (console_url, access_token) = match console_session(config) {
+    let (console_url, session) = match console_session(config) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return status;
         }
     };
-    let page = match fetch_keys(console_url, access_token) {
+    let page = match fetch_keys(console_url, &session.access_token) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return status;
         }
     };
@@ -74,17 +79,23 @@ fn list(config: &ResolvedConfig, json_output: bool) -> ExitStatus {
             "{}",
             serde_json::to_string_pretty(&keys).expect("key list output serializes")
         );
-    } else if keys.is_empty() {
-        println!("no keys");
     } else {
-        for key in &keys {
-            println!(
-                "{} {} {} {} {}",
-                key.id, key.label, key.fingerprint, key.algorithm, key.created_at
-            );
-        }
+        let views: Vec<style::KeyView<'_>> = page
+            .items
+            .iter()
+            .zip(keys.iter())
+            .map(|(raw, out)| style::KeyView {
+                id: &out.id,
+                label: &out.label,
+                fingerprint: &out.fingerprint,
+                algorithm: &out.algorithm,
+                created_at: &out.created_at,
+                extra: &raw.extra,
+            })
+            .collect();
+        println!("{}", style::key_list_cards(&views));
         if let Some(cursor) = page.next_cursor {
-            eprintln!("next cursor: {cursor}");
+            eprintln!("{}", style::next_cursor_diagnostic(&cursor));
         }
     }
     ExitStatus::Ok
@@ -94,21 +105,21 @@ fn add(config: &ResolvedConfig, args: KeyAddArgs, json_output: bool) -> ExitStat
     let public_key = match read_public_key(args.file.as_deref()) {
         Ok(value) => value,
         Err(message) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return ExitStatus::Error;
         }
     };
-    let (console_url, access_token) = match console_session(config) {
+    let (console_url, session) = match console_session(config) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return status;
         }
     };
-    let key = match create_key(console_url, access_token, &args.label, &public_key) {
+    let key = match create_key(console_url, &session.access_token, &args.label, &public_key) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return status;
         }
     };
@@ -119,25 +130,29 @@ fn add(config: &ResolvedConfig, args: KeyAddArgs, json_output: bool) -> ExitStat
             serde_json::to_string_pretty(&output).expect("key add output serializes")
         );
     } else {
-        println!("added key {} {}", output.id, output.fingerprint);
+        let confirm = style::ConfirmBlock::new("added", "key", output.label.clone())
+            .field("id", output.id.clone())
+            .field("fingerprint", output.fingerprint.clone())
+            .field("algorithm", output.algorithm.clone());
+        println!("{}", style::render_confirm(&confirm));
     }
     ExitStatus::Ok
 }
 
 fn remove(config: &ResolvedConfig, key_id: &str, json_output: bool) -> ExitStatus {
     if Uuid::parse_str(key_id).is_err() {
-        eprintln!("[usage] KEY_ID must be a UUID");
+        crate::style::eprintln_error("[usage] KEY_ID must be a UUID");
         return ExitStatus::Usage;
     }
-    let (console_url, access_token) = match console_session(config) {
+    let (console_url, session) = match console_session(config) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return status;
         }
     };
-    if let Err((status, message)) = delete_key(console_url, access_token, key_id) {
-        eprintln!("{message}");
+    if let Err((status, message)) = delete_key(console_url, &session.access_token, key_id) {
+        crate::style::eprintln_error(&message);
         return status;
     }
     if json_output {
@@ -147,23 +162,13 @@ fn remove(config: &ResolvedConfig, key_id: &str, json_output: bool) -> ExitStatu
                 .expect("key remove output serializes")
         );
     } else {
-        println!("removed key {key_id}");
+        let confirm = style::ConfirmBlock::new("removed", "key", key_id);
+        println!("{}", style::render_confirm(&confirm));
     }
     ExitStatus::Ok
 }
 
-fn console_session(config: &ResolvedConfig) -> Result<(&str, String), (ExitStatus, String)> {
-    let console_url = config
-        .require_console_url()
-        .map_err(|message| (ExitStatus::Usage, message))?;
-    let session = auth::session_for_console(config)?;
-    Ok((console_url, session.access_token.clone()))
-}
-
-fn fetch_keys(
-    console_url: &str,
-    access_token: String,
-) -> Result<KeyListPage, (ExitStatus, String)> {
+fn fetch_keys(console_url: &str, access_token: &str) -> Result<KeyListPage, (ExitStatus, String)> {
     let response = Client::new()
         .get(format!("{console_url}/api/v1/me/keys"))
         .bearer_auth(access_token)
@@ -179,7 +184,7 @@ fn fetch_keys(
 
 fn create_key(
     console_url: &str,
-    access_token: String,
+    access_token: &str,
     label: &str,
     public_key: &str,
 ) -> Result<ConsoleSshKey, (ExitStatus, String)> {
@@ -200,7 +205,7 @@ fn create_key(
 
 fn delete_key(
     console_url: &str,
-    access_token: String,
+    access_token: &str,
     key_id: &str,
 ) -> Result<(), (ExitStatus, String)> {
     let response = Client::new()
@@ -213,64 +218,7 @@ fn delete_key(
                 format!("[error] failed to remove SSH key: {err}"),
             )
         })?;
-    if response.status() == reqwest::StatusCode::NO_CONTENT {
-        return Ok(());
-    }
-    Err(error_for_response(response, "remove SSH key"))
-}
-
-fn read_json_response<T: for<'de> Deserialize<'de>>(
-    response: reqwest::blocking::Response,
-    action: &str,
-) -> Result<T, (ExitStatus, String)> {
-    if !response.status().is_success() {
-        return Err(error_for_response(response, action));
-    }
-    let body = response.text().map_err(|err| {
-        (
-            ExitStatus::Error,
-            format!("[error] failed to read {action} response: {err}"),
-        )
-    })?;
-    serde_json::from_str(&body).map_err(|err| {
-        (
-            ExitStatus::Error,
-            format!("[error] malformed {action} response: {err}"),
-        )
-    })
-}
-
-fn error_for_response(response: reqwest::blocking::Response, action: &str) -> (ExitStatus, String) {
-    let status = response.status();
-    let exit = if status == reqwest::StatusCode::UNAUTHORIZED {
-        ExitStatus::AuthRequired
-    } else {
-        ExitStatus::Error
-    };
-    let text = response.text().unwrap_or_default();
-    let message =
-        console_error_message(&text).unwrap_or_else(|| format!("{action} failed: HTTP {status}"));
-    let tag = if matches!(exit, ExitStatus::AuthRequired) {
-        "auth_required"
-    } else if matches!(exit, ExitStatus::Usage) {
-        "usage"
-    } else {
-        "error"
-    };
-    (exit, format!("[{tag}] {message}"))
-}
-
-fn console_error_message(body: &str) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_str(body).ok()?;
-    let error = value.get("error")?;
-    let message = error.get("message")?.as_str()?;
-    let code = error.get("code").and_then(|value| value.as_str());
-    Some(match code {
-        Some(code) if code != "UNAUTHORIZED" && code != "VALIDATION_ERROR" => {
-            format!("{message} ({code})")
-        }
-        _ => message.to_string(),
-    })
+    read_empty_response(response, "remove SSH key")
 }
 
 fn read_public_key(path: Option<&Path>) -> Result<String, String> {
@@ -313,16 +261,6 @@ mod tests {
         assert_eq!(
             ssh_key_algorithm("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest user@example"),
             "ssh-ed25519"
-        );
-    }
-
-    #[test]
-    fn console_error_message_uses_error_envelope_message() {
-        let body = r#"{"error":{"code":"VALIDATION_ERROR","message":"malformed public key"}}"#;
-
-        assert_eq!(
-            console_error_message(body).as_deref(),
-            Some("malformed public key")
         );
     }
 }

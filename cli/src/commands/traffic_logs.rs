@@ -1,10 +1,17 @@
+use std::collections::BTreeMap;
+
 use chrono::DateTime;
-use reqwest::blocking::{Client, Response};
+use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use uuid::Uuid;
 
-use crate::{cli::TrafficLogsArgs, commands::auth, config::ResolvedConfig, exit::ExitStatus};
+use crate::{
+    cli::TrafficLogsArgs,
+    config::ResolvedConfig,
+    console::{console_session, read_json_response, validate_uuid},
+    exit::ExitStatus,
+    style,
+};
 
 #[derive(Debug, Deserialize, Serialize)]
 struct TrafficLogListPage {
@@ -33,35 +40,31 @@ struct TrafficLog {
     path: Option<String>,
     response_code: Option<u16>,
     bytes_transferred: u64,
+
+    #[serde(flatten, default, skip_serializing)]
+    extra: BTreeMap<String, Value>,
 }
 
 pub fn run(args: TrafficLogsArgs, config: &ResolvedConfig, json: bool) -> ExitStatus {
     if let Err(message) = validate_args(&args) {
-        eprintln!("{message}");
+        crate::style::eprintln_error(&message);
         return ExitStatus::Usage;
     }
-    let console_url = match config.require_console_url() {
-        Ok(value) => value,
-        Err(message) => {
-            eprintln!("{message}");
-            return ExitStatus::Usage;
-        }
-    };
-    let session = match auth::session_for_console(config) {
+    let (console_url, session) = match console_session(config) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return status;
         }
     };
     let page = match fetch_traffic_logs(console_url, &session.access_token, &args) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return status;
         }
     };
-    print_traffic_logs(page, json);
+    print_traffic_logs(page, json, &args);
     ExitStatus::Ok
 }
 
@@ -109,67 +112,7 @@ fn fetch_traffic_logs(
     read_json_response(response, "query traffic logs")
 }
 
-fn read_json_response<T: for<'de> Deserialize<'de>>(
-    response: Response,
-    action: &str,
-) -> Result<T, (ExitStatus, String)> {
-    if !response.status().is_success() {
-        return Err(error_for_response(response, action));
-    }
-    response.json::<T>().map_err(|err| {
-        (
-            ExitStatus::Error,
-            format!("[error] malformed {action} response: {err}"),
-        )
-    })
-}
-
-fn error_for_response(response: Response, action: &str) -> (ExitStatus, String) {
-    let status = response.status();
-    let exit = if status == reqwest::StatusCode::UNAUTHORIZED {
-        ExitStatus::AuthRequired
-    } else if status == reqwest::StatusCode::BAD_REQUEST
-        || status == reqwest::StatusCode::UNPROCESSABLE_ENTITY
-    {
-        ExitStatus::Usage
-    } else {
-        ExitStatus::Error
-    };
-    let text = response.text().unwrap_or_default();
-    let message =
-        console_error_message(&text).unwrap_or_else(|| format!("{action} failed: HTTP {status}"));
-    let tag = if matches!(exit, ExitStatus::AuthRequired) {
-        "auth_required"
-    } else if matches!(exit, ExitStatus::Usage) {
-        "usage"
-    } else {
-        "error"
-    };
-    (exit, format!("[{tag}] {message}"))
-}
-
-fn console_error_message(body: &str) -> Option<String> {
-    let value: Value = serde_json::from_str(body).ok()?;
-    let error = value.get("error")?;
-    let message = error.get("message")?.as_str()?;
-    let code = error.get("code").and_then(|value| value.as_str());
-    let details = error.get("details");
-    let validation_type = details
-        .and_then(|details| details.get("errors"))
-        .and_then(|errors| errors.as_array())
-        .and_then(|errors| errors.first())
-        .and_then(|error| error.get("type"))
-        .and_then(|value| value.as_str());
-    Some(match (validation_type, code) {
-        (Some(validation_type), _) => format!("{message} ({validation_type})"),
-        (_, Some(code)) if code != "UNAUTHORIZED" && code != "VALIDATION_ERROR" => {
-            format!("{message} ({code})")
-        }
-        _ => message.to_string(),
-    })
-}
-
-fn print_traffic_logs(page: TrafficLogListPage, json_output: bool) {
+fn print_traffic_logs(page: TrafficLogListPage, json_output: bool, args: &TrafficLogsArgs) {
     if json_output {
         println!(
             "{}",
@@ -179,38 +122,39 @@ fn print_traffic_logs(page: TrafficLogListPage, json_output: bool) {
             })
             .expect("traffic log output serializes")
         );
-    } else if page.items.is_empty() {
-        println!("no traffic logs");
-    } else {
-        for log in &page.items {
-            let cvm_id = log.cvm_id.as_deref().unwrap_or("-");
-            let host = log.destination_host.as_deref().unwrap_or("-");
-            let method = log.method.as_deref().unwrap_or("-");
-            let path = log.path.as_deref().unwrap_or("-");
-            let response_code = log
-                .response_code
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "-".to_string());
-            println!(
-                "{} {} sc={} cvm={} src={} dst={}:{} host={} protocol={} method={} path={} response={} bytes={}",
-                log.timestamp,
-                log.id,
-                log.security_cvm_id,
-                cvm_id,
-                log.source_ip,
-                log.destination_ip,
-                log.port,
-                host,
-                log.protocol,
-                method,
-                path,
-                response_code,
-                log.bytes_transferred,
-            );
-        }
-        if let Some(cursor) = &page.next_cursor {
-            eprintln!("next cursor: {cursor}");
-        }
+        return;
+    }
+    // Section 7.6: v0 guarantees at most one SC per entity, so the renderer
+    // emits a single table block; the SC value is hoisted into the Filter
+    // header either from `--security-cvm` or from the constant value observed
+    // across the returned rows. `limit` and `cursor` go into the Filter header
+    // per section 6.2.1.
+    let filter = style::TrafficLogsFilter {
+        cvm: args.cvm.clone(),
+        security_cvm: args.security_cvm.clone(),
+        from: args.from.clone(),
+        to: args.to.clone(),
+        limit: Some(u32::from(args.limit)),
+        cursor: args.cursor.clone(),
+    };
+    let views: Vec<style::TrafficLogView<'_>> = page
+        .items
+        .iter()
+        .map(|log| style::TrafficLogView {
+            timestamp: &log.timestamp,
+            cvm_id: log.cvm_id.as_deref(),
+            security_cvm_id: Some(log.security_cvm_id.as_str()),
+            method: log.method.as_deref(),
+            destination_host: log.destination_host.as_deref(),
+            response_code: log.response_code,
+            bytes_transferred: log.bytes_transferred,
+            path: log.path.as_deref(),
+            extra: &log.extra,
+        })
+        .collect();
+    println!("{}", style::traffic_logs_table(&views, &filter));
+    if let Some(cursor) = &page.next_cursor {
+        eprintln!("{}", style::next_cursor_diagnostic(cursor));
     }
 }
 
@@ -218,12 +162,6 @@ fn push_query(query: &mut Vec<(&'static str, String)>, key: &'static str, value:
     if let Some(value) = value {
         query.push((key, value.clone()));
     }
-}
-
-fn validate_uuid(name: &str, value: &str) -> Result<(), String> {
-    Uuid::parse_str(value)
-        .map(|_| ())
-        .map_err(|_| format!("[usage] {name} must be a UUID"))
 }
 
 fn validate_timestamp(name: &str, value: &str) -> Result<(), String> {
@@ -250,16 +188,6 @@ mod tests {
         assert_eq!(
             validate_args(&args).expect_err("invalid cvm uuid is rejected"),
             "[usage] --cvm must be a UUID"
-        );
-    }
-
-    #[test]
-    fn console_error_message_includes_validation_type() {
-        let body = r#"{"error":{"code":"VALIDATION_ERROR","message":"request validation failed","details":{"errors":[{"type":"datetime_from_date_parsing"}]}}}"#;
-
-        assert_eq!(
-            console_error_message(body).as_deref(),
-            Some("request validation failed (datetime_from_date_parsing)")
         );
     }
 }

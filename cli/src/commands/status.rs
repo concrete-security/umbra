@@ -1,9 +1,15 @@
-use reqwest::blocking::{Client, Response};
+use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::{commands::auth, config::ResolvedConfig, exit::ExitStatus, session::Session};
+use crate::{
+    config::ResolvedConfig,
+    console::{console_session, read_json_response},
+    exit::ExitStatus,
+    session::Session,
+    style,
+};
 
 #[derive(Debug, Deserialize, Serialize)]
 struct Entity {
@@ -42,6 +48,12 @@ struct Cvm {
     region: Option<String>,
     ssh_keys: Vec<SshKeyRef>,
     fqdn: Option<String>,
+    /// Populated by the Console when `state` is `error` / `failed`. Used by
+    /// the `Dev CVMs by profile` section (spec 7.10) as the tail value when
+    /// the CVM is not running. Tolerant to absence so it stays None for
+    /// healthy CVMs.
+    #[serde(default)]
+    error_reason: Option<String>,
     created_at: String,
     updated_at: String,
 }
@@ -103,6 +115,14 @@ struct StatusOutput {
     user: StatusUser,
     entity: Entity,
     security_cvm: Option<SecurityCvm>,
+    /// True when the caller lacks `SECURITY_CVM_CONFIGURE` (HTTP 403 on the
+    /// SC read). The human renderer omits the Security CVM section entirely
+    /// in that case; the JSON output sets `security_cvm` to `null` (same as
+    /// "no SC provisioned" -- the two states are not distinguishable in JSON
+    /// today and that is acceptable because previously the command crashed
+    /// outright).
+    #[serde(skip)]
+    security_cvm_hidden: bool,
     profiles: Vec<Profile>,
     dev_cvms: Vec<Cvm>,
     ssh_keys: Vec<SshKeyOutput>,
@@ -119,34 +139,26 @@ pub fn run(config: &ResolvedConfig, json_output: bool) -> ExitStatus {
     let profile_id = match optional_profile_filter(config) {
         Ok(value) => value,
         Err(message) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return ExitStatus::Usage;
         }
     };
     let (console_url, session) = match console_session(config) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return status;
         }
     };
     let status = match fetch_status(console_url, &session, profile_id.as_deref()) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return status;
         }
     };
-    print_status(&status, json_output);
+    print_status(&status, json_output, config.console_url.as_deref());
     ExitStatus::Ok
-}
-
-fn console_session(config: &ResolvedConfig) -> Result<(&str, Session), (ExitStatus, String)> {
-    let console_url = config
-        .require_console_url()
-        .map_err(|message| (ExitStatus::Usage, message))?;
-    let session = auth::session_for_console(config)?;
-    Ok((console_url, session))
 }
 
 fn optional_profile_filter(config: &ResolvedConfig) -> Result<Option<String>, String> {
@@ -167,7 +179,12 @@ fn fetch_status(
     profile_id: Option<&str>,
 ) -> Result<StatusOutput, (ExitStatus, String)> {
     let user = fetch_me(console_url, session)?;
-    let security_cvm = fetch_security_cvm_optional(console_url, session)?;
+    let (security_cvm, security_cvm_hidden) =
+        match fetch_security_cvm_optional(console_url, session)? {
+            SecurityCvmFetch::Visible(sc) => (Some(sc), false),
+            SecurityCvmFetch::NotProvisioned => (None, false),
+            SecurityCvmFetch::Hidden => (None, true),
+        };
     let mut profiles = fetch_profiles(console_url, session)?.items;
     if let Some(profile_id) = profile_id {
         profiles.retain(|profile| profile.id == profile_id);
@@ -191,6 +208,7 @@ fn fetch_status(
         },
         entity: user.entity,
         security_cvm,
+        security_cvm_hidden,
         profiles,
         dev_cvms,
         ssh_keys,
@@ -269,10 +287,25 @@ fn fetch_keys(
     read_json_response(response, "list SSH keys")
 }
 
+/// Result of attempting to fetch the entity's Security CVM. The caller may
+/// lack the `SECURITY_CVM_CONFIGURE` permission required by the Console
+/// endpoint (console.md section 3.7); in that case the CLI MUST silently
+/// omit the Security CVM section from `concrete status` instead of failing
+/// the whole command. See cli-style.md section 7.10.
+enum SecurityCvmFetch {
+    /// The endpoint returned the SC record.
+    Visible(SecurityCvm),
+    /// HTTP 404 -- the entity has no live SC.
+    NotProvisioned,
+    /// HTTP 403 -- caller lacks `SECURITY_CVM_CONFIGURE`. Render as if the
+    /// section did not exist for this caller.
+    Hidden,
+}
+
 fn fetch_security_cvm_optional(
     console_url: &str,
     session: &Session,
-) -> Result<Option<SecurityCvm>, (ExitStatus, String)> {
+) -> Result<SecurityCvmFetch, (ExitStatus, String)> {
     let response = Client::new()
         .get(format!(
             "{console_url}/api/v1/entities/{}/security-cvm",
@@ -287,70 +320,12 @@ fn fetch_security_cvm_optional(
             )
         })?;
     if response.status() == reqwest::StatusCode::NOT_FOUND {
-        return Ok(None);
+        return Ok(SecurityCvmFetch::NotProvisioned);
     }
-    read_json_response(response, "fetch Security CVM").map(Some)
-}
-
-fn read_json_response<T: for<'de> Deserialize<'de>>(
-    response: Response,
-    action: &str,
-) -> Result<T, (ExitStatus, String)> {
-    if !response.status().is_success() {
-        return Err(error_for_response(response, action));
+    if response.status() == reqwest::StatusCode::FORBIDDEN {
+        return Ok(SecurityCvmFetch::Hidden);
     }
-    response.json::<T>().map_err(|err| {
-        (
-            ExitStatus::Error,
-            format!("[error] malformed {action} response: {err}"),
-        )
-    })
-}
-
-fn error_for_response(response: Response, action: &str) -> (ExitStatus, String) {
-    let status = response.status();
-    let exit = if status == reqwest::StatusCode::UNAUTHORIZED {
-        ExitStatus::AuthRequired
-    } else if status == reqwest::StatusCode::BAD_REQUEST
-        || status == reqwest::StatusCode::UNPROCESSABLE_ENTITY
-    {
-        ExitStatus::Usage
-    } else {
-        ExitStatus::Error
-    };
-    let text = response.text().unwrap_or_default();
-    let message =
-        console_error_message(&text).unwrap_or_else(|| format!("{action} failed: HTTP {status}"));
-    let tag = if matches!(exit, ExitStatus::AuthRequired) {
-        "auth_required"
-    } else if matches!(exit, ExitStatus::Usage) {
-        "usage"
-    } else {
-        "error"
-    };
-    (exit, format!("[{tag}] {message}"))
-}
-
-fn console_error_message(body: &str) -> Option<String> {
-    let value: Value = serde_json::from_str(body).ok()?;
-    let error = value.get("error")?;
-    let message = error.get("message")?.as_str()?;
-    let code = error.get("code").and_then(|value| value.as_str());
-    let details = error.get("details");
-    let state = details
-        .and_then(|details| details.get("state"))
-        .and_then(|value| value.as_str());
-    let required = details
-        .and_then(|details| details.get("required"))
-        .and_then(|value| value.as_str());
-    Some(match (state, required, code) {
-        (Some(state), _, _) => format!("{message} ({state})"),
-        (_, Some(required), _) => format!("{message} ({required})"),
-        (_, _, Some(code)) if code != "UNAUTHORIZED" && code != "VALIDATION_ERROR" => {
-            format!("{message} ({code})")
-        }
-        _ => message.to_string(),
-    })
+    read_json_response(response, "fetch Security CVM").map(SecurityCvmFetch::Visible)
 }
 
 fn key_output(key: &ConsoleSshKey) -> SshKeyOutput {
@@ -367,7 +342,7 @@ fn key_output(key: &ConsoleSshKey) -> SshKeyOutput {
     }
 }
 
-fn print_status(status: &StatusOutput, json_output: bool) {
+fn print_status(status: &StatusOutput, json_output: bool, console_url: Option<&str>) {
     if json_output {
         println!(
             "{}",
@@ -375,74 +350,97 @@ fn print_status(status: &StatusOutput, json_output: bool) {
         );
         return;
     }
-    println!(
-        "user {} entity={} ({})",
-        status.user.email, status.entity.name, status.entity.id
-    );
-    match &status.security_cvm {
-        Some(security_cvm) => println!(
-            "security_cvm {} state={} region={} instance_type={} policy_version={}",
-            security_cvm.id,
-            security_cvm.state,
-            security_cvm.region.as_deref().unwrap_or("-"),
-            security_cvm.instance_type.as_deref().unwrap_or("-"),
-            security_cvm.policy_version
-        ),
-        None => println!("security_cvm none"),
+    let sc_view = status
+        .security_cvm
+        .as_ref()
+        .map(|sc| style::StatusSecurityCvm {
+            id: &sc.id,
+            state: &sc.state,
+            region: sc.region.as_deref(),
+            instance_type: sc.instance_type.as_deref(),
+            policy_version: sc.policy_version,
+        });
+    let mut state_counts: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+    for cvm in &status.dev_cvms {
+        *state_counts
+            .entry(cvm.state.to_ascii_lowercase())
+            .or_insert(0) += 1;
     }
-    println!(
-        "totals profiles={} dev_cvms={} running={} ssh_keys={}",
-        status.totals.profiles,
-        status.totals.dev_cvms,
-        status.totals.dev_cvms_running,
-        status.totals.ssh_keys
-    );
-    for profile in &status.profiles {
-        let cvms = status
-            .dev_cvms
-            .iter()
-            .filter(|cvm| {
-                cvm.profiles
-                    .iter()
-                    .any(|attached| attached.id == profile.id)
-            })
-            .collect::<Vec<_>>();
-        if cvms.is_empty() {
-            println!(
-                "profile {} ({}) - no CVMs attached",
-                profile.name, profile.id
-            );
-        } else {
-            println!("profile {} ({})", profile.name, profile.id);
-            for cvm in cvms {
-                let owner = if cvm.owner.email == status.user.email {
-                    String::new()
-                } else {
-                    format!(" owner={}", cvm.owner.email)
-                };
-                println!(
-                    "  cvm {} state={} fqdn={} region={} instance_type={}{}",
-                    cvm.id,
-                    cvm.state,
-                    cvm.fqdn.as_deref().unwrap_or("-"),
-                    cvm.region.as_deref().unwrap_or("-"),
-                    cvm.instance_type.as_deref().unwrap_or("-"),
-                    owner
-                );
+    let totals_breakdown: Vec<(String, usize)> = state_counts.into_iter().collect();
+    let profile_summaries: Vec<style::StatusProfileSummary<'_>> = status
+        .profiles
+        .iter()
+        .map(|p| style::StatusProfileSummary {
+            id: &p.id,
+            name: &p.name,
+            attached_cvm_count: p.attached_cvm_count,
+        })
+        .collect();
+    let key_summaries: Vec<style::StatusKeySummary<'_>> = status
+        .ssh_keys
+        .iter()
+        .map(|k| style::StatusKeySummary {
+            id: &k.id,
+            label: &k.label,
+            fingerprint: &k.fingerprint,
+            algorithm: &k.algorithm,
+        })
+        .collect();
+    // Section 7.10 / cli.md section 3.6: group Dev CVMs under the profiles
+    // the caller belongs to. A CVM attached to multiple profiles appears
+    // under each. The tail value is the FQDN when running, otherwise the
+    // CVM's error_reason field (or `-`).
+    let lower_running = "running";
+    let dev_cvms_by_profile: Vec<style::StatusDevCvmsByProfile<'_>> = status
+        .profiles
+        .iter()
+        .map(|profile| {
+            let cvms: Vec<style::StatusDevCvmRow<'_>> = status
+                .dev_cvms
+                .iter()
+                .filter(|cvm| {
+                    cvm.profiles
+                        .iter()
+                        .any(|profile_ref| profile_ref.id == profile.id)
+                })
+                .map(|cvm| {
+                    let state_lower = cvm.state.to_ascii_lowercase();
+                    let tail = if state_lower == lower_running {
+                        cvm.fqdn.as_deref().unwrap_or("-")
+                    } else {
+                        cvm.error_reason.as_deref().unwrap_or("-")
+                    };
+                    style::StatusDevCvmRow {
+                        id: &cvm.id,
+                        state: &cvm.state,
+                        tail,
+                    }
+                })
+                .collect();
+            style::StatusDevCvmsByProfile {
+                profile_name: &profile.name,
+                cvms,
             }
-        }
-    }
-    if status.ssh_keys.is_empty() {
-        println!("ssh_keys none");
-    } else {
-        println!("ssh_keys");
-        for key in &status.ssh_keys {
-            println!(
-                "  {} {} {} {}",
-                key.id, key.label, key.algorithm, key.fingerprint
-            );
-        }
-    }
+        })
+        .collect();
+    let view = style::StatusView {
+        user_email: &status.user.email,
+        user_id: &status.user.id,
+        entity_name: &status.entity.name,
+        entity_id: &status.entity.id,
+        console_url,
+        security_cvm: sc_view,
+        security_cvm_hidden: status.security_cvm_hidden,
+        totals_profiles: status.totals.profiles,
+        totals_dev_cvms: status.totals.dev_cvms,
+        totals_dev_cvms_state_breakdown: totals_breakdown,
+        totals_ssh_keys: status.totals.ssh_keys,
+        dev_cvms_by_profile,
+        profiles: profile_summaries,
+        ssh_keys: key_summaries,
+    };
+    println!("{}", style::status_multi_section(&view));
 }
 
 #[cfg(test)]
@@ -459,15 +457,5 @@ mod tests {
         };
 
         assert_eq!(key_output(&key).algorithm, "ssh-ed25519");
-    }
-
-    #[test]
-    fn console_error_message_includes_required_permission() {
-        let body = r#"{"error":{"code":"FORBIDDEN","message":"permission denied","details":{"required":"SECURITY_CVM_CONFIGURE"}}}"#;
-
-        assert_eq!(
-            console_error_message(body).as_deref(),
-            Some("permission denied (SECURITY_CVM_CONFIGURE)")
-        );
     }
 }

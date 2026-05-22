@@ -1,16 +1,22 @@
 use std::{
-    io::{self, ErrorKind, Write},
+    io::{self, ErrorKind, IsTerminal, Write},
     process::ExitCode,
 };
 
 use clap::{CommandFactory, Parser};
 
+#[macro_use]
+mod cli_macros;
+
 mod atls;
 mod cli;
 mod commands;
 mod config;
+mod console;
 mod exit;
+mod operation;
 mod session;
+mod style;
 
 pub use exit::ExitStatus;
 
@@ -45,6 +51,11 @@ pub fn run() -> ExitCode {
         verbose: args.verbose,
     });
     let json_output = config.output == config::OutputFormat::Json;
+    style::init(
+        !config.no_color
+            && config.output != config::OutputFormat::Json
+            && io::stdout().is_terminal(),
+    );
     let status = match args.command {
         cli::Command::Admin(command) => commands::admin::run(command, &config, json_output),
         cli::Command::Alias(args) => commands::ssh::run_alias(args, &config, json_output),
@@ -61,7 +72,7 @@ pub fn run() -> ExitCode {
                 Ok(()) => ExitStatus::Ok,
                 Err(err) if err.kind() == ErrorKind::BrokenPipe => ExitStatus::Ok,
                 Err(err) => {
-                    eprintln!("[error] failed to write completions: {err}");
+                    style::eprintln_error(&format!("[error] failed to write completions: {err}"));
                     ExitStatus::Error
                 }
             }

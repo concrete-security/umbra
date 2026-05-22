@@ -1,5 +1,5 @@
 use chrono::DateTime;
-use reqwest::blocking::{Client, Response};
+use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use uuid::Uuid;
@@ -9,9 +9,10 @@ use crate::{
         AdminCommand, AdminKeysCommand, AdminKeysRotateArgs, AdminSessionsCommand,
         AdminSessionsRevokeArgs,
     },
-    commands::auth,
     config::ResolvedConfig,
+    console::{console_session, read_json_response},
     exit::ExitStatus,
+    style,
 };
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -45,39 +46,33 @@ fn sessions_revoke(
     let body = match sessions_revoke_body(&args) {
         Ok(value) => value,
         Err(message) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return ExitStatus::Usage;
         }
     };
-    let (console_url, access_token) = match console_session(config) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            eprintln!("{message}");
-            return status;
-        }
-    };
-    let output: SessionsRevokeOutput = match post_json(
+    let (console_url, session) = try_or_eprintln!(console_session(config));
+    let output: SessionsRevokeOutput = try_or_eprintln!(post_json(
         format!("{console_url}/api/v1/admin/sessions/revoke"),
-        &access_token,
+        &session.access_token,
         &Value::Object(body),
         "revoke sessions",
-    ) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            eprintln!("{message}");
-            return status;
-        }
-    };
+    ));
     if json_output {
         println!(
             "{}",
             serde_json::to_string_pretty(&output).expect("session revoke output serializes")
         );
     } else {
-        println!(
-            "revoked_jti_count={} revoked_refresh_token_count={}",
-            output.revoked_jti_count, output.revoked_refresh_token_count
-        );
+        // Confirm template for the admin sessions revoke mutation. The
+        // command has no single primary identifier; the identifier slot
+        // documents what was revoked.
+        let confirm = style::ConfirmBlock::new("revoked", "sessions", "-")
+            .field("jti", output.revoked_jti_count.to_string())
+            .field(
+                "refresh tokens",
+                output.revoked_refresh_token_count.to_string(),
+            );
+        println!("{}", style::render_confirm(&confirm));
     }
     ExitStatus::Ok
 }
@@ -87,29 +82,17 @@ fn keys_rotate(
     args: AdminKeysRotateArgs,
     json_output: bool,
 ) -> ExitStatus {
-    let (console_url, access_token) = match console_session(config) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            eprintln!("{message}");
-            return status;
-        }
-    };
+    let (console_url, session) = try_or_eprintln!(console_session(config));
     let body = json!({
         "new_kid": args.new_kid,
         "retire_old_after_seconds": args.retire_old_after_seconds,
     });
-    let output: KeysRotateOutput = match post_json(
+    let output: KeysRotateOutput = try_or_eprintln!(post_json(
         format!("{console_url}/api/v1/admin/keys/rotate"),
-        &access_token,
+        &session.access_token,
         &body,
         "rotate JWT keys",
-    ) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            eprintln!("{message}");
-            return status;
-        }
-    };
+    ));
     if json_output {
         println!(
             "{}",
@@ -121,17 +104,14 @@ fn keys_rotate(
         } else {
             output.retiring_kids.join(",")
         };
-        println!("active_kid={} retiring_kids={retiring}", output.active_kid);
+        // Confirm template for the admin keys rotate mutation. The
+        // identifier slot is the newly active kid; retiring kids surface as
+        // a detail row.
+        let confirm = style::ConfirmBlock::new("rotated", "key", output.active_kid.clone())
+            .field("retiring", retiring);
+        println!("{}", style::render_confirm(&confirm));
     }
     ExitStatus::Ok
-}
-
-fn console_session(config: &ResolvedConfig) -> Result<(&str, String), (ExitStatus, String)> {
-    let console_url = config
-        .require_console_url()
-        .map_err(|message| (ExitStatus::Usage, message))?;
-    let session = auth::session_for_console(config)?;
-    Ok((console_url, session.access_token.clone()))
 }
 
 fn post_json<T: for<'de> Deserialize<'de>>(
@@ -153,21 +133,6 @@ fn post_json<T: for<'de> Deserialize<'de>>(
             )
         })?;
     read_json_response(response, action)
-}
-
-fn read_json_response<T: for<'de> Deserialize<'de>>(
-    response: Response,
-    action: &str,
-) -> Result<T, (ExitStatus, String)> {
-    if !response.status().is_success() {
-        return Err(error_for_response(response, action));
-    }
-    response.json::<T>().map_err(|err| {
-        (
-            ExitStatus::Error,
-            format!("[error] malformed {action} response: {err}"),
-        )
-    })
 }
 
 fn sessions_revoke_body(args: &AdminSessionsRevokeArgs) -> Result<Map<String, Value>, String> {
@@ -195,46 +160,6 @@ fn sessions_revoke_body(args: &AdminSessionsRevokeArgs) -> Result<Map<String, Va
         );
     }
     Ok(body)
-}
-
-fn error_for_response(response: Response, action: &str) -> (ExitStatus, String) {
-    let status = response.status();
-    let exit = if status == reqwest::StatusCode::UNAUTHORIZED {
-        ExitStatus::AuthRequired
-    } else if status == reqwest::StatusCode::UNPROCESSABLE_ENTITY {
-        ExitStatus::Usage
-    } else {
-        ExitStatus::Error
-    };
-    let text = response.text().unwrap_or_default();
-    let message =
-        console_error_message(&text).unwrap_or_else(|| format!("{action} failed: HTTP {status}"));
-    let tag = if matches!(exit, ExitStatus::AuthRequired) {
-        "auth_required"
-    } else if matches!(exit, ExitStatus::Usage) {
-        "usage"
-    } else {
-        "error"
-    };
-    (exit, format!("[{tag}] {message}"))
-}
-
-fn console_error_message(body: &str) -> Option<String> {
-    let value: Value = serde_json::from_str(body).ok()?;
-    let error = value.get("error")?;
-    let message = error.get("message")?.as_str()?;
-    let code = error.get("code").and_then(|value| value.as_str());
-    let component = error
-        .get("details")
-        .and_then(|details| details.get("component"))
-        .and_then(|value| value.as_str());
-    Some(match (code, component) {
-        (_, Some(component)) => format!("{message} ({component})"),
-        (Some(code), _) if code != "UNAUTHORIZED" && code != "VALIDATION_ERROR" => {
-            format!("{message} ({code})")
-        }
-        _ => message.to_string(),
-    })
 }
 
 #[cfg(test)]
@@ -266,16 +191,6 @@ mod tests {
         assert_eq!(
             sessions_revoke_body(&args).expect_err("invalid timestamp is rejected"),
             "[usage] --issued-before must be an RFC3339 timestamp"
-        );
-    }
-
-    #[test]
-    fn console_error_message_includes_component() {
-        let body = r#"{"error":{"code":"SERVICE_UNAVAILABLE","message":"JWT key material is not ready for rotation","details":{"component":"jwt_key_store"}}}"#;
-
-        assert_eq!(
-            console_error_message(body).as_deref(),
-            Some("JWT key material is not ready for rotation (jwt_key_store)")
         );
     }
 }

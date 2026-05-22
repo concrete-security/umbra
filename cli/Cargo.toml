@@ -15,6 +15,7 @@ name = "concrete_cli"
 path = "src/lib.rs"
 
 [dependencies]
+anstyle = "1"
 atlas-rs = "=0.2.0"
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
