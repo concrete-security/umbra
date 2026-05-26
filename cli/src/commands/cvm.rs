@@ -1,30 +1,29 @@
 use std::{
+    collections::BTreeMap,
     env,
     fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
-use reqwest::{
-    blocking::{Client, Response},
-    header::{ETAG, IF_MATCH, RETRY_AFTER},
-};
+use reqwest::{blocking::Client, header::IF_MATCH};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use uuid::Uuid;
 
 use crate::{
     cli::{CvmCommand, CvmLaunchArgs, CvmTerminateArgs, CvmUpdateArgs},
-    commands::{auth, operation_debug},
     config::{self, ResolvedConfig},
+    console::{read_json_response, read_with_etag, validate_uuid},
     exit::ExitStatus,
+    operation::{self, Operation},
     session::Session,
+    style,
 };
 
 #[derive(Debug, Deserialize)]
@@ -74,6 +73,14 @@ struct Cvm {
     error_reason: Option<String>,
     created_at: String,
     updated_at: String,
+
+    /// Forward-compat per `docs/specs/cli-style.md` section 11.7: catch any
+    /// new fields the Console adds so the human renderer can still surface
+    /// them. `skip_serializing` keeps `--json` restricted to the fields the
+    /// CLI explicitly knows, so a future sensitive Console field would NOT
+    /// leak through `--json` until the CLI is updated.
+    #[serde(flatten, default, skip_serializing)]
+    extra: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -92,47 +99,6 @@ struct ProfileRef {
 struct SshKeyRef {
     id: String,
     label: String,
-}
-
-#[derive(Debug)]
-struct CvmWithEtag {
-    cvm: Cvm,
-    etag: String,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct Operation {
-    id: String,
-    kind: String,
-    status: String,
-    actor_id: Option<String>,
-    target: OperationTarget,
-    result: Option<Value>,
-    error: Option<OperationError>,
-    progress: Option<OperationProgress>,
-    created_at: String,
-    updated_at: String,
-    expires_at: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct OperationTarget {
-    #[serde(rename = "type")]
-    kind: String,
-    id: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct OperationError {
-    code: String,
-    message: String,
-    details: Option<Value>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct OperationProgress {
-    step: String,
-    percent: u8,
 }
 
 #[derive(Debug, Deserialize)]
@@ -157,11 +123,6 @@ struct CvmLaunchOutput {
     #[serde(flatten)]
     cvm: Cvm,
     policy_file_path: String,
-}
-
-enum OperationPoll {
-    Operation(Box<Operation>),
-    RateLimited(Duration),
 }
 
 #[derive(Clone, Copy)]
@@ -222,71 +183,74 @@ fn list(config: &ResolvedConfig, json_output: bool) -> ExitStatus {
     let profile_id = match optional_profile_filter(config) {
         Ok(value) => value,
         Err(message) => {
-            eprintln!("{message}");
+            style::eprintln_error(&message);
             return ExitStatus::Usage;
         }
     };
-    let (console_url, session) = match console_session(config) {
+    let (console_url, session) = match crate::console::console_session(config) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            style::eprintln_error(&message);
             return status;
         }
     };
     let page = match fetch_cvms(console_url, &session, profile_id.as_deref()) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            style::eprintln_error(&message);
             return status;
         }
     };
-    print_cvm_list(page, json_output);
+    print_cvm_list(page, json_output, profile_id.as_deref());
     ExitStatus::Ok
 }
 
 fn launch(config: &ResolvedConfig, args: CvmLaunchArgs, json_output: bool) -> ExitStatus {
-    let (console_url, session) = match console_session(config) {
+    let (console_url, session) = match crate::console::console_session(config) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            style::eprintln_error(&message);
             return status;
         }
     };
     let launch = match prepare_launch(config, console_url, &session, &args) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            style::eprintln_error(&message);
             return status;
         }
     };
-    let operation = match submit_launch(console_url, &session.access_token, &launch) {
+    let op = match submit_launch(console_url, &session.access_token, &launch) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            style::eprintln_error(&message);
             return status;
         }
     };
     if args.no_wait {
-        print_operation(&operation, json_output, false);
+        operation::print_operation(&op, json_output, false);
         return ExitStatus::Ok;
     }
-    let operation = match wait_for_operation(
+    let op = match operation::wait_for_operation(
         console_url,
         &session.access_token,
-        operation,
+        op,
         Duration::from_secs(u64::from(args.wait_timeout_seconds)),
         json_output,
+        true,
     ) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            if !message.is_empty() {
+                style::eprintln_error(&message);
+            }
             return status;
         }
     };
-    let result = match cvm_launch_result(&operation) {
+    let result: CvmLaunchResult = match operation::extract_operation_result(&op, "CVM launch") {
         Ok(value) => value,
         Err(message) => {
-            eprintln!("{message}");
+            style::eprintln_error(&message);
             return ExitStatus::Error;
         }
     };
@@ -294,12 +258,12 @@ fn launch(config: &ResolvedConfig, args: CvmLaunchArgs, json_output: bool) -> Ex
         match write_policy_file(&config.config_dir, &result.policy_bundle, &result.cvm.id) {
             Ok(value) => value,
             Err(message) => {
-                eprintln!("{message}");
+                style::eprintln_error(&message);
                 return ExitStatus::Error;
             }
         };
     if let Err(message) = persist_launch_defaults(config, &result.cvm, &launch.profile_ids) {
-        eprintln!("{message}");
+        style::eprintln_error(&message);
         return ExitStatus::Error;
     }
     print_launch_result(result.cvm, policy_file, json_output);
@@ -313,27 +277,27 @@ fn profile_mutation(
     json_output: bool,
 ) -> ExitStatus {
     if let Err(message) = validate_uuid("CVM_ID", cvm_id) {
-        eprintln!("{message}");
+        style::eprintln_error(&message);
         return ExitStatus::Usage;
     }
     let profile_id = match selected_profile(config) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            style::eprintln_error(&message);
             return status;
         }
     };
-    let (console_url, session) = match console_session(config) {
+    let (console_url, session) = match crate::console::console_session(config) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            style::eprintln_error(&message);
             return status;
         }
     };
-    let current = match fetch_cvm_with_etag(console_url, &session, cvm_id) {
+    let (_, etag) = match fetch_cvm_with_etag(console_url, &session, cvm_id) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            style::eprintln_error(&message);
             return status;
         }
     };
@@ -341,13 +305,13 @@ fn profile_mutation(
         console_url,
         &session.access_token,
         cvm_id,
-        &current.etag,
+        &etag,
         profile_id,
         mutation,
     ) {
-        Ok(value) => value.cvm,
+        Ok((cvm, _)) => cvm,
         Err((status, message)) => {
-            eprintln!("{message}");
+            style::eprintln_error(&message);
             return status;
         }
     };
@@ -357,12 +321,14 @@ fn profile_mutation(
             serde_json::to_string_pretty(&cvm).expect("CVM output serializes")
         );
     } else {
-        println!(
-            "{} profile {} {}",
-            mutation.as_str(),
-            profile_id,
-            cvm_summary(&cvm)
-        );
+        // Sync mutation: render the section 6.4 confirm template. The verb
+        // matches the requested action; the entity-noun is `profile`; the
+        // identifier is the profile id (the verb's subject), and the cvm
+        // appears as a detail row.
+        let confirm =
+            style::ConfirmBlock::new(format!("{}ed", mutation.as_str()), "profile", profile_id)
+                .field("cvm", cvm.id.clone());
+        println!("{}", style::render_confirm(&confirm));
     }
     ExitStatus::Ok
 }
@@ -374,92 +340,85 @@ fn lifecycle_action(
     json_output: bool,
 ) -> ExitStatus {
     if let Err(message) = validate_uuid("CVM_ID", cvm_id) {
-        eprintln!("{message}");
+        style::eprintln_error(&message);
         return ExitStatus::Usage;
     }
-    let (console_url, session) = match console_session(config) {
+    let (console_url, session) = match crate::console::console_session(config) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            style::eprintln_error(&message);
             return status;
         }
     };
-    let current = match fetch_cvm_with_etag(console_url, &session, cvm_id) {
+    let (_, etag) = match fetch_cvm_with_etag(console_url, &session, cvm_id) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            style::eprintln_error(&message);
             return status;
         }
     };
-    let cvm = match submit_lifecycle_action(
-        console_url,
-        &session.access_token,
-        cvm_id,
-        &current.etag,
-        action,
-    ) {
-        Ok(value) => value.cvm,
-        Err((status, message)) => {
-            eprintln!("{message}");
-            return status;
-        }
-    };
+    let cvm =
+        match submit_lifecycle_action(console_url, &session.access_token, cvm_id, &etag, action) {
+            Ok((cvm, _)) => cvm,
+            Err((status, message)) => {
+                style::eprintln_error(&message);
+                return status;
+            }
+        };
     print_lifecycle_result(action, &cvm, json_output);
     ExitStatus::Ok
 }
 
 fn update(config: &ResolvedConfig, args: CvmUpdateArgs, json_output: bool) -> ExitStatus {
     if let Err(message) = validate_uuid("CVM_ID", &args.cvm_id) {
-        eprintln!("{message}");
+        style::eprintln_error(&message);
         return ExitStatus::Usage;
     }
-    let (console_url, session) = match console_session(config) {
+    let (console_url, session) = match crate::console::console_session(config) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            style::eprintln_error(&message);
             return status;
         }
     };
-    let current = match fetch_cvm_with_etag(console_url, &session, &args.cvm_id) {
+    let (_, etag) = match fetch_cvm_with_etag(console_url, &session, &args.cvm_id) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            style::eprintln_error(&message);
             return status;
         }
     };
-    let operation = match submit_update(
-        console_url,
-        &session.access_token,
-        &args.cvm_id,
-        &current.etag,
-    ) {
+    let op = match submit_update(console_url, &session.access_token, &args.cvm_id, &etag) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            style::eprintln_error(&message);
             return status;
         }
     };
     if args.no_wait {
-        print_operation(&operation, json_output, false);
+        operation::print_operation(&op, json_output, false);
         return ExitStatus::Ok;
     }
-    let operation = match wait_for_operation(
+    let op = match operation::wait_for_operation(
         console_url,
         &session.access_token,
-        operation,
+        op,
         Duration::from_secs(u64::from(args.wait_timeout_seconds)),
         json_output,
+        true,
     ) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            if !message.is_empty() {
+                style::eprintln_error(&message);
+            }
             return status;
         }
     };
-    let result = match cvm_launch_result(&operation) {
+    let result: CvmLaunchResult = match operation::extract_operation_result(&op, "CVM launch") {
         Ok(value) => value,
         Err(message) => {
-            eprintln!("{message}");
+            style::eprintln_error(&message);
             return ExitStatus::Error;
         }
     };
@@ -467,7 +426,7 @@ fn update(config: &ResolvedConfig, args: CvmUpdateArgs, json_output: bool) -> Ex
         match write_policy_file(&config.config_dir, &result.policy_bundle, &result.cvm.id) {
             Ok(value) => value,
             Err(message) => {
-                eprintln!("{message}");
+                style::eprintln_error(&message);
                 return ExitStatus::Error;
             }
         };
@@ -477,56 +436,54 @@ fn update(config: &ResolvedConfig, args: CvmUpdateArgs, json_output: bool) -> Ex
 
 fn terminate(config: &ResolvedConfig, args: CvmTerminateArgs, json_output: bool) -> ExitStatus {
     if let Err(message) = validate_uuid("CVM_ID", &args.cvm_id) {
-        eprintln!("{message}");
+        style::eprintln_error(&message);
         return ExitStatus::Usage;
     }
-    let (console_url, session) = match console_session(config) {
+    let (console_url, session) = match crate::console::console_session(config) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            style::eprintln_error(&message);
             return status;
         }
     };
-    let current = match fetch_cvm_with_etag(console_url, &session, &args.cvm_id) {
+    let (_, etag) = match fetch_cvm_with_etag(console_url, &session, &args.cvm_id) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            style::eprintln_error(&message);
             return status;
         }
     };
-    let operation = match submit_terminate(
-        console_url,
-        &session.access_token,
-        &args.cvm_id,
-        &current.etag,
-    ) {
+    let op = match submit_terminate(console_url, &session.access_token, &args.cvm_id, &etag) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            style::eprintln_error(&message);
             return status;
         }
     };
     if args.no_wait {
-        print_operation(&operation, json_output, false);
+        operation::print_operation(&op, json_output, false);
         return ExitStatus::Ok;
     }
-    let operation = match wait_for_operation(
+    let op = match operation::wait_for_operation(
         console_url,
         &session.access_token,
-        operation,
+        op,
         Duration::from_secs(u64::from(args.wait_timeout_seconds)),
         json_output,
+        true,
     ) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            if !message.is_empty() {
+                style::eprintln_error(&message);
+            }
             return status;
         }
     };
-    let cvm = match operation_cvm_result(&operation) {
+    let cvm: Cvm = match operation::extract_operation_result(&op, "CVM") {
         Ok(value) => value,
         Err(message) => {
-            eprintln!("{message}");
+            style::eprintln_error(&message);
             return ExitStatus::Error;
         }
     };
@@ -616,7 +573,14 @@ fn auto_select_profile(
         .collect::<Vec<_>>();
     match assigned.as_slice() {
         [profile] => {
-            eprintln!("using profile {} ({})", profile.name, profile.id);
+            // Informational status note on stderr, styled per section 6.5
+            // info_line (cyan, terse, never crosses into stdout). This is
+            // NOT an error, NOT a confirm block -- just guidance during
+            // auto-resolution of a single-value default.
+            eprintln!(
+                "{}",
+                style::info_line(&format!("using profile {} ({})", profile.name, profile.id))
+            );
             Ok(vec![profile.id.clone()])
         }
         [] => Err((
@@ -624,9 +588,12 @@ fn auto_select_profile(
             "[usage] no assigned profiles found; ask an admin to assign you a profile".to_string(),
         )),
         profiles => {
-            eprintln!("available profiles:");
+            eprintln!("{}", style::info_line("available profiles:"));
             for profile in profiles {
-                eprintln!("  {} {}", profile.id, profile.name);
+                eprintln!(
+                    "{}",
+                    style::info_line(&format!("  {} {}", profile.id, profile.name))
+                );
             }
             Err((
                 ExitStatus::Usage,
@@ -665,28 +632,29 @@ fn selected_launch_ssh_keys(
             .map(|key| key.id.clone())
             .collect::<Vec<_>>();
         eprintln!(
-            "using registered SSH key{} {}",
-            if key_ids.len() == 1 { "" } else { "s" },
-            keys.items
-                .iter()
-                .map(|key| format!("{} ({})", key.label, key.id))
-                .collect::<Vec<_>>()
-                .join(", ")
+            "{}",
+            style::info_line(&format!(
+                "using registered SSH key{} {}",
+                if key_ids.len() == 1 { "" } else { "s" },
+                keys.items
+                    .iter()
+                    .map(|key| format!("{} ({})", key.label, key.id))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
         );
         return Ok(key_ids);
     }
     let public_key = ensure_default_ssh_public_key(config)?;
     let key = create_launch_key(console_url, session, "default", &public_key)?;
-    eprintln!("created and registered SSH key default ({})", key.id);
+    eprintln!(
+        "{}",
+        style::info_line(&format!(
+            "created and registered SSH key default ({})",
+            key.id
+        ))
+    );
     Ok(vec![key.id])
-}
-
-fn console_session(config: &ResolvedConfig) -> Result<(&str, Session), (ExitStatus, String)> {
-    let console_url = config
-        .require_console_url()
-        .map_err(|message| (ExitStatus::Usage, message))?;
-    let session = auth::session_for_console(config)?;
-    Ok((console_url, session))
 }
 
 fn fetch_launch_profiles(
@@ -842,7 +810,10 @@ fn ensure_default_ssh_public_key(config: &ResolvedConfig) -> Result<String, (Exi
             format!("[error] {} is empty", public_key.display()),
         ));
     }
-    eprintln!("using local SSH key {}", public_key.display());
+    eprintln!(
+        "{}",
+        style::info_line(&format!("using local SSH key {}", public_key.display()))
+    );
     Ok(public_key_value.to_string())
 }
 
@@ -966,7 +937,7 @@ fn fetch_cvm_with_etag(
     console_url: &str,
     session: &Session,
     cvm_id: &str,
-) -> Result<CvmWithEtag, (ExitStatus, String)> {
+) -> Result<(Cvm, String), (ExitStatus, String)> {
     let response = Client::new()
         .get(format!("{console_url}/api/v1/cvms/{cvm_id}"))
         .bearer_auth(&session.access_token)
@@ -977,7 +948,7 @@ fn fetch_cvm_with_etag(
                 format!("[error] failed to fetch CVM: {err}"),
             )
         })?;
-    read_cvm_with_etag(response, "fetch CVM")
+    read_with_etag::<Cvm>(response, "fetch CVM")
 }
 
 fn submit_launch(
@@ -1034,7 +1005,7 @@ fn mutate_profile(
     etag: &str,
     profile_id: &str,
     mutation: Mutation,
-) -> Result<CvmWithEtag, (ExitStatus, String)> {
+) -> Result<(Cvm, String), (ExitStatus, String)> {
     let client = Client::new();
     let request = match mutation {
         Mutation::Attach => client
@@ -1055,7 +1026,7 @@ fn mutate_profile(
                 format!("[error] failed to {} CVM profile: {err}", mutation.as_str()),
             )
         })?;
-    read_cvm_with_etag(response, mutation.as_str())
+    read_with_etag::<Cvm>(response, mutation.as_str())
 }
 
 fn submit_lifecycle_action(
@@ -1064,7 +1035,7 @@ fn submit_lifecycle_action(
     cvm_id: &str,
     etag: &str,
     action: LifecycleAction,
-) -> Result<CvmWithEtag, (ExitStatus, String)> {
+) -> Result<(Cvm, String), (ExitStatus, String)> {
     let response = Client::new()
         .post(format!(
             "{console_url}/api/v1/cvms/{cvm_id}/actions/{}",
@@ -1080,7 +1051,7 @@ fn submit_lifecycle_action(
                 format!("[error] failed to {} CVM: {err}", action.as_str()),
             )
         })?;
-    read_cvm_with_etag(response, action.as_str())
+    read_with_etag::<Cvm>(response, action.as_str())
 }
 
 fn submit_update(
@@ -1125,162 +1096,6 @@ fn submit_terminate(
             )
         })?;
     read_json_response(response, "submit CVM termination")
-}
-
-fn fetch_operation(
-    console_url: &str,
-    access_token: &str,
-    operation_id: &str,
-) -> Result<OperationPoll, (ExitStatus, String)> {
-    let response = Client::new()
-        .get(format!("{console_url}/api/v1/operations/{operation_id}"))
-        .bearer_auth(access_token)
-        .send()
-        .map_err(|err| {
-            (
-                ExitStatus::Error,
-                format!("[error] failed to poll operation: {err}"),
-            )
-        })?;
-    if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-        return Ok(OperationPoll::RateLimited(retry_after(&response)));
-    }
-    read_json_response(response, "poll operation")
-        .map(|operation| OperationPoll::Operation(Box::new(operation)))
-}
-
-fn wait_for_operation(
-    console_url: &str,
-    access_token: &str,
-    mut operation: Operation,
-    timeout: Duration,
-    json_output: bool,
-) -> Result<Operation, (ExitStatus, String)> {
-    let started = Instant::now();
-    let mut excluded = Duration::ZERO;
-    loop {
-        match operation.status.as_str() {
-            "succeeded" => return Ok(operation),
-            "failed" => return Err((ExitStatus::Error, operation_failure_message(&operation))),
-            "cancelled" => {
-                return Err((
-                    ExitStatus::Error,
-                    "[cancelled] operation was cancelled".to_string(),
-                ));
-            }
-            "pending" | "running" => {}
-            status => {
-                return Err((
-                    ExitStatus::Error,
-                    format!("[error] operation returned unknown status: {status}"),
-                ));
-            }
-        }
-        if Instant::now()
-            .duration_since(started)
-            .saturating_sub(excluded)
-            >= timeout
-        {
-            print_operation(&operation, json_output, true);
-            return Err((
-                ExitStatus::WaitTimeout,
-                "[wait_timeout] operation did not complete before timeout".to_string(),
-            ));
-        }
-        thread::sleep(Duration::from_secs(1));
-        match fetch_operation(console_url, access_token, &operation.id)? {
-            OperationPoll::Operation(next) => operation = *next,
-            OperationPoll::RateLimited(delay) => {
-                thread::sleep(delay);
-                excluded += delay;
-            }
-        }
-    }
-}
-
-fn read_cvm_with_etag(
-    response: Response,
-    action: &str,
-) -> Result<CvmWithEtag, (ExitStatus, String)> {
-    if !response.status().is_success() {
-        return Err(error_for_response(response, action));
-    }
-    let etag = response
-        .headers()
-        .get(ETAG)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_string)
-        .ok_or_else(|| {
-            (
-                ExitStatus::Error,
-                format!("[error] {action} response did not include ETag"),
-            )
-        })?;
-    let cvm = response.json::<Cvm>().map_err(|err| {
-        (
-            ExitStatus::Error,
-            format!("[error] malformed {action} response: {err}"),
-        )
-    })?;
-    Ok(CvmWithEtag { cvm, etag })
-}
-
-pub(crate) fn read_json_response<T: for<'de> Deserialize<'de>>(
-    response: Response,
-    action: &str,
-) -> Result<T, (ExitStatus, String)> {
-    if !response.status().is_success() {
-        return Err(error_for_response(response, action));
-    }
-    let body = response.bytes().map_err(|err| {
-        (
-            ExitStatus::Error,
-            format!("[error] failed to read {action} response: {err}"),
-        )
-    })?;
-    serde_json::from_slice::<T>(&body).map_err(|err| {
-        operation_debug::log_poll_decode_failure(action, &body, &err);
-        (
-            ExitStatus::Error,
-            format!("[error] malformed {action} response: {err}"),
-        )
-    })
-}
-
-fn retry_after(response: &Response) -> Duration {
-    response
-        .headers()
-        .get(RETRY_AFTER)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<u64>().ok())
-        .map(|seconds| Duration::from_secs(seconds.max(1)))
-        .unwrap_or_else(|| Duration::from_secs(1))
-}
-
-fn operation_failure_message(operation: &Operation) -> String {
-    if let Some(error) = &operation.error {
-        format!("[{}] {}", error.code, error.message)
-    } else {
-        "[error] operation failed".to_string()
-    }
-}
-
-fn cvm_launch_result(operation: &Operation) -> Result<CvmLaunchResult, String> {
-    let result = operation
-        .result
-        .clone()
-        .ok_or_else(|| "[error] CVM launch operation succeeded without result".to_string())?;
-    serde_json::from_value::<CvmLaunchResult>(result)
-        .map_err(|err| format!("[error] malformed CVM launch result: {err}"))
-}
-
-fn operation_cvm_result(operation: &Operation) -> Result<Cvm, String> {
-    let result = operation
-        .result
-        .clone()
-        .ok_or_else(|| "[error] CVM operation succeeded without result".to_string())?;
-    serde_json::from_value::<Cvm>(result)
-        .map_err(|err| format!("[error] malformed CVM result: {err}"))
 }
 
 pub(crate) fn write_policy_file(
@@ -1390,98 +1205,38 @@ fn policy_document(bundle: &PolicyBundle) -> Value {
     policy
 }
 
-fn error_for_response(response: Response, action: &str) -> (ExitStatus, String) {
-    let status = response.status();
-    let exit = if status == reqwest::StatusCode::UNAUTHORIZED {
-        ExitStatus::AuthRequired
-    } else if status == reqwest::StatusCode::BAD_REQUEST
-        || status == reqwest::StatusCode::UNPROCESSABLE_ENTITY
-    {
-        ExitStatus::Usage
-    } else {
-        ExitStatus::Error
-    };
-    let text = response.text().unwrap_or_default();
-    let message =
-        console_error_message(&text).unwrap_or_else(|| format!("{action} failed: HTTP {status}"));
-    let tag = if matches!(exit, ExitStatus::AuthRequired) {
-        "auth_required"
-    } else if matches!(exit, ExitStatus::Usage) {
-        "usage"
-    } else {
-        "error"
-    };
-    (exit, format!("[{tag}] {message}"))
-}
-
-fn console_error_message(body: &str) -> Option<String> {
-    let value: Value = serde_json::from_str(body).ok()?;
-    let error = value.get("error")?;
-    let message = error.get("message")?.as_str()?;
-    let code = error.get("code").and_then(|value| value.as_str());
-    let details = error.get("details");
-    let state = details
-        .and_then(|details| details.get("state"))
-        .and_then(|value| value.as_str());
-    let required = details
-        .and_then(|details| details.get("required"))
-        .and_then(|value| value.as_str());
-    let component = details
-        .and_then(|details| details.get("component"))
-        .and_then(|value| value.as_str());
-    let validation_type = details
-        .and_then(|details| details.get("errors"))
-        .and_then(|errors| errors.as_array())
-        .and_then(|errors| errors.first())
-        .and_then(|error| error.get("type"))
-        .and_then(|value| value.as_str());
-    Some(match (state, required, component, validation_type, code) {
-        (Some(state), _, _, _, _) => format!("{message} ({state})"),
-        (_, Some(required), _, _, _) => format!("{message} ({required})"),
-        (_, _, Some(component), _, _) => format!("{message} ({component})"),
-        (_, _, _, Some(validation_type), _) => format!("{message} ({validation_type})"),
-        (_, _, _, _, Some(code)) if code != "UNAUTHORIZED" && code != "VALIDATION_ERROR" => {
-            format!("{message} ({code})")
-        }
-        _ => message.to_string(),
-    })
-}
-
-fn print_cvm_list(page: CvmListPage, json_output: bool) {
+fn print_cvm_list(page: CvmListPage, json_output: bool, profile_filter: Option<&str>) {
     if json_output {
         println!(
             "{}",
             serde_json::to_string_pretty(&page.items).expect("CVM list output serializes")
         );
-    } else if page.items.is_empty() {
-        println!("no cvms");
-    } else {
-        for cvm in &page.items {
-            println!("{}", cvm_summary(cvm));
-        }
-        if let Some(cursor) = page.next_cursor {
-            eprintln!("next cursor: {cursor}");
-        }
+        return;
     }
-}
-
-fn print_operation(operation: &Operation, json_output: bool, stderr: bool) {
-    let text = if json_output {
-        serde_json::to_string_pretty(operation).expect("operation output serializes")
-    } else {
-        format!(
-            "operation {} kind={} status={} target={}/{}",
-            operation.id,
-            operation.kind,
-            operation.status,
-            operation.target.kind,
-            operation.target.id.as_deref().unwrap_or("-")
-        )
+    let views: Vec<style::CvmView<'_>> = page
+        .items
+        .iter()
+        .map(|cvm| style::CvmView {
+            id: &cvm.id,
+            state: &cvm.state,
+            error_reason: cvm.error_reason.as_deref(),
+            fqdn: cvm.fqdn.as_deref(),
+            instance_type: cvm.instance_type.as_deref(),
+            region: cvm.region.as_deref(),
+            profile_names: cvm.profiles.iter().map(|p| p.name.clone()).collect(),
+            ssh_key_labels: cvm.ssh_keys.iter().map(|k| k.label.clone()).collect(),
+            owner_email: &cvm.owner.email,
+            created_at: &cvm.created_at,
+            updated_at: &cvm.updated_at,
+            extra: &cvm.extra,
+        })
+        .collect();
+    let filter = style::CvmListFilter {
+        profile: profile_filter.map(str::to_string),
     };
-    if stderr {
-        eprintln!("{text}");
-    } else {
-        println!("{text}");
+    println!("{}", style::cvm_list_cards(&views, &filter));
+    if let Some(cursor) = page.next_cursor {
+        eprintln!("{}", style::next_cursor_diagnostic(&cursor));
     }
 }
 
@@ -1496,11 +1251,13 @@ fn print_launch_result(cvm: Cvm, policy_file: PathBuf, json_output: bool) {
             serde_json::to_string_pretty(&output).expect("CVM launch output serializes")
         );
     } else {
-        println!(
-            "launched {} policy_file={}",
-            cvm_summary(&cvm),
-            policy_file.display()
-        );
+        let cvm_id = cvm.id.clone();
+        let confirm = style::ConfirmBlock::new("launched", "cvm", cvm_id.clone())
+            .field("fqdn", cvm.fqdn.clone().unwrap_or_else(|| "-".to_string()))
+            .field("state", cvm.state.clone())
+            .field("policy file", policy_file.display().to_string())
+            .next_step(format!("concrete ssh {cvm_id}"));
+        println!("{}", style::render_confirm(&confirm));
     }
 }
 
@@ -1511,7 +1268,8 @@ fn print_lifecycle_result(action: LifecycleAction, cvm: &Cvm, json_output: bool)
             serde_json::to_string_pretty(cvm).expect("CVM output serializes")
         );
     } else {
-        println!("{} {}", action.past_tense(), cvm_summary(cvm));
+        let confirm = style::ConfirmBlock::new(action.past_tense(), "cvm", cvm.id.clone());
+        println!("{}", style::render_confirm(&confirm));
     }
 }
 
@@ -1526,11 +1284,13 @@ fn print_update_result(cvm: Cvm, policy_file: PathBuf, json_output: bool) {
             serde_json::to_string_pretty(&output).expect("CVM update output serializes")
         );
     } else {
-        println!(
-            "updated {} policy_file={}",
-            cvm_summary(&cvm),
-            policy_file.display()
-        );
+        let cvm_id = cvm.id.clone();
+        let confirm = style::ConfirmBlock::new("updated", "cvm", cvm_id.clone())
+            .field("fqdn", cvm.fqdn.clone().unwrap_or_else(|| "-".to_string()))
+            .field("state", cvm.state.clone())
+            .field("policy file", policy_file.display().to_string())
+            .next_step(format!("concrete ssh {cvm_id}"));
+        println!("{}", style::render_confirm(&confirm));
     }
 }
 
@@ -1541,35 +1301,10 @@ fn print_terminate_result(cvm: &Cvm, json_output: bool) {
             serde_json::to_string_pretty(cvm).expect("CVM output serializes")
         );
     } else {
-        println!("terminated {}", cvm_summary(cvm));
+        let confirm = style::ConfirmBlock::new("terminated", "cvm", cvm.id.clone())
+            .field("state", cvm.state.clone());
+        println!("{}", style::render_confirm(&confirm));
     }
-}
-
-fn cvm_summary(cvm: &Cvm) -> String {
-    format!(
-        "cvm {} state={} fqdn={} owner={} profiles={} ssh_keys={} updated_at={}",
-        cvm.id,
-        cvm.state,
-        cvm.fqdn.as_deref().unwrap_or("-"),
-        cvm.owner.email,
-        cvm.profiles
-            .iter()
-            .map(|profile| profile.name.as_str())
-            .collect::<Vec<_>>()
-            .join(","),
-        cvm.ssh_keys
-            .iter()
-            .map(|key| key.label.as_str())
-            .collect::<Vec<_>>()
-            .join(","),
-        cvm.updated_at
-    )
-}
-
-fn validate_uuid(name: &str, value: &str) -> Result<(), String> {
-    Uuid::parse_str(value)
-        .map(|_| ())
-        .map_err(|_| format!("[usage] {name} must be a UUID"))
 }
 
 fn validate_cvm_config_value(name: &str, value: &str) -> Result<(), String> {
@@ -1590,36 +1325,6 @@ fn validate_cvm_config_value(name: &str, value: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn console_error_message_includes_last_profile_state() {
-        let body = r#"{"error":{"code":"CONFLICT","message":"cannot detach the last CVM profile","details":{"state":"last_profile"}}}"#;
-
-        assert_eq!(
-            console_error_message(body).as_deref(),
-            Some("cannot detach the last CVM profile (last_profile)")
-        );
-    }
-
-    #[test]
-    fn console_error_message_includes_required_membership() {
-        let body = r#"{"error":{"code":"FORBIDDEN","message":"profile membership is required","details":{"required":"profile_member"}}}"#;
-
-        assert_eq!(
-            console_error_message(body).as_deref(),
-            Some("profile membership is required (profile_member)")
-        );
-    }
-
-    #[test]
-    fn console_error_message_includes_missing_component() {
-        let body = r#"{"error":{"code":"SERVICE_UNAVAILABLE","message":"Dev CVM image is not configured","details":{"component":"dev_cvm_image"}}}"#;
-
-        assert_eq!(
-            console_error_message(body).as_deref(),
-            Some("Dev CVM image is not configured (dev_cvm_image)")
-        );
-    }
 
     #[test]
     fn policy_document_maps_policy_bundle_to_atls_policy() {

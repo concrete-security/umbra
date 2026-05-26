@@ -19,6 +19,7 @@ use crate::{
     config::{self, ConfigSource, ResolvedConfig},
     exit::ExitStatus,
     session::{self, Entity, Session},
+    style,
 };
 
 #[derive(Debug, Deserialize)]
@@ -143,13 +144,13 @@ fn login(
 ) -> ExitStatus {
     let provider = provider.unwrap_or_else(|| config.oidc_provider.clone());
     if provider != "google" {
-        eprintln!("[usage] unsupported OIDC provider: {provider}");
+        crate::style::eprintln_error(&format!("[usage] unsupported OIDC provider: {provider}"));
         return ExitStatus::Usage;
     }
     let console_url_value = match selected_console_url(config, console_url_arg.as_deref()) {
         Ok(value) => value,
         Err(message) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return ExitStatus::Usage;
         }
     };
@@ -167,7 +168,7 @@ fn login(
         ) {
             Ok(()) => ExitStatus::Ok,
             Err((status, message)) => {
-                eprintln!("{message}");
+                crate::style::eprintln_error(&message);
                 status
             }
         };
@@ -175,28 +176,45 @@ fn login(
     let start = match device_start(&client, console_url, &provider) {
         Ok(value) => value,
         Err(message) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return ExitStatus::Error;
         }
     };
-    eprintln!("Open this URL to authenticate: {}", start.verification_url);
-    eprintln!("Enter code: {}", start.user_code);
+    // Section 7.18 device-flow prompts: emit through the Layer 2 helper so
+    // the activation rules (no ANSI when colors are off) apply.
+    eprintln!(
+        "{}",
+        style::info_line(&format!(
+            "Open this URL to authenticate: {}",
+            start.verification_url
+        ))
+    );
+    eprintln!(
+        "{}",
+        style::info_line(&format!("Enter code: {}", start.user_code))
+    );
     if let Some(verification_url_complete) = start
         .verification_url_complete
         .as_deref()
         .filter(|value| !value.is_empty())
     {
-        eprintln!("Complete URL: {verification_url_complete}");
+        eprintln!(
+            "{}",
+            style::info_line(&format!("Complete URL: {verification_url_complete}"))
+        );
     }
     eprintln!(
-        "Code expires in {} seconds; approve before it expires.",
-        start.expires_in
+        "{}",
+        style::info_line(&format!(
+            "Code expires in {} seconds; approve before it expires.",
+            start.expires_in
+        ))
     );
 
     let token_pair = match poll_device(&client, console_url, &start) {
         Ok(value) => value,
         Err(message) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return ExitStatus::Error;
         }
     };
@@ -207,10 +225,11 @@ fn login(
         persist_console_url,
         token_pair,
         json_output,
+        None,
     ) {
         Ok(()) => ExitStatus::Ok,
         Err((status, message)) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             status
         }
     }
@@ -277,18 +296,32 @@ fn loopback_login(
     )
     .map_err(|message| (ExitStatus::Error, message))?;
 
+    // Section 7.18: the loopback saga has 4 CLI-side steps. This is the
+    // documented exception to the no-hardcode rule (section 6.3) -- the saga
+    // never touches the Console so the CLI MUST declare the labels.
+    let mut steps: Option<style::StepsRenderer> = (!json_output).then(style::new_stderr_steps);
+
+    if let Some(s) = steps.as_mut() {
+        s.observe("open_browser", style::OperationStatus::Running);
+    }
     webbrowser::open(authorize_url.as_str()).map_err(|err| {
         (
             ExitStatus::Error,
             format!("[error] failed to open browser; rerun with --device if this host is headless: {err}"),
         )
     })?;
-    eprintln!("Opened browser for authentication.");
 
+    if let Some(s) = steps.as_mut() {
+        s.observe("await_callback", style::OperationStatus::Running);
+    }
     let code = Zeroizing::new(
         wait_for_loopback_code(&listener, &state, Duration::from_secs(300))
             .map_err(|message| (ExitStatus::Error, message))?,
     );
+
+    if let Some(s) = steps.as_mut() {
+        s.observe("exchange_tokens", style::OperationStatus::Running);
+    }
     let token_pair = exchange_loopback_token(
         client,
         console_url,
@@ -297,6 +330,10 @@ fn loopback_login(
         &redirect_uri,
         &config.oidc_client_id,
     )?;
+
+    if let Some(s) = steps.as_mut() {
+        s.observe("fetch_profile", style::OperationStatus::Running);
+    }
     complete_login(
         client,
         console_url,
@@ -304,6 +341,7 @@ fn loopback_login(
         persist_console_url,
         token_pair,
         json_output,
+        steps,
     )
 }
 
@@ -547,6 +585,7 @@ fn complete_login(
     persist_console_url: bool,
     token_pair: TokenPair,
     json_output: bool,
+    steps: Option<style::StepsRenderer>,
 ) -> Result<(), (ExitStatus, String)> {
     let me = client
         .get(format!("{console_url}/api/v1/me"))
@@ -606,11 +645,24 @@ fn complete_login(
             })
         );
     } else {
-        println!(
-            "logged in as {} until {}",
-            session.email,
-            format_time(session.expires_at)
-        );
+        let session_path = session::session_path(config_dir).display().to_string();
+        let confirm = style::ConfirmBlock::new("signed in as", "", session.email.clone())
+            .field(
+                "entity",
+                format!("{}  ({})", session.entity.name, session.entity.id),
+            )
+            .field("session", session_path)
+            .field(
+                "expires at",
+                style::format_timestamp(&format_time(session.expires_at)),
+            );
+        // When the steps renderer is active, route the confirm block through
+        // it so the final step transitions to `done` before the confirm prints.
+        if let Some(s) = steps {
+            s.finalize_success(&confirm);
+        } else {
+            println!("{}", style::render_confirm(&confirm));
+        }
     }
     Ok(())
 }
@@ -627,15 +679,16 @@ fn refresh(config: &ResolvedConfig, json_output: bool) -> ExitStatus {
                     })
                 );
             } else {
-                println!(
-                    "session refreshed until {}",
-                    format_time(session.expires_at)
+                let confirm = style::ConfirmBlock::new("refreshed", "", "session").field(
+                    "expires at",
+                    style::format_timestamp(&format_time(session.expires_at)),
                 );
+                println!("{}", style::render_confirm(&confirm));
             }
             ExitStatus::Ok
         }
         Err((status, message)) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             status
         }
     }
@@ -645,7 +698,7 @@ fn token(config: &ResolvedConfig) -> ExitStatus {
     let session = match load_session_or_auth_required(config) {
         Ok(session) => session,
         Err((status, message)) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return status;
         }
     };
@@ -659,7 +712,7 @@ fn token(config: &ResolvedConfig) -> ExitStatus {
             ExitStatus::Ok
         }
         Err((status, message)) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             status
         }
     }
@@ -763,14 +816,14 @@ fn logout(config: &ResolvedConfig, json_output: bool) -> ExitStatus {
     let session = match session::load(&config.config_dir) {
         Ok(value) => value,
         Err(message) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return ExitStatus::Error;
         }
     };
     let cleared = match session::remove(&config.config_dir) {
         Ok(value) => value,
         Err(message) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return ExitStatus::Error;
         }
     };
@@ -784,9 +837,15 @@ fn logout(config: &ResolvedConfig, json_output: bool) -> ExitStatus {
     if json_output {
         println!("{}", serde_json::json!({ "cleared": cleared }));
     } else if cleared {
-        println!("logged out");
+        let session_path = session::session_path(&config.config_dir)
+            .display()
+            .to_string();
+        let confirm = style::ConfirmBlock::new("signed", "", "out")
+            .field("session", format!("removed: {session_path}"));
+        println!("{}", style::render_confirm(&confirm));
     } else {
-        println!("no session");
+        let confirm = style::ConfirmBlock::new("no session", "", "");
+        println!("{}", style::render_confirm(&confirm));
     }
     ExitStatus::Ok
 }
@@ -795,11 +854,37 @@ fn status(config: &ResolvedConfig, json_output: bool) -> ExitStatus {
     let session = match session::load(&config.config_dir) {
         Ok(Some(value)) => value,
         Ok(None) => {
-            eprintln!("[auth_required] no session found");
+            // Section 7.21 empty-state: when no session is loaded, the
+            // renderer emits `no session` styled muted on stdout. The exit
+            // code remains AuthRequired per cli.md.
+            if json_output {
+                println!("{}", serde_json::json!({ "session": null }));
+            } else {
+                // Build an empty AuthStatusView so the renderer emits the
+                // `no session` literal exactly once. This keeps the
+                // rendering path consolidated in style.rs.
+                let view = style::AuthStatusView {
+                    user_id: None,
+                    user_email: None,
+                    entity_id: None,
+                    entity_name: None,
+                    access_token_state: "missing",
+                    access_token_expires_at: None,
+                    refresh_token_state: "missing",
+                    refresh_token_expires_at: None,
+                    config_dir: "",
+                    config_dir_source: "default",
+                    console_url: None,
+                    console_url_source: "default",
+                    session_path: "",
+                    session_permissions: None,
+                };
+                println!("{}", style::auth_status_card(&view));
+            }
             return ExitStatus::AuthRequired;
         }
         Err(message) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return ExitStatus::Error;
         }
     };
@@ -807,9 +892,9 @@ fn status(config: &ResolvedConfig, json_output: bool) -> ExitStatus {
     let remaining = (session.expires_at - now).num_seconds();
     let access_state = if remaining > 0 { "valid" } else { "expired" };
     let refresh_state = match session.refresh_expires_at {
-        Some(expires_at) if expires_at > now => "available",
+        Some(expires_at) if expires_at > now => "valid",
         Some(_) => "expired",
-        None => "absent",
+        None => "missing",
     };
 
     if json_output {
@@ -848,46 +933,30 @@ fn status(config: &ResolvedConfig, json_output: bool) -> ExitStatus {
             serde_json::to_string_pretty(&payload).expect("status payload serializes")
         );
     } else {
-        println!("user:    {} ({})", session.email, session.user_id);
-        println!("entity:  {} ({})", session.entity.name, session.entity.id);
-        println!(
-            "config:  {} ({})",
-            config.config_dir.display(),
-            config.config_dir_source.as_str()
-        );
-        println!(
-            "console: {} ({})",
-            config.console_url.as_deref().unwrap_or("<unset>"),
-            config.console_url_source.as_str()
-        );
-        println!(
-            "provider: {} ({})",
-            config.oidc_provider,
-            config.oidc_provider_source.as_str()
-        );
-        println!(
-            "client_id: {} ({})",
-            config.oidc_client_id,
-            config.oidc_client_id_source.as_str()
-        );
-        println!(
-            "session_file: {}{}",
-            session::session_path(&config.config_dir).display(),
-            session::mode_string(&config.config_dir)
-                .map(|mode| format!(" ({mode})"))
-                .unwrap_or_default()
-        );
-        println!(
-            "access:  {access_state} until {}",
-            format_time(session.expires_at)
-        );
-        println!(
-            "refresh: {refresh_state}{}",
-            session
-                .refresh_expires_at
-                .map(|value| format!(" until {}", format_time(value)))
-                .unwrap_or_default()
-        );
+        let config_dir = config.config_dir.display().to_string();
+        let session_path = session::session_path(&config.config_dir)
+            .display()
+            .to_string();
+        let session_mode = session::mode_string(&config.config_dir);
+        let access_expires = format_time(session.expires_at);
+        let refresh_expires = session.refresh_expires_at.map(format_time);
+        let view = style::AuthStatusView {
+            user_id: Some(&session.user_id),
+            user_email: Some(&session.email),
+            entity_id: Some(&session.entity.id),
+            entity_name: Some(&session.entity.name),
+            access_token_state: access_state,
+            access_token_expires_at: Some(&access_expires),
+            refresh_token_state: refresh_state,
+            refresh_token_expires_at: refresh_expires.as_deref(),
+            config_dir: &config_dir,
+            config_dir_source: config.config_dir_source.as_str(),
+            console_url: config.console_url.as_deref(),
+            console_url_source: config.console_url_source.as_str(),
+            session_path: &session_path,
+            session_permissions: session_mode.as_deref(),
+        };
+        println!("{}", style::auth_status_card(&view));
     }
     ExitStatus::Ok
 }

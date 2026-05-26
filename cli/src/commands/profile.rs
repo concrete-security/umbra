@@ -1,23 +1,22 @@
 use std::{
+    collections::BTreeMap,
     fs,
     io::{self, Read},
     path::Path,
 };
 
-use reqwest::{
-    blocking::{Client, Response},
-    header::{ETAG, IF_MATCH},
-};
+use reqwest::{blocking::Client, header::IF_MATCH};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use uuid::Uuid;
 
 use crate::{
     cli::{ProfileCommand, ProfileConfigureArgs, ProfileCreateArgs, ProfileMembersCommand},
-    commands::auth,
     config::ResolvedConfig,
+    console::{self, console_session, read_empty_response, read_json_response, read_with_etag},
     exit::ExitStatus,
     session::Session,
+    style,
 };
 
 #[derive(Debug, Deserialize)]
@@ -44,6 +43,9 @@ struct Profile {
     attached_cvm_count: u64,
     created_at: String,
     updated_at: String,
+
+    #[serde(flatten, default, skip_serializing)]
+    extra: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -85,21 +87,21 @@ pub fn run(command: ProfileCommand, config: &ResolvedConfig, json: bool) -> Exit
 fn create(config: &ResolvedConfig, args: ProfileCreateArgs, json_output: bool) -> ExitStatus {
     let name = args.name.trim();
     if name.is_empty() {
-        eprintln!("[usage] NAME must not be empty");
+        crate::style::eprintln_error("[usage] NAME must not be empty");
         return ExitStatus::Usage;
     }
     let description = args.description.unwrap_or_default();
     let (console_url, session) = match console_session(config) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return status;
         }
     };
     let profile = match create_profile(console_url, &session, name, &description) {
         Ok(value) => value.profile,
         Err((status, message)) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return status;
         }
     };
@@ -109,7 +111,13 @@ fn create(config: &ResolvedConfig, args: ProfileCreateArgs, json_output: bool) -
             serde_json::to_string_pretty(&profile).expect("profile create output serializes")
         );
     } else {
-        println!("created profile {} {}", profile.id, profile.name);
+        let confirm = style::ConfirmBlock::new("created", "profile", profile.name.clone())
+            .field("id", profile.id.clone())
+            .next_step(format!(
+                "concrete profile members add <user-id> --profile {}",
+                profile.id
+            ));
+        println!("{}", style::render_confirm(&confirm));
     }
     ExitStatus::Ok
 }
@@ -118,14 +126,14 @@ fn list(config: &ResolvedConfig, json_output: bool) -> ExitStatus {
     let (console_url, session) = match console_session(config) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return status;
         }
     };
     let page = match fetch_profiles(console_url, &session) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return status;
         }
     };
@@ -134,21 +142,24 @@ fn list(config: &ResolvedConfig, json_output: bool) -> ExitStatus {
             "{}",
             serde_json::to_string_pretty(&page.items).expect("profile list output serializes")
         );
-    } else if page.items.is_empty() {
-        println!("no profiles");
     } else {
-        for profile in &page.items {
-            println!(
-                "{} {} assigned={} cvms={} updated_at={}",
-                profile.id,
-                profile.name,
-                profile.assigned,
-                profile.attached_cvm_count,
-                profile.updated_at
-            );
-        }
+        let views: Vec<style::ProfileView<'_>> = page
+            .items
+            .iter()
+            .map(|p| style::ProfileView {
+                id: &p.id,
+                name: &p.name,
+                assigned: p.assigned,
+                attached_cvm_count: p.attached_cvm_count,
+                attached_cvm_ids: p.attached_cvms.iter().map(|c| c.id.clone()).collect(),
+                created_at: &p.created_at,
+                updated_at: &p.updated_at,
+                extra: &p.extra,
+            })
+            .collect();
+        println!("{}", style::profile_list_cards(&views));
         if let Some(cursor) = page.next_cursor {
-            eprintln!("next cursor: {cursor}");
+            eprintln!("{}", style::next_cursor_diagnostic(&cursor));
         }
     }
     ExitStatus::Ok
@@ -158,14 +169,14 @@ fn show(config: &ResolvedConfig, json_output: bool) -> ExitStatus {
     let (console_url, session, profile_id) = match selected_profile_session(config) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return status;
         }
     };
     let profile = match fetch_profile(console_url, &session.access_token, profile_id) {
         Ok(value) => value.profile,
         Err((status, message)) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return status;
         }
     };
@@ -177,21 +188,21 @@ fn configure(config: &ResolvedConfig, args: ProfileConfigureArgs, json_output: b
     let (console_url, session, profile_id) = match selected_profile_session(config) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return status;
         }
     };
     let policy = match read_policy(args.policy_file.as_deref()) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return status;
         }
     };
     let current = match fetch_profile(console_url, &session.access_token, profile_id) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return status;
         }
     };
@@ -218,7 +229,7 @@ fn configure(config: &ResolvedConfig, args: ProfileConfigureArgs, json_output: b
         ) {
             Ok(value) => value.profile,
             Err((status, message)) => {
-                eprintln!("{message}");
+                crate::style::eprintln_error(&message);
                 return status;
             }
         }
@@ -229,9 +240,13 @@ fn configure(config: &ResolvedConfig, args: ProfileConfigureArgs, json_output: b
             serde_json::to_string_pretty(&profile).expect("profile configure output serializes")
         );
     } else if !changed {
-        println!("profile {} unchanged", profile.id);
+        let confirm = style::ConfirmBlock::new("unchanged", "profile", profile.name.clone())
+            .field("id", profile.id.clone());
+        println!("{}", style::render_confirm(&confirm));
     } else {
-        println!("updated profile {} {}", profile.id, profile.name);
+        let confirm = style::ConfirmBlock::new("updated", "profile", profile.name.clone())
+            .field("id", profile.id.clone());
+        println!("{}", style::render_confirm(&confirm));
     }
     ExitStatus::Ok
 }
@@ -252,14 +267,14 @@ fn member_list(config: &ResolvedConfig, json_output: bool) -> ExitStatus {
     let (console_url, session, profile_id) = match selected_profile_session(config) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return status;
         }
     };
     let page = match fetch_profile_members(console_url, &session.access_token, profile_id) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return status;
         }
     };
@@ -269,17 +284,31 @@ fn member_list(config: &ResolvedConfig, json_output: bool) -> ExitStatus {
             serde_json::to_string_pretty(&page.items)
                 .expect("profile member list output serializes")
         );
-    } else if page.items.is_empty() {
-        println!("no profile members");
     } else {
-        for member in &page.items {
-            println!(
-                "{} {} added_at={}",
-                member.user_id, member.email, member.added_at
-            );
-        }
+        // Section 7.23: resolve the profile name via a cached/lookup path. We
+        // fetch the profile once to populate the Filter: header; this is a
+        // single extra call, acceptable for a one-shot list rendering.
+        let profile_name = fetch_profile(console_url, &session.access_token, profile_id)
+            .ok()
+            .map(|p| p.profile.name);
+        let extras_empty: BTreeMap<String, Value> = BTreeMap::new();
+        let views: Vec<style::ProfileMemberView<'_>> = page
+            .items
+            .iter()
+            .map(|m| style::ProfileMemberView {
+                user_id: &m.user_id,
+                email: &m.email,
+                added_at: &m.added_at,
+                extra: &extras_empty,
+            })
+            .collect();
+        let filter = style::ProfileMembersFilter {
+            profile_id: profile_id.to_string(),
+            profile_name,
+        };
+        println!("{}", style::profile_members_list_cards(&views, &filter));
         if let Some(cursor) = page.next_cursor {
-            eprintln!("next cursor: {cursor}");
+            eprintln!("{}", style::next_cursor_diagnostic(&cursor));
         }
     }
     ExitStatus::Ok
@@ -287,20 +316,20 @@ fn member_list(config: &ResolvedConfig, json_output: bool) -> ExitStatus {
 
 fn member_add(config: &ResolvedConfig, user_id: &str, json_output: bool) -> ExitStatus {
     if Uuid::parse_str(user_id).is_err() {
-        eprintln!("[usage] USER_ID must be a UUID");
+        crate::style::eprintln_error("[usage] USER_ID must be a UUID");
         return ExitStatus::Usage;
     }
     let (console_url, session, profile_id) = match selected_profile_session(config) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return status;
         }
     };
     let profile = match fetch_profile(console_url, &session.access_token, profile_id) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return status;
         }
     };
@@ -311,29 +340,39 @@ fn member_add(config: &ResolvedConfig, user_id: &str, json_output: bool) -> Exit
         &profile.etag,
         user_id,
     ) {
-        eprintln!("{message}");
+        crate::style::eprintln_error(&message);
         return status;
     }
-    print_member_output(profile_id, user_id, json_output, "added");
+    // Section 7.16: resolve the user's email for the confirm header.
+    let user_email =
+        console::resolve_user_email(&session, console_url, &session.access_token, user_id);
+    print_member_output(
+        profile_id,
+        &profile.profile.name,
+        user_id,
+        user_email.as_deref(),
+        json_output,
+        true,
+    );
     ExitStatus::Ok
 }
 
 fn member_remove(config: &ResolvedConfig, user_id: &str, json_output: bool) -> ExitStatus {
     if Uuid::parse_str(user_id).is_err() {
-        eprintln!("[usage] USER_ID must be a UUID");
+        crate::style::eprintln_error("[usage] USER_ID must be a UUID");
         return ExitStatus::Usage;
     }
     let (console_url, session, profile_id) = match selected_profile_session(config) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return status;
         }
     };
     let profile = match fetch_profile(console_url, &session.access_token, profile_id) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return status;
         }
     };
@@ -344,19 +383,20 @@ fn member_remove(config: &ResolvedConfig, user_id: &str, json_output: bool) -> E
         &profile.etag,
         user_id,
     ) {
-        eprintln!("{message}");
+        crate::style::eprintln_error(&message);
         return status;
     }
-    print_member_output(profile_id, user_id, json_output, "removed");
+    let user_email =
+        console::resolve_user_email(&session, console_url, &session.access_token, user_id);
+    print_member_output(
+        profile_id,
+        &profile.profile.name,
+        user_id,
+        user_email.as_deref(),
+        json_output,
+        false,
+    );
     ExitStatus::Ok
-}
-
-fn console_session(config: &ResolvedConfig) -> Result<(&str, Session), (ExitStatus, String)> {
-    let console_url = config
-        .require_console_url()
-        .map_err(|message| (ExitStatus::Usage, message))?;
-    let session = auth::session_for_console(config)?;
-    Ok((console_url, session))
 }
 
 fn selected_profile_session(
@@ -525,93 +565,11 @@ fn remove_member(
 }
 
 fn read_profile_with_etag(
-    response: Response,
+    response: reqwest::blocking::Response,
     action: &str,
 ) -> Result<ProfileWithEtag, (ExitStatus, String)> {
-    if !response.status().is_success() {
-        return Err(error_for_response(response, action));
-    }
-    let etag = response
-        .headers()
-        .get(ETAG)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_string)
-        .ok_or_else(|| {
-            (
-                ExitStatus::Error,
-                format!("[error] {action} response did not include ETag"),
-            )
-        })?;
-    let profile = response.json::<Profile>().map_err(|err| {
-        (
-            ExitStatus::Error,
-            format!("[error] malformed {action} response: {err}"),
-        )
-    })?;
+    let (profile, etag) = read_with_etag::<Profile>(response, action)?;
     Ok(ProfileWithEtag { profile, etag })
-}
-
-fn read_json_response<T: for<'de> Deserialize<'de>>(
-    response: Response,
-    action: &str,
-) -> Result<T, (ExitStatus, String)> {
-    if !response.status().is_success() {
-        return Err(error_for_response(response, action));
-    }
-    response.json::<T>().map_err(|err| {
-        (
-            ExitStatus::Error,
-            format!("[error] malformed {action} response: {err}"),
-        )
-    })
-}
-
-fn read_empty_response(response: Response, action: &str) -> Result<(), (ExitStatus, String)> {
-    if response.status() == reqwest::StatusCode::NO_CONTENT {
-        Ok(())
-    } else {
-        Err(error_for_response(response, action))
-    }
-}
-
-fn error_for_response(response: Response, action: &str) -> (ExitStatus, String) {
-    let status = response.status();
-    let exit = if status == reqwest::StatusCode::UNAUTHORIZED {
-        ExitStatus::AuthRequired
-    } else if status == reqwest::StatusCode::UNPROCESSABLE_ENTITY {
-        ExitStatus::Usage
-    } else {
-        ExitStatus::Error
-    };
-    let text = response.text().unwrap_or_default();
-    let message =
-        console_error_message(&text).unwrap_or_else(|| format!("{action} failed: HTTP {status}"));
-    let tag = if matches!(exit, ExitStatus::AuthRequired) {
-        "auth_required"
-    } else if matches!(exit, ExitStatus::Usage) {
-        "usage"
-    } else {
-        "error"
-    };
-    (exit, format!("[{tag}] {message}"))
-}
-
-fn console_error_message(body: &str) -> Option<String> {
-    let value: Value = serde_json::from_str(body).ok()?;
-    let error = value.get("error")?;
-    let message = error.get("message")?.as_str()?;
-    let code = error.get("code").and_then(|value| value.as_str());
-    let state = error
-        .get("details")
-        .and_then(|details| details.get("state"))
-        .and_then(|value| value.as_str());
-    Some(match (code, state) {
-        (_, Some(state)) => format!("{message} ({state})"),
-        (Some(code), _) if code != "UNAUTHORIZED" && code != "VALIDATION_ERROR" => {
-            format!("{message} ({code})")
-        }
-        _ => message.to_string(),
-    })
 }
 
 fn read_policy(path: Option<&Path>) -> Result<Option<Value>, (ExitStatus, String)> {
@@ -657,29 +615,32 @@ fn print_profile(profile: &Profile, json_output: bool) {
         );
         return;
     }
-    println!("id: {}", profile.id);
-    println!("name: {}", profile.name);
-    println!("description: {}", profile.description);
-    println!("assigned: {}", profile.assigned);
-    println!("attached_cvm_count: {}", profile.attached_cvm_count);
-    if profile.attached_cvms.is_empty() {
-        println!("attached_cvms: []");
-    } else {
-        println!("attached_cvms:");
-        for cvm in &profile.attached_cvms {
-            println!("  {} {} {}", cvm.id, cvm.fqdn, cvm.state);
-        }
-    }
-    println!("policy:");
-    let policy = serde_json::to_string_pretty(&profile.policy).expect("policy output serializes");
-    for line in policy.lines() {
-        println!("  {line}");
-    }
-    println!("created_at: {}", profile.created_at);
-    println!("updated_at: {}", profile.updated_at);
+    let policy_pretty =
+        serde_json::to_string_pretty(&profile.policy).expect("policy output serializes");
+    let attached_ids: Vec<String> = profile.attached_cvms.iter().map(|c| c.id.clone()).collect();
+    let view = style::ProfileShowView {
+        id: &profile.id,
+        name: &profile.name,
+        description: Some(profile.description.as_str()),
+        assigned: profile.assigned,
+        attached_cvm_count: profile.attached_cvm_count,
+        attached_cvm_ids: attached_ids,
+        policy_pretty: &policy_pretty,
+        created_at: &profile.created_at,
+        updated_at: &profile.updated_at,
+        extra: &profile.extra,
+    };
+    println!("{}", style::profile_show_card(&view));
 }
 
-fn print_member_output(profile_id: &str, user_id: &str, json_output: bool, verb: &str) {
+fn print_member_output(
+    profile_id: &str,
+    profile_name: &str,
+    user_id: &str,
+    user_email: Option<&str>,
+    json_output: bool,
+    added: bool,
+) {
     if json_output {
         println!(
             "{}",
@@ -689,8 +650,32 @@ fn print_member_output(profile_id: &str, user_id: &str, json_output: bool, verb:
             })
             .expect("profile member output serializes")
         );
+        return;
+    }
+    // Section 7.16 confirm shape:
+    //   added: `[OK] added user <email> to profile <name>` with details
+    //          `user id`, `profile id`, `next step` (cvm launch)
+    //   removed: `[OK] removed user <email> from profile <name>` (single-line)
+    let identifier_email = user_email.unwrap_or(user_id);
+    if added {
+        let confirm = style::ConfirmBlock::new(
+            "added user",
+            format!("to profile {profile_name}"),
+            identifier_email,
+        )
+        .field("user id", user_id)
+        .field("profile id", profile_id)
+        .next_step(format!(
+            "concrete cvm launch --profile {profile_id} --ssh-key <key-id>"
+        ));
+        println!("{}", style::render_confirm(&confirm));
     } else {
-        println!("{verb} user {user_id} profile {profile_id}");
+        let confirm = style::ConfirmBlock::new(
+            "removed user",
+            format!("from profile {profile_name}"),
+            identifier_email,
+        );
+        println!("{}", style::render_confirm(&confirm));
     }
 }
 
@@ -708,15 +693,5 @@ mod tests {
         assert!(matches!(err.0, ExitStatus::Usage));
         assert!(err.1.contains("JSON object"));
         fs::remove_file(path).expect("test policy file removed");
-    }
-
-    #[test]
-    fn console_error_message_includes_conflict_state() {
-        let body = r#"{"error":{"code":"CONFLICT","message":"profile name is already registered","details":{"state":"profile_name_taken"}}}"#;
-
-        assert_eq!(
-            console_error_message(body).as_deref(),
-            Some("profile name is already registered (profile_name_taken)")
-        );
     }
 }

@@ -3,7 +3,7 @@ use serde_json::{json, Map, Value};
 use crate::{
     cli::ConfigCommand,
     config::{ConfigSource, ResolvedConfig},
-    ExitStatus,
+    style, ExitStatus,
 };
 
 pub fn run(command: ConfigCommand, config: &ResolvedConfig, json_output: bool) -> ExitStatus {
@@ -31,14 +31,21 @@ fn show(config: &ResolvedConfig, json_output: bool) -> ExitStatus {
                 .expect("config show output serializes")
         );
     } else {
-        for entry in entries {
-            println!(
-                "{:<28} {} ({})",
-                entry.key,
-                display_value(&entry.value),
-                entry.source.as_str()
-            );
-        }
+        let display_values: Vec<String> = entries.iter().map(|e| display_value(&e.value)).collect();
+        let views: Vec<style::ConfigEntryView<'_>> = entries
+            .iter()
+            .zip(display_values.iter())
+            .map(|(e, v)| style::ConfigEntryView {
+                key: e.key,
+                value: if v == "(none)" {
+                    None
+                } else {
+                    Some(v.as_str())
+                },
+                source: e.source.as_str(),
+            })
+            .collect();
+        println!("{}", style::config_show_table(&views));
     }
     ExitStatus::Ok
 }
@@ -142,7 +149,7 @@ fn bool_entry(key: &'static str, value: bool, source: ConfigSource) -> ConfigEnt
 
 fn display_value(value: &Value) -> String {
     match value {
-        Value::Null => "<unset>".to_string(),
+        Value::Null => "(none)".to_string(),
         Value::String(value) => value.clone(),
         Value::Bool(value) => value.to_string(),
         _ => value.to_string(),

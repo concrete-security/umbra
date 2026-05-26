@@ -1,6 +1,8 @@
+use std::collections::BTreeMap;
+
 use reqwest::{
     blocking::{Client, Response},
-    header::{ETAG, IF_MATCH},
+    header::IF_MATCH,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -8,10 +10,14 @@ use uuid::Uuid;
 
 use crate::{
     cli::{UserAddArgs, UserCommand, UserPermissionsCommand},
-    commands::auth,
     config::ResolvedConfig,
+    console::{
+        console_session, read_empty_response, read_etag_only, read_json_response, read_with_etag,
+        validate_uuid,
+    },
     exit::ExitStatus,
     session::Session,
+    style,
 };
 
 #[derive(Debug, Deserialize)]
@@ -33,6 +39,9 @@ struct User {
     last_login_at: Option<String>,
     created_at: String,
     deleted_at: Option<String>,
+
+    #[serde(flatten, default, skip_serializing)]
+    extra: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -95,39 +104,39 @@ fn add(config: &ResolvedConfig, args: UserAddArgs, json_output: bool) -> ExitSta
         None => match derived_name(&args.email) {
             Ok(value) => value.to_string(),
             Err(message) => {
-                eprintln!("{message}");
+                crate::style::eprintln_error(&message);
                 return ExitStatus::Usage;
             }
         },
     };
     if let Err(message) = validate_email(&args.email) {
-        eprintln!("{message}");
+        crate::style::eprintln_error(&message);
         return ExitStatus::Usage;
     }
     let profile_ids = match profile_flags(config) {
         Ok(value) => value,
         Err(message) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return ExitStatus::Usage;
         }
     };
     if let Some(entity_id) = &args.entity {
         if let Err(message) = validate_uuid("--entity", entity_id) {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return ExitStatus::Usage;
         }
     }
     let (console_url, session) = match console_session(config) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return status;
         }
     };
     let target_entity_id = match target_entity_id(args.entity.as_ref(), &session.entity.id) {
         Ok(value) => value,
         Err(message) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return ExitStatus::Usage;
         }
     };
@@ -141,7 +150,7 @@ fn add(config: &ResolvedConfig, args: UserAddArgs, json_output: bool) -> ExitSta
     ) {
         Ok(value) => value.user,
         Err((status, message)) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return status;
         }
     };
@@ -150,7 +159,7 @@ fn add(config: &ResolvedConfig, args: UserAddArgs, json_output: bool) -> ExitSta
         {
             Ok(value) => value,
             Err((status, message)) => {
-                eprintln!("{message}");
+                crate::style::eprintln_error(&message);
                 return status;
             }
         };
@@ -161,7 +170,7 @@ fn add(config: &ResolvedConfig, args: UserAddArgs, json_output: bool) -> ExitSta
             &profile_etag,
             &created.id,
         ) {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return status;
         }
     }
@@ -171,7 +180,7 @@ fn add(config: &ResolvedConfig, args: UserAddArgs, json_output: bool) -> ExitSta
         match fetch_user_with_etag(console_url, &session, &target_entity_id, &created.id) {
             Ok(value) => value.user,
             Err((status, message)) => {
-                eprintln!("{message}");
+                crate::style::eprintln_error(&message);
                 return status;
             }
         }
@@ -184,14 +193,14 @@ fn list(config: &ResolvedConfig, json_output: bool) -> ExitStatus {
     let (console_url, session) = match console_session(config) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return status;
         }
     };
     let page = match fetch_users(console_url, &session) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return status;
         }
     };
@@ -200,26 +209,23 @@ fn list(config: &ResolvedConfig, json_output: bool) -> ExitStatus {
             "{}",
             serde_json::to_string_pretty(&page.items).expect("user list output serializes")
         );
-    } else if page.items.is_empty() {
-        println!("no users");
     } else {
-        for user in &page.items {
-            println!(
-                "{} {} state={} permissions={} profiles={} created_at={}",
-                user.id,
-                user.email,
-                user.state,
-                user.permissions.join(","),
-                user.profiles
-                    .iter()
-                    .map(|profile| profile.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(","),
-                user.created_at
-            );
-        }
+        let views: Vec<style::UserView<'_>> = page
+            .items
+            .iter()
+            .map(|user| style::UserView {
+                id: &user.id,
+                email: &user.email,
+                state: &user.state,
+                permissions: &user.permissions,
+                profile_names: user.profiles.iter().map(|p| p.name.clone()).collect(),
+                created_at: &user.created_at,
+                extra: &user.extra,
+            })
+            .collect();
+        println!("{}", style::user_list_cards(&views));
         if let Some(cursor) = page.next_cursor {
-            eprintln!("next cursor: {cursor}");
+            eprintln!("{}", style::next_cursor_diagnostic(&cursor));
         }
     }
     ExitStatus::Ok
@@ -227,20 +233,20 @@ fn list(config: &ResolvedConfig, json_output: bool) -> ExitStatus {
 
 fn show(config: &ResolvedConfig, user_id: &str, json_output: bool) -> ExitStatus {
     if let Err(message) = validate_uuid("USER_ID", user_id) {
-        eprintln!("{message}");
+        crate::style::eprintln_error(&message);
         return ExitStatus::Usage;
     }
     let (console_url, session) = match console_session(config) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return status;
         }
     };
     let user = match fetch_user_with_etag(console_url, &session, &session.entity.id, user_id) {
         Ok(value) => value.user,
         Err((status, message)) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return status;
         }
     };
@@ -255,20 +261,20 @@ fn lifecycle(
     json_output: bool,
 ) -> ExitStatus {
     if let Err(message) = validate_uuid("USER_ID", user_id) {
-        eprintln!("{message}");
+        crate::style::eprintln_error(&message);
         return ExitStatus::Usage;
     }
     let (console_url, session) = match console_session(config) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return status;
         }
     };
     let user = match post_user_action(console_url, &session, user_id, action) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return status;
         }
     };
@@ -278,25 +284,30 @@ fn lifecycle(
             serde_json::to_string_pretty(&user).expect("user lifecycle output serializes")
         );
     } else {
-        println!("{action}d user {} state={}", user.id, user.state);
+        // Section 7.25 mutation confirm: verb = `<action>d` (deactivated /
+        // reactivated), identifier = email, detail rows = user id / state.
+        let confirm = style::ConfirmBlock::new(format!("{action}d"), "user", user.email.clone())
+            .field("id", user.id.clone())
+            .field("state", user.state.clone());
+        println!("{}", style::render_confirm(&confirm));
     }
     ExitStatus::Ok
 }
 
 fn erase(config: &ResolvedConfig, user_id: &str, json_output: bool) -> ExitStatus {
     if let Err(message) = validate_uuid("USER_ID", user_id) {
-        eprintln!("{message}");
+        crate::style::eprintln_error(&message);
         return ExitStatus::Usage;
     }
     let (console_url, session) = match console_session(config) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return status;
         }
     };
     if let Err((status, message)) = delete_user(console_url, &session, user_id) {
-        eprintln!("{message}");
+        crate::style::eprintln_error(&message);
         return status;
     }
     if json_output {
@@ -309,7 +320,11 @@ fn erase(config: &ResolvedConfig, user_id: &str, json_output: bool) -> ExitStatu
             .expect("user erase output serializes")
         );
     } else {
-        println!("erased user {user_id}");
+        // Section 7.25 mutation confirm: erase is irreversible and emits a
+        // single-line block (no detail rows; we do not have the user's email
+        // post-deletion).
+        let confirm = style::ConfirmBlock::new("erased", "user", user_id);
+        println!("{}", style::render_confirm(&confirm));
     }
     ExitStatus::Ok
 }
@@ -334,20 +349,20 @@ fn permissions(
 
 fn permissions_list(config: &ResolvedConfig, user_id: &str, json_output: bool) -> ExitStatus {
     if let Err(message) = validate_uuid("USER_ID", user_id) {
-        eprintln!("{message}");
+        crate::style::eprintln_error(&message);
         return ExitStatus::Usage;
     }
     let (console_url, session) = match console_session(config) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return status;
         }
     };
     let user = match fetch_user_with_etag(console_url, &session, &session.entity.id, user_id) {
         Ok(value) => value.user,
         Err((status, message)) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return status;
         }
     };
@@ -357,12 +372,8 @@ fn permissions_list(config: &ResolvedConfig, user_id: &str, json_output: bool) -
             serde_json::to_string_pretty(&user.permissions)
                 .expect("permission list output serializes")
         );
-    } else if user.permissions.is_empty() {
-        println!("no permissions");
     } else {
-        for permission in user.permissions {
-            println!("{permission}");
-        }
+        println!("{}", style::user_permissions_list(&user.permissions));
     }
     ExitStatus::Ok
 }
@@ -374,20 +385,20 @@ fn permissions_grant(
     json_output: bool,
 ) -> ExitStatus {
     if let Err(message) = validate_uuid("USER_ID", user_id) {
-        eprintln!("{message}");
+        crate::style::eprintln_error(&message);
         return ExitStatus::Usage;
     }
     let (console_url, session) = match console_session(config) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return status;
         }
     };
     let user = match fetch_user_with_etag(console_url, &session, &session.entity.id, user_id) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return status;
         }
     };
@@ -400,7 +411,7 @@ fn permissions_grant(
     ) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return status;
         }
     };
@@ -414,11 +425,9 @@ fn permissions_grant(
             .expect("permission grant output serializes")
         );
     } else {
-        println!(
-            "granted user {} permissions={}",
-            result.user_id,
-            permissions_join(&result.permissions)
-        );
+        let confirm = style::ConfirmBlock::new("granted", "permission", result.user_id.clone())
+            .field("permissions", permissions_join(&result.permissions));
+        println!("{}", style::render_confirm(&confirm));
     }
     ExitStatus::Ok
 }
@@ -430,13 +439,13 @@ fn permissions_revoke(
     json_output: bool,
 ) -> ExitStatus {
     if let Err(message) = validate_uuid("USER_ID", user_id) {
-        eprintln!("{message}");
+        crate::style::eprintln_error(&message);
         return ExitStatus::Usage;
     }
     let (console_url, session) = match console_session(config) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return status;
         }
     };
@@ -444,7 +453,7 @@ fn permissions_revoke(
         let user = match fetch_user_with_etag(console_url, &session, &session.entity.id, user_id) {
             Ok(value) => value,
             Err((status, message)) => {
-                eprintln!("{message}");
+                crate::style::eprintln_error(&message);
                 return status;
             }
         };
@@ -455,7 +464,7 @@ fn permissions_revoke(
             &user.etag,
             permission,
         ) {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return status;
         }
     }
@@ -464,25 +473,16 @@ fn permissions_revoke(
             "{}",
             serde_json::to_string_pretty(&PermissionRevokeOutput {
                 user_id,
-                revoked: permissions,
+                revoked: permissions.clone(),
             })
             .expect("permission revoke output serializes")
         );
     } else {
-        println!(
-            "revoked user {user_id} permissions={}",
-            permissions_join(&permissions)
-        );
+        let confirm = style::ConfirmBlock::new("revoked", "permission", user_id)
+            .field("permissions", permissions_join(&permissions));
+        println!("{}", style::render_confirm(&confirm));
     }
     ExitStatus::Ok
-}
-
-fn console_session(config: &ResolvedConfig) -> Result<(&str, Session), (ExitStatus, String)> {
-    let console_url = config
-        .require_console_url()
-        .map_err(|message| (ExitStatus::Usage, message))?;
-    let session = auth::session_for_console(config)?;
-    Ok((console_url, session))
 }
 
 fn fetch_users(console_url: &str, session: &Session) -> Result<UserListPage, (ExitStatus, String)> {
@@ -681,124 +681,12 @@ fn read_user_with_etag(
     response: Response,
     action: &str,
 ) -> Result<UserWithEtag, (ExitStatus, String)> {
-    if !response.status().is_success() {
-        return Err(error_for_response(response, action));
-    }
-    let etag = response
-        .headers()
-        .get(ETAG)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_string)
-        .ok_or_else(|| {
-            (
-                ExitStatus::Error,
-                format!("[error] {action} response did not include ETag"),
-            )
-        })?;
-    let user = response.json::<User>().map_err(|err| {
-        (
-            ExitStatus::Error,
-            format!("[error] malformed {action} response: {err}"),
-        )
-    })?;
+    let (user, etag) = read_with_etag::<User>(response, action)?;
     Ok(UserWithEtag { user, etag })
 }
 
 fn read_etag_response(response: Response, action: &str) -> Result<String, (ExitStatus, String)> {
-    if !response.status().is_success() {
-        return Err(error_for_response(response, action));
-    }
-    response
-        .headers()
-        .get(ETAG)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_string)
-        .ok_or_else(|| {
-            (
-                ExitStatus::Error,
-                format!("[error] {action} response did not include ETag"),
-            )
-        })
-}
-
-fn read_json_response<T: for<'de> Deserialize<'de>>(
-    response: Response,
-    action: &str,
-) -> Result<T, (ExitStatus, String)> {
-    if !response.status().is_success() {
-        return Err(error_for_response(response, action));
-    }
-    response.json::<T>().map_err(|err| {
-        (
-            ExitStatus::Error,
-            format!("[error] malformed {action} response: {err}"),
-        )
-    })
-}
-
-fn read_empty_response(response: Response, action: &str) -> Result<(), (ExitStatus, String)> {
-    if response.status() == reqwest::StatusCode::NO_CONTENT {
-        Ok(())
-    } else {
-        Err(error_for_response(response, action))
-    }
-}
-
-fn error_for_response(response: Response, action: &str) -> (ExitStatus, String) {
-    let status = response.status();
-    let exit = if status == reqwest::StatusCode::UNAUTHORIZED {
-        ExitStatus::AuthRequired
-    } else if status == reqwest::StatusCode::UNPROCESSABLE_ENTITY {
-        ExitStatus::Usage
-    } else {
-        ExitStatus::Error
-    };
-    let text = response.text().unwrap_or_default();
-    let message =
-        console_error_message(&text).unwrap_or_else(|| format!("{action} failed: HTTP {status}"));
-    let tag = if matches!(exit, ExitStatus::AuthRequired) {
-        "auth_required"
-    } else if matches!(exit, ExitStatus::Usage) {
-        "usage"
-    } else {
-        "error"
-    };
-    (exit, format!("[{tag}] {message}"))
-}
-
-fn console_error_message(body: &str) -> Option<String> {
-    let value: Value = serde_json::from_str(body).ok()?;
-    let error = value.get("error")?;
-    let message = error.get("message")?.as_str()?;
-    let code = error.get("code").and_then(|value| value.as_str());
-    let details = error.get("details");
-    let state = details
-        .and_then(|details| details.get("state"))
-        .and_then(|value| value.as_str());
-    let required = details
-        .and_then(|details| details.get("required"))
-        .and_then(|value| value.as_str());
-    let validation_type = details
-        .and_then(|details| details.get("errors"))
-        .and_then(|errors| errors.as_array())
-        .and_then(|errors| errors.first())
-        .and_then(|error| error.get("type"))
-        .and_then(|value| value.as_str());
-    Some(match (state, required, validation_type, code) {
-        (Some(state), _, _, _) => format!("{message} ({state})"),
-        (_, Some(required), _, _) => format!("{message} ({required})"),
-        (_, _, Some(validation_type), _) => format!("{message} ({validation_type})"),
-        (_, _, _, Some(code)) if code != "UNAUTHORIZED" && code != "VALIDATION_ERROR" => {
-            format!("{message} ({code})")
-        }
-        _ => message.to_string(),
-    })
-}
-
-fn validate_uuid(name: &str, value: &str) -> Result<(), String> {
-    Uuid::parse_str(value)
-        .map(|_| ())
-        .map_err(|_| format!("[usage] {name} must be a UUID"))
+    read_etag_only(response, action)
 }
 
 fn target_entity_id(
@@ -856,7 +744,12 @@ fn print_user_add(user: &User, json_output: bool) {
             serde_json::to_string_pretty(user).expect("user add output serializes")
         );
     } else {
-        println!("added user {} {} state={}", user.id, user.email, user.state);
+        // Section 7.25 mutation confirm: identifier = email, detail rows =
+        // user id / state.
+        let confirm = style::ConfirmBlock::new("added", "user", user.email.clone())
+            .field("id", user.id.clone())
+            .field("state", user.state.clone());
+        println!("{}", style::render_confirm(&confirm));
     }
 }
 
@@ -868,30 +761,27 @@ fn print_user(user: &User, json_output: bool) {
         );
         return;
     }
-    println!("id: {}", user.id);
-    println!("email: {}", user.email);
-    println!("name: {}", user.name);
-    println!("entity: {} {}", user.entity.id, user.entity.name);
-    println!("state: {}", user.state);
-    println!("permissions: {}", permissions_join(&user.permissions));
-    if user.profiles.is_empty() {
-        println!("profiles: []");
-    } else {
-        println!("profiles:");
-        for profile in &user.profiles {
-            println!("  {} {}", profile.id, profile.name);
-        }
-    }
-    println!(
-        "last_login_at: {}",
-        user.last_login_at.as_deref().unwrap_or("-")
-    );
-    println!(
-        "deactivated_at: {}",
-        user.deactivated_at.as_deref().unwrap_or("-")
-    );
-    println!("created_at: {}", user.created_at);
-    println!("deleted_at: {}", user.deleted_at.as_deref().unwrap_or("-"));
+    let profiles: Vec<(String, String)> = user
+        .profiles
+        .iter()
+        .map(|p| (p.id.clone(), p.name.clone()))
+        .collect();
+    let view = style::UserShowView {
+        id: &user.id,
+        email: &user.email,
+        name: &user.name,
+        entity_id: &user.entity.id,
+        entity_name: &user.entity.name,
+        state: &user.state,
+        permissions: &user.permissions,
+        profiles,
+        last_login_at: user.last_login_at.as_deref(),
+        deactivated_at: user.deactivated_at.as_deref(),
+        created_at: &user.created_at,
+        deleted_at: user.deleted_at.as_deref(),
+        extra: &user.extra,
+    };
+    println!("{}", style::user_show_card(&view));
 }
 
 #[cfg(test)]
@@ -940,16 +830,6 @@ mod tests {
             target_entity_id(Some(&entity_id), "00000000-0000-4000-8000-000000000001")
                 .expect_err("bad entity id is rejected"),
             "[usage] --entity must be a UUID"
-        );
-    }
-
-    #[test]
-    fn console_error_message_includes_validation_type() {
-        let body = r#"{"error":{"code":"VALIDATION_ERROR","message":"email domain must match entity domain","details":{"errors":[{"type":"email_domain_mismatch","field":"email"}]}}}"#;
-
-        assert_eq!(
-            console_error_message(body).as_deref(),
-            Some("email domain must match entity domain (email_domain_mismatch)")
         );
     }
 }

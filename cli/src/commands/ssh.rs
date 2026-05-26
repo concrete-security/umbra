@@ -21,10 +21,11 @@ use crate::{
         AgentSessionArgs, AliasArgs, CodeArgs, CursorArgs, SessionListArgs, SessionTargetArgs,
         SshArgs,
     },
-    commands::auth,
     config::ResolvedConfig,
+    console::console_session,
     exit::ExitStatus,
     session::Session,
+    style,
 };
 
 #[derive(Debug, Deserialize)]
@@ -57,13 +58,13 @@ struct SessionRow {
 
 pub fn run(args: SshArgs, config: &ResolvedConfig) -> ExitStatus {
     if args.name.is_some() && args.command.is_some() {
-        eprintln!("[usage] --name cannot be combined with --command");
+        crate::style::eprintln_error("[usage] --name cannot be combined with --command");
         return ExitStatus::Usage;
     }
     let remote_command = match ssh_remote_command(&args) {
         Ok(value) => value,
         Err(message) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return ExitStatus::Usage;
         }
     };
@@ -87,7 +88,7 @@ pub fn run_agent(
         "claude" => "claude",
         "codex" => "codex",
         _ => {
-            eprintln!("[error] unsupported agent session verb {verb}");
+            crate::style::eprintln_error(&format!("[error] unsupported agent session verb {verb}"));
             return ExitStatus::Error;
         }
     };
@@ -95,7 +96,7 @@ pub fn run_agent(
     let session_name = match session_name(args.name.as_deref(), program) {
         Ok(value) => value,
         Err(message) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return ExitStatus::Usage;
         }
     };
@@ -124,14 +125,14 @@ pub fn run_ps(args: SessionListArgs, config: &ResolvedConfig, json_output: bool)
     let cvm_id = match selected_cvm_id(None, config) {
         Ok(value) => value,
         Err(message) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return ExitStatus::Usage;
         }
     };
     let aliases = match aliases_by_session(&config.config_dir, &cvm_id) {
         Ok(value) => value,
         Err(message) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return ExitStatus::Error;
         }
     };
@@ -146,18 +147,18 @@ pub fn run_ps(args: SessionListArgs, config: &ResolvedConfig, json_output: bool)
     ) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return status;
         }
     };
     let rows = match parse_session_rows(&output, &aliases) {
         Ok(value) => value,
         Err(message) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return ExitStatus::Error;
         }
     };
-    print_session_rows(&rows, json_output);
+    print_session_rows(&rows, json_output, &cvm_id);
     ExitStatus::Ok
 }
 
@@ -165,14 +166,14 @@ pub fn run_attach(args: SessionTargetArgs, config: &ResolvedConfig) -> ExitStatu
     let cvm_id = match selected_cvm_id(None, config) {
         Ok(value) => value,
         Err(message) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return ExitStatus::Usage;
         }
     };
     let session_name = match resolve_target(&config.config_dir, &cvm_id, &args.target) {
         Ok(value) => value,
         Err(message) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return ExitStatus::Error;
         }
     };
@@ -191,14 +192,14 @@ pub fn run_kill(args: SessionTargetArgs, config: &ResolvedConfig, json_output: b
     let cvm_id = match selected_cvm_id(None, config) {
         Ok(value) => value,
         Err(message) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return ExitStatus::Usage;
         }
     };
     let session_name = match resolve_target(&config.config_dir, &cvm_id, &args.target) {
         Ok(value) => value,
         Err(message) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return ExitStatus::Error;
         }
     };
@@ -222,12 +223,18 @@ pub fn run_kill(args: SessionTargetArgs, config: &ResolvedConfig, json_output: b
                     .expect("kill output serializes")
                 );
             } else {
-                println!("killed session {session_name} on {cvm_id}");
+                // Section 7.30: identifier is the session name (the entity
+                // being killed); detail row records the CVM the session was
+                // running on.
+                let confirm =
+                    crate::style::ConfirmBlock::new("killed", "session", session_name.clone())
+                        .field("cvm", cvm_id.clone());
+                println!("{}", crate::style::render_confirm(&confirm));
             }
             ExitStatus::Ok
         }
         Err((status, message)) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             status
         }
     }
@@ -237,16 +244,16 @@ pub fn run_alias(args: AliasArgs, config: &ResolvedConfig, json_output: bool) ->
     let cvm_id = match selected_cvm_id(None, config) {
         Ok(value) => value,
         Err(message) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return ExitStatus::Usage;
         }
     };
     if let Err(message) = validate_session_name(&args.name) {
-        eprintln!("{message}");
+        crate::style::eprintln_error(&message);
         return ExitStatus::Usage;
     }
     if let Err(message) = validate_session_name(&args.alias) {
-        eprintln!("{message}");
+        crate::style::eprintln_error(&message);
         return ExitStatus::Usage;
     }
     let output = match run_ssh_capture(
@@ -260,30 +267,33 @@ pub fn run_alias(args: AliasArgs, config: &ResolvedConfig, json_output: bool) ->
     ) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return status;
         }
     };
     let rows = match parse_session_rows(&output, &BTreeMap::new()) {
         Ok(value) => value,
         Err(message) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return ExitStatus::Error;
         }
     };
     if rows.iter().any(|row| row.name == args.alias) {
-        eprintln!(
+        crate::style::eprintln_error(&format!(
             "[error] alias {} collides with an existing dtach session name",
             args.alias
-        );
+        ));
         return ExitStatus::Error;
     }
     if !rows.iter().any(|row| row.name == args.name) {
-        eprintln!("[error] session {} was not found on {}", args.name, cvm_id);
+        crate::style::eprintln_error(&format!(
+            "[error] session {} was not found on {}",
+            args.name, cvm_id
+        ));
         return ExitStatus::Error;
     }
     if let Err(message) = write_alias(&config.config_dir, &cvm_id, &args.name, &args.alias) {
-        eprintln!("{message}");
+        crate::style::eprintln_error(&message);
         return ExitStatus::Error;
     }
     if json_output {
@@ -297,7 +307,12 @@ pub fn run_alias(args: AliasArgs, config: &ResolvedConfig, json_output: bool) ->
             .expect("alias output serializes")
         );
     } else {
-        println!("alias {} -> {} on {}", args.alias, args.name, cvm_id);
+        // Section 7.31: identifier is the new alias; detail rows record the
+        // underlying session and the CVM the alias is scoped to.
+        let confirm = crate::style::ConfirmBlock::new("aliased", "session", args.alias.clone())
+            .field("session", args.name.clone())
+            .field("cvm", cvm_id.clone());
+        println!("{}", crate::style::render_confirm(&confirm));
     }
     ExitStatus::Ok
 }
@@ -306,7 +321,7 @@ fn run_ssh(invocation: SshInvocation<'_>, config: &ResolvedConfig) -> ExitStatus
     let prepared = match prepare_ssh(invocation.cvm_id, config) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return status;
         }
     };
@@ -315,11 +330,11 @@ fn run_ssh(invocation: SshInvocation<'_>, config: &ResolvedConfig) -> ExitStatus
     match ssh.status() {
         Ok(status) if status.success() => ExitStatus::Ok,
         Ok(status) => {
-            eprintln!("[error] ssh exited with status {status}");
+            crate::style::eprintln_error(&format!("[error] ssh exited with status {status}"));
             ExitStatus::Error
         }
         Err(err) => {
-            eprintln!("[error] failed to invoke ssh: {err}");
+            crate::style::eprintln_error(&format!("[error] failed to invoke ssh: {err}"));
             ExitStatus::Error
         }
     }
@@ -329,14 +344,14 @@ fn run_editor(editor_bin: &Path, config: &ResolvedConfig) -> ExitStatus {
     let prepared = match prepare_ssh(None, config) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return status;
         }
     };
     let launch = match write_editor_ssh_files(config, &prepared) {
         Ok(value) => value,
         Err(message) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return ExitStatus::Error;
         }
     };
@@ -350,10 +365,10 @@ fn run_editor(editor_bin: &Path, config: &ResolvedConfig) -> ExitStatus {
     match editor.spawn() {
         Ok(_) => ExitStatus::Ok,
         Err(err) => {
-            eprintln!(
+            crate::style::eprintln_error(&format!(
                 "[error] failed to launch editor binary {}: {err}",
                 editor_bin.display()
-            );
+            ));
             ExitStatus::Error
         }
     }
@@ -490,14 +505,6 @@ fn selected_cvm_id(arg: Option<&str>, config: &ResolvedConfig) -> Result<String,
         })
 }
 
-fn console_session(config: &ResolvedConfig) -> Result<(&str, Session), (ExitStatus, String)> {
-    let console_url = config
-        .require_console_url()
-        .map_err(|message| (ExitStatus::Usage, message))?;
-    let session = auth::session_for_console(config)?;
-    Ok((console_url, session))
-}
-
 fn fetch_cvm(
     console_url: &str,
     session: &Session,
@@ -513,7 +520,7 @@ fn fetch_cvm(
                 format!("[error] failed to fetch Dev CVM: {err}"),
             )
         })?;
-    crate::commands::cvm::read_json_response(response, "fetch Dev CVM")
+    crate::console::read_json_response(response, "fetch Dev CVM")
 }
 
 fn resolve_policy_path(
@@ -546,7 +553,7 @@ fn fetch_policy_bundle(
                 format!("[error] failed to fetch Dev CVM policy bundle: {err}"),
             )
         })?;
-    crate::commands::cvm::read_json_response(response, "fetch Dev CVM policy bundle")
+    crate::console::read_json_response(response, "fetch Dev CVM policy bundle")
 }
 
 fn per_cvm_policy_path(config_dir: &Path, cvm_id: &str) -> PathBuf {
@@ -814,7 +821,7 @@ fn parse_session_rows(
     Ok(rows)
 }
 
-fn print_session_rows(rows: &[SessionRow], json_output: bool) {
+fn print_session_rows(rows: &[SessionRow], json_output: bool, cvm_id: &str) {
     if json_output {
         println!(
             "{}",
@@ -822,19 +829,21 @@ fn print_session_rows(rows: &[SessionRow], json_output: bool) {
         );
         return;
     }
-    if rows.is_empty() {
-        println!("sessions none");
-        return;
-    }
-    for row in rows {
-        println!(
-            "session {} attached={} alias={} created_at={}",
-            row.name,
-            row.attached,
-            row.alias.as_deref().unwrap_or("-"),
-            row.created_at
-        );
-    }
+    let extra = std::collections::BTreeMap::new();
+    let views: Vec<style::PsSessionView<'_>> = rows
+        .iter()
+        .map(|row| style::PsSessionView {
+            name: &row.name,
+            attached: row.attached,
+            alias: row.alias.as_deref(),
+            created_at: &row.created_at,
+            extra: &extra,
+        })
+        .collect();
+    let filter = style::PsFilter {
+        cvm: cvm_id.to_string(),
+    };
+    println!("{}", style::ps_cards(&views, &filter));
 }
 
 fn format_epoch(value: i64) -> String {

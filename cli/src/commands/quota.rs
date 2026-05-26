@@ -1,14 +1,20 @@
-use reqwest::blocking::{Client, Response};
+use std::collections::BTreeMap;
+
+use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::{
     cli::{QuotaClearArgs, QuotaCommand, QuotaScopeArgs, QuotaSetArgs},
-    commands::auth,
     config::ResolvedConfig,
+    console::{
+        console_session, read_empty_response, read_json_response, resolve_entity_name,
+        resolve_user_email, validate_uuid,
+    },
     exit::ExitStatus,
     session::Session,
+    style,
 };
 
 const ENTITY_QUOTA_RESOURCES: &[&str] = &["dev_cvms", "ssh_keys", "users", "profiles"];
@@ -37,6 +43,9 @@ struct Quota {
     current_usage: u64,
     set_by: Option<String>,
     set_at: Option<String>,
+
+    #[serde(flatten, default, skip_serializing)]
+    extra: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -59,25 +68,32 @@ fn get(config: &ResolvedConfig, args: QuotaScopeArgs, json_output: bool) -> Exit
     let (console_url, session) = match console_session(config) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return status;
         }
     };
     let scope = match resolve_scope(&args, &session) {
         Ok(value) => value,
         Err(message) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return ExitStatus::Usage;
         }
     };
     let quotas = match fetch_quotas(console_url, &session.access_token, &scope) {
         Ok(value) => value.quotas,
         Err((status, message)) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return status;
         }
     };
-    print_quotas(&quotas, json_output);
+    print_quotas(
+        &quotas,
+        json_output,
+        &scope,
+        &session,
+        console_url,
+        &session.access_token,
+    );
     ExitStatus::Ok
 }
 
@@ -85,21 +101,31 @@ fn set(config: &ResolvedConfig, args: QuotaSetArgs, json_output: bool) -> ExitSt
     let (console_url, session) = match console_session(config) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return status;
         }
     };
     let scope = match resolve_scope(&args.scope, &session) {
         Ok(value) => value,
         Err(message) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return ExitStatus::Usage;
         }
     };
     if let Err(message) = validate_resource(&scope, &args.resource) {
-        eprintln!("{message}");
+        crate::style::eprintln_error(&message);
         return ExitStatus::Usage;
     }
+    // Capture the previous limit (when present) for the confirm block's
+    // `previous limit` row (section 7.24). On 404/error, simply leave it `-`.
+    let previous_limit = fetch_quotas(console_url, &session.access_token, &scope)
+        .ok()
+        .and_then(|list| {
+            list.quotas
+                .into_iter()
+                .find(|q| q.resource == args.resource)
+                .map(|q| q.limit)
+        });
     let quota = match set_quota(
         console_url,
         &session.access_token,
@@ -109,11 +135,39 @@ fn set(config: &ResolvedConfig, args: QuotaSetArgs, json_output: bool) -> ExitSt
     ) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return status;
         }
     };
-    print_quota(&quota, json_output, "set");
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&quota).expect("quota set output serializes")
+        );
+    } else {
+        let (scope_noun, scope_id) = scope_parts(&scope);
+        let human = match &scope {
+            QuotaScope::Entity(id) => {
+                resolve_entity_name(&session, console_url, &session.access_token, id)
+            }
+            QuotaScope::User(id) => {
+                resolve_user_email(&session, console_url, &session.access_token, id)
+            }
+        };
+        println!(
+            "{}",
+            style::quota_set_confirm(&style::QuotaSetConfirm {
+                resource: &args.resource,
+                scope_noun,
+                scope_human: human.as_deref(),
+                scope_id,
+                limit: quota.limit,
+                previous_limit,
+                set_by: quota.set_by.as_deref(),
+                next_step_flag: scope_noun,
+            })
+        );
+    }
     ExitStatus::Ok
 }
 
@@ -121,33 +175,42 @@ fn clear(config: &ResolvedConfig, args: QuotaClearArgs, json_output: bool) -> Ex
     let (console_url, session) = match console_session(config) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return status;
         }
     };
     let scope = match resolve_scope(&args.scope, &session) {
         Ok(value) => value,
         Err(message) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return ExitStatus::Usage;
         }
     };
     if let Err(message) = validate_resource(&scope, &args.resource) {
-        eprintln!("{message}");
+        crate::style::eprintln_error(&message);
         return ExitStatus::Usage;
     }
+    // Capture previous limit before clearing (section 7.24 `previous limit`).
+    let previous_limit = fetch_quotas(console_url, &session.access_token, &scope)
+        .ok()
+        .and_then(|list| {
+            list.quotas
+                .into_iter()
+                .find(|q| q.resource == args.resource)
+                .map(|q| q.limit)
+        });
     if let Err((status, message)) =
         clear_quota(console_url, &session.access_token, &scope, &args.resource)
     {
-        eprintln!("{message}");
+        crate::style::eprintln_error(&message);
         return status;
     }
-    let (scope_name, scope_id) = scope_parts(&scope);
+    let (scope_noun, scope_id) = scope_parts(&scope);
     if json_output {
         println!(
             "{}",
             serde_json::to_string_pretty(&QuotaClearOutput {
-                scope: scope_name,
+                scope: scope_noun,
                 scope_id,
                 resource: &args.resource,
                 cleared: true,
@@ -155,17 +218,27 @@ fn clear(config: &ResolvedConfig, args: QuotaClearArgs, json_output: bool) -> Ex
             .expect("quota clear output serializes")
         );
     } else {
-        println!("cleared {scope_name} {scope_id} quota {}", args.resource);
+        let human = match &scope {
+            QuotaScope::Entity(id) => {
+                resolve_entity_name(&session, console_url, &session.access_token, id)
+            }
+            QuotaScope::User(id) => {
+                resolve_user_email(&session, console_url, &session.access_token, id)
+            }
+        };
+        println!(
+            "{}",
+            style::quota_clear_confirm(&style::QuotaClearConfirm {
+                resource: &args.resource,
+                scope_noun,
+                scope_human: human.as_deref(),
+                scope_id,
+                previous_limit,
+                next_step_flag: scope_noun,
+            })
+        );
     }
     ExitStatus::Ok
-}
-
-fn console_session(config: &ResolvedConfig) -> Result<(&str, Session), (ExitStatus, String)> {
-    let console_url = config
-        .require_console_url()
-        .map_err(|message| (ExitStatus::Usage, message))?;
-    let session = auth::session_for_console(config)?;
-    Ok((console_url, session))
 }
 
 fn resolve_scope(args: &QuotaScopeArgs, session: &Session) -> Result<QuotaScope, String> {
@@ -264,78 +337,6 @@ fn clear_quota(
     read_empty_response(response, "clear quota")
 }
 
-fn read_json_response<T: for<'de> Deserialize<'de>>(
-    response: Response,
-    action: &str,
-) -> Result<T, (ExitStatus, String)> {
-    if !response.status().is_success() {
-        return Err(error_for_response(response, action));
-    }
-    response.json::<T>().map_err(|err| {
-        (
-            ExitStatus::Error,
-            format!("[error] malformed {action} response: {err}"),
-        )
-    })
-}
-
-fn read_empty_response(response: Response, action: &str) -> Result<(), (ExitStatus, String)> {
-    if response.status() == reqwest::StatusCode::NO_CONTENT {
-        Ok(())
-    } else {
-        Err(error_for_response(response, action))
-    }
-}
-
-fn error_for_response(response: Response, action: &str) -> (ExitStatus, String) {
-    let status = response.status();
-    let exit = if status == reqwest::StatusCode::UNAUTHORIZED {
-        ExitStatus::AuthRequired
-    } else if status == reqwest::StatusCode::BAD_REQUEST
-        || status == reqwest::StatusCode::UNPROCESSABLE_ENTITY
-    {
-        ExitStatus::Usage
-    } else {
-        ExitStatus::Error
-    };
-    let text = response.text().unwrap_or_default();
-    let message =
-        console_error_message(&text).unwrap_or_else(|| format!("{action} failed: HTTP {status}"));
-    let tag = if matches!(exit, ExitStatus::AuthRequired) {
-        "auth_required"
-    } else if matches!(exit, ExitStatus::Usage) {
-        "usage"
-    } else {
-        "error"
-    };
-    (exit, format!("[{tag}] {message}"))
-}
-
-fn console_error_message(body: &str) -> Option<String> {
-    let value: Value = serde_json::from_str(body).ok()?;
-    let error = value.get("error")?;
-    let message = error.get("message")?.as_str()?;
-    let code = error.get("code").and_then(|value| value.as_str());
-    let details = error.get("details");
-    let state = details
-        .and_then(|details| details.get("state"))
-        .and_then(|value| value.as_str());
-    let validation_type = details
-        .and_then(|details| details.get("errors"))
-        .and_then(|errors| errors.as_array())
-        .and_then(|errors| errors.first())
-        .and_then(|error| error.get("type"))
-        .and_then(|value| value.as_str());
-    Some(match (state, validation_type, code) {
-        (Some(state), _, _) => format!("{message} ({state})"),
-        (_, Some(validation_type), _) => format!("{message} ({validation_type})"),
-        (_, _, Some(code)) if code != "UNAUTHORIZED" && code != "VALIDATION_ERROR" => {
-            format!("{message} ({code})")
-        }
-        _ => message.to_string(),
-    })
-}
-
 fn validate_resource(scope: &QuotaScope, resource: &str) -> Result<(), String> {
     let valid = match scope {
         QuotaScope::Entity(_) => ENTITY_QUOTA_RESOURCES.contains(&resource),
@@ -350,12 +351,6 @@ fn validate_resource(scope: &QuotaScope, resource: &str) -> Result<(), String> {
     }
 }
 
-fn validate_uuid(name: &str, value: &str) -> Result<(), String> {
-    Uuid::parse_str(value)
-        .map(|_| ())
-        .map_err(|_| format!("[usage] {name} must be a UUID"))
-}
-
 fn scope_parts(scope: &QuotaScope) -> (&'static str, &str) {
     match scope {
         QuotaScope::Entity(entity_id) => ("entity", entity_id),
@@ -363,49 +358,61 @@ fn scope_parts(scope: &QuotaScope) -> (&'static str, &str) {
     }
 }
 
-fn quota_scope_id(quota: &Quota) -> (&'static str, &str) {
-    if let Some(entity_id) = quota.entity_id.as_deref() {
-        ("entity", entity_id)
-    } else if let Some(user_id) = quota.user_id.as_deref() {
-        ("user", user_id)
-    } else {
-        ("scope", "-")
-    }
-}
-
-fn print_quotas(quotas: &[Quota], json_output: bool) {
+fn print_quotas(
+    quotas: &[Quota],
+    json_output: bool,
+    scope: &QuotaScope,
+    session: &Session,
+    console_url: &str,
+    access_token: &str,
+) {
     if json_output {
         println!(
             "{}",
             serde_json::to_string_pretty(quotas).expect("quota list output serializes")
         );
-    } else if quotas.is_empty() {
-        println!("no quotas");
-    } else {
-        for quota in quotas {
-            print_quota(quota, false, "quota");
-        }
+        return;
     }
-}
-
-fn print_quota(quota: &Quota, json_output: bool, prefix: &str) {
-    if json_output {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(quota).expect("quota output serializes")
-        );
-    } else {
-        let (scope, scope_id) = quota_scope_id(quota);
-        println!(
-            "{prefix} {scope}={scope_id} resource={} limit={} source={} current_usage={} set_by={} set_at={}",
-            quota.resource,
-            quota.limit,
-            quota.source,
-            quota.current_usage,
-            quota.set_by.as_deref().unwrap_or("-"),
-            quota.set_at.as_deref().unwrap_or("-"),
-        );
-    }
+    let (filter_entity_id, filter_user_id) = match scope {
+        QuotaScope::Entity(id) => (Some(id.clone()), None),
+        QuotaScope::User(id) => (None, Some(id.clone())),
+    };
+    // Section 7.8: resolve the scope filter to a human-readable name when
+    // possible. Session-local data first; fall back to a Console lookup; on
+    // 404/403, the renderer falls back to the bare UUID.
+    let (entity_name, user_email) = match scope {
+        QuotaScope::Entity(id) => (
+            resolve_entity_name(session, console_url, access_token, id),
+            None,
+        ),
+        QuotaScope::User(id) => (
+            None,
+            resolve_user_email(session, console_url, access_token, id),
+        ),
+    };
+    let filter = style::QuotaListFilter {
+        entity_id: filter_entity_id,
+        user_id: filter_user_id,
+        entity_name,
+        user_email,
+    };
+    let views: Vec<style::QuotaView<'_>> = quotas
+        .iter()
+        .map(|q| style::QuotaView {
+            resource: &q.resource,
+            entity_id: q.entity_id.as_deref(),
+            entity_name: None,
+            user_id: q.user_id.as_deref(),
+            user_email: None,
+            limit: q.limit,
+            current_usage: q.current_usage,
+            source: &q.source,
+            set_by: q.set_by.as_deref(),
+            set_at: q.set_at.as_deref(),
+            extra: &q.extra,
+        })
+        .collect();
+    println!("{}", style::quota_get_cards(&views, &filter));
 }
 
 #[cfg(test)]
@@ -418,15 +425,5 @@ mod tests {
             .expect_err("profiles is entity-only");
 
         assert_eq!(err, "[usage] unknown quota resource for scope: profiles");
-    }
-
-    #[test]
-    fn console_error_message_includes_conflict_state() {
-        let body = r#"{"error":{"code":"CONFLICT","message":"user quota exceeds effective entity quota","details":{"state":"user_quota_above_entity_quota","entity_quota":1}}}"#;
-
-        assert_eq!(
-            console_error_message(body).as_deref(),
-            Some("user quota exceeds effective entity quota (user_quota_above_entity_quota)")
-        );
     }
 }

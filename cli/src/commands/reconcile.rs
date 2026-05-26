@@ -1,9 +1,14 @@
-use reqwest::blocking::{Client, Response};
+use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use crate::{cli::ReconcileArgs, commands::auth, config::ResolvedConfig, exit::ExitStatus};
+use crate::{
+    cli::ReconcileArgs,
+    config::ResolvedConfig,
+    console::{console_session, read_json_response},
+    exit::ExitStatus,
+};
 
 #[derive(Debug, Deserialize, Serialize)]
 struct ReconcileOutput {
@@ -13,17 +18,10 @@ struct ReconcileOutput {
 }
 
 pub fn run(args: ReconcileArgs, config: &ResolvedConfig, json_output: bool) -> ExitStatus {
-    let console_url = match config.require_console_url() {
-        Ok(value) => value,
-        Err(message) => {
-            eprintln!("{message}");
-            return ExitStatus::Usage;
-        }
-    };
-    let session = match auth::session_for_console(config) {
+    let (console_url, session) = match console_session(config) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return status;
         }
     };
@@ -35,7 +33,7 @@ pub fn run(args: ReconcileArgs, config: &ResolvedConfig, json_output: bool) -> E
     ) {
         Ok(value) => value,
         Err((status, message)) => {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return status;
         }
     };
@@ -45,23 +43,54 @@ pub fn run(args: ReconcileArgs, config: &ResolvedConfig, json_output: bool) -> E
             serde_json::to_string_pretty(&output).expect("reconcile output serializes")
         );
     } else {
-        println!(
-            "cvms_advanced={} ids={}",
-            output.cvms_advanced.len(),
-            format_ids(&output.cvms_advanced)
-        );
-        println!(
-            "security_cvms_advanced={} ids={}",
-            output.security_cvms_advanced.len(),
-            format_ids(&output.security_cvms_advanced)
-        );
-        println!(
-            "orphans_cleaned={} ids={}",
-            output.orphans_cleaned.len(),
-            format_ids(&output.orphans_cleaned)
-        );
+        // Section 7.28: a reconcile run produces a single confirm block whose
+        // header records the verb (`reconciled`), the noun (`run`) and a
+        // synthetic identifier that summarises which sub-buckets the saga
+        // advanced. Detail rows surface the per-bucket counts plus the
+        // resolved id list (`-` when empty).
+        let identifier = reconcile_identifier(&output, args.no_orphans);
+        let confirm = crate::style::ConfirmBlock::new("reconciled", "run", identifier)
+            .field(
+                "cvms advanced",
+                format!(
+                    "{} ids={}",
+                    output.cvms_advanced.len(),
+                    format_ids(&output.cvms_advanced)
+                ),
+            )
+            .field(
+                "security cvms advanced",
+                format!(
+                    "{} ids={}",
+                    output.security_cvms_advanced.len(),
+                    format_ids(&output.security_cvms_advanced)
+                ),
+            )
+            .field(
+                "orphans cleaned",
+                format!(
+                    "{} ids={}",
+                    output.orphans_cleaned.len(),
+                    format_ids(&output.orphans_cleaned)
+                ),
+            );
+        println!("{}", crate::style::render_confirm(&confirm));
     }
     ExitStatus::Ok
+}
+
+fn reconcile_identifier(output: &ReconcileOutput, no_orphans: bool) -> String {
+    let total = output.cvms_advanced.len()
+        + output.security_cvms_advanced.len()
+        + output.orphans_cleaned.len();
+    if total == 0 {
+        return if no_orphans {
+            "no advances".to_string()
+        } else {
+            "no advances or orphans".to_string()
+        };
+    }
+    format!("{total} actions")
 }
 
 fn post_json<T: for<'de> Deserialize<'de>>(
@@ -81,57 +110,7 @@ fn post_json<T: for<'de> Deserialize<'de>>(
                 format!("[error] failed to run reconcile: {err}"),
             )
         })?;
-    read_json_response(response)
-}
-
-fn read_json_response<T: for<'de> Deserialize<'de>>(
-    response: Response,
-) -> Result<T, (ExitStatus, String)> {
-    if !response.status().is_success() {
-        return Err(error_for_response(response));
-    }
-    response.json::<T>().map_err(|err| {
-        (
-            ExitStatus::Error,
-            format!("[error] malformed reconcile response: {err}"),
-        )
-    })
-}
-
-fn error_for_response(response: Response) -> (ExitStatus, String) {
-    let status = response.status();
-    let exit = if status == reqwest::StatusCode::UNAUTHORIZED {
-        ExitStatus::AuthRequired
-    } else if status == reqwest::StatusCode::UNPROCESSABLE_ENTITY {
-        ExitStatus::Usage
-    } else {
-        ExitStatus::Error
-    };
-    let text = response.text().unwrap_or_default();
-    let message =
-        console_error_message(&text).unwrap_or_else(|| format!("reconcile failed: HTTP {status}"));
-    let tag = if matches!(exit, ExitStatus::AuthRequired) {
-        "auth_required"
-    } else if matches!(exit, ExitStatus::Usage) {
-        "usage"
-    } else {
-        "error"
-    };
-    (exit, format!("[{tag}] {message}"))
-}
-
-fn console_error_message(body: &str) -> Option<String> {
-    let value: Value = serde_json::from_str(body).ok()?;
-    let error = value.get("error")?;
-    let message = error.get("message")?.as_str()?;
-    let component = error
-        .get("details")
-        .and_then(|details| details.get("component"))
-        .and_then(|value| value.as_str());
-    Some(match component {
-        Some(component) => format!("{message} ({component})"),
-        None => message.to_string(),
-    })
+    read_json_response(response, "reconcile")
 }
 
 fn format_ids(values: &[String]) -> String {
@@ -145,16 +124,6 @@ fn format_ids(values: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn console_error_message_includes_component() {
-        let body = r#"{"error":{"code":"SERVICE_UNAVAILABLE","message":"CVM provider adapter is not configured","details":{"component":"cvm_provider_adapter"}}}"#;
-
-        assert_eq!(
-            console_error_message(body).as_deref(),
-            Some("CVM provider adapter is not configured (cvm_provider_adapter)")
-        );
-    }
 
     #[test]
     fn empty_human_ids_render_dash() {
