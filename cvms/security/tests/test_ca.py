@@ -10,12 +10,14 @@ from concrete_security_cvm.ca import CAExportUnauthorized, generate_root_ca, wri
 
 
 def test_generate_root_ca_uses_p384_ca_certificate() -> None:
-    ca = generate_root_ca(now=datetime(2026, 5, 16, 6, 0, tzinfo=timezone.utc))
+    issued_at = datetime(2026, 5, 16, 6, 0, tzinfo=timezone.utc)
+    ca = generate_root_ca(now=issued_at)
 
     assert isinstance(ca.private_key.curve, ec.SECP384R1)
     cert = x509.load_pem_x509_certificate(ca.ca_pem)
     assert cert.subject == cert.issuer
     assert cert.not_valid_before_utc <= datetime(2026, 5, 16, 6, 0, tzinfo=timezone.utc)
+    assert cert.not_valid_after_utc == issued_at.replace(year=2027)
     basic_constraints = cert.extensions.get_extension_for_oid(ExtensionOID.BASIC_CONSTRAINTS).value
     assert basic_constraints.ca is True
     key_usage = cert.extensions.get_extension_for_oid(ExtensionOID.KEY_USAGE).value
