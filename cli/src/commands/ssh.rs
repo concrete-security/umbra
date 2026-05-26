@@ -92,7 +92,13 @@ pub fn run_agent(
             return ExitStatus::Error;
         }
     };
-    let program_command = agent_program_command(program);
+    if let Some(workspace) = args.workspace.as_deref() {
+        if let Err(message) = validate_workspace_path(workspace) {
+            eprintln!("{message}");
+            return ExitStatus::Usage;
+        }
+    }
+    let program_command = agent_program_command(program, args.workspace.as_deref());
     let session_name = match session_name(args.name.as_deref(), program) {
         Ok(value) => value,
         Err(message) => {
@@ -756,11 +762,16 @@ fn dtach_remote_command(session_name: &str, program_command: &str) -> String {
     )
 }
 
-fn agent_program_command(program: &str) -> String {
+fn agent_program_command(program: &str, workspace: Option<&str>) -> String {
+    let workspace_cd = workspace.map(workspace_cd_command);
     if program != "claude" {
-        return program.to_string();
+        return match workspace_cd {
+            Some(cd) => format!("bash -lc {}", shell_quote(&format!("{cd}\nexec {program}"))),
+            None => program.to_string(),
+        };
     }
-    let script = r#"mkdir -p "$HOME/.claude"
+    let mut script = String::from(
+        r#"mkdir -p "$HOME/.claude"
 if [ -e "$HOME/.claude.json" ] && [ ! -L "$HOME/.claude.json" ]; then
   if [ ! -s "$HOME/.claude.json" ]; then
     printf '{}\n' >"$HOME/.claude.json"
@@ -773,8 +784,26 @@ else
   fi
   ln -sfn "$HOME/.claude/.claude.json" "$HOME/.claude.json"
 fi
-exec claude"#;
-    format!("bash -lc {}", shell_quote(script))
+"#,
+    );
+    if let Some(cd) = workspace_cd {
+        script.push_str(&cd);
+        script.push('\n');
+    }
+    script.push_str("exec claude");
+    format!("bash -lc {}", shell_quote(&script))
+}
+
+fn workspace_cd_command(workspace: &str) -> String {
+    if let Some(rest) = workspace.strip_prefix("~/") {
+        format!(r#"cd "$HOME/{rest}" || {{ echo "[error] workspace not found" >&2; exit 1; }}"#)
+    } else if workspace.starts_with('/') {
+        format!(r#"cd "{workspace}" || {{ echo "[error] workspace not found" >&2; exit 1; }}"#)
+    } else {
+        format!(
+            r#"cd "$HOME/{workspace}" || {{ echo "[error] workspace not found" >&2; exit 1; }}"#
+        )
+    }
 }
 
 fn ps_remote_command() -> String {
@@ -936,6 +965,38 @@ fn write_alias(
     Ok(())
 }
 
+fn validate_workspace_path(value: &str) -> Result<&str, String> {
+    if value.is_empty() {
+        return Err("[usage] --workspace must not be empty".to_string());
+    }
+    if value.len() > 512 {
+        return Err("[usage] --workspace must be at most 512 bytes".to_string());
+    }
+    if value.contains("..") {
+        return Err("[usage] --workspace must not contain '..'".to_string());
+    }
+    if value.starts_with('~') && !value.starts_with("~/") && value != "~" {
+        return Err("[usage] --workspace must use ~/ for home-relative paths".to_string());
+    }
+    let path_body = value
+        .strip_prefix("~/")
+        .or_else(|| value.strip_prefix('/'))
+        .unwrap_or(value);
+    if path_body.is_empty() {
+        return Err("[usage] --workspace must not be empty".to_string());
+    }
+    if !path_body
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'_' | b'-'))
+    {
+        return Err(
+            "[usage] --workspace may only contain ASCII letters, digits, '/', '.', '_', and '-'"
+                .to_string(),
+        );
+    }
+    Ok(value)
+}
+
 fn validate_session_name(value: &str) -> Result<&str, String> {
     if value.is_empty() {
         return Err("[usage] --name must not be empty".to_string());
@@ -1015,12 +1076,45 @@ mod tests {
 
     #[test]
     fn claude_agent_command_repairs_empty_config() {
-        let command = agent_program_command("claude");
+        let command = agent_program_command("claude", None);
         assert!(command.starts_with("bash -lc "));
         assert!(command.contains(".claude/.claude.json"));
         assert!(command.contains("printf"));
         assert!(command.contains("exec claude"));
-        assert_eq!(agent_program_command("codex"), "codex");
+        assert_eq!(agent_program_command("codex", None), "codex");
+    }
+
+    #[test]
+    fn agent_command_changes_to_workspace_before_launch() {
+        let claude = agent_program_command("claude", Some("~/workspaces/myrepo"));
+        assert!(claude.contains(r#"cd "$HOME/workspaces/myrepo""#));
+        assert!(claude.contains("exec claude"));
+
+        let codex = agent_program_command("codex", Some("/home/dev/workspaces/myrepo"));
+        assert!(codex.starts_with("bash -lc "));
+        assert!(codex.contains(r#"cd "/home/dev/workspaces/myrepo""#));
+        assert!(codex.contains("exec codex"));
+    }
+
+    #[test]
+    fn validate_workspace_path_rejects_unsafe_values() {
+        assert_eq!(
+            validate_workspace_path("~/workspaces/myrepo"),
+            Ok("~/workspaces/myrepo")
+        );
+        assert_eq!(
+            validate_workspace_path("/home/dev/workspaces/myrepo"),
+            Ok("/home/dev/workspaces/myrepo")
+        );
+        assert_eq!(
+            validate_workspace_path("workspaces/myrepo"),
+            Ok("workspaces/myrepo")
+        );
+        assert!(validate_workspace_path("").is_err());
+        assert!(validate_workspace_path("~/workspaces/../etc").is_err());
+        assert!(validate_workspace_path("~/workspaces/my repo").is_err());
+        assert!(validate_workspace_path("~other/workspaces/myrepo").is_err());
+        assert!(validate_workspace_path("~/workspaces/myrepo;rm").is_err());
     }
 
     #[test]

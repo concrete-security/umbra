@@ -457,6 +457,10 @@ pub struct AgentSessionArgs {
     /// Private SSH key to pass to ssh(1).
     #[arg(long)]
     pub identity_file: Option<PathBuf>,
+
+    /// Working directory for the agent on the Dev CVM, for example ~/workspaces/myrepo.
+    #[arg(long)]
+    pub workspace: Option<String>,
 }
 
 #[derive(clap::Args, Debug)]
