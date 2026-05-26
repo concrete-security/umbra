@@ -13,6 +13,7 @@ mod cli;
 mod commands;
 mod config;
 mod console;
+mod cvm_state;
 mod exit;
 mod operation;
 mod session;

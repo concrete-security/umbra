@@ -95,11 +95,19 @@ pub fn run_agent(
     };
     if let Some(workspace) = args.workspace.as_deref() {
         if let Err(message) = validate_workspace_path(workspace) {
-            eprintln!("{message}");
+            crate::style::eprintln_error(&message);
             return ExitStatus::Usage;
         }
     }
-    let program_command = agent_program_command(program, args.workspace.as_deref());
+    let cvm_id = match selected_cvm_id(args.cvm_id.as_deref(), config) {
+        Ok(value) => value,
+        Err(message) => {
+            crate::style::eprintln_error(&message);
+            return ExitStatus::Usage;
+        }
+    };
+    let workspace = resolve_workspace(args.workspace.as_deref(), config, &cvm_id);
+    let program_command = agent_program_command(program, workspace.as_deref());
     let session_name = match session_name(args.name.as_deref(), program) {
         Ok(value) => value,
         Err(message) => {
@@ -109,7 +117,7 @@ pub fn run_agent(
     };
     run_ssh(
         SshInvocation {
-            cvm_id: args.cvm_id.as_deref(),
+            cvm_id: Some(&cvm_id),
             identity_file: args.identity_file.as_deref(),
             remote_command: dtach_remote_command(&session_name, &program_command),
             allocate_tty: true,
@@ -120,12 +128,12 @@ pub fn run_agent(
 
 pub fn run_code(args: CodeArgs, config: &ResolvedConfig) -> ExitStatus {
     let bin = args.code_bin.unwrap_or_else(|| PathBuf::from("code"));
-    run_editor(&bin, config)
+    run_editor(&bin, args.workspace.as_deref(), config)
 }
 
 pub fn run_cursor(args: CursorArgs, config: &ResolvedConfig) -> ExitStatus {
     let bin = args.cursor_bin.unwrap_or_else(|| PathBuf::from("cursor"));
-    run_editor(&bin, config)
+    run_editor(&bin, args.workspace.as_deref(), config)
 }
 
 pub fn run_ps(args: SessionListArgs, config: &ResolvedConfig, json_output: bool) -> ExitStatus {
@@ -347,7 +355,17 @@ fn run_ssh(invocation: SshInvocation<'_>, config: &ResolvedConfig) -> ExitStatus
     }
 }
 
-fn run_editor(editor_bin: &Path, config: &ResolvedConfig) -> ExitStatus {
+fn run_editor(
+    editor_bin: &Path,
+    workspace_arg: Option<&str>,
+    config: &ResolvedConfig,
+) -> ExitStatus {
+    if let Some(value) = workspace_arg {
+        if let Err(message) = validate_workspace_path(value) {
+            crate::style::eprintln_error(&message);
+            return ExitStatus::Usage;
+        }
+    }
     let prepared = match prepare_ssh(None, config) {
         Ok(value) => value,
         Err((status, message)) => {
@@ -355,6 +373,7 @@ fn run_editor(editor_bin: &Path, config: &ResolvedConfig) -> ExitStatus {
             return status;
         }
     };
+    let workspace = resolve_workspace(workspace_arg, config, &prepared.cvm_id);
     let launch = match write_editor_ssh_files(config, &prepared) {
         Ok(value) => value,
         Err(message) => {
@@ -365,7 +384,7 @@ fn run_editor(editor_bin: &Path, config: &ResolvedConfig) -> ExitStatus {
     let mut editor = Command::new(editor_bin);
     editor
         .arg("--folder-uri")
-        .arg(editor_remote_uri(&launch.host_alias))
+        .arg(editor_remote_uri(&launch.host_alias, workspace.as_deref()))
         .env("PATH", path_with_prefix(&launch.wrapper_dir))
         .stdin(Stdio::null())
         .stdout(Stdio::null());
@@ -733,8 +752,36 @@ fn editor_host_alias(cvm_id: &str) -> String {
     }
 }
 
-fn editor_remote_uri(host_alias: &str) -> String {
-    format!("vscode-remote://ssh-remote+{host_alias}/home/dev")
+const DEV_REMOTE_HOME: &str = "/home/dev";
+
+fn editor_remote_path(workspace: Option<&str>) -> String {
+    let Some(value) = workspace else {
+        return DEV_REMOTE_HOME.to_string();
+    };
+    if let Some(rest) = value.strip_prefix("~/") {
+        format!("{DEV_REMOTE_HOME}/{rest}")
+    } else if value.starts_with('/') {
+        value.to_string()
+    } else {
+        format!("{DEV_REMOTE_HOME}/{value}")
+    }
+}
+
+fn editor_remote_uri(host_alias: &str, workspace: Option<&str>) -> String {
+    let path = editor_remote_path(workspace);
+    format!("vscode-remote://ssh-remote+{host_alias}{path}")
+}
+
+fn resolve_workspace(
+    explicit: Option<&str>,
+    config: &ResolvedConfig,
+    cvm_id: &str,
+) -> Option<String> {
+    if let Some(value) = explicit {
+        let _ = crate::cvm_state::write_workspace(&config.config_dir, cvm_id, value);
+        return Some(value.to_string());
+    }
+    crate::cvm_state::read(&config.config_dir, cvm_id).workspace
 }
 
 fn validate_ssh_config_token(value: &str, label: &str) -> Result<(), String> {
@@ -981,7 +1028,7 @@ fn write_alias(
     Ok(())
 }
 
-fn validate_workspace_path(value: &str) -> Result<&str, String> {
+pub(crate) fn validate_workspace_path(value: &str) -> Result<&str, String> {
     if value.is_empty() {
         return Err("[usage] --workspace must not be empty".to_string());
     }
@@ -1151,10 +1198,29 @@ mod tests {
     }
 
     #[test]
-    fn editor_remote_uri_targets_dev_home() {
+    fn editor_remote_uri_targets_dev_home_without_workspace() {
         assert_eq!(
-            editor_remote_uri("concrete-cvm-1"),
+            editor_remote_uri("concrete-cvm-1", None),
             "vscode-remote://ssh-remote+concrete-cvm-1/home/dev"
         );
+    }
+
+    #[test]
+    fn editor_remote_uri_appends_workspace_path() {
+        assert_eq!(
+            editor_remote_uri("concrete-cvm-1", Some("~/workspaces/myrepo")),
+            "vscode-remote://ssh-remote+concrete-cvm-1/home/dev/workspaces/myrepo"
+        );
+    }
+
+    #[test]
+    fn editor_remote_path_resolves_workspace_variants() {
+        assert_eq!(editor_remote_path(None), "/home/dev");
+        assert_eq!(
+            editor_remote_path(Some("~/repos/foo")),
+            "/home/dev/repos/foo"
+        );
+        assert_eq!(editor_remote_path(Some("/srv/x")), "/srv/x");
+        assert_eq!(editor_remote_path(Some("repos/foo")), "/home/dev/repos/foo");
     }
 }

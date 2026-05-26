@@ -468,6 +468,10 @@ pub struct CodeArgs {
     /// VS Code binary to invoke. Defaults to code on PATH.
     #[arg(long)]
     pub code_bin: Option<PathBuf>,
+
+    /// Working directory for the editor on the Dev CVM, for example ~/workspaces/myrepo.
+    #[arg(long)]
+    pub workspace: Option<String>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -475,6 +479,10 @@ pub struct CursorArgs {
     /// Cursor binary to invoke. Defaults to cursor on PATH.
     #[arg(long)]
     pub cursor_bin: Option<PathBuf>,
+
+    /// Working directory for the editor on the Dev CVM, for example ~/workspaces/myrepo.
+    #[arg(long)]
+    pub workspace: Option<String>,
 }
 
 #[derive(clap::Args, Debug)]
