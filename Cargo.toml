@@ -3,7 +3,7 @@ resolver = "2"
 members = ["cli", "cvms/dev/user-sandbox/atls-connect"]
 
 [workspace.package]
-version = "0.3.0-beta.1"
+version = "0.3.0-beta.2"
 edition = "2021"
 license-file = "LICENSE.txt"
 repository = "https://github.com/concrete-security/concrete"
