@@ -33,6 +33,7 @@ struct Cvm {
     id: String,
     state: String,
     fqdn: Option<String>,
+    error_reason: Option<String>,
 }
 
 struct SshInvocation<'a> {
@@ -441,6 +442,15 @@ fn prepare_ssh(
             format!(
                 "[error] Dev CVM {} is in state {}, expected RUNNING",
                 cvm.id, cvm.state
+            ),
+        ));
+    }
+    if cvm.error_reason.as_deref() == Some("SECURITY_CVM_REBIND_REQUIRED") {
+        return Err((
+            ExitStatus::Error,
+            format!(
+                "[error] Dev CVM {} needs an update after the Security CVM changed. Run `concrete cvm update {}`; if the local aTLS policy changes, the CLI will ask before replacing your trusted measurement.",
+                cvm.id, cvm.id
             ),
         ));
     }

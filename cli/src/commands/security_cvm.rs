@@ -391,10 +391,12 @@ fn print_update_result(result: &SecurityCvmUpdateResult, json_output: bool) {
         // them as an additional field on the confirm so the operator sees
         // exactly which CVMs they need to relaunch / update next.
         if !result.dev_cvms_requiring_update.is_empty() {
-            confirm = confirm.field(
-                "dev cvms requiring update",
-                result.dev_cvms_requiring_update.join(", "),
-            );
+            confirm = confirm
+                .field(
+                    "dev cvms requiring update",
+                    result.dev_cvms_requiring_update.join(", "),
+                )
+                .next_step("run concrete cvm update <cvm-id> for each listed Dev CVM");
         }
         println!("{}", style::render_confirm(&confirm));
     }

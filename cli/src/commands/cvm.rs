@@ -2,7 +2,7 @@ use std::{
     collections::BTreeMap,
     env,
     fs::{self, OpenOptions},
-    io::Write,
+    io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     time::Duration,
@@ -123,6 +123,25 @@ struct CvmLaunchOutput {
     #[serde(flatten)]
     cvm: Cvm,
     policy_file_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    policy_file_status: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum PolicyWriteStatus {
+    Installed,
+    Unchanged,
+    ReplacedAfterConfirmation,
+}
+
+impl PolicyWriteStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Installed => "installed",
+            Self::Unchanged => "unchanged",
+            Self::ReplacedAfterConfirmation => "replaced_after_confirmation",
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -415,22 +434,26 @@ fn update(config: &ResolvedConfig, args: CvmUpdateArgs, json_output: bool) -> Ex
             return status;
         }
     };
-    let result: CvmLaunchResult = match operation::extract_operation_result(&op, "CVM launch") {
+    let result: CvmLaunchResult = match operation::extract_operation_result(&op, "CVM update") {
         Ok(value) => value,
         Err(message) => {
             style::eprintln_error(&message);
             return ExitStatus::Error;
         }
     };
-    let policy_file =
-        match write_policy_file(&config.config_dir, &result.policy_bundle, &result.cvm.id) {
-            Ok(value) => value,
-            Err(message) => {
-                style::eprintln_error(&message);
-                return ExitStatus::Error;
-            }
-        };
-    print_update_result(result.cvm, policy_file, json_output);
+    let (policy_file, policy_status) = match write_policy_file_after_update(
+        &config.config_dir,
+        &result.policy_bundle,
+        &result.cvm.id,
+        json_output,
+    ) {
+        Ok(value) => value,
+        Err(message) => {
+            style::eprintln_error(&message);
+            return ExitStatus::Error;
+        }
+    };
+    print_update_result(result.cvm, policy_file, policy_status, json_output);
     ExitStatus::Ok
 }
 
@@ -1103,8 +1126,44 @@ pub(crate) fn write_policy_file(
     bundle: &PolicyBundle,
     cvm_id: &str,
 ) -> Result<PathBuf, String> {
+    let (target, data, _) = prepare_policy_file(config_dir, bundle, cvm_id)?;
+    install_policy_file(&target, &data)?;
+    Ok(target)
+}
+
+fn write_policy_file_after_update(
+    config_dir: &Path,
+    bundle: &PolicyBundle,
+    cvm_id: &str,
+    json_output: bool,
+) -> Result<(PathBuf, PolicyWriteStatus), String> {
+    let (target, data, document) = prepare_policy_file(config_dir, bundle, cvm_id)?;
+    if !target.exists() {
+        install_policy_file(&target, &data)?;
+        return Ok((target, PolicyWriteStatus::Installed));
+    }
+    if policy_file_matches(&target, &document)? {
+        tighten_policy_permissions(&target)?;
+        return Ok((target, PolicyWriteStatus::Unchanged));
+    }
+    if !json_output && prompt_replace_policy(cvm_id, &target)? {
+        install_policy_file(&target, &data)?;
+        return Ok((target, PolicyWriteStatus::ReplacedAfterConfirmation));
+    }
+    Err(format!(
+        "[error] Dev CVM update succeeded, but the local aTLS policy file was not changed. The new policy changes the measurement this CLI trusts. Current policy: {}. Re-run `concrete cvm update {}` from an interactive terminal and answer yes if you trust the new measurement.",
+        target.display(),
+        cvm_id
+    ))
+}
+
+fn prepare_policy_file(
+    config_dir: &Path,
+    bundle: &PolicyBundle,
+    cvm_id: &str,
+) -> Result<(PathBuf, Vec<u8>, Value), String> {
     if bundle.cvm_id != cvm_id {
-        return Err("[error] CVM launch result policy bundle did not match CVM id".to_string());
+        return Err("[error] CVM policy bundle did not match CVM id".to_string());
     }
     let dir = config_dir.join("cvms");
     fs::create_dir_all(&dir)
@@ -1116,9 +1175,21 @@ pub(crate) fn write_policy_file(
         })?;
     }
     let target = dir.join(format!("{cvm_id}.atls-policy.json"));
-    let tmp = dir.join(format!(".{cvm_id}.{}.tmp", std::process::id()));
-    let data = serde_json::to_vec_pretty(&policy_document(bundle))
+    let document = policy_document(bundle);
+    let data = serde_json::to_vec_pretty(&document)
         .map_err(|err| format!("[error] failed to serialize aTLS policy: {err}"))?;
+    Ok((target, data, document))
+}
+
+fn install_policy_file(target: &Path, data: &[u8]) -> Result<(), String> {
+    let dir = target
+        .parent()
+        .ok_or_else(|| "[error] failed to resolve policy directory".to_string())?;
+    let stem = target
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("policy");
+    let tmp = dir.join(format!(".{stem}.{}.tmp", std::process::id()));
     let mut options = OpenOptions::new();
     options.write(true).create(true).truncate(true);
     #[cfg(unix)]
@@ -1128,18 +1199,70 @@ pub(crate) fn write_policy_file(
     let mut file = options
         .open(&tmp)
         .map_err(|err| format!("[error] failed to create temporary aTLS policy file: {err}"))?;
-    file.write_all(&data)
+    file.write_all(data)
         .and_then(|_| file.sync_all())
         .map_err(|err| format!("[error] failed to write aTLS policy file: {err}"))?;
-    fs::rename(&tmp, &target)
+    fs::rename(&tmp, target)
         .map_err(|err| format!("[error] failed to install aTLS policy file: {err}"))?;
+    tighten_policy_permissions(target)
+}
+
+fn tighten_policy_permissions(target: &Path) -> Result<(), String> {
     #[cfg(unix)]
     {
-        fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).map_err(|err| {
+        fs::set_permissions(target, fs::Permissions::from_mode(0o600)).map_err(|err| {
             format!("[error] failed to tighten aTLS policy file permissions: {err}")
         })?;
     }
-    Ok(target)
+    Ok(())
+}
+
+fn policy_file_matches(target: &Path, expected: &Value) -> Result<bool, String> {
+    let data = fs::read(target)
+        .map_err(|err| format!("[error] failed to read aTLS policy file: {err}"))?;
+    match serde_json::from_slice::<Value>(&data) {
+        Ok(actual) => Ok(&actual == expected),
+        Err(_) => Ok(false),
+    }
+}
+
+fn prompt_replace_policy(cvm_id: &str, target: &Path) -> Result<bool, String> {
+    if !io::stdin().is_terminal() {
+        return Ok(false);
+    }
+    eprintln!(
+        "{}",
+        style::info_line("The updated Dev CVM returned new aTLS trust material.")
+    );
+    eprintln!(
+        "{}",
+        style::info_line("This usually happens after a Security CVM update or Dev CVM rebind.")
+    );
+    eprintln!(
+        "{}",
+        style::info_line(
+            "Your local policy file is the golden measurement this CLI trusts, so Concrete will not replace it automatically."
+        )
+    );
+    eprint!(
+        "{}",
+        style::info_line(&format!(
+            "Replace {} for CVM {}? [y/N] ",
+            target.display(),
+            cvm_id
+        ))
+    );
+    io::stderr()
+        .flush()
+        .map_err(|err| format!("[error] failed to flush policy prompt: {err}"))?;
+    let mut answer = String::new();
+    io::stdin()
+        .read_line(&mut answer)
+        .map_err(|err| format!("[error] failed to read policy prompt response: {err}"))?;
+    Ok(matches!(
+        answer.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
 }
 
 fn persist_launch_defaults(
@@ -1245,6 +1368,7 @@ fn print_launch_result(cvm: Cvm, policy_file: PathBuf, json_output: bool) {
         let output = CvmLaunchOutput {
             cvm,
             policy_file_path: policy_file.display().to_string(),
+            policy_file_status: None,
         };
         println!(
             "{}",
@@ -1273,11 +1397,17 @@ fn print_lifecycle_result(action: LifecycleAction, cvm: &Cvm, json_output: bool)
     }
 }
 
-fn print_update_result(cvm: Cvm, policy_file: PathBuf, json_output: bool) {
+fn print_update_result(
+    cvm: Cvm,
+    policy_file: PathBuf,
+    policy_status: PolicyWriteStatus,
+    json_output: bool,
+) {
     if json_output {
         let output = CvmLaunchOutput {
             cvm,
             policy_file_path: policy_file.display().to_string(),
+            policy_file_status: Some(policy_status.as_str().to_string()),
         };
         println!(
             "{}",
@@ -1289,6 +1419,7 @@ fn print_update_result(cvm: Cvm, policy_file: PathBuf, json_output: bool) {
             .field("fqdn", cvm.fqdn.clone().unwrap_or_else(|| "-".to_string()))
             .field("state", cvm.state.clone())
             .field("policy file", policy_file.display().to_string())
+            .field("policy status", policy_status.as_str())
             .next_step(format!("concrete ssh {cvm_id}"));
         println!("{}", style::render_confirm(&confirm));
     }
@@ -1328,49 +1459,10 @@ mod tests {
 
     #[test]
     fn policy_document_maps_policy_bundle_to_atls_policy() {
-        let bundle = PolicyBundle {
-            cvm_id: "00000000-0000-4000-8000-000000000001".to_string(),
-            compose_template: "services: {}".to_string(),
-            expected_bootchain: json!({
-                "mrtd": "a".repeat(64),
-                "rtmr0": "b".repeat(64),
-                "rtmr1": "c".repeat(64),
-                "rtmr2": "d".repeat(64),
-            }),
-            os_image_hash: "e".repeat(64),
-            rtmr3_binding: json!({
-                "cvm_id": "00000000-0000-4000-8000-000000000001",
-                "security_cvm_fqdn": "sc.example.com",
-                "security_cvm_proxy_port": 8080,
-                "security_cvm_proxy_token_sha256": "f".repeat(64),
-                "security_cvm_ca_cert_sha256": "0".repeat(64),
-                "authorised_ssh_keys_sha256": "1".repeat(64),
-            }),
-            extra: {
-                let mut extra = Map::new();
-                extra.insert(
-                    "connect_host".to_string(),
-                    Value::String("app-443s.dstack.example.com".to_string()),
-                );
-                extra.insert(
-                    "app_compose".to_string(),
-                    json!({
-                        "allowed_envs": ["wrong"],
-                        "docker_compose_file": "stale",
-                        "features": ["wrong"],
-                        "runner": "docker-compose"
-                    }),
-                );
-                extra.insert(
-                    "app_compose_json".to_string(),
-                    Value::String(
-                        r#"{"allowed_envs":[],"docker_compose_file":"stale","features":["kms","tproxy-net"],"runner":"docker-compose"}"#
-                            .to_string(),
-                    ),
-                );
-                extra
-            },
-        };
+        let bundle = test_policy_bundle(
+            "00000000-0000-4000-8000-000000000001",
+            "app-443s.dstack.example.com",
+        );
 
         let policy = policy_document(&bundle);
 
@@ -1391,6 +1483,98 @@ mod tests {
             .expect("app_compose serializes")
             .starts_with(r#"{"allowed_envs":[],"docker_compose_file":"#));
         assert_eq!(policy["rtmr3_binding"]["security_cvm_proxy_port"], 8080);
+    }
+
+    #[test]
+    fn update_policy_refuses_to_overwrite_changed_local_trust_in_json_mode() {
+        let dir = std::env::temp_dir().join(format!("concrete-cvm-policy-test-{}", Uuid::new_v4()));
+        let cvm_id = "00000000-0000-4000-8000-000000000001";
+        write_policy_file(&dir, &test_policy_bundle(cvm_id, "old.example.com"), cvm_id)
+            .expect("initial policy written");
+
+        let err = write_policy_file_after_update(
+            &dir,
+            &test_policy_bundle(cvm_id, "new.example.com"),
+            cvm_id,
+            true,
+        )
+        .expect_err("changed local trust requires explicit confirmation");
+
+        let policy_path = dir.join("cvms").join(format!("{cvm_id}.atls-policy.json"));
+        let policy: Value = serde_json::from_slice(&fs::read(policy_path).expect("policy read"))
+            .expect("policy parses");
+        assert_eq!(policy["connect_host"], "old.example.com");
+        assert!(err.contains("local aTLS policy file was not changed"));
+        fs::remove_dir_all(dir).expect("temp dir removed");
+    }
+
+    #[test]
+    fn update_policy_accepts_unchanged_local_trust() {
+        let dir = std::env::temp_dir().join(format!("concrete-cvm-policy-test-{}", Uuid::new_v4()));
+        let cvm_id = "00000000-0000-4000-8000-000000000001";
+        write_policy_file(
+            &dir,
+            &test_policy_bundle(cvm_id, "same.example.com"),
+            cvm_id,
+        )
+        .expect("initial policy written");
+
+        let (_, status) = write_policy_file_after_update(
+            &dir,
+            &test_policy_bundle(cvm_id, "same.example.com"),
+            cvm_id,
+            true,
+        )
+        .expect("unchanged policy accepted");
+
+        assert_eq!(status.as_str(), "unchanged");
+        fs::remove_dir_all(dir).expect("temp dir removed");
+    }
+
+    fn test_policy_bundle(cvm_id: &str, connect_host: &str) -> PolicyBundle {
+        PolicyBundle {
+            cvm_id: cvm_id.to_string(),
+            compose_template: "services: {}".to_string(),
+            expected_bootchain: json!({
+                "mrtd": "a".repeat(64),
+                "rtmr0": "b".repeat(64),
+                "rtmr1": "c".repeat(64),
+                "rtmr2": "d".repeat(64),
+            }),
+            os_image_hash: "e".repeat(64),
+            rtmr3_binding: json!({
+                "cvm_id": cvm_id,
+                "security_cvm_fqdn": "sc.example.com",
+                "security_cvm_proxy_port": 8080,
+                "security_cvm_proxy_token_sha256": "f".repeat(64),
+                "security_cvm_ca_cert_sha256": "0".repeat(64),
+                "authorised_ssh_keys_sha256": "1".repeat(64),
+            }),
+            extra: {
+                let mut extra = Map::new();
+                extra.insert(
+                    "connect_host".to_string(),
+                    Value::String(connect_host.to_string()),
+                );
+                extra.insert(
+                    "app_compose".to_string(),
+                    json!({
+                        "allowed_envs": ["wrong"],
+                        "docker_compose_file": "stale",
+                        "features": ["wrong"],
+                        "runner": "docker-compose"
+                    }),
+                );
+                extra.insert(
+                    "app_compose_json".to_string(),
+                    Value::String(
+                        r#"{"allowed_envs":[],"docker_compose_file":"stale","features":["kms","tproxy-net"],"runner":"docker-compose"}"#
+                            .to_string(),
+                    ),
+                );
+                extra
+            },
+        }
     }
 
     #[test]
