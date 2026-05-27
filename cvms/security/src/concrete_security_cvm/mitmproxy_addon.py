@@ -107,24 +107,55 @@ class SecurityCVMProxyAddon:
         if len(self._connect_identities) > MAX_CONNECT_IDENTITIES:
             self._connect_identities.clear()
 
+    def responseheaders(self, flow: Any) -> None:
+        # Stream the response body straight through instead of buffering the
+        # whole thing in RAM. The SC's egress is dominated by large, long-lived
+        # streaming responses (e.g. agent SSE), and buffering entire response
+        # bodies is what drives the proxy into OOM. Requests are still fully
+        # buffered (see request()/_request_body), so DLP request-body scanning
+        # is unaffected. A counting callback keeps the traffic-log byte count
+        # accurate even though response.content is not populated when streamed.
+        response = getattr(flow, "response", None)
+        if response is None:
+            return
+        metadata = _metadata(flow)
+        metadata["concrete_streamed_bytes"] = 0
+
+        def _count_streamed(chunk: bytes) -> bytes:
+            metadata["concrete_streamed_bytes"] += len(chunk)
+            return chunk
+
+        response.stream = _count_streamed
+
     def response(self, flow: Any) -> None:
-        traffic_log = _metadata(flow).pop("concrete_traffic_log", None)
+        metadata = _metadata(flow)
+        traffic_log = metadata.pop("concrete_traffic_log", None)
+        streamed_bytes = metadata.pop("concrete_streamed_bytes", None)
         if not isinstance(traffic_log, TrafficLogRecord):
             return
         response = getattr(flow, "response", None)
         if response is None:
             return
         status_code = int(getattr(response, "status_code", 0) or 0)
+        # Streamed responses no longer populate response.content, so prefer the
+        # byte count tallied by the stream callback; fall back to the buffered
+        # body size for any response that was not streamed.
+        if isinstance(streamed_bytes, int):
+            bytes_transferred = streamed_bytes
+        else:
+            bytes_transferred = _response_body_size(response)
         self.traffic_emitter.enqueue(
             replace(
                 traffic_log,
                 response_code=status_code,
-                bytes_transferred=_response_body_size(response),
+                bytes_transferred=bytes_transferred,
             )
         )
 
     def error(self, flow: Any) -> None:
-        traffic_log = _metadata(flow).pop("concrete_traffic_log", None)
+        metadata = _metadata(flow)
+        traffic_log = metadata.pop("concrete_traffic_log", None)
+        metadata.pop("concrete_streamed_bytes", None)
         if not isinstance(traffic_log, TrafficLogRecord):
             return
         self.traffic_emitter.enqueue(replace(traffic_log, response_code=502, bytes_transferred=0))

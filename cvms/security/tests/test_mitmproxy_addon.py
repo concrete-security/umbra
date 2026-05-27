@@ -177,6 +177,40 @@ def test_allowed_request_strips_proxy_auth_injects_secret_and_logs_after_respons
     assert "concrete_traffic_log" not in flow.metadata
 
 
+def test_response_is_streamed_and_logs_streamed_byte_count() -> None:
+    proxy_addon, queue = addon()
+    flow = FakeFlow()
+
+    proxy_addon.request(flow)
+    assert flow.response is None
+
+    # Upstream response headers arrive: the addon must switch the body to
+    # streaming (so it is never buffered whole in RAM) and install a counting
+    # callback. Streamed responses do not populate response.content.
+    flow.response = FakeResponse(status_code=200, raw_content=b"", headers={})
+    proxy_addon.responseheaders(flow)
+
+    assert callable(flow.response.stream)
+    assert flow.metadata["concrete_streamed_bytes"] == 0
+
+    # Body streams through in chunks; the callback returns each chunk unchanged
+    # and tallies bytes (the trailing empty chunk signals end-of-stream).
+    for chunk in (b"a" * 4096, b"b" * 4096, b"c" * 808, b""):
+        assert flow.response.stream(chunk) == chunk
+
+    proxy_addon.response(flow)
+    batch = queue.drain_batch()
+
+    assert batch is not None
+    assert len(batch.records) == 1
+    log = batch.records[0]
+    assert log.response_code == 200
+    # bytes_transferred reflects the streamed total, not response.content.
+    assert log.bytes_transferred == 4096 + 4096 + 808
+    assert "concrete_streamed_bytes" not in flow.metadata
+    assert "concrete_traffic_log" not in flow.metadata
+
+
 def test_allowed_connect_uses_authority_and_does_not_log_before_http_request() -> None:
     policy_body = policy()
     policy_body["blocked_destinations"] = []
