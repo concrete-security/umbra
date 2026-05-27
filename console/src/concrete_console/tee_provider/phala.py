@@ -171,6 +171,7 @@ class PhalaClient:
                 str(staged.compose_path),
                 "-e",
                 str(staged.env_path),
+                "--no-dev-os",
             ]
             append_optional_arg(args, "--instance-type", instance_type)
             append_optional_arg(args, "--region", region)
@@ -192,6 +193,7 @@ class PhalaClient:
                     str(staged.compose_path),
                     "-e",
                     str(staged.env_path),
+                    "--no-dev-os",
                     "--json",
                 ]
             )

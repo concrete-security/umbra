@@ -142,6 +142,7 @@ def test_deploy_stages_files_with_private_modes_and_cleans(tmp_path) -> None:
         assert sys.argv[1:4] == ["deploy", "--name", "concrete-v0-cvm-smoke"]
         assert sys.argv[sys.argv.index("--instance-type") + 1] == "tdx.small"
         assert sys.argv[sys.argv.index("--region") + 1] == "FR-PARIS-1"
+        assert "--no-dev-os" in sys.argv
         compose_path = sys.argv[sys.argv.index("--compose") + 1]
         env_path = sys.argv[sys.argv.index("-e") + 1]
         assert stat.S_IMODE(os.stat(compose_path).st_mode) == 0o600
@@ -197,6 +198,7 @@ def test_deploy_falls_back_to_cvms_get_when_cli_stdout_is_empty(tmp_path) -> Non
 
     argv = json.loads(marker.read_text())
     assert argv[:3] == ["deploy", "--name", "concrete-v0-cvm-smoke"]
+    assert "--no-dev-os" in argv
     assert "--wait" in argv
     assert result.app_id == "app-123"
     assert result.gateway_host == "dstack.example.com"
@@ -272,6 +274,7 @@ def test_update_uses_phala_deploy_cvm_id(tmp_path) -> None:
     seen = json.loads(marker.read_text())
     argv = seen["argv"]
     assert argv[:3] == ["deploy", "--cvm-id", "a8dcb43d-7c46-4d5d-b026-192409368bbc"]
+    assert "--no-dev-os" in argv
     assert "--wait" not in argv
     assert "--json" in argv
     assert seen["compose"] == "services: {}\n"
