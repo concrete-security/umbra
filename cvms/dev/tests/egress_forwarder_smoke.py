@@ -64,6 +64,35 @@ async def fake_security_cvm_http(reader, writer):
     await writer.wait_closed()
 
 
+async def fake_security_cvm_blocked_connect(reader, writer):
+    upgrade = await reader.readuntil(b"\r\n\r\n")
+    assert b"GET /concrete/proxy HTTP/1.1" in upgrade
+    assert b"Proxy-Authorization" not in upgrade
+    writer.write(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: concrete-proxy\r\nConnection: Upgrade\r\n\r\n")
+    await writer.drain()
+
+    request = await reader.readuntil(b"\r\n\r\n")
+    assert b"CONNECT blocked.example.com:443 HTTP/1.1" in request
+    assert b"Proxy-Authorization: Bearer real-proxy-token\r\n" in request
+
+    body = (
+        b"Concrete network restriction: this request was blocked by the profile policy assigned "
+        b"to this Dev CVM.\nThis is a Concrete policy decision, not a network or server failure.\n"
+    )
+    writer.write(
+        b"HTTP/1.1 403 Forbidden\r\n"
+        b"Content-Type: text/plain; charset=utf-8\r\n"
+        b"X-Concrete-Blocked: true\r\n"
+        b"Content-Length: "
+        + str(len(body)).encode("ascii")
+        + b"\r\n\r\n"
+        + body
+    )
+    await writer.drain()
+    writer.close()
+    await writer.wait_closed()
+
+
 def write_fake_connect_helper(directory: Path, relay_port: int) -> Path:
     helper = directory / "fake-atls-connect.py"
     helper.write_text(
@@ -157,6 +186,34 @@ async def smoke():
         await server.wait_closed()
     security_cvm.close()
     await security_cvm.wait_closed()
+
+    security_cvm_blocked = await asyncio.start_server(fake_security_cvm_blocked_connect, "127.0.0.1", 0)
+    relay_port = security_cvm_blocked.sockets[0].getsockname()[1]
+    with tempfile.TemporaryDirectory() as temp:
+        helper = write_fake_connect_helper(Path(temp), relay_port)
+        runtime_dir = Path(temp) / "run"
+        set_forwarder_env(helper)
+        config = forwarder.load_config(runtime_dir)
+        server = await asyncio.start_server(lambda r, w: forwarder.handle_client(r, w, config), "127.0.0.1", 0)
+        forwarder_port = server.sockets[0].getsockname()[1]
+        reader, writer = await asyncio.open_connection("127.0.0.1", forwarder_port)
+        writer.write(
+            b"CONNECT blocked.example.com:443 HTTP/1.1\r\n"
+            b"Host: blocked.example.com:443\r\n"
+            b"\r\n"
+        )
+        await writer.drain()
+        response = await reader.read()
+        assert b"HTTP/1.1 403 Forbidden" in response
+        assert b"X-Concrete-Blocked: true" in response
+        assert b"Concrete network restriction" in response
+        assert b"profile policy assigned to this Dev CVM" in response
+        writer.close()
+        await writer.wait_closed()
+        server.close()
+        await server.wait_closed()
+    security_cvm_blocked.close()
+    await security_cvm_blocked.wait_closed()
 
     security_cvm_http = await asyncio.start_server(fake_security_cvm_http, "127.0.0.1", 0)
     relay_port = security_cvm_http.sockets[0].getsockname()[1]

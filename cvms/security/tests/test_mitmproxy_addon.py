@@ -271,7 +271,14 @@ def test_blocked_request_sets_403_and_emits_sanitized_traffic_log() -> None:
 
     assert flow.response is not None
     assert flow.response.status_code == 403
-    assert flow.response.raw_content == b"Concrete Proxy: Destination blocked by policy\n"
+    assert b"Concrete network restriction" in flow.response.raw_content
+    assert b"profile policy assigned to this Dev CVM" in flow.response.raw_content
+    assert b"not a network or server failure" in flow.response.raw_content
+    assert flow.response.headers["X-Concrete-Blocked"] == "true"
+    assert flow.response.headers["X-Concrete-Block-Source"] == "profile"
+    assert flow.response.headers["X-Concrete-Block-Reason"] == "blocked_destination"
+    assert flow.response.headers["X-Concrete-CVM-ID"] == str(CVM_ID)
+    assert flow.response.headers["X-Concrete-Policy-Version"] == "3"
     assert batch is not None
     assert batch.records[0].path == "/v1/files/upload"
     assert batch.records[0].response_code == 403
@@ -286,6 +293,8 @@ def test_blocked_connect_sets_403_and_emits_sanitized_traffic_log() -> None:
 
     assert flow.response is not None
     assert flow.response.status_code == 403
+    assert b"Concrete network restriction" in flow.response.raw_content
+    assert flow.response.headers["X-Concrete-Block-Source"] == "profile"
     assert batch is not None
     assert batch.records[0].method == "CONNECT"
     assert batch.records[0].response_code == 403
@@ -302,6 +311,8 @@ def test_unknown_proxy_bearer_returns_407_without_logging_token(
 
     assert flow.response is not None
     assert flow.response.status_code == 407
+    assert flow.response.raw_content == b"Concrete Proxy: Proxy authentication required\n"
+    assert "X-Concrete-Blocked" not in flow.response.headers
     assert len(queue) == 0
     assert "wrong-token" not in caplog.text
 

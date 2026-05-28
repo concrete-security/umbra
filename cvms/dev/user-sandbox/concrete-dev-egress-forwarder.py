@@ -426,6 +426,77 @@ async def relay_response_until_close(reader: asyncio.StreamReader, writer: async
         await writer.drain()
 
 
+def response_header_values(response_headers: bytes, header_name: str) -> list[str]:
+    wanted = header_name.lower()
+    lines = response_headers.removesuffix(b"\r\n\r\n").decode("iso-8859-1").split("\r\n")
+    values: list[str] = []
+    for line in lines[1:]:
+        if ":" not in line:
+            continue
+        name, value = line.split(":", 1)
+        if name.strip().lower() == wanted:
+            values.append(value.strip())
+    return values
+
+
+def response_content_length(response_headers: bytes) -> int | None:
+    values = response_header_values(response_headers, "content-length")
+    if not values:
+        return None
+    if len(set(values)) != 1 or not values[0].isdigit():
+        raise ConnectionError("invalid upstream Content-Length header")
+    return int(values[0])
+
+
+def response_transfer_encoding_is_chunked(response_headers: bytes) -> bool:
+    values = response_header_values(response_headers, "transfer-encoding")
+    if not values:
+        return False
+    codings = ",".join(values).lower().split(",")
+    return any(coding.strip() == "chunked" for coding in codings)
+
+
+async def relay_chunked_response_body(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> int:
+    relayed = 0
+    while True:
+        line = await reader.readuntil(b"\r\n")
+        writer.write(line)
+        relayed += len(line)
+        size_text = line.split(b";", 1)[0].strip()
+        try:
+            chunk_size = int(size_text, 16)
+        except ValueError as exc:
+            raise ConnectionError("invalid chunked upstream response body") from exc
+        if chunk_size == 0:
+            while True:
+                trailer = await reader.readuntil(b"\r\n")
+                writer.write(trailer)
+                relayed += len(trailer)
+                if trailer == b"\r\n":
+                    await writer.drain()
+                    return relayed
+        chunk = await reader.readexactly(chunk_size + 2)
+        writer.write(chunk)
+        relayed += len(chunk)
+        await writer.drain()
+
+
+async def relay_response_body(
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    response_headers: bytes,
+) -> int:
+    if response_transfer_encoding_is_chunked(response_headers):
+        return await relay_chunked_response_body(reader, writer)
+    content_length = response_content_length(response_headers)
+    if content_length is None or content_length == 0:
+        return 0
+    body = await reader.readexactly(content_length)
+    writer.write(body)
+    await writer.drain()
+    return len(body)
+
+
 async def bridge(
     left_reader: asyncio.StreamReader,
     left_writer: asyncio.StreamWriter,
@@ -482,6 +553,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             status_parts = response.split(b"\r\n", 1)[0].split()
             status_code = status_parts[1] if len(status_parts) >= 2 and response.startswith(b"HTTP/") else b"000"
             if status_code != b"200":
+                upstream_bytes = await relay_response_body(upstream.reader, writer, response)
                 return
             client_bytes, upstream_bytes = await bridge(reader, writer, upstream.reader, upstream.writer)
         else:

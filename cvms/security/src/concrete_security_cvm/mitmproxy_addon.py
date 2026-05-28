@@ -170,8 +170,8 @@ class SecurityCVMProxyAddon:
             self.traffic_emitter.enqueue(result.traffic_log)
         flow.response = self.response_factory(
             result.response_code or 403,
-            _blocked_body(result.reason),
-            {"Content-Type": "text/plain; charset=utf-8"},
+            _blocked_body(result),
+            _blocked_headers(result),
         )
 
 
@@ -204,17 +204,46 @@ def mitmproxy_response_factory(status_code: int, content: bytes, headers: Mappin
     return http.Response.make(status_code, content, dict(headers))
 
 
-def _blocked_body(reason: str) -> bytes:
-    messages = {
+def _blocked_headers(result: EnforcementResult) -> dict[str, str]:
+    headers = {"Content-Type": "text/plain; charset=utf-8"}
+    if result.response_code == 403 and result.cvm is not None:
+        headers.update(
+            {
+                "Proxy-Status": f"concrete-security-cvm; error={result.reason}",
+                "X-Concrete-Blocked": "true",
+                "X-Concrete-Block-Source": "profile",
+                "X-Concrete-Block-Reason": result.reason,
+                "X-Concrete-CVM-ID": str(result.cvm.cvm_id),
+                "X-Concrete-Policy-Version": str(result.cvm.policy_version),
+            }
+        )
+    return headers
+
+
+def _blocked_body(result: EnforcementResult) -> bytes:
+    auth_messages = {
         "proxy_auth_missing": "Concrete Proxy: Proxy authentication required\n",
         "proxy_auth_unknown": "Concrete Proxy: Proxy authentication required\n",
-        "blocked_destination": "Concrete Proxy: Destination blocked by policy\n",
-        "destination_not_allowed": "Concrete Proxy: Destination not in allowed domains\n",
-        "dlp_secret_detected": "Concrete Proxy: Blocked by DLP policy\n",
-        "dlp_scan_timeout": "Concrete Proxy: Blocked by DLP scanner timeout\n",
-        "policy_secret_injection_conflict": "Concrete Proxy: Secret injection conflict\n",
     }
-    return messages.get(reason, "Concrete Proxy: Request blocked by policy\n").encode("utf-8")
+    if result.reason in auth_messages:
+        return auth_messages[result.reason].encode("utf-8")
+
+    reason_messages = {
+        "blocked_destination": "Reason: the destination is explicitly blocked.",
+        "destination_not_allowed": "Reason: this endpoint is not allowed.",
+        "dlp_secret_detected": "Reason: profile DLP policy detected sensitive data.",
+        "dlp_scan_timeout": "Reason: profile DLP scanning timed out.",
+        "policy_secret_injection_conflict": "Reason: profile secret injection rules conflict.",
+    }
+    body = "\n".join(
+        [
+            "Concrete network restriction: this request was blocked by the profile policy assigned to this Dev CVM.",
+            reason_messages.get(result.reason, "Reason: profile policy blocked this request."),
+            "This is a Concrete policy decision, not a network or server failure.",
+            "",
+        ]
+    )
+    return body.encode("utf-8")
 
 
 def _request_scheme(request: Any, method: str) -> str:
