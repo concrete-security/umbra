@@ -65,6 +65,7 @@ export SECURITY_CVM_PROXY_PORT="8080"
 export SECURITY_CVM_ATLS_POLICY_B64
 SECURITY_CVM_ATLS_POLICY_B64="$(base64 -w0 "$TMPDIR/policy.json")"
 export SECURITY_CVM_PROXY_TOKEN="compose-smoke-token"
+export DEV_CVM_CONTROL_TOKEN="compose-smoke-dev-control-token"
 
 docker compose -p "$PROJECT" -f "$ROOT/cvms/dev/docker-compose.yml" -f "$TMPDIR/compose.override.yml" \
   up -d --wait --wait-timeout 60
