@@ -23,6 +23,7 @@ use crate::{
     exit::ExitStatus,
     operation::{self, Operation},
     session::Session,
+    ssh_identity::{self, persistable_path},
     style,
 };
 
@@ -53,6 +54,7 @@ struct KeyListPage {
 struct ConsoleSshKey {
     id: String,
     label: String,
+    fingerprint: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -281,7 +283,12 @@ fn launch(config: &ResolvedConfig, args: CvmLaunchArgs, json_output: bool) -> Ex
                 return ExitStatus::Error;
             }
         };
-    if let Err(message) = persist_launch_defaults(config, &result.cvm, &launch.profile_ids) {
+    if let Err(message) = persist_launch_defaults(
+        config,
+        &result.cvm,
+        &launch.profile_ids,
+        launch.ssh_identity.as_deref(),
+    ) {
         style::eprintln_error(&message);
         return ExitStatus::Error;
     }
@@ -517,6 +524,7 @@ fn terminate(config: &ResolvedConfig, args: CvmTerminateArgs, json_output: bool)
 struct LaunchRequest {
     profile_ids: Vec<String>,
     ssh_key_ids: Vec<String>,
+    ssh_identity: Option<PathBuf>,
     instance_type: Option<String>,
     region: Option<String>,
 }
@@ -534,7 +542,7 @@ fn prepare_launch(
             "[usage] at most 16 --ssh-key values are supported".to_string(),
         ));
     }
-    let ssh_key_ids = selected_launch_ssh_keys(config, console_url, session, args)?;
+    let (ssh_key_ids, ssh_identity) = selected_launch_ssh_keys(config, console_url, session, args)?;
     let instance_type = args
         .instance_type
         .clone()
@@ -554,6 +562,7 @@ fn prepare_launch(
     Ok(LaunchRequest {
         profile_ids,
         ssh_key_ids,
+        ssh_identity,
         instance_type,
         region,
     })
@@ -632,43 +641,88 @@ fn selected_launch_ssh_keys(
     console_url: &str,
     session: &Session,
     args: &CvmLaunchArgs,
-) -> Result<Vec<String>, (ExitStatus, String)> {
+) -> Result<(Vec<String>, Option<PathBuf>), (ExitStatus, String)> {
     if !args.ssh_keys.is_empty() {
         for ssh_key_id in &args.ssh_keys {
             validate_uuid("--ssh-key", ssh_key_id)
                 .map_err(|message| (ExitStatus::Usage, message))?;
         }
-        return Ok(args.ssh_keys.clone());
+        let keys = fetch_launch_keys(console_url, session)?;
+        let selected = keys
+            .items
+            .iter()
+            .filter(|key| args.ssh_keys.iter().any(|id| id == &key.id))
+            .collect::<Vec<_>>();
+        let fingerprints = selected
+            .iter()
+            .map(|key| key.fingerprint.clone())
+            .collect::<Vec<_>>();
+        let identity = ssh_identity::discover_private_key_for_fingerprints(&fingerprints);
+        return Ok((args.ssh_keys.clone(), identity));
     }
     let keys = fetch_launch_keys(console_url, session)?;
     if !keys.items.is_empty() {
-        if keys.items.len() > 16 {
-            return Err((
-                ExitStatus::Usage,
-                "[usage] more than 16 registered SSH keys found; rerun with explicit --ssh-key values"
-                    .to_string(),
-            ));
-        }
-        let key_ids = keys
+        let mut key_ids = keys
             .items
             .iter()
             .map(|key| key.id.clone())
             .collect::<Vec<_>>();
+        let mut key_labels = keys
+            .items
+            .iter()
+            .map(|key| format!("{} ({})", key.label, key.id))
+            .collect::<Vec<_>>();
+        let fingerprints = keys
+            .items
+            .iter()
+            .map(|key| key.fingerprint.clone())
+            .collect::<Vec<_>>();
+        let mut identity = ssh_identity::discover_private_key_for_fingerprints(&fingerprints);
+        if identity.is_none() {
+            let (private_key, public_key) = ensure_default_ssh_keypair(config)?;
+            let key = create_launch_key(console_url, session, "default", &public_key)?;
+            eprintln!(
+                "{}",
+                style::info_line(&format!(
+                    "created and registered SSH key default ({}) because no registered key matched a local private key",
+                    key.id
+                ))
+            );
+            if key_ids.len() >= 16 {
+                eprintln!(
+                    "{}",
+                    style::info_line(
+                        "registered SSH keys are at the launch limit; using the new local key for this CVM"
+                    )
+                );
+                key_ids.clear();
+                key_labels.clear();
+            }
+            key_ids.push(key.id);
+            key_labels.push(format!(
+                "default ({})",
+                key_ids.last().expect("key id just pushed")
+            ));
+            identity = Some(private_key);
+        }
+        if key_ids.len() > 16 {
+            return Err((
+                ExitStatus::Usage,
+                "[usage] launch would install more than 16 SSH keys; rerun with explicit --ssh-key values"
+                    .to_string(),
+            ));
+        }
         eprintln!(
             "{}",
             style::info_line(&format!(
                 "using registered SSH key{} {}",
                 if key_ids.len() == 1 { "" } else { "s" },
-                keys.items
-                    .iter()
-                    .map(|key| format!("{} ({})", key.label, key.id))
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                key_labels.join(", ")
             ))
         );
-        return Ok(key_ids);
+        return Ok((key_ids, identity));
     }
-    let public_key = ensure_default_ssh_public_key(config)?;
+    let (private_key, public_key) = ensure_default_ssh_keypair(config)?;
     let key = create_launch_key(console_url, session, "default", &public_key)?;
     eprintln!(
         "{}",
@@ -677,7 +731,7 @@ fn selected_launch_ssh_keys(
             key.id
         ))
     );
-    Ok(vec![key.id])
+    Ok((vec![key.id], Some(private_key)))
 }
 
 fn fetch_launch_profiles(
@@ -738,7 +792,9 @@ fn create_launch_key(
     read_json_response(response, "add SSH key")
 }
 
-fn ensure_default_ssh_public_key(config: &ResolvedConfig) -> Result<String, (ExitStatus, String)> {
+fn ensure_default_ssh_keypair(
+    config: &ResolvedConfig,
+) -> Result<(PathBuf, String), (ExitStatus, String)> {
     let home = dirs::home_dir().ok_or_else(|| {
         (
             ExitStatus::Error,
@@ -761,7 +817,7 @@ fn ensure_default_ssh_public_key(config: &ResolvedConfig) -> Result<String, (Exi
             )
         })?;
     }
-    let (private_key, public_key) = default_ssh_key_paths(&ssh_dir)?;
+    let (private_key, public_key_path) = ssh_identity::default_ssh_key_paths(&ssh_dir)?;
     if !private_key.exists() {
         let comment = default_ssh_key_comment(config);
         let output = Command::new("ssh-keygen")
@@ -793,7 +849,7 @@ fn ensure_default_ssh_public_key(config: &ResolvedConfig) -> Result<String, (Exi
                 format!("[error] ssh-keygen exited with {detail}"),
             ));
         }
-    } else if !public_key.exists() {
+    } else if !public_key_path.exists() {
         let output = Command::new("ssh-keygen")
             .arg("-y")
             .arg("-f")
@@ -818,26 +874,29 @@ fn ensure_default_ssh_public_key(config: &ResolvedConfig) -> Result<String, (Exi
                 format!("[error] ssh-keygen exited with {detail}"),
             ));
         }
-        write_public_key_file(&public_key, &output.stdout)?;
+        write_public_key_file(&public_key_path, &output.stdout)?;
     }
-    let public_key_value = fs::read_to_string(&public_key).map_err(|err| {
+    let public_key_value = fs::read_to_string(&public_key_path).map_err(|err| {
         (
             ExitStatus::Error,
-            format!("[error] failed to read {}: {err}", public_key.display()),
+            format!(
+                "[error] failed to read {}: {err}",
+                public_key_path.display()
+            ),
         )
     })?;
     let public_key_value = public_key_value.trim();
     if public_key_value.is_empty() {
         return Err((
             ExitStatus::Error,
-            format!("[error] {} is empty", public_key.display()),
+            format!("[error] {} is empty", public_key_path.display()),
         ));
     }
     eprintln!(
         "{}",
-        style::info_line(&format!("using local SSH key {}", public_key.display()))
+        style::info_line(&format!("using local SSH key {}", private_key.display()))
     );
-    Ok(public_key_value.to_string())
+    Ok((private_key, public_key_value.to_string()))
 }
 
 fn write_public_key_file(path: &Path, data: &[u8]) -> Result<(), (ExitStatus, String)> {
@@ -874,33 +933,6 @@ fn write_public_key_file(path: &Path, data: &[u8]) -> Result<(), (ExitStatus, St
         })?;
     }
     Ok(())
-}
-
-fn default_ssh_key_paths(ssh_dir: &Path) -> Result<(PathBuf, PathBuf), (ExitStatus, String)> {
-    let preferred = ssh_dir.join("id_ed25519");
-    let preferred_public = ssh_dir.join("id_ed25519.pub");
-    if preferred.exists() || !preferred_public.exists() {
-        return Ok((preferred, preferred_public));
-    }
-    for index in 0..100 {
-        let name = if index == 0 {
-            "concrete_ed25519".to_string()
-        } else {
-            format!("concrete_ed25519_{index}")
-        };
-        let private_key = ssh_dir.join(&name);
-        let public_key = ssh_dir.join(format!("{name}.pub"));
-        if !private_key.exists() && !public_key.exists() {
-            return Ok((private_key, public_key));
-        }
-    }
-    Err((
-        ExitStatus::Error,
-        format!(
-            "[error] failed to find an unused SSH key path under {}",
-            ssh_dir.display()
-        ),
-    ))
 }
 
 fn default_ssh_key_comment(config: &ResolvedConfig) -> String {
@@ -1269,10 +1301,17 @@ fn persist_launch_defaults(
     config: &ResolvedConfig,
     cvm: &Cvm,
     profile_ids: &[String],
+    ssh_identity: Option<&Path>,
 ) -> Result<(), String> {
     let mut values = vec![("default_cvm", cvm.id.clone())];
     if config.profile.is_none() && profile_ids.len() == 1 {
         values.push(("default_profile", profile_ids[0].clone()));
+    }
+    if let Some(path) = ssh_identity {
+        values.push((
+            "default_ssh_identity",
+            persistable_path(path).display().to_string(),
+        ));
     }
     config::persist_string_values(&config.config_dir, &values)
 }
@@ -1583,32 +1622,6 @@ mod tests {
             validate_cvm_config_value("--region", "FR PARIS").expect_err("space rejected"),
             "[usage] --region may contain only letters, digits, '.', '_', and '-'"
         );
-    }
-
-    #[test]
-    fn default_ssh_key_paths_prefers_id_ed25519_when_unused() {
-        let dir = std::env::temp_dir().join(format!("concrete-cvm-key-test-{}", Uuid::new_v4()));
-        fs::create_dir_all(&dir).expect("temp dir created");
-
-        let (private_key, public_key) = default_ssh_key_paths(&dir).expect("key paths resolved");
-
-        assert_eq!(private_key, dir.join("id_ed25519"));
-        assert_eq!(public_key, dir.join("id_ed25519.pub"));
-        fs::remove_dir_all(dir).expect("temp dir removed");
-    }
-
-    #[test]
-    fn default_ssh_key_paths_does_not_target_existing_public_key_without_private_key() {
-        let dir = std::env::temp_dir().join(format!("concrete-cvm-key-test-{}", Uuid::new_v4()));
-        fs::create_dir_all(&dir).expect("temp dir created");
-        fs::write(dir.join("id_ed25519.pub"), "ssh-ed25519 existing\n")
-            .expect("public key written");
-
-        let (private_key, public_key) = default_ssh_key_paths(&dir).expect("key paths resolved");
-
-        assert_eq!(private_key, dir.join("concrete_ed25519"));
-        assert_eq!(public_key, dir.join("concrete_ed25519.pub"));
-        fs::remove_dir_all(dir).expect("temp dir removed");
     }
 
     #[test]

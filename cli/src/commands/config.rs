@@ -79,6 +79,14 @@ fn config_entries(config: &ResolvedConfig) -> Vec<ConfigEntry> {
             config.profile_source,
         ),
         string_entry(
+            "default_ssh_identity",
+            config
+                .default_ssh_identity
+                .as_ref()
+                .map(|path| path.display().to_string()),
+            config.default_ssh_identity_source,
+        ),
+        string_entry(
             "atls_policy",
             config
                 .atls_policy

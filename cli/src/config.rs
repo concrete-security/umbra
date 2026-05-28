@@ -15,6 +15,7 @@ struct ConfigFile {
     console_url: Option<String>,
     default_cvm: Option<String>,
     default_profile: Option<String>,
+    default_ssh_identity: Option<PathBuf>,
     atls_policy: Option<PathBuf>,
     atls_policy_insecure_skip: Option<bool>,
     default_instance_type: Option<String>,
@@ -52,6 +53,8 @@ pub struct ResolvedConfig {
     pub console_url_source: ConfigSource,
     pub default_cvm: Option<String>,
     pub default_cvm_source: ConfigSource,
+    pub default_ssh_identity: Option<PathBuf>,
+    pub default_ssh_identity_source: ConfigSource,
     pub profile: Option<String>,
     pub profile_source: ConfigSource,
     pub profile_flags: Vec<String>,
@@ -150,6 +153,18 @@ impl ResolvedConfig {
         {
             (Some(value), ConfigSource::Env)
         } else if let Some(value) = file.default_cvm {
+            (Some(value), ConfigSource::File)
+        } else {
+            (None, ConfigSource::Missing)
+        };
+
+        let (default_ssh_identity, default_ssh_identity_source) = if let Some(value) =
+            env::var("CONCRETE_DEFAULT_SSH_IDENTITY")
+                .ok()
+                .filter(|value| !value.is_empty())
+        {
+            (Some(PathBuf::from(value)), ConfigSource::Env)
+        } else if let Some(value) = file.default_ssh_identity {
             (Some(value), ConfigSource::File)
         } else {
             (None, ConfigSource::Missing)
@@ -322,6 +337,8 @@ impl ResolvedConfig {
             console_url_source,
             default_cvm,
             default_cvm_source,
+            default_ssh_identity,
+            default_ssh_identity_source,
             profile,
             profile_source,
             profile_flags: overrides.profile,

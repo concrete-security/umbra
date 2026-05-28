@@ -3,7 +3,7 @@ use std::{
     env,
     ffi::OsString,
     fs::{self, OpenOptions},
-    io::Write,
+    io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
@@ -25,8 +25,24 @@ use crate::{
     console::console_session,
     exit::ExitStatus,
     session::Session,
-    style,
+    ssh_identity, style,
 };
+
+#[derive(Debug, Deserialize)]
+struct CvmSshKeyRef {
+    id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct MeSshKey {
+    id: String,
+    fingerprint: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct MeSshKeyListPage {
+    items: Vec<MeSshKey>,
+}
 
 #[derive(Debug, Deserialize)]
 struct Cvm {
@@ -34,6 +50,7 @@ struct Cvm {
     state: String,
     fqdn: Option<String>,
     error_reason: Option<String>,
+    ssh_keys: Vec<CvmSshKeyRef>,
 }
 
 struct SshInvocation<'a> {
@@ -47,6 +64,7 @@ struct PreparedSsh {
     cvm_id: String,
     fqdn: String,
     proxy_command: String,
+    identity_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Serialize)]
@@ -343,14 +361,14 @@ pub fn run_alias(args: AliasArgs, config: &ResolvedConfig, json_output: bool) ->
 }
 
 fn run_ssh(invocation: SshInvocation<'_>, config: &ResolvedConfig) -> ExitStatus {
-    let prepared = match prepare_ssh(invocation.cvm_id, config) {
+    let prepared = match prepare_ssh(invocation.cvm_id, invocation.identity_file, config) {
         Ok(value) => value,
         Err((status, message)) => {
             crate::style::eprintln_error(&message);
             return status;
         }
     };
-    let mut ssh = base_ssh_command(&prepared, invocation.identity_file, invocation.allocate_tty);
+    let mut ssh = base_ssh_command(&prepared, invocation.allocate_tty);
     ssh.arg(invocation.remote_command);
     match ssh.status() {
         Ok(status) if status.success() => ExitStatus::Ok,
@@ -377,7 +395,7 @@ fn run_editor(
             return ExitStatus::Usage;
         }
     }
-    let prepared = match prepare_ssh(None, config) {
+    let prepared = match prepare_ssh(None, identity_file, config) {
         Ok(value) => value,
         Err((status, message)) => {
             crate::style::eprintln_error(&message);
@@ -385,7 +403,7 @@ fn run_editor(
         }
     };
     let workspace = resolve_workspace(workspace_arg, config, &prepared.cvm_id);
-    let launch = match write_editor_ssh_files(config, &prepared, identity_file) {
+    let launch = match write_editor_ssh_files(config, &prepared) {
         Ok(value) => value,
         Err(message) => {
             crate::style::eprintln_error(&message);
@@ -415,8 +433,8 @@ fn run_ssh_capture(
     invocation: SshInvocation<'_>,
     config: &ResolvedConfig,
 ) -> Result<String, (ExitStatus, String)> {
-    let prepared = prepare_ssh(invocation.cvm_id, config)?;
-    let mut ssh = base_ssh_command(&prepared, invocation.identity_file, invocation.allocate_tty);
+    let prepared = prepare_ssh(invocation.cvm_id, invocation.identity_file, config)?;
+    let mut ssh = base_ssh_command(&prepared, invocation.allocate_tty);
     ssh.arg(invocation.remote_command);
     let output = ssh.output().map_err(|err| {
         (
@@ -446,6 +464,7 @@ fn run_ssh_capture(
 
 fn prepare_ssh(
     cvm_id_arg: Option<&str>,
+    explicit_identity: Option<&Path>,
     config: &ResolvedConfig,
 ) -> Result<PreparedSsh, (ExitStatus, String)> {
     let cvm_id = match selected_cvm_id(cvm_id_arg, config) {
@@ -505,18 +524,35 @@ fn prepare_ssh(
             return Err((ExitStatus::Error, message));
         }
     };
+    let identity_file = if let Some(path) = explicit_identity {
+        Some(ssh_identity::resolve_explicit_identity(path)?)
+    } else {
+        let fingerprints = match installed_key_fingerprints(console_url, &session, &cvm) {
+            Ok(value) => value,
+            Err((status, message)) => {
+                return Err((status, message));
+            }
+        };
+        let identity = ssh_identity::resolve_session_identity(config, None, &fingerprints)?;
+        if identity.is_none() && !fingerprints.is_empty() {
+            eprintln!(
+                "{}",
+                style::info_line(
+                    "no matching local SSH private key found for this CVM; falling back to ssh-agent/default identities"
+                )
+            );
+        }
+        identity
+    };
     Ok(PreparedSsh {
         cvm_id: cvm.id,
         fqdn,
         proxy_command,
+        identity_file,
     })
 }
 
-fn base_ssh_command(
-    prepared: &PreparedSsh,
-    identity_file: Option<&Path>,
-    allocate_tty: bool,
-) -> Command {
+fn base_ssh_command(prepared: &PreparedSsh, allocate_tty: bool) -> Command {
     let mut ssh = Command::new("ssh");
     ssh.arg("-o")
         .arg(format!("ProxyCommand={}", prepared.proxy_command))
@@ -527,10 +563,17 @@ fn base_ssh_command(
         .arg("-o")
         .arg("LogLevel=ERROR")
         .arg("-o")
-        .arg("BatchMode=yes")
+        .arg(format!(
+            "BatchMode={}",
+            if allocate_tty && io::stdin().is_terminal() {
+                "no"
+            } else {
+                "yes"
+            }
+        ))
         .arg("-o")
         .arg("ConnectTimeout=30");
-    if let Some(identity_file) = identity_file {
+    if let Some(identity_file) = prepared.identity_file.as_deref() {
         ssh.arg("-o").arg("IdentitiesOnly=yes");
         ssh.arg("-i").arg(identity_file);
     }
@@ -567,6 +610,38 @@ fn fetch_cvm(
             )
         })?;
     crate::console::read_json_response(response, "fetch Dev CVM")
+}
+
+fn installed_key_fingerprints(
+    console_url: &str,
+    session: &Session,
+    cvm: &Cvm,
+) -> Result<Vec<String>, (ExitStatus, String)> {
+    if cvm.ssh_keys.is_empty() {
+        return Ok(Vec::new());
+    }
+    let response = Client::new()
+        .get(format!("{console_url}/api/v1/me/keys"))
+        .bearer_auth(&session.access_token)
+        .send()
+        .map_err(|err| {
+            (
+                ExitStatus::Error,
+                format!("[error] failed to list SSH keys: {err}"),
+            )
+        })?;
+    let page: MeSshKeyListPage = crate::console::read_json_response(response, "list SSH keys")?;
+    let installed_ids = cvm
+        .ssh_keys
+        .iter()
+        .map(|key| key.id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    Ok(page
+        .items
+        .into_iter()
+        .filter(|key| installed_ids.contains(key.id.as_str()))
+        .map(|key| key.fingerprint)
+        .collect())
 }
 
 fn resolve_policy_path(
@@ -634,28 +709,23 @@ struct EditorLaunch {
     wrapper_dir: PathBuf,
 }
 
-fn render_editor_ssh_config(
-    host_alias: &str,
-    prepared: &PreparedSsh,
-    identity_file: Option<&Path>,
-) -> String {
+fn render_editor_ssh_config(host_alias: &str, prepared: &PreparedSsh) -> Result<String, String> {
     let mut out = format!(
         "Host {host_alias}\n  HostName {}\n  User dev\n  ProxyCommand {}\n  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null\n  LogLevel ERROR\n  BatchMode yes\n  ConnectTimeout 30\n",
         prepared.fqdn, prepared.proxy_command,
     );
-    if let Some(path) = identity_file {
+    if let Some(path) = prepared.identity_file.as_ref() {
         out.push_str(&format!(
             "  IdentityFile {}\n  IdentitiesOnly yes\n",
-            path.display(),
+            ssh_config_quoted_path(path)?,
         ));
     }
-    out
+    Ok(out)
 }
 
 fn write_editor_ssh_files(
     config: &ResolvedConfig,
     prepared: &PreparedSsh,
-    identity_file: Option<&Path>,
 ) -> Result<EditorLaunch, String> {
     validate_ssh_config_token(&prepared.fqdn, "Dev CVM FQDN")?;
     if prepared.proxy_command.contains(['\n', '\r']) {
@@ -677,7 +747,7 @@ fn write_editor_ssh_files(
     }
 
     let config_path = base_dir.join("config");
-    let ssh_config = render_editor_ssh_config(&host_alias, prepared, identity_file);
+    let ssh_config = render_editor_ssh_config(&host_alias, prepared)?;
     write_atomic_file(&config_path, ssh_config.as_bytes(), 0o600)?;
 
     let ssh_bin = find_ssh_binary()
@@ -820,6 +890,22 @@ fn validate_ssh_config_token(value: &str, label: &str) -> Result<(), String> {
         return Err(format!("[error] {label} is not safe for SSH config output"));
     }
     Ok(())
+}
+
+fn ssh_config_quoted_path(path: &Path) -> Result<String, String> {
+    let value = path
+        .to_str()
+        .ok_or_else(|| "[error] SSH identity path is not valid UTF-8".to_string())?;
+    if value
+        .bytes()
+        .any(|byte| byte < 0x20 || byte == 0x7f || matches!(byte, b'\n' | b'\r'))
+    {
+        return Err("[error] SSH identity path is not safe for SSH config output".to_string());
+    }
+    Ok(format!(
+        "\"{}\"",
+        value.replace('\\', "\\\\").replace('"', "\\\"")
+    ))
 }
 
 fn ssh_remote_command(args: &SshArgs) -> Result<String, String> {
@@ -1137,8 +1223,9 @@ mod tests {
             cvm_id: "cvm-1".to_string(),
             fqdn: "cvm.example.com".to_string(),
             proxy_command: "concrete tunnel cvm.example.com".to_string(),
+            identity_file: Some(PathBuf::from("/tmp/concrete-key")),
         };
-        let ssh = base_ssh_command(&prepared, Some(Path::new("/tmp/concrete-key")), false);
+        let ssh = base_ssh_command(&prepared, false);
         let args: Vec<String> = ssh
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -1158,8 +1245,9 @@ mod tests {
             cvm_id: "cvm-1".to_string(),
             fqdn: "cvm.example.com".to_string(),
             proxy_command: "concrete tunnel cvm.example.com".to_string(),
+            identity_file: None,
         };
-        let config = render_editor_ssh_config("concrete-cvm-1", &prepared, None);
+        let config = render_editor_ssh_config("concrete-cvm-1", &prepared).unwrap();
         assert!(config.contains("Host concrete-cvm-1"));
         assert!(config.contains("HostName cvm.example.com"));
         assert!(config.contains("BatchMode yes"));
@@ -1173,13 +1261,10 @@ mod tests {
             cvm_id: "cvm-1".to_string(),
             fqdn: "cvm.example.com".to_string(),
             proxy_command: "concrete tunnel cvm.example.com".to_string(),
+            identity_file: Some(PathBuf::from("/home/u/.ssh/concrete_dev_ed25519")),
         };
-        let config = render_editor_ssh_config(
-            "concrete-cvm-1",
-            &prepared,
-            Some(Path::new("/home/u/.ssh/concrete_dev_ed25519")),
-        );
-        assert!(config.contains("IdentityFile /home/u/.ssh/concrete_dev_ed25519"));
+        let config = render_editor_ssh_config("concrete-cvm-1", &prepared).unwrap();
+        assert!(config.contains("IdentityFile \"/home/u/.ssh/concrete_dev_ed25519\""));
         assert!(config.contains("IdentitiesOnly yes"));
     }
 

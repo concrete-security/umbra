@@ -17,6 +17,7 @@ mod cvm_state;
 mod exit;
 mod operation;
 mod session;
+mod ssh_identity;
 mod style;
 
 pub use exit::ExitStatus;
