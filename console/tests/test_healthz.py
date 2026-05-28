@@ -325,6 +325,7 @@ def test_run_ready_checks_includes_oidc_jwks(monkeypatch) -> None:
 
     monkeypatch.setattr(readiness, "_check_database", ok)
     monkeypatch.setattr(readiness, "_check_jwt_keys", ok)
+    monkeypatch.setattr(readiness, "_check_secret_injection_kek", ok)
     monkeypatch.setattr(readiness, "_check_oidc_jwks", ok)
     monkeypatch.setattr(readiness, "_check_cloudflare_adapter", ok)
     monkeypatch.setattr(readiness, "_check_phala_adapter", ok)
@@ -339,6 +340,7 @@ def test_run_ready_checks_includes_oidc_jwks(monkeypatch) -> None:
         "oidc_jwks": "ok",
         "operation_scheduler": "ok",
         "phala_adapter": "ok",
+        "secret_injection_kek": "ok",
     }
 
 

@@ -15,6 +15,7 @@ from concrete_console.db import get_pool
 from concrete_console.errors import api_error
 from concrete_console.idempotency import advisory_lock_key, request_body_sha256
 from concrete_console.internal_auth import CurrentServicePrincipal, require_security_cvm_ingest_principal
+from concrete_console.profile_secrets import expand_profile_policy_secret_values
 from concrete_console.resources import json_payload, timestamp
 
 router = APIRouter(prefix="/internal")
@@ -106,7 +107,15 @@ async def list_sc_control_cvms(
                     jsonb_agg(
                         jsonb_build_object(
                             'profile_id', ep.id,
-                            'policy', ep.policy
+                            'policy', ep.policy,
+                            'secret_material', COALESCE(
+                                (
+                                    SELECT jsonb_object_agg(psm.injection_id, psm.ciphertext ORDER BY psm.injection_id)
+                                    FROM profile_secret_material psm
+                                    WHERE psm.profile_id = ep.id
+                                ),
+                                '{}'::jsonb
+                            )
                         )
                         ORDER BY cp.attached_at, cp.profile_id
                     ) FILTER (WHERE ep.id IS NOT NULL),
@@ -276,7 +285,16 @@ def merge_profile_policies(profile_rows: list[dict[str, Any]]) -> dict[str, Any]
     for row in profile_rows:
         policy = json_payload(row.get("policy", {}))
         if isinstance(policy, dict):
-            policies.append(policy)
+            secret_material = json_payload(row.get("secret_material", {}))
+            if not isinstance(secret_material, dict):
+                secret_material = {}
+            policies.append(
+                expand_profile_policy_secret_values(
+                    profile_id=row.get("profile_id", ""),
+                    policy=policy,
+                    secret_material=secret_material,
+                )
+            )
     return {
         "allowed_destinations": merge_union_lists(policies, "allowed_destinations"),
         "blocked_destinations": merge_intersection_lists(policies, "blocked_destinations"),

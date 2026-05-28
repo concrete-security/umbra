@@ -4,6 +4,8 @@ from datetime import datetime, timezone
 import json
 from typing import Any
 
+from concrete_console.profile_secrets import redacted_profile_policy as redact_profile_policy
+
 
 def timestamp(value: datetime) -> str:
     if value.tzinfo is None:
@@ -65,7 +67,7 @@ def profile_resource(row: Any) -> dict[str, Any]:
         "entity_id": str(row["entity_id"]),
         "name": row["name"],
         "description": row["description"],
-        "policy": json_payload(row["policy"]),
+        "policy": redacted_profile_policy(row["policy"]),
         "assigned": bool(row.get("assigned", False)),
         "attached_cvms": [
             {"id": str(cvm["id"]), "fqdn": cvm["fqdn"], "state": cvm["state"]} for cvm in attached_cvms
@@ -74,6 +76,11 @@ def profile_resource(row: Any) -> dict[str, Any]:
         "created_at": timestamp(row["created_at"]),
         "updated_at": timestamp(row["updated_at"]),
     }
+
+
+def redacted_profile_policy(policy: Any) -> Any:
+    parsed = json_payload(policy)
+    return redact_profile_policy(parsed)
 
 
 def profile_member_resource(row: Any) -> dict[str, Any]:

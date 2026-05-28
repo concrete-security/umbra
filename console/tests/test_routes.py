@@ -33,6 +33,7 @@ from concrete_console.routes import (
     require_cvm_profile_mutable,
     require_idempotency_key,
     require_if_match,
+    replace_profile_secret_material,
     render_dev_cvm_compose_config,
     render_security_cvm_compose_config,
     resolve_cvm_launch_config,
@@ -48,6 +49,7 @@ from concrete_console.routes import (
     validate_reconcile_dependencies,
 )
 from concrete_console.dns_provider.cloudflare import CloudflareError
+from concrete_console.profile_secrets import encrypt_profile_secret_value
 from concrete_console.tee_provider.phala import PhalaError
 from concrete_console.routes_internal import (
     TrafficLogBatch,
@@ -959,6 +961,59 @@ def test_validate_profile_policy_rejects_invalid_secret_injection_match() -> Non
     assert any(error["field"] == "policy.secret_injections.0.header" and error["type"] == "invalid_header" for error in errors)
 
 
+def test_validate_profile_policy_rejects_duplicate_secret_injection_ids() -> None:
+    injection = {
+        "id": "slack-bearer",
+        "match": {
+            "scheme": "https",
+            "host": "slack.com",
+            "ports": [443],
+            "methods": ["POST"],
+            "path_prefixes": ["/api/"],
+        },
+        "type": "request_header",
+        "header": "authorization",
+        "value": "xoxb-real",
+        "value_template": "Bearer ${secret}",
+    }
+    with pytest.raises(HTTPException) as exc:
+        validate_profile_policy({"secret_injections": [injection, dict(injection)]})
+
+    errors = exc.value.detail["error"]["details"]["errors"]
+    assert any(error["field"] == "policy.secret_injections.1.id" and error["type"] == "duplicate_id" for error in errors)
+
+
+def test_replace_profile_secret_material_encrypts_values(monkeypatch) -> None:
+    class FakeConn:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def execute(self, sql, *args):
+            self.calls.append((sql, args))
+            return "OK"
+
+    monkeypatch.setenv("SECRET_INJECTION_KEK_B64", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+    conn = FakeConn()
+    profile_id = UUID("00000000-0000-4000-8000-000000000010")
+
+    asyncio.run(
+        replace_profile_secret_material(
+            conn,
+            profile_id=profile_id,
+            secret_values={"anthropic-key": "sk-ant-real"},
+        )
+    )
+
+    assert len(conn.calls) == 2
+    assert "DELETE FROM profile_secret_material" in conn.calls[0][0]
+    assert conn.calls[0][1] == (profile_id, ["anthropic-key"])
+    assert "INSERT INTO profile_secret_material" in conn.calls[1][0]
+    assert conn.calls[1][1][0:2] == (profile_id, "anthropic-key")
+    ciphertext = conn.calls[1][1][2]
+    assert ciphertext.startswith("v1:")
+    assert "sk-ant-real" not in ciphertext
+
+
 def test_validate_profile_policy_rejects_secret_pattern_that_security_cvm_cannot_compile() -> None:
     with pytest.raises(HTTPException) as exc:
         validate_profile_policy(
@@ -1312,7 +1367,14 @@ def test_enforce_traffic_log_volume_limit_rejects_over_budget() -> None:
     }
 
 
-def test_merge_profile_policies_field_typed() -> None:
+def test_merge_profile_policies_field_typed(monkeypatch) -> None:
+    monkeypatch.setenv("SECRET_INJECTION_KEK_B64", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+    profile_b = "profile-b"
+    ciphertext = encrypt_profile_secret_value(
+        profile_id=profile_b,
+        injection_id="anthropic-key",
+        value="sk-ant-real",
+    )
     merged = merge_profile_policies(
         [
             {
@@ -1325,13 +1387,20 @@ def test_merge_profile_policies_field_typed() -> None:
                 },
             },
             {
-                "profile_id": "profile-b",
+                "profile_id": profile_b,
                 "policy": {
                     "allowed_destinations": [{"id": "github", "host": "api.github.com"}],
                     "blocked_destinations": [{"id": "admin", "host": "admin.example.com"}],
-                    "secret_injections": [{"id": "anthropic-key", "header": "authorization"}],
+                    "secret_injections": [
+                        {
+                            "id": "anthropic-key",
+                            "header": "authorization",
+                            "value_template": "Bearer ${secret}",
+                        }
+                    ],
                     "sandbox_env": {"OPENAI_API_KEY": "concrete-proxy-injected"},
                 },
+                "secret_material": {"anthropic-key": ciphertext},
             },
         ]
     )
@@ -1343,7 +1412,14 @@ def test_merge_profile_policies_field_typed() -> None:
         ],
         "blocked_destinations": [{"id": "admin", "host": "admin.example.com"}],
         "secret_patterns": [{"id": "openai", "pattern": "sk-[A-Za-z0-9]+"}],
-        "secret_injections": [{"id": "anthropic-key", "header": "authorization"}],
+        "secret_injections": [
+            {
+                "id": "anthropic-key",
+                "header": "authorization",
+                "value": "sk-ant-real",
+                "value_template": "Bearer ${secret}",
+            }
+        ],
         "sandbox_env": [
             {"name": "ANTHROPIC_API_KEY", "value": "concrete-proxy-injected"},
             {"name": "OPENAI_API_KEY", "value": "concrete-proxy-injected"},

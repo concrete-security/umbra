@@ -36,6 +36,7 @@ from concrete_console.idempotency import (
 )
 from concrete_console.jwt_keys import get_jwt_manager
 from concrete_console.log_config import logger
+from concrete_console.profile_secrets import encrypt_profile_secret_value, split_profile_policy_secret_values
 from concrete_console.resources import (
     audit_event_resource,
     cvm_resource,
@@ -745,6 +746,7 @@ def _validate_secret_injections(raw: Any, errors: list[dict[str, Any]]) -> None:
     if not isinstance(raw, list):
         errors.append({"field": "policy.secret_injections", "type": "array_required"})
         return
+    seen_ids: set[str] = set()
     for index, item in enumerate(raw):
         field = f"policy.secret_injections.{index}"
         if not isinstance(item, dict):
@@ -755,6 +757,10 @@ def _validate_secret_injections(raw: Any, errors: list[dict[str, Any]]) -> None:
         injection_id = item.get("id")
         if not isinstance(injection_id, str) or not POLICY_ID_RE.fullmatch(injection_id):
             errors.append({"field": f"{field}.id", "type": "invalid_id"})
+        elif injection_id in seen_ids:
+            errors.append({"field": f"{field}.id", "type": "duplicate_id"})
+        else:
+            seen_ids.add(injection_id)
         if item.get("type") != "request_header":
             errors.append({"field": f"{field}.type", "type": "invalid_type"})
         _validate_destination_rule(
@@ -2233,15 +2239,21 @@ async def patch_profile(
             old_policy = json_payload(profile["policy"])
             next_name = body.name if "name" in body.model_fields_set else profile["name"]
             next_description = body.description if "description" in body.model_fields_set else profile["description"]
-            next_policy = body.policy if "policy" in body.model_fields_set else old_policy
-            validate_profile_policy(next_policy)
+            policy_provided = "policy" in body.model_fields_set
+            if policy_provided:
+                validate_profile_policy(body.policy)
+                next_policy, next_secret_values = split_profile_policy_secret_values(body.policy)
+            else:
+                next_policy = old_policy
+                next_secret_values = None
             changed = (
                 next_name != profile["name"]
                 or next_description != profile["description"]
                 or next_policy != old_policy
+                or bool(next_secret_values)
             )
             if changed:
-                policy_changed = next_policy != old_policy
+                policy_changed = next_policy != old_policy or bool(next_secret_values)
                 if policy_changed:
                     await ensure_profile_policy_update_compatible(conn, profile_id=profile_id, next_policy=next_policy)
                 try:
@@ -2275,6 +2287,12 @@ async def patch_profile(
                         {"state": "profile_name_taken"},
                     ) from None
                 if policy_changed:
+                    if policy_provided:
+                        await replace_profile_secret_material(
+                            conn,
+                            profile_id=profile_id,
+                            secret_values=next_secret_values,
+                        )
                     await bump_attached_cvm_policy_versions(conn, profile_id)
                     await insert_audit_event(
                         conn,
@@ -4542,6 +4560,42 @@ async def ensure_profile_policy_update_compatible(
         grouped.setdefault(row["cvm_id"], []).append({"profile_id": row["profile_id"], "policy": policy})
     for profile_rows in grouped.values():
         ensure_no_sandbox_env_conflict(profile_rows)
+
+
+async def replace_profile_secret_material(
+    conn: asyncpg.Connection,
+    *,
+    profile_id: UUID,
+    secret_values: dict[str, str],
+) -> None:
+    injection_ids = sorted(secret_values)
+    await conn.execute(
+        """
+        DELETE FROM profile_secret_material
+        WHERE profile_id = $1
+          AND NOT (injection_id = ANY($2::text[]))
+        """,
+        profile_id,
+        injection_ids,
+    )
+    for injection_id in injection_ids:
+        ciphertext = encrypt_profile_secret_value(
+            profile_id=profile_id,
+            injection_id=injection_id,
+            value=secret_values[injection_id],
+        )
+        await conn.execute(
+            """
+            INSERT INTO profile_secret_material (profile_id, injection_id, ciphertext)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (profile_id, injection_id)
+            DO UPDATE SET ciphertext = EXCLUDED.ciphertext,
+                          updated_at = now()
+            """,
+            profile_id,
+            injection_id,
+            ciphertext,
+        )
 
 
 def ensure_no_sandbox_env_conflict(profile_rows: list[Any]) -> None:

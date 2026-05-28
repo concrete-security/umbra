@@ -13,6 +13,7 @@ from concrete_console.config import load_settings
 from concrete_console.db import get_pool
 from concrete_console.jwt_keys import get_jwt_manager
 from concrete_console.oidc import load_google_jwks
+from concrete_console.profile_secrets import check_secret_injection_kek
 from concrete_console.scheduler import check_operation_scheduler_recent
 
 CheckState = Literal["ok", "failed"]
@@ -23,6 +24,7 @@ async def run_ready_checks() -> dict[str, CheckState]:
     results = await asyncio.gather(
         _capped("database", _check_database(), timeout=1.0),
         _capped("jwt_keys", _check_jwt_keys(), timeout=1.0),
+        _capped("secret_injection_kek", _check_secret_injection_kek(), timeout=1.0),
         _capped("oidc_jwks", _check_oidc_jwks(), timeout=1.0),
         _capped("cloudflare_adapter", _check_cloudflare_adapter(), timeout=1.0),
         _capped("phala_adapter", _check_phala_adapter(), timeout=1.0),
@@ -59,6 +61,10 @@ async def _check_jwt_keys() -> None:
             raise RuntimeError("active JWT kid is not in verifying key set")
 
     await asyncio.to_thread(load_keys)
+
+
+async def _check_secret_injection_kek() -> None:
+    await asyncio.to_thread(check_secret_injection_kek)
 
 
 async def _check_oidc_jwks() -> None:

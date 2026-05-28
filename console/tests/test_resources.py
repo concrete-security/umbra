@@ -7,6 +7,7 @@ from concrete_console.resources import (
     operation_resource,
     profile_member_resource,
     profile_resource,
+    redacted_profile_policy,
     security_cvm_attestation_resource,
     security_cvm_resource,
     ssh_key_resource,
@@ -102,6 +103,56 @@ def test_profile_resource_parses_json_policy() -> None:
         }
     ]
     assert resource["attached_cvm_count"] == 1
+
+
+def test_profile_resource_strips_secret_injection_values() -> None:
+    policy = {
+        "secret_injections": [
+            "malformed-secret-value",
+            {
+                "id": "anthropic-auth",
+                "match": {
+                    "scheme": "https",
+                    "host": "api.anthropic.com",
+                    "ports": [443],
+                    "methods": ["POST"],
+                    "path_prefixes": ["/v1/"],
+                },
+                "type": "request_header",
+                "header": "authorization",
+                "value": "sk-ant-real-secret",
+                "value_template": "Bearer ${secret}",
+                "debug_value": "should-not-be-public",
+            }
+        ],
+        "sandbox_env": {"ANTHROPIC_API_KEY": "concrete-proxy-injected"},
+    }
+
+    resource = profile_resource(
+        {
+            "id": UUID("00000000-0000-4000-8000-000000000010"),
+            "entity_id": UUID("00000000-0000-4000-8000-000000000002"),
+            "name": "default",
+            "description": "",
+            "policy": policy,
+            "assigned": True,
+            "attached_cvms": [],
+            "attached_cvm_count": 0,
+            "created_at": datetime(2026, 5, 15, 18, 3, tzinfo=timezone.utc),
+            "updated_at": datetime(2026, 5, 15, 18, 4, tzinfo=timezone.utc),
+        }
+    )
+
+    assert len(resource["policy"]["secret_injections"]) == 1
+    injection = resource["policy"]["secret_injections"][0]
+    assert "value" not in injection
+    assert "debug_value" not in injection
+    assert injection["value_template"] == "Bearer ${secret}"
+    assert policy["secret_injections"][1]["value"] == "sk-ant-real-secret"
+
+
+def test_redacted_profile_policy_handles_non_object_policy() -> None:
+    assert redacted_profile_policy("[]") == {}
 
 
 def test_profile_member_resource_formats_membership() -> None:
