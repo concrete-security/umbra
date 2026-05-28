@@ -3,8 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import re
-from typing import Any
-from urllib.parse import parse_qs
+from typing import Any, Mapping
+from urllib.parse import parse_qs, unquote
 
 import re2
 
@@ -42,6 +42,9 @@ HEADER_RE = re.compile(r"^[a-z][a-z0-9-]{0,126}$")
 HEX_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 POINTER_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 TRAFFIC_LOG_ATTRIBUTE_NAME_RE = re.compile(r"^[a-z_]{1,32}$")
+PATH_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+PATH_BAD_PERCENT_RE = re.compile(r"%(?![0-9A-Fa-f]{2})")
+PATH_AMBIGUOUS_ESCAPE_RE = re.compile(r"%(?:2[eEfF]|5[cC])")
 HOP_BY_HOP_HEADERS = {
     "connection",
     "content-length",
@@ -95,8 +98,8 @@ class BodyAssertion:
     field: tuple[str, ...]
     allow_values: frozenset[str]
 
-    def evaluate(self, body: bytes) -> bool:
-        value = _extract_scalar(self.kind, self.field, body)
+    def evaluate(self, body: bytes, headers: Mapping[str, str]) -> bool:
+        value = _extract_scalar(self.kind, self.field, body, headers)
         if value is _MISSING:
             return False
         return _scalar_to_str(value) in self.allow_values
@@ -108,8 +111,8 @@ class TrafficLogAttribute:
     kind: str
     field: tuple[str, ...]
 
-    def extract(self, body: bytes) -> str | None:
-        value = _extract_scalar(self.kind, self.field, body)
+    def extract(self, body: bytes, headers: Mapping[str, str]) -> str | None:
+        value = _extract_scalar(self.kind, self.field, body, headers)
         if value is _MISSING:
             return None
         return _scalar_to_str(value)[:MAX_TRAFFIC_LOG_ATTRIBUTE_VALUE_CHARS]
@@ -132,7 +135,7 @@ class DestinationRule:
             and self._host_matches(host.lower().rstrip("."))
             and port in self.ports
             and method.upper() in self.methods
-            and any(path.startswith(prefix) for prefix in self.path_prefixes)
+            and _path_matches_prefixes(path, self.path_prefixes)
         )
 
     def matches_tunnel(self, *, scheme: str, host: str, port: int) -> bool:
@@ -144,13 +147,13 @@ class DestinationRule:
             return host.endswith(f".{suffix}") and host != suffix
         return host == self.host
 
-    def body_assertions_pass(self, body: bytes) -> bool:
-        return all(assertion.evaluate(body) for assertion in self.body_assertions)
+    def body_assertions_pass(self, body: bytes, headers: Mapping[str, str]) -> bool:
+        return all(assertion.evaluate(body, headers) for assertion in self.body_assertions)
 
-    def extract_traffic_log_attributes(self, body: bytes) -> dict[str, str]:
+    def extract_traffic_log_attributes(self, body: bytes, headers: Mapping[str, str]) -> dict[str, str]:
         attributes: dict[str, str] = {}
         for attribute in self.traffic_log_attributes:
-            value = attribute.extract(body)
+            value = attribute.extract(body, headers)
             if value is not None:
                 attributes[attribute.name] = value
         return attributes
@@ -219,6 +222,7 @@ class EffectivePolicy:
         method: str,
         path: str,
         body: bytes = b"",
+        headers: Mapping[str, str] | None = None,
     ) -> PolicyDecision:
         request = {
             "scheme": scheme,
@@ -233,7 +237,7 @@ class EffectivePolicy:
         for rule in self.allowed_destinations:
             if not rule.matches(**request):
                 continue
-            if rule.body_assertions and not rule.body_assertions_pass(body):
+            if rule.body_assertions and not rule.body_assertions_pass(body, headers or {}):
                 continue
             return PolicyDecision(True, "allowed_destination", rule.rule_id, matched_rule=rule)
         return PolicyDecision(False, "destination_not_allowed")
@@ -704,8 +708,14 @@ def _parse_path_prefixes(raw: Any, field: str, errors: list[PolicyError]) -> lis
         return []
     prefixes: list[str] = []
     for index, prefix in enumerate(raw):
-        if not isinstance(prefix, str) or not prefix.startswith("/"):
-            errors.append(PolicyError(f"{field}.{index}", "invalid_path_prefix", "path prefix must be absolute"))
+        if not isinstance(prefix, str) or not _valid_policy_path(prefix):
+            errors.append(
+                PolicyError(
+                    f"{field}.{index}",
+                    "invalid_path_prefix",
+                    "path prefix must be an absolute unambiguous origin path",
+                )
+            )
             continue
         prefixes.append(prefix)
     return prefixes
@@ -734,8 +744,10 @@ def valid_proxy_token_hash(value: str) -> bool:
     return bool(HEX_SHA256_RE.fullmatch(value))
 
 
-def _extract_scalar(kind: str, field: tuple[str, ...], body: bytes) -> Any:
+def _extract_scalar(kind: str, field: tuple[str, ...], body: bytes, headers: Mapping[str, str]) -> Any:
     if not body or len(body) > MAX_BODY_ASSERTION_BYTES:
+        return _MISSING
+    if not _content_type_matches(kind, headers):
         return _MISSING
     if kind == "form":
         if len(field) != 1:
@@ -750,6 +762,45 @@ def _extract_scalar(kind: str, field: tuple[str, ...], body: bytes) -> Any:
             return _MISSING
         return _walk_json_pointer(parsed, field)
     return _MISSING
+
+
+def _content_type_matches(kind: str, headers: Mapping[str, str]) -> bool:
+    content_type = ""
+    for name, value in headers.items():
+        if name.lower() == "content-type":
+            content_type = value
+            break
+    media_type = content_type.split(";", 1)[0].strip().lower()
+    if kind == "form":
+        return media_type == "application/x-www-form-urlencoded"
+    if kind == "json":
+        return media_type == "application/json"
+    return False
+
+
+def _path_matches_prefixes(path: str, prefixes: tuple[str, ...]) -> bool:
+    return _valid_policy_path(path) and any(path.startswith(prefix) for prefix in prefixes)
+
+
+def _valid_policy_path(path: str) -> bool:
+    if not isinstance(path, str) or not path.startswith("/"):
+        return False
+    if PATH_CONTROL_RE.search(path) or "\\" in path or "?" in path or "#" in path:
+        return False
+    if PATH_BAD_PERCENT_RE.search(path) or PATH_AMBIGUOUS_ESCAPE_RE.search(path):
+        return False
+    decoded = unquote(path)
+    if not decoded.startswith("/") or "\\" in decoded or PATH_CONTROL_RE.search(decoded):
+        return False
+    if decoded != "/" and "//" in decoded:
+        return False
+    segments = decoded.split("/")
+    for index, segment in enumerate(segments[1:], start=1):
+        if segment in {".", ".."}:
+            return False
+        if segment == "" and index != len(segments) - 1:
+            return False
+    return True
 
 
 def _parse_form_body(body: bytes) -> dict[str, str] | Any:

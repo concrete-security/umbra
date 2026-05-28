@@ -28,6 +28,7 @@ TRAFFIC_LOG_VOLUME_LOCK_KEY = "traffic-log-volume"
 TRAFFIC_LOG_ATTRIBUTES_MAX_KEYS = 4
 TRAFFIC_LOG_ATTRIBUTE_VALUE_MAX_LEN = 256
 TRAFFIC_LOG_ATTRIBUTE_NAME_RE = re.compile(r"^[a-z_]{1,32}$")
+TRAFFIC_LOG_PATH_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 
 class TrafficLogIn(BaseModel):
@@ -60,6 +61,21 @@ class TrafficLogIn(BaseModel):
                 raise ValueError(f"invalid attribute name: {name!r}")
             if not isinstance(attribute_value, str) or len(attribute_value) > TRAFFIC_LOG_ATTRIBUTE_VALUE_MAX_LEN:
                 raise ValueError(f"invalid attribute value for {name!r}")
+        return value
+
+    @field_validator("path")
+    @classmethod
+    def _validate_path(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if (
+            not value.startswith("/")
+            or "?" in value
+            or "#" in value
+            or "\\" in value
+            or TRAFFIC_LOG_PATH_CONTROL_RE.search(value)
+        ):
+            raise ValueError("path must be a path-only origin-form value")
         return value
 
 

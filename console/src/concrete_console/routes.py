@@ -8,9 +8,11 @@ import json
 import re
 import secrets
 from typing import Annotated, Any
+from urllib.parse import unquote
 from uuid import UUID, uuid4
 
 import asyncpg
+import re2
 from cryptography.hazmat.primitives.serialization import load_ssh_public_key
 from fastapi import APIRouter, Depends, Header, Query, Request, Response
 from fastapi.responses import JSONResponse
@@ -70,16 +72,55 @@ PERMISSIONS = {
 SANDBOX_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 SANDBOX_ENV_RESERVED_NAMES = {"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "PATH", "HOME"}
 SANDBOX_ENV_RESERVED_PREFIXES = ("CONCRETE_", "SECURITY_CVM_", "AUTHORIZED_SSH_", "SANDBOX_ENV_")
+POLICY_TOP_LEVEL_FIELDS = {
+    "allowed_destinations",
+    "blocked_destinations",
+    "secret_patterns",
+    "secret_injections",
+    "sandbox_env",
+}
+POLICY_DESTINATION_FIELDS = {
+    "id",
+    "scheme",
+    "host",
+    "ports",
+    "methods",
+    "path_prefixes",
+    "body_assertions",
+    "traffic_log_attributes",
+}
+POLICY_DESTINATION_EXTENSION_FIELDS = {"body_assertions", "traffic_log_attributes"}
+POLICY_DESTINATION_MATCH_FIELDS = {"scheme", "host", "ports", "methods", "path_prefixes"}
+POLICY_SECRET_PATTERN_FIELDS = {"id", "name", "pattern", "scan_headers", "scan_body"}
+POLICY_SECRET_INJECTION_FIELDS = {"id", "match", "type", "header", "value", "value_template"}
 POLICY_BODY_ASSERTION_KINDS = {"form", "json"}
 POLICY_BODY_ASSERTION_FIELDS = {"kind", "field", "allow_values"}
 POLICY_TRAFFIC_LOG_ATTR_FIELDS = {"name", "kind", "field"}
+POLICY_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,100}$")
+POLICY_DNS_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+POLICY_HEADER_RE = re.compile(r"^[a-z][a-z0-9-]{0,126}$")
 POLICY_POINTER_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 POLICY_TRAFFIC_LOG_ATTR_NAME_RE = re.compile(r"^[a-z_]{1,32}$")
+POLICY_PATH_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+POLICY_PATH_BAD_PERCENT_RE = re.compile(r"%(?![0-9A-Fa-f]{2})")
+POLICY_PATH_AMBIGUOUS_ESCAPE_RE = re.compile(r"%(?:2[eEfF]|5[cC])")
+POLICY_HOP_BY_HOP_HEADERS = {
+    "connection",
+    "content-length",
+    "host",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+}
 POLICY_MAX_BODY_ASSERTIONS_PER_RULE = 16
 POLICY_MAX_TRAFFIC_LOG_ATTRIBUTES_PER_RULE = 4
 POLICY_MAX_POINTER_SEGMENTS_JSON = 4
 POLICY_MAX_ALLOW_VALUES = 256
 POLICY_MAX_ALLOW_VALUE_LEN = 256
+POLICY_MAX_SECRET_PATTERN_LEN = 4096
 IDEMPOTENCY_KEY_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 CVM_CONFIG_VALUE_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 SECURITY_CVM_INSTANCE_TYPE_RE = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
@@ -481,6 +522,8 @@ def sandbox_env_value_denylist() -> list[re.Pattern[str]]:
 
 def validate_profile_policy(policy: dict[str, Any]) -> None:
     errors: list[dict[str, Any]] = []
+    for key in sorted(set(policy) - POLICY_TOP_LEVEL_FIELDS):
+        errors.append({"field": f"policy.{key}", "type": "unknown_field"})
     sandbox_env = policy.get("sandbox_env")
     if sandbox_env is not None:
         if not isinstance(sandbox_env, dict):
@@ -511,51 +554,232 @@ def validate_profile_policy(policy: dict[str, Any]) -> None:
                 errors.append({"field": field, "type": "invalid_value"})
             if any(pattern.search(value) for pattern in denylist):
                 errors.append({"field": field, "type": "value_denied"})
-    _validate_destination_extensions(
+    _validate_destination_rules(
         policy.get("allowed_destinations"),
         "allowed_destinations",
         errors,
         allow_extensions=True,
     )
-    _validate_destination_extensions(
+    _validate_destination_rules(
         policy.get("blocked_destinations"),
         "blocked_destinations",
         errors,
         allow_extensions=False,
     )
-    _validate_injection_match_extensions(policy.get("secret_injections"), errors)
+    _validate_secret_patterns(policy.get("secret_patterns"), errors)
+    _validate_secret_injections(policy.get("secret_injections"), errors)
     if errors:
         raise api_error(422, "VALIDATION_ERROR", "invalid profile policy", {"errors": errors})
 
 
-def _validate_destination_extensions(
+def _validate_destination_rules(
     rules: Any,
     list_field: str,
     errors: list[dict[str, Any]],
     *,
     allow_extensions: bool,
 ) -> None:
-    if rules is None or not isinstance(rules, list):
+    if rules is None:
+        return
+    if not isinstance(rules, list):
+        errors.append({"field": f"policy.{list_field}", "type": "array_required"})
         return
     for index, rule in enumerate(rules):
-        if not isinstance(rule, dict):
-            continue
-        field = f"policy.{list_field}.{index}"
-        if not allow_extensions:
-            for forbidden in ("body_assertions", "traffic_log_attributes"):
-                if forbidden in rule:
-                    errors.append({"field": f"{field}.{forbidden}", "type": "forbidden_field"})
-            continue
-        _validate_body_assertions(
-            rule.get("body_assertions"),
-            f"{field}.body_assertions",
+        _validate_destination_rule(
+            rule,
+            f"policy.{list_field}.{index}",
             errors,
+            require_id=True,
+            allow_extensions=allow_extensions,
         )
-        _validate_traffic_log_attributes(
-            rule.get("traffic_log_attributes"),
-            f"{field}.traffic_log_attributes",
+
+
+def _validate_destination_rule(
+    rule: Any,
+    field: str,
+    errors: list[dict[str, Any]],
+    *,
+    require_id: bool,
+    allow_extensions: bool,
+) -> None:
+    if not isinstance(rule, dict):
+        errors.append({"field": field, "type": "object_required"})
+        return
+    base_fields = POLICY_DESTINATION_FIELDS if require_id else POLICY_DESTINATION_MATCH_FIELDS
+    allowed_fields = base_fields if allow_extensions else (base_fields - POLICY_DESTINATION_EXTENSION_FIELDS)
+    for key in sorted(set(rule) - allowed_fields):
+        errors.append({"field": f"{field}.{key}", "type": "unknown_field"})
+    if require_id:
+        rule_id = rule.get("id")
+        if not isinstance(rule_id, str) or not POLICY_ID_RE.fullmatch(rule_id):
+            errors.append({"field": f"{field}.id", "type": "invalid_id"})
+    elif "id" in rule:
+        errors.append({"field": f"{field}.id", "type": "forbidden_field"})
+    scheme = rule.get("scheme")
+    if scheme not in {"http", "https"}:
+        errors.append({"field": f"{field}.scheme", "type": "invalid_scheme"})
+    host = rule.get("host")
+    if not isinstance(host, str) or not _valid_policy_host(host):
+        errors.append({"field": f"{field}.host", "type": "invalid_host"})
+    _validate_ports(rule.get("ports"), scheme if isinstance(scheme, str) else None, f"{field}.ports", errors)
+    _validate_methods(rule.get("methods"), f"{field}.methods", errors)
+    _validate_path_prefixes(rule.get("path_prefixes"), f"{field}.path_prefixes", errors)
+    if not allow_extensions:
+        for forbidden in ("body_assertions", "traffic_log_attributes"):
+            if forbidden in rule:
+                errors.append({"field": f"{field}.{forbidden}", "type": "forbidden_field"})
+        return
+    _validate_body_assertions(
+        rule.get("body_assertions"),
+        f"{field}.body_assertions",
+        errors,
+    )
+    _validate_traffic_log_attributes(
+        rule.get("traffic_log_attributes"),
+        f"{field}.traffic_log_attributes",
+        errors,
+    )
+
+
+def _validate_ports(raw: Any, scheme: str | None, field: str, errors: list[dict[str, Any]]) -> None:
+    if raw is None:
+        if scheme in {"http", "https"}:
+            return
+        errors.append({"field": field, "type": "invalid_ports"})
+        return
+    if not isinstance(raw, list) or not 1 <= len(raw) <= 16:
+        errors.append({"field": field, "type": "invalid_ports"})
+        return
+    for index, port in enumerate(raw):
+        if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
+            errors.append({"field": f"{field}.{index}", "type": "invalid_port"})
+
+
+def _validate_methods(raw: Any, field: str, errors: list[dict[str, Any]]) -> None:
+    if not isinstance(raw, list) or not 1 <= len(raw) <= 16:
+        errors.append({"field": field, "type": "invalid_methods"})
+        return
+    for index, method in enumerate(raw):
+        if not isinstance(method, str) or not method or method != method.upper() or len(method) > 20:
+            errors.append({"field": f"{field}.{index}", "type": "invalid_method"})
+
+
+def _validate_path_prefixes(raw: Any, field: str, errors: list[dict[str, Any]]) -> None:
+    if not isinstance(raw, list) or not 1 <= len(raw) <= 32:
+        errors.append({"field": field, "type": "invalid_path_prefixes"})
+        return
+    for index, prefix in enumerate(raw):
+        if not isinstance(prefix, str) or not _valid_policy_path(prefix):
+            errors.append({"field": f"{field}.{index}", "type": "invalid_path_prefix"})
+
+
+def _valid_policy_host(host: str) -> bool:
+    if host != host.lower() or host.endswith(".") or len(host) > 253:
+        return False
+    if host.startswith("*."):
+        suffix = host[2:]
+        return "." in suffix and _valid_dns_name(suffix)
+    return _valid_dns_name(host)
+
+
+def _valid_dns_name(host: str) -> bool:
+    labels = host.split(".")
+    return len(labels) >= 2 and all(POLICY_DNS_LABEL_RE.fullmatch(label) for label in labels)
+
+
+def _valid_policy_path(path: str) -> bool:
+    if not path.startswith("/"):
+        return False
+    if POLICY_PATH_CONTROL_RE.search(path) or "\\" in path or "?" in path or "#" in path:
+        return False
+    if POLICY_PATH_BAD_PERCENT_RE.search(path) or POLICY_PATH_AMBIGUOUS_ESCAPE_RE.search(path):
+        return False
+    decoded = unquote(path)
+    if not decoded.startswith("/") or "\\" in decoded or POLICY_PATH_CONTROL_RE.search(decoded):
+        return False
+    if decoded != "/" and "//" in decoded:
+        return False
+    segments = decoded.split("/")
+    for index, segment in enumerate(segments[1:], start=1):
+        if segment in {".", ".."}:
+            return False
+        if segment == "" and index != len(segments) - 1:
+            return False
+    return True
+
+
+def _validate_secret_patterns(raw: Any, errors: list[dict[str, Any]]) -> None:
+    if raw is None:
+        return
+    if not isinstance(raw, list):
+        errors.append({"field": "policy.secret_patterns", "type": "array_required"})
+        return
+    for index, item in enumerate(raw):
+        field = f"policy.secret_patterns.{index}"
+        if not isinstance(item, dict):
+            errors.append({"field": field, "type": "object_required"})
+            continue
+        for key in sorted(set(item) - POLICY_SECRET_PATTERN_FIELDS):
+            errors.append({"field": f"{field}.{key}", "type": "unknown_field"})
+        pattern_id = item.get("id")
+        if not isinstance(pattern_id, str) or not POLICY_ID_RE.fullmatch(pattern_id):
+            errors.append({"field": f"{field}.id", "type": "invalid_id"})
+        name = item.get("name")
+        if not isinstance(name, str) or len(name) > 100:
+            errors.append({"field": f"{field}.name", "type": "invalid_name"})
+        pattern = item.get("pattern")
+        if not isinstance(pattern, str) or not pattern or len(pattern) > POLICY_MAX_SECRET_PATTERN_LEN:
+            errors.append({"field": f"{field}.pattern", "type": "invalid_pattern"})
+        else:
+            try:
+                re2.compile(pattern)
+            except Exception:
+                errors.append({"field": f"{field}.pattern", "type": "invalid_regex"})
+        if not isinstance(item.get("scan_headers"), bool) or not isinstance(item.get("scan_body"), bool):
+            errors.append({"field": field, "type": "invalid_scan_flags"})
+
+
+def _validate_secret_injections(raw: Any, errors: list[dict[str, Any]]) -> None:
+    if raw is None:
+        return
+    if not isinstance(raw, list):
+        errors.append({"field": "policy.secret_injections", "type": "array_required"})
+        return
+    for index, item in enumerate(raw):
+        field = f"policy.secret_injections.{index}"
+        if not isinstance(item, dict):
+            errors.append({"field": field, "type": "object_required"})
+            continue
+        for key in sorted(set(item) - POLICY_SECRET_INJECTION_FIELDS):
+            errors.append({"field": f"{field}.{key}", "type": "unknown_field"})
+        injection_id = item.get("id")
+        if not isinstance(injection_id, str) or not POLICY_ID_RE.fullmatch(injection_id):
+            errors.append({"field": f"{field}.id", "type": "invalid_id"})
+        if item.get("type") != "request_header":
+            errors.append({"field": f"{field}.type", "type": "invalid_type"})
+        _validate_destination_rule(
+            item.get("match"),
+            f"{field}.match",
             errors,
+            require_id=False,
+            allow_extensions=False,
         )
+        header = item.get("header")
+        if (
+            not isinstance(header, str)
+            or not POLICY_HEADER_RE.fullmatch(header)
+            or header in POLICY_HOP_BY_HOP_HEADERS
+        ):
+            errors.append({"field": f"{field}.header", "type": "invalid_header"})
+        value = item.get("value")
+        if not isinstance(value, str):
+            errors.append({"field": f"{field}.value", "type": "string_required"})
+            value = ""
+        template = item.get("value_template")
+        if not isinstance(template, str) or template.count("${secret}") != 1:
+            errors.append({"field": f"{field}.value_template", "type": "invalid_template"})
+        elif len(template.replace("${secret}", value)) > 8192:
+            errors.append({"field": f"{field}.value_template", "type": "rendered_value_too_long"})
 
 
 def _validate_body_assertions(raw: Any, field: str, errors: list[dict[str, Any]]) -> None:
@@ -647,21 +871,6 @@ def _validate_allow_values(raw: Any, field: str, errors: list[dict[str, Any]]) -
         if not isinstance(value, str) or not 1 <= len(value) <= POLICY_MAX_ALLOW_VALUE_LEN:
             errors.append({"field": f"{field}.{index}", "type": "invalid_allow_value"})
             return
-
-
-def _validate_injection_match_extensions(raw: Any, errors: list[dict[str, Any]]) -> None:
-    if not isinstance(raw, list):
-        return
-    for index, item in enumerate(raw):
-        if not isinstance(item, dict):
-            continue
-        match = item.get("match")
-        if not isinstance(match, dict):
-            continue
-        field = f"policy.secret_injections.{index}.match"
-        for forbidden in ("body_assertions", "traffic_log_attributes"):
-            if forbidden in match:
-                errors.append({"field": f"{field}.{forbidden}", "type": "forbidden_field"})
 
 
 def validate_permission_symbol(permission: str) -> None:

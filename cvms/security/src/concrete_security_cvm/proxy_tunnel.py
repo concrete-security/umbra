@@ -136,6 +136,8 @@ def validate_upgrade_request(request: UpgradeRequest, config: ProxyTunnelConfig)
         raise UpgradeError("426 Upgrade Required", b"upgrade required\n", "connection_upgrade_missing")
     if not _header_has_token(request.headers.get("upgrade", ""), config.upgrade_token):
         raise UpgradeError("426 Upgrade Required", b"upgrade required\n", "upgrade_token_missing")
+    if "proxy-authorization" in request.headers:
+        raise UpgradeError("400 Bad Request", b"proxy authorization belongs to inner proxy request\n", "outer_proxy_auth_forbidden")
 
 
 async def write_response(writer: asyncio.StreamWriter, status: str, body: bytes) -> None:

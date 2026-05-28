@@ -81,13 +81,16 @@ class SecurityCVMProxyAddon:
             result = enforce_request(proxy_request, control_map)
         if result.allowed:
             _replace_headers(flow.request.headers, result.upstream_headers)
-            if result.traffic_log is not None:
-                _metadata(flow)["concrete_traffic_log"] = result.traffic_log
             if (connect_only or proxy_request.method == "CONNECT") and result.cvm is not None:
+                if result.traffic_log is not None:
+                    self.traffic_emitter.enqueue(result.traffic_log)
                 _metadata(flow)["concrete_connect_allowed"] = True
                 _metadata(flow)["concrete_cvm_id"] = str(result.cvm.cvm_id)
                 if key := _client_connection_key(flow):
                     self._remember_connect_identity(key, result.cvm.cvm_id)
+                return
+            if result.traffic_log is not None:
+                _metadata(flow)["concrete_traffic_log"] = result.traffic_log
             return
         self._reject(flow, result)
 

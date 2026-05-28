@@ -148,7 +148,7 @@ def test_authenticated_request_reuses_connect_identity_without_proxy_auth() -> N
     assert result.upstream_headers["authorization"] == "Bearer sk-ant-real"
 
 
-def test_allowed_connect_uses_host_port_gate_without_request_log() -> None:
+def test_allowed_connect_uses_host_port_gate_and_records_tunnel_log() -> None:
     policy_body = policy()
     policy_body["blocked_destinations"] = []
 
@@ -156,7 +156,9 @@ def test_allowed_connect_uses_host_port_gate_without_request_log() -> None:
 
     assert result.allowed is True
     assert result.response_code is None
-    assert result.traffic_log is None
+    assert result.traffic_log is not None
+    assert result.traffic_log.method == "CONNECT"
+    assert result.traffic_log.response_code == 200
     assert "proxy-authorization" not in result.upstream_headers
     assert result.upstream_headers["authorization"] == "Bearer concrete-proxy-injected"
 
@@ -315,6 +317,37 @@ def test_body_assertion_allowed_form_emits_attribute_in_traffic_log() -> None:
     assert result.traffic_log is not None
     assert result.traffic_log.attributes == {"slack_channel": "C0ALLOWED1"}
     assert result.upstream_headers["authorization"] == "Bearer xoxb-real-token"
+
+
+def test_body_assertion_form_with_wrong_content_type_denies() -> None:
+    result = enforce_request(
+        slack_request(headers={
+            "Proxy-Authorization": "Bearer proxy-token",
+            "Authorization": "Bearer concrete-proxy-injected",
+            "Content-Type": "application/json",
+        }),
+        control_map(slack_policy()),
+    )
+
+    assert result.allowed is False
+    assert result.response_code == 403
+    assert result.reason == "destination_not_allowed"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/conversations.history/../chat.postMessage",
+        "/api/conversations.history%2f..%2fchat.postMessage",
+    ],
+)
+def test_ambiguous_slack_path_denies_before_injection(path: str) -> None:
+    result = enforce_request(slack_request(path=path), control_map(slack_policy()))
+
+    assert result.allowed is False
+    assert result.response_code == 403
+    assert result.reason == "destination_not_allowed"
+    assert result.upstream_headers["authorization"] == "Bearer concrete-proxy-injected"
 
 
 def test_body_assertion_allowed_json_emits_attribute_in_traffic_log() -> None:

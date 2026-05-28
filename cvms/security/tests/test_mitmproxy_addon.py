@@ -211,7 +211,7 @@ def test_response_is_streamed_and_logs_streamed_byte_count() -> None:
     assert "concrete_traffic_log" not in flow.metadata
 
 
-def test_allowed_connect_uses_authority_and_does_not_log_before_http_request() -> None:
+def test_allowed_connect_uses_authority_and_logs_tunnel_before_http_request() -> None:
     policy_body = policy()
     policy_body["blocked_destinations"] = []
     proxy_addon, queue = addon(policy_body)
@@ -221,7 +221,13 @@ def test_allowed_connect_uses_authority_and_does_not_log_before_http_request() -
     proxy_addon.request(flow)
 
     assert flow.response is None
-    assert len(queue) == 0
+    batch = queue.drain_batch()
+    assert batch is not None
+    assert len(batch.records) == 1
+    assert batch.records[0].cvm_id == CVM_ID
+    assert batch.records[0].method == "CONNECT"
+    assert batch.records[0].destination_host == "api.anthropic.com"
+    assert batch.records[0].response_code == 200
     assert "Proxy-Authorization" not in flow.request.headers
     assert "proxy-authorization" not in flow.request.headers
 
@@ -234,6 +240,11 @@ def test_decrypted_https_request_reuses_connect_identity_without_proxy_auth() ->
 
     proxy_addon.http_connect(connect_flow)
     assert connect_flow.response is None
+    connect_batch = queue.drain_batch()
+    assert connect_batch is not None
+    assert len(connect_batch.records) == 1
+    assert connect_batch.records[0].method == "CONNECT"
+    assert connect_batch.records[0].response_code == 200
     flow = FakeFlow(FakeRequest(headers={"Authorization": "Bearer concrete-proxy-injected"}))
     flow.client_conn = connect_flow.client_conn
     proxy_addon.request(flow)
@@ -364,6 +375,11 @@ def slack_policy() -> dict[str, object]:
 def test_body_assertion_allow_lands_attribute_on_traffic_log() -> None:
     proxy_addon, queue = addon(slack_policy())
     slack_request = FakeRequest(
+        headers={
+            "Proxy-Authorization": "Bearer proxy-token",
+            "Authorization": "Bearer concrete-proxy-injected",
+            "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
+        },
         host="slack.com",
         path="/api/conversations.history",
     )
@@ -389,6 +405,11 @@ def test_body_assertion_allow_lands_attribute_on_traffic_log() -> None:
 def test_body_assertion_unallowed_channel_returns_403_and_no_attribute() -> None:
     proxy_addon, queue = addon(slack_policy())
     slack_request = FakeRequest(
+        headers={
+            "Proxy-Authorization": "Bearer proxy-token",
+            "Authorization": "Bearer concrete-proxy-injected",
+            "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
+        },
         host="slack.com",
         path="/api/conversations.history",
     )
@@ -400,6 +421,39 @@ def test_body_assertion_unallowed_channel_returns_403_and_no_attribute() -> None
 
     assert flow.response is not None
     assert flow.response.status_code == 403
+    assert batch is not None
+    assert batch.records[0].response_code == 403
+    assert batch.records[0].attributes == {}
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/conversations.history/../chat.postMessage",
+        "/api/conversations.history%2f..%2fchat.postMessage",
+    ],
+)
+def test_ambiguous_slack_path_denies_without_injecting_secret(path: str) -> None:
+    proxy_addon, queue = addon(slack_policy())
+    slack_request = FakeRequest(
+        headers={
+            "Proxy-Authorization": "Bearer proxy-token",
+            "Authorization": "Bearer concrete-proxy-injected",
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
+        host="slack.com",
+        path=path,
+    )
+    slack_request.raw_content = b"channel=C0ALLOWED1"
+    flow = FakeFlow(slack_request)
+
+    proxy_addon.request(flow)
+    batch = queue.drain_batch()
+
+    assert flow.response is not None
+    assert flow.response.status_code == 403
+    assert flow.request.headers["Authorization"] == "Bearer concrete-proxy-injected"
+    assert "authorization" not in flow.request.headers
     assert batch is not None
     assert batch.records[0].response_code == 403
     assert batch.records[0].attributes == {}

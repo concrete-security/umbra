@@ -8,6 +8,7 @@ dependencies = [
     "alembic>=1.13,<2",
     "asyncpg>=0.29,<1",
     "fastapi>=0.115,<1",
+    "google-re2>=1,<2",
     "httpx>=0.27,<1",
     "pyjwt[crypto]>=2.10,<3",
     "pytest>=8,<9",

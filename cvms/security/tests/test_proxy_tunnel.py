@@ -78,3 +78,32 @@ async def _proxy_tunnel_rejects_plain_request_without_upgrade() -> None:
     await writer.wait_closed()
     server.close()
     await server.wait_closed()
+
+
+def test_proxy_tunnel_rejects_outer_proxy_authorization() -> None:
+    asyncio.run(_proxy_tunnel_rejects_outer_proxy_authorization())
+
+
+async def _proxy_tunnel_rejects_outer_proxy_authorization() -> None:
+    config = ProxyTunnelConfig(upstream_host="127.0.0.1", upstream_port=9)
+    server = await asyncio.start_server(lambda r, w: handle_client(r, w, config), "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    reader, writer = await asyncio.open_connection("127.0.0.1", port)
+
+    writer.write(
+        b"GET /concrete/proxy HTTP/1.1\r\n"
+        b"Host: sc.example.com\r\n"
+        b"Connection: Upgrade\r\n"
+        b"Upgrade: concrete-proxy\r\n"
+        b"Proxy-Authorization: Bearer proxy-token\r\n"
+        b"\r\n"
+    )
+    await writer.drain()
+
+    response = await reader.read()
+    assert b"400 Bad Request" in response
+
+    writer.close()
+    await writer.wait_closed()
+    server.close()
+    await server.wait_closed()

@@ -97,6 +97,7 @@ def enforce_authenticated_request(
         method=request.method,
         path=request.path,
         body=request.body,
+        headers=headers,
     )
     if not decision.allowed:
         return _blocked_result(request, cvm, upstream_headers, decision.reason, decision.rule_id)
@@ -127,7 +128,7 @@ def enforce_authenticated_request(
     upstream_headers.update(injection_headers)
     attributes: dict[str, str] = {}
     if decision.matched_rule is not None:
-        attributes = decision.matched_rule.extract_traffic_log_attributes(request.body)
+        attributes = decision.matched_rule.extract_traffic_log_attributes(request.body, headers)
     return EnforcementResult(
         allowed=True,
         response_code=None,
@@ -176,7 +177,7 @@ def enforce_connect_request(request: ProxyRequest, control_map: ControlMap) -> E
         reason="allowed",
         cvm=cvm,
         upstream_headers=upstream_headers,
-        traffic_log=None,
+        traffic_log=traffic_log_record(request, cvm, response_code=200),
         matched_policy_id=decision.rule_id,
     )
 

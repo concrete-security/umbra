@@ -793,7 +793,16 @@ def test_policy_sha256_is_canonical() -> None:
 
 
 def test_validate_profile_policy_accepts_sandbox_env() -> None:
-    validate_profile_policy({"sandbox_env": {"PLACEHOLDER": "value"}, "opaque": {"kept": True}})
+    validate_profile_policy({"sandbox_env": {"PLACEHOLDER": "value"}})
+
+
+def test_validate_profile_policy_rejects_unknown_top_level_field() -> None:
+    with pytest.raises(HTTPException) as exc:
+        validate_profile_policy({"sandbox_env": {"PLACEHOLDER": "value"}, "opaque": {"kept": True}})
+
+    assert exc.value.status_code == 422
+    errors = exc.value.detail["error"]["details"]["errors"]
+    assert errors == [{"field": "policy.opaque", "type": "unknown_field"}]
 
 
 def test_validate_profile_policy_rejects_bad_sandbox_env() -> None:
@@ -811,6 +820,32 @@ def test_validate_profile_policy_rejects_bad_sandbox_env() -> None:
     assert exc.value.status_code == 422
     errors = exc.value.detail["error"]["details"]["errors"]
     assert {error["type"] for error in errors} == {"invalid_name", "reserved_name", "value_denied"}
+
+
+def test_validate_profile_policy_rejects_invalid_destination_schema() -> None:
+    with pytest.raises(HTTPException) as exc:
+        validate_profile_policy(
+            {
+                "allowed_destinations": [
+                    {
+                        "id": "bad-destination",
+                        "scheme": "https",
+                        "host": "slack.com:443",
+                        "ports": [443],
+                        "methods": ["post"],
+                        "path_prefixes": ["/api/conversations.history/../chat.postMessage"],
+                    }
+                ]
+            }
+        )
+
+    errors = exc.value.detail["error"]["details"]["errors"]
+    assert any(error == {"field": "policy.allowed_destinations.0.host", "type": "invalid_host"} for error in errors)
+    assert any(error == {"field": "policy.allowed_destinations.0.methods.0", "type": "invalid_method"} for error in errors)
+    assert any(
+        error == {"field": "policy.allowed_destinations.0.path_prefixes.0", "type": "invalid_path_prefix"}
+        for error in errors
+    )
 
 
 def test_validate_profile_policy_accepts_body_assertions_and_traffic_log_attributes() -> None:
@@ -889,6 +924,59 @@ def test_validate_profile_policy_rejects_body_assertions_on_injection_match() ->
 
     errors = exc.value.detail["error"]["details"]["errors"]
     assert any(error["type"] == "forbidden_field" for error in errors)
+
+
+def test_validate_profile_policy_rejects_invalid_secret_injection_match() -> None:
+    with pytest.raises(HTTPException) as exc:
+        validate_profile_policy(
+            {
+                "secret_injections": [
+                    {
+                        "id": "slack-bearer",
+                        "match": {
+                            "scheme": "https",
+                            "host": "slack.com:443",
+                            "ports": [443],
+                            "methods": ["POST"],
+                            "path_prefixes": ["/api/conversations.history/%2e%2e/chat.postMessage"],
+                        },
+                        "type": "request_header",
+                        "header": "proxy-authorization",
+                        "value": "xoxb-real",
+                        "value_template": "Bearer ${secret}",
+                    }
+                ]
+            }
+        )
+
+    errors = exc.value.detail["error"]["details"]["errors"]
+    assert any(error["field"] == "policy.secret_injections.0.match.host" and error["type"] == "invalid_host" for error in errors)
+    assert any(
+        error["field"] == "policy.secret_injections.0.match.path_prefixes.0"
+        and error["type"] == "invalid_path_prefix"
+        for error in errors
+    )
+    assert any(error["field"] == "policy.secret_injections.0.header" and error["type"] == "invalid_header" for error in errors)
+
+
+def test_validate_profile_policy_rejects_secret_pattern_that_security_cvm_cannot_compile() -> None:
+    with pytest.raises(HTTPException) as exc:
+        validate_profile_policy(
+            {
+                "secret_patterns": [
+                    {
+                        "id": "bad-regex",
+                        "name": "Bad regex",
+                        "pattern": "(",
+                        "scan_headers": True,
+                        "scan_body": True,
+                    }
+                ]
+            }
+        )
+
+    errors = exc.value.detail["error"]["details"]["errors"]
+    assert errors == [{"field": "policy.secret_patterns.0.pattern", "type": "invalid_regex"}]
 
 
 def test_validate_profile_policy_rejects_invalid_body_assertion_kind() -> None:
@@ -1177,6 +1265,11 @@ def test_traffic_log_in_rejects_overlong_attribute_value() -> None:
 
     with pytest.raises(ValidationError):
         traffic_log(attributes={"slack_channel": "x" * 257})
+
+
+def test_traffic_log_in_rejects_path_with_query_string() -> None:
+    with pytest.raises(ValidationError):
+        traffic_log(path="/api/chat.postMessage?token=not-logged")
 
 
 class TrafficLogVolumeLimitConn:

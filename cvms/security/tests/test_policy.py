@@ -7,6 +7,10 @@ from concrete_security_cvm.policy import (
 )
 
 
+FORM_HEADERS = {"content-type": "application/x-www-form-urlencoded; charset=utf-8"}
+JSON_HEADERS = {"content-type": "application/json; charset=utf-8"}
+
+
 def sample_policy() -> dict[str, object]:
     return {
         "allowed_destinations": [
@@ -194,6 +198,7 @@ def test_body_assertion_form_match_allows_request() -> None:
         method="POST",
         path="/api/conversations.history",
         body=b"channel=C0ALLOWED1&oldest=0",
+        headers=FORM_HEADERS,
     )
 
     assert decision.allowed is True
@@ -213,6 +218,26 @@ def test_body_assertion_form_mismatch_falls_through_to_deny() -> None:
         method="POST",
         path="/api/conversations.history",
         body=b"channel=C0NOTALLOWED",
+        headers=FORM_HEADERS,
+    )
+
+    assert decision.allowed is False
+    assert decision.reason == "destination_not_allowed"
+
+
+def test_body_assertion_wrong_content_type_denies() -> None:
+    raw = sample_policy()
+    raw["allowed_destinations"] = [slack_rule_with_assertions()]
+    policy = parse_effective_policy(raw)
+
+    decision = policy.decide(
+        scheme="https",
+        host="slack.com",
+        port=443,
+        method="POST",
+        path="/api/conversations.history",
+        body=b"channel=C0ALLOWED1",
+        headers=JSON_HEADERS,
     )
 
     assert decision.allowed is False
@@ -231,9 +256,49 @@ def test_body_assertion_form_missing_field_denies() -> None:
         method="POST",
         path="/api/conversations.history",
         body=b"other=1",
+        headers=FORM_HEADERS,
     )
 
     assert decision.allowed is False
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/conversations.history/../chat.postMessage",
+        "/api/conversations.history%2f..%2fchat.postMessage",
+        "/api/conversations.history/%2e%2e/chat.postMessage",
+        "/api/conversations.history\\..\\chat.postMessage",
+        "/api/conversations.history//chat.postMessage",
+    ],
+)
+def test_ambiguous_paths_do_not_match_allow_prefix(path: str) -> None:
+    raw = sample_policy()
+    raw["allowed_destinations"] = [slack_rule_with_assertions()]
+    policy = parse_effective_policy(raw)
+
+    decision = policy.decide(
+        scheme="https",
+        host="slack.com",
+        port=443,
+        method="POST",
+        path=path,
+        body=b"channel=C0ALLOWED1",
+        headers=FORM_HEADERS,
+    )
+
+    assert decision.allowed is False
+    assert decision.reason == "destination_not_allowed"
+
+
+def test_ambiguous_policy_path_prefix_rejected() -> None:
+    raw = sample_policy()
+    raw["allowed_destinations"] = [slack_rule_with_assertions(path_prefixes=["/api/../chat.postMessage"])]
+
+    with pytest.raises(PolicyValidationError) as exc:
+        parse_effective_policy(raw)
+
+    assert any(error.type == "invalid_path_prefix" for error in exc.value.errors)
 
 
 def test_body_assertion_json_match_allows_request() -> None:
@@ -253,6 +318,7 @@ def test_body_assertion_json_match_allows_request() -> None:
         method="POST",
         path="/api/conversations.history",
         body=b'{"channel":"C0ALLOWED1","oldest":0}',
+        headers=JSON_HEADERS,
     )
 
     assert decision.allowed is True
@@ -281,6 +347,7 @@ def test_body_assertion_json_nested_path_resolves_scalar() -> None:
         method="POST",
         path="/v1/databases/abc/query",
         body=b'{"filter":{"property":"Name","equals":"hi"}}',
+        headers=JSON_HEADERS,
     )
 
     assert decision.allowed is True
@@ -303,6 +370,7 @@ def test_body_assertion_non_scalar_resolution_denies() -> None:
         method="POST",
         path="/api/conversations.history",
         body=b'{"filter":{"nested":"x"}}',
+        headers=JSON_HEADERS,
     )
 
     assert decision.allowed is False
@@ -325,6 +393,7 @@ def test_body_assertion_malformed_json_denies() -> None:
         method="POST",
         path="/api/conversations.history",
         body=b"{not json",
+        headers=JSON_HEADERS,
     )
 
     assert decision.allowed is False
@@ -342,6 +411,7 @@ def test_body_assertion_oversized_body_denies() -> None:
         method="POST",
         path="/api/conversations.history",
         body=b"channel=C0ALLOWED1&pad=" + b"A" * MAX_BODY_ASSERTION_BYTES,
+        headers=FORM_HEADERS,
     )
 
     assert decision.allowed is False
@@ -377,10 +447,11 @@ def test_traffic_log_attributes_extracted_on_allow() -> None:
         method="POST",
         path="/api/conversations.history",
         body=b"channel=C0ALLOWED1",
+        headers=FORM_HEADERS,
     )
 
     assert decision.matched_rule is not None
-    attributes = decision.matched_rule.extract_traffic_log_attributes(b"channel=C0ALLOWED1")
+    attributes = decision.matched_rule.extract_traffic_log_attributes(b"channel=C0ALLOWED1", FORM_HEADERS)
     assert attributes == {"slack_channel": "C0ALLOWED1"}
 
 
@@ -553,6 +624,7 @@ def test_first_allow_rule_must_match_or_fall_through() -> None:
         method="POST",
         path="/api/conversations.history",
         body=b"channel=C0OTHER",
+        headers=FORM_HEADERS,
     )
 
     assert matched.allowed is True
