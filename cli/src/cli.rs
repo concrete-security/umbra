@@ -472,6 +472,10 @@ pub struct CodeArgs {
     /// Working directory for the editor on the Dev CVM, for example ~/workspaces/myrepo.
     #[arg(long)]
     pub workspace: Option<String>,
+
+    /// Private SSH key to pass to ssh(1) as IdentityFile when launching the editor.
+    #[arg(long)]
+    pub identity_file: Option<PathBuf>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -483,6 +487,10 @@ pub struct CursorArgs {
     /// Working directory for the editor on the Dev CVM, for example ~/workspaces/myrepo.
     #[arg(long)]
     pub workspace: Option<String>,
+
+    /// Private SSH key to pass to ssh(1) as IdentityFile when launching the editor.
+    #[arg(long)]
+    pub identity_file: Option<PathBuf>,
 }
 
 #[derive(clap::Args, Debug)]

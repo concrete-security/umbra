@@ -128,12 +128,22 @@ pub fn run_agent(
 
 pub fn run_code(args: CodeArgs, config: &ResolvedConfig) -> ExitStatus {
     let bin = args.code_bin.unwrap_or_else(|| PathBuf::from("code"));
-    run_editor(&bin, args.workspace.as_deref(), config)
+    run_editor(
+        &bin,
+        args.workspace.as_deref(),
+        args.identity_file.as_deref(),
+        config,
+    )
 }
 
 pub fn run_cursor(args: CursorArgs, config: &ResolvedConfig) -> ExitStatus {
     let bin = args.cursor_bin.unwrap_or_else(|| PathBuf::from("cursor"));
-    run_editor(&bin, args.workspace.as_deref(), config)
+    run_editor(
+        &bin,
+        args.workspace.as_deref(),
+        args.identity_file.as_deref(),
+        config,
+    )
 }
 
 pub fn run_ps(args: SessionListArgs, config: &ResolvedConfig, json_output: bool) -> ExitStatus {
@@ -358,6 +368,7 @@ fn run_ssh(invocation: SshInvocation<'_>, config: &ResolvedConfig) -> ExitStatus
 fn run_editor(
     editor_bin: &Path,
     workspace_arg: Option<&str>,
+    identity_file: Option<&Path>,
     config: &ResolvedConfig,
 ) -> ExitStatus {
     if let Some(value) = workspace_arg {
@@ -374,7 +385,7 @@ fn run_editor(
         }
     };
     let workspace = resolve_workspace(workspace_arg, config, &prepared.cvm_id);
-    let launch = match write_editor_ssh_files(config, &prepared) {
+    let launch = match write_editor_ssh_files(config, &prepared, identity_file) {
         Ok(value) => value,
         Err(message) => {
             crate::style::eprintln_error(&message);
@@ -623,9 +634,28 @@ struct EditorLaunch {
     wrapper_dir: PathBuf,
 }
 
+fn render_editor_ssh_config(
+    host_alias: &str,
+    prepared: &PreparedSsh,
+    identity_file: Option<&Path>,
+) -> String {
+    let mut out = format!(
+        "Host {host_alias}\n  HostName {}\n  User dev\n  ProxyCommand {}\n  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null\n  LogLevel ERROR\n  BatchMode yes\n  ConnectTimeout 30\n",
+        prepared.fqdn, prepared.proxy_command,
+    );
+    if let Some(path) = identity_file {
+        out.push_str(&format!(
+            "  IdentityFile {}\n  IdentitiesOnly yes\n",
+            path.display(),
+        ));
+    }
+    out
+}
+
 fn write_editor_ssh_files(
     config: &ResolvedConfig,
     prepared: &PreparedSsh,
+    identity_file: Option<&Path>,
 ) -> Result<EditorLaunch, String> {
     validate_ssh_config_token(&prepared.fqdn, "Dev CVM FQDN")?;
     if prepared.proxy_command.contains(['\n', '\r']) {
@@ -647,10 +677,7 @@ fn write_editor_ssh_files(
     }
 
     let config_path = base_dir.join("config");
-    let ssh_config = format!(
-        "Host {host_alias}\n  HostName {}\n  User dev\n  ProxyCommand {}\n  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null\n  LogLevel ERROR\n  BatchMode yes\n  ConnectTimeout 30\n",
-        prepared.fqdn, prepared.proxy_command,
-    );
+    let ssh_config = render_editor_ssh_config(&host_alias, prepared, identity_file);
     write_atomic_file(&config_path, ssh_config.as_bytes(), 0o600)?;
 
     let ssh_bin = find_ssh_binary()
@@ -1123,6 +1150,37 @@ mod tests {
         assert!(args
             .windows(2)
             .any(|pair| pair == ["-i", "/tmp/concrete-key"]));
+    }
+
+    #[test]
+    fn editor_ssh_config_omits_identity_file_by_default() {
+        let prepared = PreparedSsh {
+            cvm_id: "cvm-1".to_string(),
+            fqdn: "cvm.example.com".to_string(),
+            proxy_command: "concrete tunnel cvm.example.com".to_string(),
+        };
+        let config = render_editor_ssh_config("concrete-cvm-1", &prepared, None);
+        assert!(config.contains("Host concrete-cvm-1"));
+        assert!(config.contains("HostName cvm.example.com"));
+        assert!(config.contains("BatchMode yes"));
+        assert!(!config.contains("IdentityFile"));
+        assert!(!config.contains("IdentitiesOnly"));
+    }
+
+    #[test]
+    fn editor_ssh_config_pins_identity_file_when_supplied() {
+        let prepared = PreparedSsh {
+            cvm_id: "cvm-1".to_string(),
+            fqdn: "cvm.example.com".to_string(),
+            proxy_command: "concrete tunnel cvm.example.com".to_string(),
+        };
+        let config = render_editor_ssh_config(
+            "concrete-cvm-1",
+            &prepared,
+            Some(Path::new("/home/u/.ssh/concrete_dev_ed25519")),
+        );
+        assert!(config.contains("IdentityFile /home/u/.ssh/concrete_dev_ed25519"));
+        assert!(config.contains("IdentitiesOnly yes"));
     }
 
     #[test]
