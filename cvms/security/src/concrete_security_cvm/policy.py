@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import re
 from typing import Any
+from urllib.parse import parse_qs
 
 import re2
 
@@ -14,17 +16,32 @@ TOP_LEVEL_FIELDS = {
     "secret_injections",
     "sandbox_env",
 }
-DESTINATION_FIELDS = {"id", "scheme", "host", "ports", "methods", "path_prefixes"}
+DESTINATION_FIELDS = {
+    "id",
+    "scheme",
+    "host",
+    "ports",
+    "methods",
+    "path_prefixes",
+    "body_assertions",
+    "traffic_log_attributes",
+}
+DESTINATION_EXTENSION_FIELDS = {"body_assertions", "traffic_log_attributes"}
 DESTINATION_MATCH_FIELDS = {"scheme", "host", "ports", "methods", "path_prefixes"}
 SECRET_PATTERN_FIELDS = {"id", "name", "pattern", "scan_headers", "scan_body"}
 SECRET_INJECTION_FIELDS = {"id", "match", "type", "header", "value", "value_template"}
 SANDBOX_ENV_FIELDS = {"name", "value"}
+BODY_ASSERTION_FIELDS = {"kind", "field", "allow_values"}
+TRAFFIC_LOG_ATTRIBUTE_FIELDS = {"name", "kind", "field"}
+BODY_ASSERTION_KINDS = {"form", "json"}
 
 ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,100}$")
 DNS_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 HEADER_RE = re.compile(r"^[a-z][a-z0-9-]{0,126}$")
 HEX_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+POINTER_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+TRAFFIC_LOG_ATTRIBUTE_NAME_RE = re.compile(r"^[a-z_]{1,32}$")
 HOP_BY_HOP_HEADERS = {
     "connection",
     "content-length",
@@ -36,6 +53,27 @@ HOP_BY_HOP_HEADERS = {
     "transfer-encoding",
     "upgrade",
 }
+
+MAX_BODY_ASSERTION_BYTES = 1 * 1024 * 1024
+MAX_BODY_ASSERTION_JSON_DEPTH = 32
+MAX_BODY_ASSERTION_JSON_KEYS = 1024
+MAX_BODY_ASSERTION_JSON_ARRAY = 1024
+MAX_BODY_ASSERTIONS_PER_RULE = 16
+MAX_TRAFFIC_LOG_ATTRIBUTES_PER_RULE = 4
+MAX_POINTER_SEGMENTS_JSON = 4
+MAX_ALLOW_VALUES = 256
+MAX_ALLOW_VALUE_LEN = 256
+MAX_TRAFFIC_LOG_ATTRIBUTE_VALUE_CHARS = 256
+
+
+class _Missing:
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "<_MISSING>"
+
+
+_MISSING: Any = _Missing()
 
 
 @dataclass(frozen=True)
@@ -52,6 +90,32 @@ class PolicyValidationError(ValueError):
 
 
 @dataclass(frozen=True)
+class BodyAssertion:
+    kind: str
+    field: tuple[str, ...]
+    allow_values: frozenset[str]
+
+    def evaluate(self, body: bytes) -> bool:
+        value = _extract_scalar(self.kind, self.field, body)
+        if value is _MISSING:
+            return False
+        return _scalar_to_str(value) in self.allow_values
+
+
+@dataclass(frozen=True)
+class TrafficLogAttribute:
+    name: str
+    kind: str
+    field: tuple[str, ...]
+
+    def extract(self, body: bytes) -> str | None:
+        value = _extract_scalar(self.kind, self.field, body)
+        if value is _MISSING:
+            return None
+        return _scalar_to_str(value)[:MAX_TRAFFIC_LOG_ATTRIBUTE_VALUE_CHARS]
+
+
+@dataclass(frozen=True)
 class DestinationRule:
     rule_id: str | None
     scheme: str
@@ -59,6 +123,8 @@ class DestinationRule:
     ports: tuple[int, ...]
     methods: tuple[str, ...]
     path_prefixes: tuple[str, ...]
+    body_assertions: tuple[BodyAssertion, ...] = ()
+    traffic_log_attributes: tuple[TrafficLogAttribute, ...] = ()
 
     def matches(self, *, scheme: str, host: str, port: int, method: str, path: str) -> bool:
         return (
@@ -77,6 +143,17 @@ class DestinationRule:
             suffix = self.host[2:]
             return host.endswith(f".{suffix}") and host != suffix
         return host == self.host
+
+    def body_assertions_pass(self, body: bytes) -> bool:
+        return all(assertion.evaluate(body) for assertion in self.body_assertions)
+
+    def extract_traffic_log_attributes(self, body: bytes) -> dict[str, str]:
+        attributes: dict[str, str] = {}
+        for attribute in self.traffic_log_attributes:
+            value = attribute.extract(body)
+            if value is not None:
+                attributes[attribute.name] = value
+        return attributes
 
 
 @dataclass(frozen=True)
@@ -112,6 +189,7 @@ class PolicyDecision:
     allowed: bool
     reason: str
     rule_id: str | None = None
+    matched_rule: DestinationRule | None = None
 
 
 @dataclass(frozen=True)
@@ -132,7 +210,16 @@ class EffectivePolicy:
             sandbox_env=(),
         )
 
-    def decide(self, *, scheme: str, host: str, port: int, method: str, path: str) -> PolicyDecision:
+    def decide(
+        self,
+        *,
+        scheme: str,
+        host: str,
+        port: int,
+        method: str,
+        path: str,
+        body: bytes = b"",
+    ) -> PolicyDecision:
         request = {
             "scheme": scheme,
             "host": host,
@@ -144,8 +231,11 @@ class EffectivePolicy:
             if rule.matches(**request):
                 return PolicyDecision(False, "blocked_destination", rule.rule_id)
         for rule in self.allowed_destinations:
-            if rule.matches(**request):
-                return PolicyDecision(True, "allowed_destination", rule.rule_id)
+            if not rule.matches(**request):
+                continue
+            if rule.body_assertions and not rule.body_assertions_pass(body):
+                continue
+            return PolicyDecision(True, "allowed_destination", rule.rule_id, matched_rule=rule)
         return PolicyDecision(False, "destination_not_allowed")
 
     def decide_tunnel(self, *, scheme: str, host: str, port: int) -> PolicyDecision:
@@ -159,7 +249,7 @@ class EffectivePolicy:
                 return PolicyDecision(False, "blocked_destination", rule.rule_id)
         for rule in self.allowed_destinations:
             if rule.matches_tunnel(**request):
-                return PolicyDecision(True, "allowed_destination", rule.rule_id)
+                return PolicyDecision(True, "allowed_destination", rule.rule_id, matched_rule=rule)
         return PolicyDecision(False, "destination_not_allowed")
 
     def render_injection_headers(
@@ -207,8 +297,18 @@ def parse_effective_policy(raw: Any) -> EffectivePolicy:
     _reject_unknown_fields(raw, TOP_LEVEL_FIELDS, "policy", errors)
     if errors:
         raise PolicyValidationError(errors)
-    allowed = _parse_destination_rules(raw.get("allowed_destinations", []), "allowed_destinations", errors)
-    blocked = _parse_destination_rules(raw.get("blocked_destinations", []), "blocked_destinations", errors)
+    allowed = _parse_destination_rules(
+        raw.get("allowed_destinations", []),
+        "allowed_destinations",
+        errors,
+        allow_extensions=True,
+    )
+    blocked = _parse_destination_rules(
+        raw.get("blocked_destinations", []),
+        "blocked_destinations",
+        errors,
+        allow_extensions=False,
+    )
     patterns = _parse_secret_patterns(raw.get("secret_patterns", []), errors)
     injections = _parse_secret_injections(raw.get("secret_injections", []), errors)
     sandbox_env = _parse_sandbox_env(raw.get("sandbox_env", []), errors)
@@ -223,14 +323,29 @@ def parse_effective_policy(raw: Any) -> EffectivePolicy:
     )
 
 
-def _parse_destination_rules(raw: Any, field: str, errors: list[PolicyError]) -> list[DestinationRule]:
+def _parse_destination_rules(
+    raw: Any,
+    field: str,
+    errors: list[PolicyError],
+    *,
+    allow_extensions: bool,
+) -> list[DestinationRule]:
     if not isinstance(raw, list):
         errors.append(PolicyError(field, "array_required", "destination rules must be an array"))
         return []
     return [
         rule
         for index, item in enumerate(raw)
-        if (rule := _parse_destination_rule(item, f"{field}.{index}", errors, require_id=True)) is not None
+        if (
+            rule := _parse_destination_rule(
+                item,
+                f"{field}.{index}",
+                errors,
+                require_id=True,
+                allow_extensions=allow_extensions,
+            )
+        )
+        is not None
     ]
 
 
@@ -240,11 +355,13 @@ def _parse_destination_rule(
     errors: list[PolicyError],
     *,
     require_id: bool,
+    allow_extensions: bool = False,
 ) -> DestinationRule | None:
     if not isinstance(raw, dict):
         errors.append(PolicyError(field, "object_required", "destination rule must be an object"))
         return None
-    allowed_fields = DESTINATION_FIELDS if require_id else DESTINATION_MATCH_FIELDS
+    base_fields = DESTINATION_FIELDS if require_id else DESTINATION_MATCH_FIELDS
+    allowed_fields = base_fields if allow_extensions else (base_fields - DESTINATION_EXTENSION_FIELDS)
     _reject_unknown_fields(raw, allowed_fields, field, errors)
     rule_id = raw.get("id")
     if require_id:
@@ -264,6 +381,19 @@ def _parse_destination_rule(
     ports = _parse_ports(raw.get("ports"), scheme, f"{field}.ports", errors)
     methods = _parse_methods(raw.get("methods"), f"{field}.methods", errors)
     path_prefixes = _parse_path_prefixes(raw.get("path_prefixes"), f"{field}.path_prefixes", errors)
+    body_assertions: list[BodyAssertion] = []
+    traffic_log_attributes: list[TrafficLogAttribute] = []
+    if allow_extensions:
+        body_assertions = _parse_body_assertions(
+            raw.get("body_assertions", []),
+            f"{field}.body_assertions",
+            errors,
+        )
+        traffic_log_attributes = _parse_traffic_log_attributes(
+            raw.get("traffic_log_attributes", []),
+            f"{field}.traffic_log_attributes",
+            errors,
+        )
     if not host or not methods or not path_prefixes:
         return None
     return DestinationRule(
@@ -273,7 +403,163 @@ def _parse_destination_rule(
         ports=tuple(ports),
         methods=tuple(methods),
         path_prefixes=tuple(path_prefixes),
+        body_assertions=tuple(body_assertions),
+        traffic_log_attributes=tuple(traffic_log_attributes),
     )
+
+
+def _parse_body_assertions(
+    raw: Any,
+    field: str,
+    errors: list[PolicyError],
+) -> list[BodyAssertion]:
+    if raw is None or raw == []:
+        return []
+    if not isinstance(raw, list):
+        errors.append(PolicyError(field, "array_required", "body_assertions must be an array"))
+        return []
+    if len(raw) > MAX_BODY_ASSERTIONS_PER_RULE:
+        errors.append(
+            PolicyError(
+                field,
+                "too_many",
+                f"body_assertions must contain at most {MAX_BODY_ASSERTIONS_PER_RULE} entries",
+            )
+        )
+        return []
+    assertions: list[BodyAssertion] = []
+    for index, item in enumerate(raw):
+        item_field = f"{field}.{index}"
+        if not isinstance(item, dict):
+            errors.append(PolicyError(item_field, "object_required", "body assertion must be an object"))
+            continue
+        _reject_unknown_fields(item, BODY_ASSERTION_FIELDS, item_field, errors)
+        kind = item.get("kind")
+        if kind not in BODY_ASSERTION_KINDS:
+            errors.append(PolicyError(f"{item_field}.kind", "invalid_kind", "kind must be form or json"))
+            continue
+        segments = _parse_pointer_field(item.get("field"), kind, f"{item_field}.field", errors)
+        if segments is None:
+            continue
+        allow_values = _parse_allow_values(item.get("allow_values"), f"{item_field}.allow_values", errors)
+        if allow_values is None:
+            continue
+        assertions.append(BodyAssertion(kind=kind, field=segments, allow_values=frozenset(allow_values)))
+    return assertions
+
+
+def _parse_traffic_log_attributes(
+    raw: Any,
+    field: str,
+    errors: list[PolicyError],
+) -> list[TrafficLogAttribute]:
+    if raw is None or raw == []:
+        return []
+    if not isinstance(raw, list):
+        errors.append(PolicyError(field, "array_required", "traffic_log_attributes must be an array"))
+        return []
+    if len(raw) > MAX_TRAFFIC_LOG_ATTRIBUTES_PER_RULE:
+        errors.append(
+            PolicyError(
+                field,
+                "too_many",
+                f"traffic_log_attributes must contain at most {MAX_TRAFFIC_LOG_ATTRIBUTES_PER_RULE} entries",
+            )
+        )
+        return []
+    seen_names: set[str] = set()
+    attributes: list[TrafficLogAttribute] = []
+    for index, item in enumerate(raw):
+        item_field = f"{field}.{index}"
+        if not isinstance(item, dict):
+            errors.append(PolicyError(item_field, "object_required", "traffic_log_attribute must be an object"))
+            continue
+        _reject_unknown_fields(item, TRAFFIC_LOG_ATTRIBUTE_FIELDS, item_field, errors)
+        name = item.get("name")
+        if not isinstance(name, str) or not TRAFFIC_LOG_ATTRIBUTE_NAME_RE.fullmatch(name):
+            errors.append(
+                PolicyError(f"{item_field}.name", "invalid_name", "name must be 1..32 chars [a-z_]")
+            )
+            continue
+        if name in seen_names:
+            errors.append(
+                PolicyError(f"{item_field}.name", "duplicate_name", f"name {name!r} already used in this rule")
+            )
+            continue
+        kind = item.get("kind")
+        if kind not in BODY_ASSERTION_KINDS:
+            errors.append(PolicyError(f"{item_field}.kind", "invalid_kind", "kind must be form or json"))
+            continue
+        segments = _parse_pointer_field(item.get("field"), kind, f"{item_field}.field", errors)
+        if segments is None:
+            continue
+        seen_names.add(name)
+        attributes.append(TrafficLogAttribute(name=name, kind=kind, field=segments))
+    return attributes
+
+
+def _parse_pointer_field(
+    raw: Any,
+    kind: str,
+    field: str,
+    errors: list[PolicyError],
+) -> tuple[str, ...] | None:
+    if not isinstance(raw, str):
+        errors.append(PolicyError(field, "invalid_field", "field must be a string"))
+        return None
+    if not raw.startswith("/"):
+        errors.append(PolicyError(field, "invalid_field", "field must start with '/'"))
+        return None
+    segments_raw = raw[1:].split("/")
+    if not segments_raw or any(not segment for segment in segments_raw):
+        errors.append(PolicyError(field, "invalid_field", "field segments must be non-empty"))
+        return None
+    max_segments = 1 if kind == "form" else MAX_POINTER_SEGMENTS_JSON
+    if len(segments_raw) > max_segments:
+        errors.append(
+            PolicyError(
+                field,
+                "invalid_field",
+                f"field must have at most {max_segments} segments for kind={kind}",
+            )
+        )
+        return None
+    for segment in segments_raw:
+        if not POINTER_SEGMENT_RE.fullmatch(segment):
+            errors.append(
+                PolicyError(field, "invalid_field", "field segments must be 1..64 chars from [A-Za-z0-9_.-]")
+            )
+            return None
+    return tuple(segments_raw)
+
+
+def _parse_allow_values(
+    raw: Any,
+    field: str,
+    errors: list[PolicyError],
+) -> list[str] | None:
+    if not isinstance(raw, list) or not 1 <= len(raw) <= MAX_ALLOW_VALUES:
+        errors.append(
+            PolicyError(
+                field,
+                "invalid_allow_values",
+                f"allow_values must contain 1..{MAX_ALLOW_VALUES} strings",
+            )
+        )
+        return None
+    values: list[str] = []
+    for index, value in enumerate(raw):
+        if not isinstance(value, str) or not 1 <= len(value) <= MAX_ALLOW_VALUE_LEN:
+            errors.append(
+                PolicyError(
+                    f"{field}.{index}",
+                    "invalid_allow_value",
+                    f"allow_value must be 1..{MAX_ALLOW_VALUE_LEN} chars",
+                )
+            )
+            return None
+        values.append(value)
+    return values
 
 
 def _parse_secret_patterns(raw: Any, errors: list[PolicyError]) -> list[SecretPattern]:
@@ -335,7 +621,13 @@ def _parse_secret_injections(raw: Any, errors: list[PolicyError]) -> list[Secret
         if injection_type != "request_header":
             errors.append(PolicyError(f"{field}.type", "invalid_type", "only request_header is supported"))
             continue
-        match = _parse_destination_rule(item.get("match"), f"{field}.match", errors, require_id=False)
+        match = _parse_destination_rule(
+            item.get("match"),
+            f"{field}.match",
+            errors,
+            require_id=False,
+            allow_extensions=False,
+        )
         if not isinstance(header, str) or not HEADER_RE.fullmatch(header) or header in HOP_BY_HOP_HEADERS:
             errors.append(PolicyError(f"{field}.header", "invalid_header", "header must be lower-case and injectable"))
             continue
@@ -440,3 +732,100 @@ def _valid_dns_name(host: str) -> bool:
 
 def valid_proxy_token_hash(value: str) -> bool:
     return bool(HEX_SHA256_RE.fullmatch(value))
+
+
+def _extract_scalar(kind: str, field: tuple[str, ...], body: bytes) -> Any:
+    if not body or len(body) > MAX_BODY_ASSERTION_BYTES:
+        return _MISSING
+    if kind == "form":
+        if len(field) != 1:
+            return _MISSING
+        parsed = _parse_form_body(body)
+        if parsed is _MISSING:
+            return _MISSING
+        return parsed.get(field[0], _MISSING)
+    if kind == "json":
+        parsed = _parse_json_body(body)
+        if parsed is _MISSING:
+            return _MISSING
+        return _walk_json_pointer(parsed, field)
+    return _MISSING
+
+
+def _parse_form_body(body: bytes) -> dict[str, str] | Any:
+    try:
+        decoded = body.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return _MISSING
+    try:
+        parsed = parse_qs(decoded, strict_parsing=True, keep_blank_values=True)
+    except ValueError:
+        return _MISSING
+    result: dict[str, str] = {}
+    for key, values in parsed.items():
+        if len(values) != 1:
+            continue
+        result[key] = values[0]
+    return result
+
+
+def _parse_json_body(body: bytes) -> Any:
+    try:
+        decoded = body.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return _MISSING
+    try:
+        value = json.loads(decoded)
+    except json.JSONDecodeError:
+        return _MISSING
+    if not _validate_json_bounds(value, depth=0):
+        return _MISSING
+    return value
+
+
+def _validate_json_bounds(value: Any, *, depth: int) -> bool:
+    if depth > MAX_BODY_ASSERTION_JSON_DEPTH:
+        return False
+    if isinstance(value, dict):
+        if len(value) > MAX_BODY_ASSERTION_JSON_KEYS:
+            return False
+        for v in value.values():
+            if not _validate_json_bounds(v, depth=depth + 1):
+                return False
+    elif isinstance(value, list):
+        if len(value) > MAX_BODY_ASSERTION_JSON_ARRAY:
+            return False
+        for v in value:
+            if not _validate_json_bounds(v, depth=depth + 1):
+                return False
+    return True
+
+
+def _walk_json_pointer(value: Any, segments: tuple[str, ...]) -> Any:
+    cursor: Any = value
+    for segment in segments:
+        if isinstance(cursor, dict):
+            if segment not in cursor:
+                return _MISSING
+            cursor = cursor[segment]
+        elif isinstance(cursor, list):
+            try:
+                index = int(segment)
+            except ValueError:
+                return _MISSING
+            if index < 0 or index >= len(cursor):
+                return _MISSING
+            cursor = cursor[index]
+        else:
+            return _MISSING
+    if isinstance(cursor, bool):
+        return cursor
+    if isinstance(cursor, (str, int, float)):
+        return cursor
+    return _MISSING
+
+
+def _scalar_to_str(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)

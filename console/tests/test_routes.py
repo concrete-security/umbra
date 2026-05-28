@@ -813,6 +813,193 @@ def test_validate_profile_policy_rejects_bad_sandbox_env() -> None:
     assert {error["type"] for error in errors} == {"invalid_name", "reserved_name", "value_denied"}
 
 
+def test_validate_profile_policy_accepts_body_assertions_and_traffic_log_attributes() -> None:
+    validate_profile_policy(
+        {
+            "allowed_destinations": [
+                {
+                    "id": "slack-read",
+                    "scheme": "https",
+                    "host": "slack.com",
+                    "ports": [443],
+                    "methods": ["POST"],
+                    "path_prefixes": ["/api/conversations.history"],
+                    "body_assertions": [
+                        {"kind": "form", "field": "/channel", "allow_values": ["C0ALLOWED1"]},
+                        {"kind": "json", "field": "/channel", "allow_values": ["C0ALLOWED1"]},
+                    ],
+                    "traffic_log_attributes": [
+                        {"name": "slack_channel", "kind": "form", "field": "/channel"},
+                    ],
+                }
+            ]
+        }
+    )
+
+
+def test_validate_profile_policy_rejects_body_assertions_on_blocked_destination() -> None:
+    with pytest.raises(HTTPException) as exc:
+        validate_profile_policy(
+            {
+                "blocked_destinations": [
+                    {
+                        "id": "block-this",
+                        "scheme": "https",
+                        "host": "slack.com",
+                        "ports": [443],
+                        "methods": ["POST"],
+                        "path_prefixes": ["/api/chat.postMessage"],
+                        "body_assertions": [
+                            {"kind": "form", "field": "/channel", "allow_values": ["X"]}
+                        ],
+                    }
+                ]
+            }
+        )
+
+    errors = exc.value.detail["error"]["details"]["errors"]
+    assert any(error["type"] == "forbidden_field" for error in errors)
+
+
+def test_validate_profile_policy_rejects_body_assertions_on_injection_match() -> None:
+    with pytest.raises(HTTPException) as exc:
+        validate_profile_policy(
+            {
+                "secret_injections": [
+                    {
+                        "id": "slack-bearer",
+                        "match": {
+                            "scheme": "https",
+                            "host": "slack.com",
+                            "ports": [443],
+                            "methods": ["POST"],
+                            "path_prefixes": ["/api/"],
+                            "body_assertions": [
+                                {"kind": "form", "field": "/channel", "allow_values": ["X"]}
+                            ],
+                        },
+                        "type": "request_header",
+                        "header": "authorization",
+                        "value": "xoxb-real",
+                        "value_template": "Bearer ${secret}",
+                    }
+                ]
+            }
+        )
+
+    errors = exc.value.detail["error"]["details"]["errors"]
+    assert any(error["type"] == "forbidden_field" for error in errors)
+
+
+def test_validate_profile_policy_rejects_invalid_body_assertion_kind() -> None:
+    with pytest.raises(HTTPException) as exc:
+        validate_profile_policy(
+            {
+                "allowed_destinations": [
+                    {
+                        "body_assertions": [
+                            {"kind": "yaml", "field": "/channel", "allow_values": ["X"]}
+                        ]
+                    }
+                ]
+            }
+        )
+
+    errors = exc.value.detail["error"]["details"]["errors"]
+    assert any(error["type"] == "invalid_kind" for error in errors)
+
+
+def test_validate_profile_policy_rejects_form_pointer_with_multiple_segments() -> None:
+    with pytest.raises(HTTPException) as exc:
+        validate_profile_policy(
+            {
+                "allowed_destinations": [
+                    {
+                        "body_assertions": [
+                            {"kind": "form", "field": "/a/b", "allow_values": ["X"]}
+                        ]
+                    }
+                ]
+            }
+        )
+
+    errors = exc.value.detail["error"]["details"]["errors"]
+    assert any(error["type"] == "invalid_field" for error in errors)
+
+
+def test_validate_profile_policy_rejects_json_pointer_with_too_many_segments() -> None:
+    with pytest.raises(HTTPException) as exc:
+        validate_profile_policy(
+            {
+                "allowed_destinations": [
+                    {
+                        "body_assertions": [
+                            {"kind": "json", "field": "/a/b/c/d/e", "allow_values": ["X"]}
+                        ]
+                    }
+                ]
+            }
+        )
+
+    errors = exc.value.detail["error"]["details"]["errors"]
+    assert any(error["type"] == "invalid_field" for error in errors)
+
+
+def test_validate_profile_policy_rejects_traffic_log_attribute_invalid_name() -> None:
+    with pytest.raises(HTTPException) as exc:
+        validate_profile_policy(
+            {
+                "allowed_destinations": [
+                    {
+                        "traffic_log_attributes": [
+                            {"name": "SlackChannel", "kind": "form", "field": "/channel"}
+                        ]
+                    }
+                ]
+            }
+        )
+
+    errors = exc.value.detail["error"]["details"]["errors"]
+    assert any(error["type"] == "invalid_name" for error in errors)
+
+
+def test_validate_profile_policy_rejects_traffic_log_attribute_duplicate_name() -> None:
+    with pytest.raises(HTTPException) as exc:
+        validate_profile_policy(
+            {
+                "allowed_destinations": [
+                    {
+                        "traffic_log_attributes": [
+                            {"name": "slack_channel", "kind": "form", "field": "/channel"},
+                            {"name": "slack_channel", "kind": "form", "field": "/channel"},
+                        ]
+                    }
+                ]
+            }
+        )
+
+    errors = exc.value.detail["error"]["details"]["errors"]
+    assert any(error["type"] == "duplicate_name" for error in errors)
+
+
+def test_validate_profile_policy_rejects_body_assertion_empty_allow_values() -> None:
+    with pytest.raises(HTTPException) as exc:
+        validate_profile_policy(
+            {
+                "allowed_destinations": [
+                    {
+                        "body_assertions": [
+                            {"kind": "form", "field": "/channel", "allow_values": []}
+                        ]
+                    }
+                ]
+            }
+        )
+
+    errors = exc.value.detail["error"]["details"]["errors"]
+    assert any(error["type"] == "invalid_allow_values" for error in errors)
+
+
 def test_ensure_no_sandbox_env_conflict_rejects_different_values() -> None:
     with pytest.raises(HTTPException) as exc:
         ensure_no_sandbox_env_conflict(
@@ -959,6 +1146,37 @@ def test_validate_traffic_log_timestamps_rejects_skew() -> None:
 
     assert exc.value.status_code == 422
     assert exc.value.detail["error"]["details"]["errors"][0]["type"] == "timestamp_skew"
+
+
+def test_traffic_log_in_accepts_attributes() -> None:
+    log = traffic_log(attributes={"slack_channel": "C0ALLOWED1"})
+    assert log.attributes == {"slack_channel": "C0ALLOWED1"}
+
+
+def test_traffic_log_in_defaults_attributes_to_empty_dict() -> None:
+    log = traffic_log()
+    assert log.attributes == {}
+
+
+def test_traffic_log_in_rejects_invalid_attribute_name() -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        traffic_log(attributes={"BadName": "x"})
+
+
+def test_traffic_log_in_rejects_too_many_attributes() -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        traffic_log(attributes={f"k_{i}": "v" for i in range(5)})
+
+
+def test_traffic_log_in_rejects_overlong_attribute_value() -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        traffic_log(attributes={"slack_channel": "x" * 257})
 
 
 class TrafficLogVolumeLimitConn:

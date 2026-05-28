@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import asyncio
 import json
 import logging
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Mapping
 from uuid import UUID, uuid4
 
 import httpx
@@ -34,12 +34,13 @@ class TrafficLogRecord:
     path: str | None
     response_code: int | None
     bytes_transferred: int
+    attributes: Mapping[str, str] = field(default_factory=dict)
 
     def to_json(self) -> dict[str, Any]:
         timestamp = self.timestamp
         if timestamp.tzinfo is None:
             timestamp = timestamp.replace(tzinfo=timezone.utc)
-        return {
+        payload: dict[str, Any] = {
             "timestamp": timestamp.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
             "cvm_id": str(self.cvm_id),
             "source_ip": self.source_ip,
@@ -52,6 +53,9 @@ class TrafficLogRecord:
             "response_code": self.response_code,
             "bytes_transferred": self.bytes_transferred,
         }
+        if self.attributes:
+            payload["attributes"] = dict(self.attributes)
+        return payload
 
     def approximate_size(self) -> int:
         return len(_compact_json(self.to_json()).encode("utf-8"))

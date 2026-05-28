@@ -172,6 +172,9 @@ def operation_resource(row: Any) -> dict[str, Any]:
 
 def traffic_log_resource(row: Any) -> dict[str, Any]:
     row = dict(row)
+    attributes = json_payload(row.get("attributes", {})) if "attributes" in row else {}
+    if not isinstance(attributes, dict):
+        attributes = {}
     return {
         "id": str(row["id"]),
         "timestamp": timestamp(row["timestamp"]),
@@ -186,6 +189,7 @@ def traffic_log_resource(row: Any) -> dict[str, Any]:
         "path": row["path"],
         "response_code": row["response_code"],
         "bytes_transferred": row["bytes_transferred"],
+        "attributes": attributes,
     }
 
 

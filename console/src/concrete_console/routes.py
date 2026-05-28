@@ -70,6 +70,16 @@ PERMISSIONS = {
 SANDBOX_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 SANDBOX_ENV_RESERVED_NAMES = {"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "PATH", "HOME"}
 SANDBOX_ENV_RESERVED_PREFIXES = ("CONCRETE_", "SECURITY_CVM_", "AUTHORIZED_SSH_", "SANDBOX_ENV_")
+POLICY_BODY_ASSERTION_KINDS = {"form", "json"}
+POLICY_BODY_ASSERTION_FIELDS = {"kind", "field", "allow_values"}
+POLICY_TRAFFIC_LOG_ATTR_FIELDS = {"name", "kind", "field"}
+POLICY_POINTER_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+POLICY_TRAFFIC_LOG_ATTR_NAME_RE = re.compile(r"^[a-z_]{1,32}$")
+POLICY_MAX_BODY_ASSERTIONS_PER_RULE = 16
+POLICY_MAX_TRAFFIC_LOG_ATTRIBUTES_PER_RULE = 4
+POLICY_MAX_POINTER_SEGMENTS_JSON = 4
+POLICY_MAX_ALLOW_VALUES = 256
+POLICY_MAX_ALLOW_VALUE_LEN = 256
 IDEMPOTENCY_KEY_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 CVM_CONFIG_VALUE_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 SECURITY_CVM_INSTANCE_TYPE_RE = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
@@ -470,38 +480,188 @@ def sandbox_env_value_denylist() -> list[re.Pattern[str]]:
 
 
 def validate_profile_policy(policy: dict[str, Any]) -> None:
-    sandbox_env = policy.get("sandbox_env")
-    if sandbox_env is None:
-        return
     errors: list[dict[str, Any]] = []
-    if not isinstance(sandbox_env, dict):
-        raise api_error(
-            422,
-            "VALIDATION_ERROR",
-            "policy.sandbox_env must be an object",
-            {"errors": [{"field": "policy.sandbox_env", "type": "object_required"}]},
-        )
-    if len(sandbox_env) > 64:
-        errors.append({"field": "policy.sandbox_env", "type": "too_many_entries", "limit": 64})
-    denylist = sandbox_env_value_denylist()
-    for name, value in sandbox_env.items():
-        field = f"policy.sandbox_env.{name}"
-        if not isinstance(name, str) or not SANDBOX_ENV_NAME_RE.fullmatch(name):
-            errors.append({"field": field, "type": "invalid_name"})
-            continue
-        if name in SANDBOX_ENV_RESERVED_NAMES or any(name.startswith(prefix) for prefix in SANDBOX_ENV_RESERVED_PREFIXES):
-            errors.append({"field": field, "type": "reserved_name"})
-        if not isinstance(value, str):
-            errors.append({"field": field, "type": "string_required"})
-            continue
-        if len(value) > 1024:
-            errors.append({"field": field, "type": "value_too_long", "limit": 1024})
-        if "\x00" in value or "\n" in value or "\r" in value:
-            errors.append({"field": field, "type": "invalid_value"})
-        if any(pattern.search(value) for pattern in denylist):
-            errors.append({"field": field, "type": "value_denied"})
+    sandbox_env = policy.get("sandbox_env")
+    if sandbox_env is not None:
+        if not isinstance(sandbox_env, dict):
+            raise api_error(
+                422,
+                "VALIDATION_ERROR",
+                "policy.sandbox_env must be an object",
+                {"errors": [{"field": "policy.sandbox_env", "type": "object_required"}]},
+            )
+        if len(sandbox_env) > 64:
+            errors.append({"field": "policy.sandbox_env", "type": "too_many_entries", "limit": 64})
+        denylist = sandbox_env_value_denylist()
+        for name, value in sandbox_env.items():
+            field = f"policy.sandbox_env.{name}"
+            if not isinstance(name, str) or not SANDBOX_ENV_NAME_RE.fullmatch(name):
+                errors.append({"field": field, "type": "invalid_name"})
+                continue
+            if name in SANDBOX_ENV_RESERVED_NAMES or any(
+                name.startswith(prefix) for prefix in SANDBOX_ENV_RESERVED_PREFIXES
+            ):
+                errors.append({"field": field, "type": "reserved_name"})
+            if not isinstance(value, str):
+                errors.append({"field": field, "type": "string_required"})
+                continue
+            if len(value) > 1024:
+                errors.append({"field": field, "type": "value_too_long", "limit": 1024})
+            if "\x00" in value or "\n" in value or "\r" in value:
+                errors.append({"field": field, "type": "invalid_value"})
+            if any(pattern.search(value) for pattern in denylist):
+                errors.append({"field": field, "type": "value_denied"})
+    _validate_destination_extensions(
+        policy.get("allowed_destinations"),
+        "allowed_destinations",
+        errors,
+        allow_extensions=True,
+    )
+    _validate_destination_extensions(
+        policy.get("blocked_destinations"),
+        "blocked_destinations",
+        errors,
+        allow_extensions=False,
+    )
+    _validate_injection_match_extensions(policy.get("secret_injections"), errors)
     if errors:
         raise api_error(422, "VALIDATION_ERROR", "invalid profile policy", {"errors": errors})
+
+
+def _validate_destination_extensions(
+    rules: Any,
+    list_field: str,
+    errors: list[dict[str, Any]],
+    *,
+    allow_extensions: bool,
+) -> None:
+    if rules is None or not isinstance(rules, list):
+        return
+    for index, rule in enumerate(rules):
+        if not isinstance(rule, dict):
+            continue
+        field = f"policy.{list_field}.{index}"
+        if not allow_extensions:
+            for forbidden in ("body_assertions", "traffic_log_attributes"):
+                if forbidden in rule:
+                    errors.append({"field": f"{field}.{forbidden}", "type": "forbidden_field"})
+            continue
+        _validate_body_assertions(
+            rule.get("body_assertions"),
+            f"{field}.body_assertions",
+            errors,
+        )
+        _validate_traffic_log_attributes(
+            rule.get("traffic_log_attributes"),
+            f"{field}.traffic_log_attributes",
+            errors,
+        )
+
+
+def _validate_body_assertions(raw: Any, field: str, errors: list[dict[str, Any]]) -> None:
+    if raw is None:
+        return
+    if not isinstance(raw, list):
+        errors.append({"field": field, "type": "array_required"})
+        return
+    if len(raw) > POLICY_MAX_BODY_ASSERTIONS_PER_RULE:
+        errors.append({"field": field, "type": "too_many", "limit": POLICY_MAX_BODY_ASSERTIONS_PER_RULE})
+        return
+    for index, item in enumerate(raw):
+        item_field = f"{field}.{index}"
+        if not isinstance(item, dict):
+            errors.append({"field": item_field, "type": "object_required"})
+            continue
+        unknown = set(item) - POLICY_BODY_ASSERTION_FIELDS
+        for key in sorted(unknown):
+            errors.append({"field": f"{item_field}.{key}", "type": "unknown_field"})
+        kind = item.get("kind")
+        if kind not in POLICY_BODY_ASSERTION_KINDS:
+            errors.append({"field": f"{item_field}.kind", "type": "invalid_kind"})
+            continue
+        if not _validate_pointer(item.get("field"), kind, f"{item_field}.field", errors):
+            continue
+        _validate_allow_values(item.get("allow_values"), f"{item_field}.allow_values", errors)
+
+
+def _validate_traffic_log_attributes(raw: Any, field: str, errors: list[dict[str, Any]]) -> None:
+    if raw is None:
+        return
+    if not isinstance(raw, list):
+        errors.append({"field": field, "type": "array_required"})
+        return
+    if len(raw) > POLICY_MAX_TRAFFIC_LOG_ATTRIBUTES_PER_RULE:
+        errors.append(
+            {"field": field, "type": "too_many", "limit": POLICY_MAX_TRAFFIC_LOG_ATTRIBUTES_PER_RULE}
+        )
+        return
+    seen: set[str] = set()
+    for index, item in enumerate(raw):
+        item_field = f"{field}.{index}"
+        if not isinstance(item, dict):
+            errors.append({"field": item_field, "type": "object_required"})
+            continue
+        unknown = set(item) - POLICY_TRAFFIC_LOG_ATTR_FIELDS
+        for key in sorted(unknown):
+            errors.append({"field": f"{item_field}.{key}", "type": "unknown_field"})
+        name = item.get("name")
+        if not isinstance(name, str) or not POLICY_TRAFFIC_LOG_ATTR_NAME_RE.fullmatch(name):
+            errors.append({"field": f"{item_field}.name", "type": "invalid_name"})
+            continue
+        if name in seen:
+            errors.append({"field": f"{item_field}.name", "type": "duplicate_name"})
+            continue
+        kind = item.get("kind")
+        if kind not in POLICY_BODY_ASSERTION_KINDS:
+            errors.append({"field": f"{item_field}.kind", "type": "invalid_kind"})
+            continue
+        if not _validate_pointer(item.get("field"), kind, f"{item_field}.field", errors):
+            continue
+        seen.add(name)
+
+
+def _validate_pointer(raw: Any, kind: str, field: str, errors: list[dict[str, Any]]) -> bool:
+    if not isinstance(raw, str) or not raw.startswith("/"):
+        errors.append({"field": field, "type": "invalid_field"})
+        return False
+    segments = raw[1:].split("/")
+    if not segments or any(not segment for segment in segments):
+        errors.append({"field": field, "type": "invalid_field"})
+        return False
+    max_segments = 1 if kind == "form" else POLICY_MAX_POINTER_SEGMENTS_JSON
+    if len(segments) > max_segments:
+        errors.append({"field": field, "type": "invalid_field"})
+        return False
+    for segment in segments:
+        if not POLICY_POINTER_SEGMENT_RE.fullmatch(segment):
+            errors.append({"field": field, "type": "invalid_field"})
+            return False
+    return True
+
+
+def _validate_allow_values(raw: Any, field: str, errors: list[dict[str, Any]]) -> None:
+    if not isinstance(raw, list) or not 1 <= len(raw) <= POLICY_MAX_ALLOW_VALUES:
+        errors.append({"field": field, "type": "invalid_allow_values"})
+        return
+    for index, value in enumerate(raw):
+        if not isinstance(value, str) or not 1 <= len(value) <= POLICY_MAX_ALLOW_VALUE_LEN:
+            errors.append({"field": f"{field}.{index}", "type": "invalid_allow_value"})
+            return
+
+
+def _validate_injection_match_extensions(raw: Any, errors: list[dict[str, Any]]) -> None:
+    if not isinstance(raw, list):
+        return
+    for index, item in enumerate(raw):
+        if not isinstance(item, dict):
+            continue
+        match = item.get("match")
+        if not isinstance(match, dict):
+            continue
+        field = f"policy.secret_injections.{index}.match"
+        for forbidden in ("body_assertions", "traffic_log_attributes"):
+            if forbidden in match:
+                errors.append({"field": f"{field}.{forbidden}", "type": "forbidden_field"})
 
 
 def validate_permission_symbol(permission: str) -> None:
@@ -5132,7 +5292,8 @@ async def list_traffic_logs(
             tl.method,
             tl.path,
             tl.response_code,
-            tl.bytes_transferred
+            tl.bytes_transferred,
+            tl.attributes
         FROM traffic_logs tl
         JOIN security_cvms sc ON sc.id = tl.security_cvm_id
         WHERE {' AND '.join(clauses)}

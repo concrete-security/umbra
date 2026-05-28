@@ -1,6 +1,10 @@
 import pytest
 
-from concrete_security_cvm.policy import PolicyValidationError, parse_effective_policy
+from concrete_security_cvm.policy import (
+    MAX_BODY_ASSERTION_BYTES,
+    PolicyValidationError,
+    parse_effective_policy,
+)
 
 
 def sample_policy() -> dict[str, object]:
@@ -159,3 +163,398 @@ def test_secret_patterns_are_compiled_with_re2() -> None:
         parse_effective_policy(raw)
 
     assert exc.value.errors[0].type == "invalid_regex"
+
+
+def slack_rule_with_assertions(**overrides: object) -> dict[str, object]:
+    rule: dict[str, object] = {
+        "id": "slack-read",
+        "scheme": "https",
+        "host": "slack.com",
+        "ports": [443],
+        "methods": ["POST"],
+        "path_prefixes": ["/api/conversations.history"],
+        "body_assertions": [
+            {"kind": "form", "field": "/channel", "allow_values": ["C0ALLOWED1", "C0ALLOWED2"]}
+        ],
+        "traffic_log_attributes": [{"name": "slack_channel", "kind": "form", "field": "/channel"}],
+    }
+    rule.update(overrides)
+    return rule
+
+
+def test_body_assertion_form_match_allows_request() -> None:
+    raw = sample_policy()
+    raw["allowed_destinations"] = [slack_rule_with_assertions()]
+    policy = parse_effective_policy(raw)
+
+    decision = policy.decide(
+        scheme="https",
+        host="slack.com",
+        port=443,
+        method="POST",
+        path="/api/conversations.history",
+        body=b"channel=C0ALLOWED1&oldest=0",
+    )
+
+    assert decision.allowed is True
+    assert decision.matched_rule is not None
+    assert decision.matched_rule.rule_id == "slack-read"
+
+
+def test_body_assertion_form_mismatch_falls_through_to_deny() -> None:
+    raw = sample_policy()
+    raw["allowed_destinations"] = [slack_rule_with_assertions()]
+    policy = parse_effective_policy(raw)
+
+    decision = policy.decide(
+        scheme="https",
+        host="slack.com",
+        port=443,
+        method="POST",
+        path="/api/conversations.history",
+        body=b"channel=C0NOTALLOWED",
+    )
+
+    assert decision.allowed is False
+    assert decision.reason == "destination_not_allowed"
+
+
+def test_body_assertion_form_missing_field_denies() -> None:
+    raw = sample_policy()
+    raw["allowed_destinations"] = [slack_rule_with_assertions()]
+    policy = parse_effective_policy(raw)
+
+    decision = policy.decide(
+        scheme="https",
+        host="slack.com",
+        port=443,
+        method="POST",
+        path="/api/conversations.history",
+        body=b"other=1",
+    )
+
+    assert decision.allowed is False
+
+
+def test_body_assertion_json_match_allows_request() -> None:
+    raw = sample_policy()
+    raw["allowed_destinations"] = [
+        slack_rule_with_assertions(
+            body_assertions=[{"kind": "json", "field": "/channel", "allow_values": ["C0ALLOWED1"]}],
+            traffic_log_attributes=[{"name": "slack_channel", "kind": "json", "field": "/channel"}],
+        )
+    ]
+    policy = parse_effective_policy(raw)
+
+    decision = policy.decide(
+        scheme="https",
+        host="slack.com",
+        port=443,
+        method="POST",
+        path="/api/conversations.history",
+        body=b'{"channel":"C0ALLOWED1","oldest":0}',
+    )
+
+    assert decision.allowed is True
+    assert decision.matched_rule is not None
+
+
+def test_body_assertion_json_nested_path_resolves_scalar() -> None:
+    raw = sample_policy()
+    raw["allowed_destinations"] = [
+        slack_rule_with_assertions(
+            id="notion-page",
+            host="api.notion.com",
+            path_prefixes=["/v1/databases/"],
+            body_assertions=[
+                {"kind": "json", "field": "/filter/property", "allow_values": ["Name"]}
+            ],
+            traffic_log_attributes=[],
+        )
+    ]
+    policy = parse_effective_policy(raw)
+
+    decision = policy.decide(
+        scheme="https",
+        host="api.notion.com",
+        port=443,
+        method="POST",
+        path="/v1/databases/abc/query",
+        body=b'{"filter":{"property":"Name","equals":"hi"}}',
+    )
+
+    assert decision.allowed is True
+
+
+def test_body_assertion_non_scalar_resolution_denies() -> None:
+    raw = sample_policy()
+    raw["allowed_destinations"] = [
+        slack_rule_with_assertions(
+            body_assertions=[{"kind": "json", "field": "/filter", "allow_values": ["x"]}],
+            traffic_log_attributes=[],
+        )
+    ]
+    policy = parse_effective_policy(raw)
+
+    decision = policy.decide(
+        scheme="https",
+        host="slack.com",
+        port=443,
+        method="POST",
+        path="/api/conversations.history",
+        body=b'{"filter":{"nested":"x"}}',
+    )
+
+    assert decision.allowed is False
+
+
+def test_body_assertion_malformed_json_denies() -> None:
+    raw = sample_policy()
+    raw["allowed_destinations"] = [
+        slack_rule_with_assertions(
+            body_assertions=[{"kind": "json", "field": "/channel", "allow_values": ["C0ALLOWED1"]}],
+            traffic_log_attributes=[],
+        )
+    ]
+    policy = parse_effective_policy(raw)
+
+    decision = policy.decide(
+        scheme="https",
+        host="slack.com",
+        port=443,
+        method="POST",
+        path="/api/conversations.history",
+        body=b"{not json",
+    )
+
+    assert decision.allowed is False
+
+
+def test_body_assertion_oversized_body_denies() -> None:
+    raw = sample_policy()
+    raw["allowed_destinations"] = [slack_rule_with_assertions()]
+    policy = parse_effective_policy(raw)
+
+    decision = policy.decide(
+        scheme="https",
+        host="slack.com",
+        port=443,
+        method="POST",
+        path="/api/conversations.history",
+        body=b"channel=C0ALLOWED1&pad=" + b"A" * MAX_BODY_ASSERTION_BYTES,
+    )
+
+    assert decision.allowed is False
+
+
+def test_body_assertion_rule_without_assertions_still_matches() -> None:
+    raw = sample_policy()
+    policy = parse_effective_policy(raw)
+
+    decision = policy.decide(
+        scheme="https",
+        host="api.github.com",
+        port=443,
+        method="POST",
+        path="/repos/x/y",
+        body=b'{"channel":"anything"}',
+    )
+
+    assert decision.allowed is True
+    assert decision.matched_rule is not None
+    assert decision.matched_rule.body_assertions == ()
+
+
+def test_traffic_log_attributes_extracted_on_allow() -> None:
+    raw = sample_policy()
+    raw["allowed_destinations"] = [slack_rule_with_assertions()]
+    policy = parse_effective_policy(raw)
+
+    decision = policy.decide(
+        scheme="https",
+        host="slack.com",
+        port=443,
+        method="POST",
+        path="/api/conversations.history",
+        body=b"channel=C0ALLOWED1",
+    )
+
+    assert decision.matched_rule is not None
+    attributes = decision.matched_rule.extract_traffic_log_attributes(b"channel=C0ALLOWED1")
+    assert attributes == {"slack_channel": "C0ALLOWED1"}
+
+
+def test_body_assertions_rejected_on_blocked_destinations() -> None:
+    raw = sample_policy()
+    raw["blocked_destinations"] = [
+        {
+            **raw["blocked_destinations"][0],  # type: ignore[index]
+            "body_assertions": [{"kind": "form", "field": "/channel", "allow_values": ["x"]}],
+        }
+    ]
+
+    with pytest.raises(PolicyValidationError) as exc:
+        parse_effective_policy(raw)
+
+    assert any(error.field.endswith(".body_assertions") for error in exc.value.errors)
+
+
+def test_body_assertions_rejected_on_secret_injection_match() -> None:
+    raw = sample_policy()
+    raw["secret_injections"][0]["match"]["body_assertions"] = [  # type: ignore[index]
+        {"kind": "form", "field": "/channel", "allow_values": ["x"]}
+    ]
+
+    with pytest.raises(PolicyValidationError) as exc:
+        parse_effective_policy(raw)
+
+    assert any("body_assertions" in error.field for error in exc.value.errors)
+
+
+def test_body_assertion_invalid_kind_rejected() -> None:
+    raw = sample_policy()
+    raw["allowed_destinations"] = [
+        slack_rule_with_assertions(
+            body_assertions=[{"kind": "yaml", "field": "/channel", "allow_values": ["x"]}]
+        )
+    ]
+
+    with pytest.raises(PolicyValidationError) as exc:
+        parse_effective_policy(raw)
+
+    assert any(error.type == "invalid_kind" for error in exc.value.errors)
+
+
+def test_body_assertion_form_pointer_must_be_single_segment() -> None:
+    raw = sample_policy()
+    raw["allowed_destinations"] = [
+        slack_rule_with_assertions(
+            body_assertions=[{"kind": "form", "field": "/foo/bar", "allow_values": ["x"]}]
+        )
+    ]
+
+    with pytest.raises(PolicyValidationError):
+        parse_effective_policy(raw)
+
+
+def test_body_assertion_json_pointer_max_4_segments() -> None:
+    raw = sample_policy()
+    raw["allowed_destinations"] = [
+        slack_rule_with_assertions(
+            body_assertions=[{"kind": "json", "field": "/a/b/c/d/e", "allow_values": ["x"]}]
+        )
+    ]
+
+    with pytest.raises(PolicyValidationError):
+        parse_effective_policy(raw)
+
+
+def test_body_assertion_pointer_must_start_with_slash() -> None:
+    raw = sample_policy()
+    raw["allowed_destinations"] = [
+        slack_rule_with_assertions(
+            body_assertions=[{"kind": "form", "field": "channel", "allow_values": ["x"]}]
+        )
+    ]
+
+    with pytest.raises(PolicyValidationError):
+        parse_effective_policy(raw)
+
+
+def test_body_assertion_pointer_rejects_special_chars() -> None:
+    raw = sample_policy()
+    raw["allowed_destinations"] = [
+        slack_rule_with_assertions(
+            body_assertions=[{"kind": "json", "field": "/foo~1bar", "allow_values": ["x"]}]
+        )
+    ]
+
+    with pytest.raises(PolicyValidationError):
+        parse_effective_policy(raw)
+
+
+def test_body_assertion_allow_values_must_be_non_empty() -> None:
+    raw = sample_policy()
+    raw["allowed_destinations"] = [
+        slack_rule_with_assertions(
+            body_assertions=[{"kind": "form", "field": "/channel", "allow_values": []}]
+        )
+    ]
+
+    with pytest.raises(PolicyValidationError):
+        parse_effective_policy(raw)
+
+
+def test_traffic_log_attributes_duplicate_name_rejected() -> None:
+    raw = sample_policy()
+    raw["allowed_destinations"] = [
+        slack_rule_with_assertions(
+            traffic_log_attributes=[
+                {"name": "slack_channel", "kind": "form", "field": "/channel"},
+                {"name": "slack_channel", "kind": "form", "field": "/channel"},
+            ]
+        )
+    ]
+
+    with pytest.raises(PolicyValidationError) as exc:
+        parse_effective_policy(raw)
+
+    assert any(error.type == "duplicate_name" for error in exc.value.errors)
+
+
+def test_traffic_log_attribute_name_must_be_lowercase() -> None:
+    raw = sample_policy()
+    raw["allowed_destinations"] = [
+        slack_rule_with_assertions(
+            traffic_log_attributes=[
+                {"name": "SlackChannel", "kind": "form", "field": "/channel"},
+            ]
+        )
+    ]
+
+    with pytest.raises(PolicyValidationError):
+        parse_effective_policy(raw)
+
+
+def test_unknown_field_in_body_assertion_rejected() -> None:
+    raw = sample_policy()
+    raw["allowed_destinations"] = [
+        slack_rule_with_assertions(
+            body_assertions=[
+                {"kind": "form", "field": "/channel", "allow_values": ["x"], "extra": True}
+            ]
+        )
+    ]
+
+    with pytest.raises(PolicyValidationError) as exc:
+        parse_effective_policy(raw)
+
+    assert any(error.type == "unknown_field" for error in exc.value.errors)
+
+
+def test_first_allow_rule_must_match_or_fall_through() -> None:
+    raw = sample_policy()
+    raw["allowed_destinations"] = [
+        slack_rule_with_assertions(
+            body_assertions=[{"kind": "form", "field": "/channel", "allow_values": ["C0ALLOWED1"]}]
+        ),
+        slack_rule_with_assertions(
+            id="slack-read-broad",
+            body_assertions=[{"kind": "form", "field": "/channel", "allow_values": ["C0OTHER"]}],
+            traffic_log_attributes=[],
+        ),
+    ]
+    policy = parse_effective_policy(raw)
+
+    matched = policy.decide(
+        scheme="https",
+        host="slack.com",
+        port=443,
+        method="POST",
+        path="/api/conversations.history",
+        body=b"channel=C0OTHER",
+    )
+
+    assert matched.allowed is True
+    assert matched.matched_rule is not None
+    assert matched.matched_rule.rule_id == "slack-read-broad"

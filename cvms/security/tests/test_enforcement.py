@@ -230,3 +230,149 @@ def test_dlp_timeout_blocks_authenticated_request() -> None:
     assert result.allowed is False
     assert result.response_code == 403
     assert result.reason == "dlp_scan_timeout"
+
+
+def slack_policy() -> dict[str, object]:
+    return {
+        "allowed_destinations": [
+            {
+                "id": "slack-read-conv-form",
+                "scheme": "https",
+                "host": "slack.com",
+                "ports": [443],
+                "methods": ["POST"],
+                "path_prefixes": ["/api/conversations.history"],
+                "body_assertions": [
+                    {"kind": "form", "field": "/channel", "allow_values": ["C0ALLOWED1"]}
+                ],
+                "traffic_log_attributes": [
+                    {"name": "slack_channel", "kind": "form", "field": "/channel"}
+                ],
+            },
+            {
+                "id": "slack-read-conv-json",
+                "scheme": "https",
+                "host": "slack.com",
+                "ports": [443],
+                "methods": ["POST"],
+                "path_prefixes": ["/api/conversations.history"],
+                "body_assertions": [
+                    {"kind": "json", "field": "/channel", "allow_values": ["C0ALLOWED1"]}
+                ],
+                "traffic_log_attributes": [
+                    {"name": "slack_channel", "kind": "json", "field": "/channel"}
+                ],
+            },
+        ],
+        "blocked_destinations": [],
+        "secret_patterns": [],
+        "secret_injections": [
+            {
+                "id": "slack-oauth-bearer",
+                "match": {
+                    "scheme": "https",
+                    "host": "slack.com",
+                    "ports": [443],
+                    "methods": ["POST"],
+                    "path_prefixes": ["/api/"],
+                },
+                "type": "request_header",
+                "header": "authorization",
+                "value": "xoxb-real-token",
+                "value_template": "Bearer ${secret}",
+            }
+        ],
+        "sandbox_env": [],
+    }
+
+
+def slack_request(**overrides: object) -> ProxyRequest:
+    fields = {
+        "source_ip": "10.0.0.5",
+        "destination_ip": "1.2.3.4",
+        "scheme": "https",
+        "host": "slack.com",
+        "port": 443,
+        "method": "POST",
+        "path": "/api/conversations.history",
+        "headers": {
+            "Proxy-Authorization": "Bearer proxy-token",
+            "Authorization": "Bearer concrete-proxy-injected",
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
+        "body": b"channel=C0ALLOWED1&limit=10",
+        "timestamp": datetime(2026, 5, 16, 5, 50, tzinfo=timezone.utc),
+    }
+    fields.update(overrides)
+    return ProxyRequest(**fields)  # type: ignore[arg-type]
+
+
+def test_body_assertion_allowed_form_emits_attribute_in_traffic_log() -> None:
+    result = enforce_request(slack_request(), control_map(slack_policy()))
+
+    assert result.allowed is True
+    assert result.matched_policy_id == "slack-read-conv-form"
+    assert result.traffic_log is not None
+    assert result.traffic_log.attributes == {"slack_channel": "C0ALLOWED1"}
+    assert result.upstream_headers["authorization"] == "Bearer xoxb-real-token"
+
+
+def test_body_assertion_allowed_json_emits_attribute_in_traffic_log() -> None:
+    result = enforce_request(
+        slack_request(body=b'{"channel":"C0ALLOWED1"}', headers={
+            "Proxy-Authorization": "Bearer proxy-token",
+            "Authorization": "Bearer concrete-proxy-injected",
+            "Content-Type": "application/json",
+        }),
+        control_map(slack_policy()),
+    )
+
+    assert result.allowed is True
+    assert result.matched_policy_id == "slack-read-conv-json"
+    assert result.traffic_log is not None
+    assert result.traffic_log.attributes == {"slack_channel": "C0ALLOWED1"}
+
+
+def test_body_assertion_unallowed_channel_denies_with_traffic_log() -> None:
+    result = enforce_request(
+        slack_request(body=b"channel=C0NOTALLOWED"),
+        control_map(slack_policy()),
+    )
+
+    assert result.allowed is False
+    assert result.response_code == 403
+    assert result.reason == "destination_not_allowed"
+    assert result.traffic_log is not None
+    assert result.traffic_log.response_code == 403
+
+
+def test_body_assertion_malformed_body_denies() -> None:
+    result = enforce_request(
+        slack_request(body=b"{not json", headers={
+            "Proxy-Authorization": "Bearer proxy-token",
+            "Authorization": "Bearer concrete-proxy-injected",
+            "Content-Type": "application/json",
+        }),
+        control_map(slack_policy()),
+    )
+
+    assert result.allowed is False
+    assert result.response_code == 403
+
+
+def test_body_assertion_missing_field_denies() -> None:
+    result = enforce_request(
+        slack_request(body=b"oldest=0&latest=100"),
+        control_map(slack_policy()),
+    )
+
+    assert result.allowed is False
+    assert result.response_code == 403
+
+
+def test_allowed_path_without_assertions_emits_empty_attributes() -> None:
+    result = enforce_request(request(), control_map())
+
+    assert result.allowed is True
+    assert result.traffic_log is not None
+    assert result.traffic_log.attributes == {}

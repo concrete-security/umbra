@@ -96,6 +96,7 @@ def enforce_authenticated_request(
         port=request.port,
         method=request.method,
         path=request.path,
+        body=request.body,
     )
     if not decision.allowed:
         return _blocked_result(request, cvm, upstream_headers, decision.reason, decision.rule_id)
@@ -124,13 +125,16 @@ def enforce_authenticated_request(
     except PolicyValidationError:
         return _blocked_result(request, cvm, upstream_headers, "policy_secret_injection_conflict", None)
     upstream_headers.update(injection_headers)
+    attributes: dict[str, str] = {}
+    if decision.matched_rule is not None:
+        attributes = decision.matched_rule.extract_traffic_log_attributes(request.body)
     return EnforcementResult(
         allowed=True,
         response_code=None,
         reason="allowed",
         cvm=cvm,
         upstream_headers=upstream_headers,
-        traffic_log=traffic_log_record(request, cvm, response_code=None),
+        traffic_log=traffic_log_record(request, cvm, response_code=None, attributes=attributes),
         matched_policy_id=decision.rule_id,
     )
 
@@ -226,6 +230,7 @@ def traffic_log_record(
     *,
     response_code: int | None,
     bytes_transferred: int = 0,
+    attributes: Mapping[str, str] | None = None,
 ) -> TrafficLogRecord:
     return TrafficLogRecord(
         timestamp=request.timestamp or datetime.now(timezone.utc),
@@ -239,6 +244,7 @@ def traffic_log_record(
         path=request.path,
         response_code=response_code,
         bytes_transferred=bytes_transferred,
+        attributes=dict(attributes) if attributes else {},
     )
 
 

@@ -319,3 +319,87 @@ def test_error_hook_emits_502_for_allowed_request_without_response() -> None:
     assert len(batch.records) == 1
     assert batch.records[0].response_code == 502
     assert batch.records[0].bytes_transferred == 0
+
+
+def slack_policy() -> dict[str, object]:
+    return {
+        "allowed_destinations": [
+            {
+                "id": "slack-read-conv-form",
+                "scheme": "https",
+                "host": "slack.com",
+                "ports": [443],
+                "methods": ["POST"],
+                "path_prefixes": ["/api/conversations.history"],
+                "body_assertions": [
+                    {"kind": "form", "field": "/channel", "allow_values": ["C0ALLOWED1"]}
+                ],
+                "traffic_log_attributes": [
+                    {"name": "slack_channel", "kind": "form", "field": "/channel"}
+                ],
+            }
+        ],
+        "blocked_destinations": [],
+        "secret_patterns": [],
+        "secret_injections": [
+            {
+                "id": "slack-oauth-bearer",
+                "match": {
+                    "scheme": "https",
+                    "host": "slack.com",
+                    "ports": [443],
+                    "methods": ["POST"],
+                    "path_prefixes": ["/api/"],
+                },
+                "type": "request_header",
+                "header": "authorization",
+                "value": "xoxb-real-token",
+                "value_template": "Bearer ${secret}",
+            }
+        ],
+        "sandbox_env": [],
+    }
+
+
+def test_body_assertion_allow_lands_attribute_on_traffic_log() -> None:
+    proxy_addon, queue = addon(slack_policy())
+    slack_request = FakeRequest(
+        host="slack.com",
+        path="/api/conversations.history",
+    )
+    slack_request.raw_content = b"channel=C0ALLOWED1&limit=10"
+    flow = FakeFlow(slack_request)
+
+    proxy_addon.request(flow)
+
+    assert flow.response is None
+    assert flow.request.headers["authorization"] == "Bearer xoxb-real-token"
+
+    flow.response = FakeResponse(status_code=200, raw_content=b'{"ok":true}', headers={})
+    proxy_addon.response(flow)
+    batch = queue.drain_batch()
+
+    assert batch is not None
+    assert len(batch.records) == 1
+    log = batch.records[0]
+    assert log.attributes == {"slack_channel": "C0ALLOWED1"}
+    assert log.response_code == 200
+
+
+def test_body_assertion_unallowed_channel_returns_403_and_no_attribute() -> None:
+    proxy_addon, queue = addon(slack_policy())
+    slack_request = FakeRequest(
+        host="slack.com",
+        path="/api/conversations.history",
+    )
+    slack_request.raw_content = b"channel=C0NOTALLOWED"
+    flow = FakeFlow(slack_request)
+
+    proxy_addon.request(flow)
+    batch = queue.drain_batch()
+
+    assert flow.response is not None
+    assert flow.response.status_code == 403
+    assert batch is not None
+    assert batch.records[0].response_code == 403
+    assert batch.records[0].attributes == {}

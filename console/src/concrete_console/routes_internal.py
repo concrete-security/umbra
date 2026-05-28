@@ -9,7 +9,7 @@ from uuid import UUID
 
 import asyncpg
 from fastapi import APIRouter, Depends, Header, Request, Response
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from concrete_console.db import get_pool
 from concrete_console.errors import api_error
@@ -25,6 +25,9 @@ TRAFFIC_LOG_MAX_BODY_BYTES = 4 * 1024 * 1024
 TRAFFIC_LOG_TIMESTAMP_SKEW = timedelta(minutes=10)
 TRAFFIC_LOG_PRINCIPAL_LOGS_PER_MINUTE = 5000
 TRAFFIC_LOG_VOLUME_LOCK_KEY = "traffic-log-volume"
+TRAFFIC_LOG_ATTRIBUTES_MAX_KEYS = 4
+TRAFFIC_LOG_ATTRIBUTE_VALUE_MAX_LEN = 256
+TRAFFIC_LOG_ATTRIBUTE_NAME_RE = re.compile(r"^[a-z_]{1,32}$")
 
 
 class TrafficLogIn(BaseModel):
@@ -41,6 +44,23 @@ class TrafficLogIn(BaseModel):
     path: str | None = Field(default=None, max_length=2000)
     response_code: int | None = None
     bytes_transferred: int = Field(ge=0)
+    attributes: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("attributes")
+    @classmethod
+    def _validate_attributes(cls, value: dict[str, str]) -> dict[str, str]:
+        if not isinstance(value, dict):
+            raise ValueError("attributes must be a mapping")
+        if len(value) > TRAFFIC_LOG_ATTRIBUTES_MAX_KEYS:
+            raise ValueError(
+                f"attributes contains more than {TRAFFIC_LOG_ATTRIBUTES_MAX_KEYS} entries"
+            )
+        for name, attribute_value in value.items():
+            if not isinstance(name, str) or not TRAFFIC_LOG_ATTRIBUTE_NAME_RE.fullmatch(name):
+                raise ValueError(f"invalid attribute name: {name!r}")
+            if not isinstance(attribute_value, str) or len(attribute_value) > TRAFFIC_LOG_ATTRIBUTE_VALUE_MAX_LEN:
+                raise ValueError(f"invalid attribute value for {name!r}")
+        return value
 
 
 class TrafficLogBatch(BaseModel):
@@ -207,9 +227,10 @@ async def ingest_traffic_logs(
                     method,
                     path,
                     response_code,
-                    bytes_transferred
+                    bytes_transferred,
+                    attributes
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb)
                 """,
                 [
                     (
@@ -226,6 +247,7 @@ async def ingest_traffic_logs(
                         log.path,
                         log.response_code,
                         log.bytes_transferred,
+                        json.dumps(log.attributes, sort_keys=True),
                     )
                     for log in body.logs
                 ],
