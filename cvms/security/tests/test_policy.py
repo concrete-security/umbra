@@ -291,6 +291,36 @@ def test_ambiguous_paths_do_not_match_allow_prefix(path: str) -> None:
     assert decision.reason == "destination_not_allowed"
 
 
+def test_encoded_slash_policy_prefix_allows_npm_scoped_package_path() -> None:
+    raw = sample_policy()
+    raw["allowed_destinations"] = [
+        {
+            "id": "npm-scoped-package",
+            "scheme": "https",
+            "host": "registry.npmjs.org",
+            "ports": [443],
+            "methods": ["GET"],
+            "path_prefixes": ["/@openclaw%2Fslack"],
+        }
+    ]
+    policy = parse_effective_policy(raw)
+
+    assert policy.decide(
+        scheme="https",
+        host="registry.npmjs.org",
+        port=443,
+        method="GET",
+        path="/@openclaw%2fslack",
+    ).allowed
+    assert not policy.decide(
+        scheme="https",
+        host="registry.npmjs.org",
+        port=443,
+        method="GET",
+        path="/@openclaw/slack",
+    ).allowed
+
+
 def test_ambiguous_policy_path_prefix_rejected() -> None:
     raw = sample_policy()
     raw["allowed_destinations"] = [slack_rule_with_assertions(path_prefixes=["/api/../chat.postMessage"])]

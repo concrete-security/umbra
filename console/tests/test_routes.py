@@ -850,6 +850,23 @@ def test_validate_profile_policy_rejects_invalid_destination_schema() -> None:
     )
 
 
+def test_validate_profile_policy_allows_npm_scoped_package_path_prefix() -> None:
+    validate_profile_policy(
+        {
+            "allowed_destinations": [
+                {
+                    "id": "npm-scoped-package",
+                    "scheme": "https",
+                    "host": "registry.npmjs.org",
+                    "ports": [443],
+                    "methods": ["GET"],
+                    "path_prefixes": ["/@openclaw%2fslack"],
+                }
+            ]
+        }
+    )
+
+
 def test_validate_profile_policy_accepts_body_assertions_and_traffic_log_attributes() -> None:
     validate_profile_policy(
         {

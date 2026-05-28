@@ -104,7 +104,7 @@ POLICY_POINTER_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 POLICY_TRAFFIC_LOG_ATTR_NAME_RE = re.compile(r"^[a-z_]{1,32}$")
 POLICY_PATH_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 POLICY_PATH_BAD_PERCENT_RE = re.compile(r"%(?![0-9A-Fa-f]{2})")
-POLICY_PATH_AMBIGUOUS_ESCAPE_RE = re.compile(r"%(?:2[eEfF]|5[cC])")
+POLICY_PATH_AMBIGUOUS_ESCAPE_RE = re.compile(r"%(?:2[eE]|5[cC])")
 POLICY_HOP_BY_HOP_HEADERS = {
     "connection",
     "content-length",

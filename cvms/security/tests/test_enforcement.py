@@ -132,6 +132,38 @@ def test_allowed_request_strips_proxy_auth_and_injects_real_header_after_dlp() -
     assert result.traffic_log.cvm_id.hex == "00000000000040008000000000000010"
 
 
+def test_encoded_slash_npm_scoped_package_request_is_allowed() -> None:
+    registry_policy = {
+        "allowed_destinations": [
+            {
+                "id": "npm-scoped-package",
+                "scheme": "https",
+                "host": "registry.npmjs.org",
+                "ports": [443],
+                "methods": ["GET"],
+                "path_prefixes": ["/@openclaw%2Fslack"],
+            }
+        ],
+        "blocked_destinations": [],
+        "secret_patterns": [],
+        "secret_injections": [],
+        "sandbox_env": [],
+    }
+
+    result = enforce_request(
+        request(
+            host="registry.npmjs.org",
+            destination_ip="104.16.24.34",
+            method="GET",
+            path="/@openclaw%2fslack",
+            body=b"",
+        ),
+        control_map(registry_policy),
+    )
+
+    assert result.allowed is True
+
+
 def test_authenticated_request_reuses_connect_identity_without_proxy_auth() -> None:
     cvm = control_map().lookup_proxy_token("proxy-token")
     assert cvm is not None

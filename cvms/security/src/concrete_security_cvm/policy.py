@@ -44,7 +44,8 @@ POINTER_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 TRAFFIC_LOG_ATTRIBUTE_NAME_RE = re.compile(r"^[a-z_]{1,32}$")
 PATH_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 PATH_BAD_PERCENT_RE = re.compile(r"%(?![0-9A-Fa-f]{2})")
-PATH_AMBIGUOUS_ESCAPE_RE = re.compile(r"%(?:2[eEfF]|5[cC])")
+PATH_AMBIGUOUS_ESCAPE_RE = re.compile(r"%(?:2[eE]|5[cC])")
+PATH_PERCENT_ESCAPE_RE = re.compile(r"%[0-9A-Fa-f]{2}")
 HOP_BY_HOP_HEADERS = {
     "connection",
     "content-length",
@@ -717,7 +718,7 @@ def _parse_path_prefixes(raw: Any, field: str, errors: list[PolicyError]) -> lis
                 )
             )
             continue
-        prefixes.append(prefix)
+        prefixes.append(_canonical_policy_path(prefix))
     return prefixes
 
 
@@ -779,7 +780,10 @@ def _content_type_matches(kind: str, headers: Mapping[str, str]) -> bool:
 
 
 def _path_matches_prefixes(path: str, prefixes: tuple[str, ...]) -> bool:
-    return _valid_policy_path(path) and any(path.startswith(prefix) for prefix in prefixes)
+    if not _valid_policy_path(path):
+        return False
+    canonical_path = _canonical_policy_path(path)
+    return any(canonical_path.startswith(prefix) for prefix in prefixes)
 
 
 def _valid_policy_path(path: str) -> bool:
@@ -801,6 +805,10 @@ def _valid_policy_path(path: str) -> bool:
         if segment == "" and index != len(segments) - 1:
             return False
     return True
+
+
+def _canonical_policy_path(path: str) -> str:
+    return PATH_PERCENT_ESCAPE_RE.sub(lambda match: match.group(0).lower(), path)
 
 
 def _parse_form_body(body: bytes) -> dict[str, str] | Any:
