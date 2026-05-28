@@ -145,11 +145,66 @@ def write_fake_connect_helper(directory: Path, relay_port: int) -> Path:
     return helper
 
 
+def write_refresh_only_fake_connect_helper(directory: Path, relay_port: int) -> Path:
+    helper = directory / "fake-atls-connect-refresh.py"
+    helper.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env python3",
+                "import asyncio",
+                "import json",
+                "import sys",
+                f"TARGET_PORT = {relay_port}",
+                "",
+                "async def pipe(reader, writer):",
+                "    try:",
+                "        while True:",
+                "            data = await reader.read(65536)",
+                "            if not data:",
+                "                break",
+                "            writer.write(data)",
+                "            await writer.drain()",
+                "    finally:",
+                "        writer.close()",
+                "        await writer.wait_closed()",
+                "",
+                "async def handle(local_reader, local_writer):",
+                "    remote_reader, remote_writer = await asyncio.open_connection('127.0.0.1', TARGET_PORT)",
+                "    await asyncio.gather(pipe(local_reader, remote_writer), pipe(remote_reader, local_writer))",
+                "",
+                "async def main():",
+                "    request = json.loads(sys.stdin.readline())",
+                "    assert request['fqdn'] == 'sc.example.com'",
+                "    with open(request['policy_path'], 'r', encoding='utf-8') as policy_file:",
+                "        policy = json.load(policy_file)",
+                "    if policy.get('refresh') is not True:",
+                "        print('primary policy rejected by fake helper', file=sys.stderr)",
+                "        return 1",
+                "    assert request['connect_host'] == 'new-app-443s.dstack.example.com'",
+                "    server = await asyncio.start_server(handle, '127.0.0.1', 0)",
+                "    port = server.sockets[0].getsockname()[1]",
+                "    print(json.dumps({'host': '127.0.0.1', 'port': port}), flush=True)",
+                "    async with server:",
+                "        await server.serve_forever()",
+                "",
+                "try:",
+                "    raise SystemExit(asyncio.run(main()))",
+                "except KeyboardInterrupt:",
+                "    pass",
+                "",
+            ]
+        )
+    )
+    helper.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+    return helper
+
+
 def set_forwarder_env(helper: Path) -> None:
     os.environ["SECURITY_CVM_FQDN"] = "sc.example.com"
     os.environ["SECURITY_CVM_CONNECT_HOST"] = "app-443s.dstack.example.com"
     os.environ["SECURITY_CVM_PROXY_PORT"] = "8080"
     os.environ["SECURITY_CVM_PROXY_TOKEN"] = "real-proxy-token"
+    os.environ["DEV_CVM_CONTROL_TOKEN"] = "real-dev-control-token"
     os.environ["SECURITY_CVM_CA_CERT_B64"] = base64.b64encode(b"-----BEGIN CERTIFICATE-----\nMIIB\n").decode("ascii")
     os.environ["SECURITY_CVM_ATLS_POLICY_B64"] = base64.b64encode(json.dumps({"type": "dstack_tdx"}).encode()).decode(
         "ascii"
@@ -186,6 +241,75 @@ async def smoke():
         await server.wait_closed()
     security_cvm.close()
     await security_cvm.wait_closed()
+
+    security_cvm_refresh = await asyncio.start_server(fake_security_cvm, "127.0.0.1", 0)
+    relay_port = security_cvm_refresh.sockets[0].getsockname()[1]
+    with tempfile.TemporaryDirectory() as temp:
+        temp_path = Path(temp)
+        helper = write_refresh_only_fake_connect_helper(temp_path, relay_port)
+        refresh_policy_path = temp_path / "refreshed-policy.json"
+        refresh_policy_path.write_text(json.dumps({"type": "dstack_tdx", "refresh": True}), encoding="utf-8")
+        runtime_dir = temp_path / "run"
+        set_forwarder_env(helper)
+        config = forwarder.load_config(runtime_dir)
+
+        original_fetch = forwarder.fetch_refreshed_atls_policy
+
+        refresh_fetches = 0
+
+        def fake_fetch_refreshed_atls_policy(_config):
+            nonlocal refresh_fetches
+            refresh_fetches += 1
+            _config.atls_policy_refresh_path.write_text(
+                refresh_policy_path.read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            _config.atls_policy_refresh_metadata_path.write_text(
+                json.dumps({"connect_host": "new-app-443s.dstack.example.com"}),
+                encoding="utf-8",
+            )
+            return forwarder.RefreshedAtlsPolicy(
+                policy_path=_config.atls_policy_refresh_path,
+                connect_host="new-app-443s.dstack.example.com",
+            )
+
+        forwarder.fetch_refreshed_atls_policy = fake_fetch_refreshed_atls_policy
+        try:
+            server = await asyncio.start_server(lambda r, w: forwarder.handle_client(r, w, config), "127.0.0.1", 0)
+            forwarder_port = server.sockets[0].getsockname()[1]
+            reader, writer = await asyncio.open_connection("127.0.0.1", forwarder_port)
+            writer.write(
+                b"CONNECT example.com:443 HTTP/1.1\r\n"
+                b"Host: example.com:443\r\n"
+                b"\r\n"
+                b"hello"
+            )
+            await writer.drain()
+            response = await reader.readuntil(b"\r\n\r\n")
+            assert b"200 Connection Established" in response
+            assert await reader.readexactly(5) == b"HELLO"
+            writer.close()
+            await writer.wait_closed()
+            reader, writer = await asyncio.open_connection("127.0.0.1", forwarder_port)
+            writer.write(
+                b"CONNECT example.com:443 HTTP/1.1\r\n"
+                b"Host: example.com:443\r\n"
+                b"\r\n"
+                b"hello"
+            )
+            await writer.drain()
+            response = await reader.readuntil(b"\r\n\r\n")
+            assert b"200 Connection Established" in response
+            assert await reader.readexactly(5) == b"HELLO"
+            assert refresh_fetches == 1
+            writer.close()
+            await writer.wait_closed()
+            server.close()
+            await server.wait_closed()
+        finally:
+            forwarder.fetch_refreshed_atls_policy = original_fetch
+    security_cvm_refresh.close()
+    await security_cvm_refresh.wait_closed()
 
     security_cvm_blocked = await asyncio.start_server(fake_security_cvm_blocked_connect, "127.0.0.1", 0)
     relay_port = security_cvm_blocked.sockets[0].getsockname()[1]

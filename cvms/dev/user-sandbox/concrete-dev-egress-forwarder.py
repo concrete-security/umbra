@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import hashlib
+import http.client
 import json
 import os
 import shlex
@@ -42,7 +44,11 @@ class ForwarderConfig:
     security_cvm_proxy_path: str
     security_cvm_proxy_upgrade: str
     proxy_token: str
+    dev_control_token: str
+    console_url: str | None
     atls_policy_path: Path
+    atls_policy_refresh_path: Path
+    atls_policy_refresh_metadata_path: Path
     ca_cert_path: Path
     atls_connect_cmd: tuple[str, ...]
     atls_connect_timeout_seconds: float
@@ -61,6 +67,12 @@ class VerifiedUpstream:
     reader: asyncio.StreamReader
     writer: asyncio.StreamWriter
     process: asyncio.subprocess.Process
+
+
+@dataclass(frozen=True)
+class RefreshedAtlsPolicy:
+    policy_path: Path
+    connect_host: str | None
 
 
 def log(message: str) -> None:
@@ -94,6 +106,24 @@ def optional_token_env(name: str, default: str) -> str:
     value = os.environ.get(name, default).strip()
     if not value or any(character in value for character in "\r\n\t\0"):
         raise RuntimeError(f"{name} must not be empty or contain control characters")
+    return value
+
+
+def optional_url_env(name: str) -> str | None:
+    value = os.environ.get(name, "").strip().rstrip("/")
+    if not value:
+        return None
+    parsed = urlsplit(value)
+    if (
+        parsed.scheme != "https"
+        or not parsed.netloc
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+        or any(character in value for character in "\r\n\t\0")
+    ):
+        log(f"{name} ignored because policy refresh requires an https origin URL")
+        return None
     return value
 
 
@@ -141,6 +171,8 @@ def materialize_runtime_files(runtime_dir: Path) -> tuple[Path, Path, str]:
 
 def load_config(runtime_dir: Path = Path("/run/concrete")) -> ForwarderConfig:
     policy_path, ca_path, proxy_token = materialize_runtime_files(runtime_dir)
+    dev_control_token = required_env("DEV_CVM_CONTROL_TOKEN")
+    os.environ.pop("DEV_CVM_CONTROL_TOKEN", None)
     command = os.environ.get("DEV_EGRESS_ATLS_CONNECT_CMD", "/usr/local/bin/concrete-atls-connect")
     argv = tuple(shlex.split(command))
     if not argv:
@@ -155,7 +187,11 @@ def load_config(runtime_dir: Path = Path("/run/concrete")) -> ForwarderConfig:
         security_cvm_proxy_path=optional_path_env("SECURITY_CVM_PROXY_PATH", DEFAULT_SECURITY_CVM_PROXY_PATH),
         security_cvm_proxy_upgrade=optional_token_env("SECURITY_CVM_PROXY_UPGRADE", DEFAULT_SECURITY_CVM_PROXY_UPGRADE),
         proxy_token=proxy_token,
+        dev_control_token=dev_control_token,
+        console_url=optional_url_env("CONSOLE_URL"),
         atls_policy_path=policy_path,
+        atls_policy_refresh_path=runtime_dir / "security-cvm.atls-policy.refresh.json",
+        atls_policy_refresh_metadata_path=runtime_dir / "security-cvm.atls-policy.refresh-meta.json",
         ca_cert_path=ca_path,
         atls_connect_cmd=argv,
         atls_connect_timeout_seconds=float(os.environ.get("DEV_EGRESS_ATLS_CONNECT_TIMEOUT_SECONDS", "10")),
@@ -253,15 +289,20 @@ def encode_request_line_and_headers(request: ProxyRequest, proxy_token: str, *, 
     return ("\r\n".join(lines) + "\r\n\r\n").encode("iso-8859-1")
 
 
-async def open_verified_upstream(config: ForwarderConfig) -> VerifiedUpstream:
+async def open_verified_upstream_with_policy(
+    config: ForwarderConfig,
+    *,
+    policy_path: Path,
+    connect_host: str | None,
+) -> VerifiedUpstream:
     payload = {
         "fqdn": config.security_cvm_fqdn,
         "port": config.security_cvm_public_port,
-        "policy_path": str(config.atls_policy_path),
+        "policy_path": str(policy_path),
         "ca_cert_path": str(config.ca_cert_path),
     }
-    if config.security_cvm_connect_host:
-        payload["connect_host"] = config.security_cvm_connect_host
+    if connect_host:
+        payload["connect_host"] = connect_host
     env = {"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")}
     process = await asyncio.create_subprocess_exec(
         *config.atls_connect_cmd,
@@ -306,6 +347,138 @@ async def open_verified_upstream(config: ForwarderConfig) -> VerifiedUpstream:
         await process.wait()
         raise
     return VerifiedUpstream(reader=reader, writer=writer, process=process)
+
+
+async def open_verified_upstream(config: ForwarderConfig) -> VerifiedUpstream:
+    primary_error: Exception | None = None
+    if config.atls_policy_refresh_path.exists():
+        try:
+            return await open_verified_upstream_with_policy(
+                config,
+                policy_path=config.atls_policy_refresh_path,
+                connect_host=cached_refresh_connect_host(config) or config.security_cvm_connect_host,
+            )
+        except (ConnectionError, OSError) as exc:
+            log(f"atls_cached_refresh_failed reason={exc}")
+
+    try:
+        return await open_verified_upstream_with_policy(
+            config,
+            policy_path=config.atls_policy_path,
+            connect_host=config.security_cvm_connect_host,
+        )
+    except (ConnectionError, OSError) as exc:
+        primary_error = exc
+        log(f"atls_primary_failed reason={exc}")
+
+    refreshed = await asyncio.to_thread(fetch_refreshed_atls_policy, config)
+    if refreshed is not None:
+        try:
+            return await open_verified_upstream_with_policy(
+                config,
+                policy_path=refreshed.policy_path,
+                connect_host=refreshed.connect_host or config.security_cvm_connect_host,
+            )
+        except (ConnectionError, OSError) as exc:
+            log(f"atls_console_refresh_failed reason={exc}")
+
+    if primary_error is not None:
+        raise ConnectionError(f"aTLS verification failed and refresh did not recover: {primary_error}") from primary_error
+    raise ConnectionError("aTLS verification failed and refresh did not recover")
+
+
+def cached_refresh_connect_host(config: ForwarderConfig) -> str | None:
+    try:
+        payload = json.loads(config.atls_policy_refresh_metadata_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    connect_host = payload.get("connect_host")
+    if connect_host is None:
+        return None
+    if not isinstance(connect_host, str) or not connect_host.strip() or any(
+        character in connect_host for character in "\r\n\t\0"
+    ):
+        return None
+    return connect_host.strip()
+
+
+def fetch_refreshed_atls_policy(config: ForwarderConfig) -> RefreshedAtlsPolicy | None:
+    if config.console_url is None:
+        return None
+    parsed = urlsplit(config.console_url)
+    path = "/internal/dev-control/security-cvm-atls-policy"
+    connection = http.client.HTTPSConnection(parsed.hostname, parsed.port or 443, timeout=5)
+    try:
+        connection.request(
+            "GET",
+            path,
+            headers={
+                "Authorization": f"Bearer {config.dev_control_token}",
+                "Accept": "application/json",
+            },
+        )
+        response = connection.getresponse()
+        body = response.read(1024 * 1024 + 1)
+    except OSError as exc:
+        log(f"atls_console_refresh_fetch_failed reason={exc}")
+        return None
+    finally:
+        connection.close()
+    if response.status != 200:
+        log(f"atls_console_refresh_unavailable status={response.status}")
+        return None
+    if len(body) > 1024 * 1024:
+        log("atls_console_refresh_rejected reason=response_too_large")
+        return None
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        log("atls_console_refresh_rejected reason=malformed_json")
+        return None
+    if not isinstance(payload, dict):
+        log("atls_console_refresh_rejected reason=malformed_payload")
+        return None
+    if payload.get("security_cvm_fqdn") != config.security_cvm_fqdn:
+        log("atls_console_refresh_rejected reason=fqdn_mismatch")
+        return None
+    try:
+        expected_ca_sha256 = hashlib.sha256(config.ca_cert_path.read_bytes()).hexdigest()
+    except OSError as exc:
+        log(f"atls_console_refresh_rejected reason=ca_unreadable detail={exc}")
+        return None
+    if payload.get("ca_cert_sha256") != expected_ca_sha256:
+        log("atls_console_refresh_rejected reason=ca_changed")
+        return None
+    policy = payload.get("atls_policy")
+    if not isinstance(policy, dict) or policy.get("type") != "dstack_tdx":
+        log("atls_console_refresh_rejected reason=invalid_policy")
+        return None
+    if policy.get("disable_runtime_verification") is True:
+        log("atls_console_refresh_rejected reason=runtime_verification_disabled")
+        return None
+    if not all(policy.get(field) for field in ("expected_bootchain", "app_compose", "os_image_hash")):
+        log("atls_console_refresh_rejected reason=runtime_verification_fields_missing")
+        return None
+    connect_host = payload.get("connect_host")
+    if connect_host is not None:
+        if not isinstance(connect_host, str) or not connect_host.strip() or any(
+            character in connect_host for character in "\r\n\t\0"
+        ):
+            log("atls_console_refresh_rejected reason=invalid_connect_host")
+            return None
+        connect_host = connect_host.strip()
+    data = json.dumps(policy, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    write_private_file(config.atls_policy_refresh_path, data, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+    metadata = json.dumps({"connect_host": connect_host}, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    write_private_file(
+        config.atls_policy_refresh_metadata_path,
+        metadata,
+        stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH,
+    )
+    log("atls_console_refresh_installed")
+    return RefreshedAtlsPolicy(policy_path=config.atls_policy_refresh_path, connect_host=connect_host)
 
 
 async def open_security_proxy_tunnel(upstream: VerifiedUpstream, config: ForwarderConfig) -> None:

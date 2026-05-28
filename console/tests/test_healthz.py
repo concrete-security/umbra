@@ -127,6 +127,10 @@ def test_route_credential_dimension_uses_spec_specific_budgets() -> None:
         "GET /internal/sc-control/cvms",
         60,
     )
+    assert app_module.route_credential_dimension("GET", "/internal/dev-control/security-cvm-atls-policy") == (
+        "GET /internal/dev-control/security-cvm-atls-policy",
+        30,
+    )
     assert app_module.route_credential_dimension("POST", "/internal/traffic-logs") == (
         "POST /internal/traffic-logs",
         120,

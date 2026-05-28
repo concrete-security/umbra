@@ -1741,12 +1741,14 @@ async def execute_cvm_launch_phala_deploy_operation(operation_id: Any) -> None:
     from concrete_console.tee_provider.phala import PhalaClient, PhalaError
 
     proxy_token = secrets.token_urlsafe(32)
+    dev_control_token = secrets.token_urlsafe(32)
     try:
         env, binding = build_cvm_launch_env(
             snapshot,
             public_keys=public_keys,
             profile_rows=profile_rows,
             proxy_token=proxy_token,
+            dev_control_token=dev_control_token,
         )
         name = cvm_launch_provider_name(_row_value(snapshot, "cvm_id"))
         shade_result = await ShadeClient.from_settings().build(
@@ -1778,7 +1780,9 @@ async def execute_cvm_launch_phala_deploy_operation(operation_id: Any) -> None:
     finally:
         if "env" in locals():
             env["SECURITY_CVM_PROXY_TOKEN"] = ""
+            env["DEV_CVM_CONTROL_TOKEN"] = ""
         proxy_token = ""
+        dev_control_token = ""
 
     metadata = cvm_launch_metadata(
         name=name,
@@ -1798,6 +1802,7 @@ async def execute_cvm_launch_phala_deploy_operation(operation_id: Any) -> None:
         actor_id=_row_value(snapshot, "actor_id"),
         metadata=metadata,
         proxy_token_hash=binding["security_cvm_proxy_token_sha256"],
+        dev_control_token_hash=binding["dev_cvm_control_token_sha256"],
     )
 
 
@@ -2245,12 +2250,14 @@ async def execute_cvm_update_phala_operation(operation_id: Any) -> None:
     from concrete_console.tee_provider import CvmProviderError, cvm_provider_from_settings
 
     proxy_token = secrets.token_urlsafe(32)
+    dev_control_token = secrets.token_urlsafe(32)
     try:
         env, binding = build_cvm_launch_env(
             snapshot,
             public_keys=public_keys,
             profile_rows=profile_rows,
             proxy_token=proxy_token,
+            dev_control_token=dev_control_token,
         )
         shade_client = ShadeClient.from_settings()
         shade_result = await shade_client.build(
@@ -2288,7 +2295,9 @@ async def execute_cvm_update_phala_operation(operation_id: Any) -> None:
     finally:
         if "env" in locals():
             env["SECURITY_CVM_PROXY_TOKEN"] = ""
+            env["DEV_CVM_CONTROL_TOKEN"] = ""
         proxy_token = ""
+        dev_control_token = ""
 
     policy_snapshot = dict(snapshot)
     policy_snapshot["compose_config"] = update_material["compose_config"]
@@ -2313,6 +2322,7 @@ async def execute_cvm_update_phala_operation(operation_id: Any) -> None:
         compose_config=update_material["compose_config"],
         expected_image_measurement=update_material["expected_image_measurement"],
         proxy_token_hash=binding["security_cvm_proxy_token_sha256"],
+        dev_control_token_hash=binding["dev_cvm_control_token_sha256"],
     )
 
 
@@ -3196,13 +3206,18 @@ def build_cvm_launch_env(
     public_keys: list[str],
     profile_rows: list[Any],
     proxy_token: str,
+    dev_control_token: str,
 ) -> tuple[dict[str, str], dict[str, Any]]:
     authorized_keys = render_authorized_ssh_keys(public_keys)
     sandbox_env = render_sandbox_env_placeholders(profile_rows)
     ca_cert_pem = _row_value(snapshot, "security_cvm_ca_cert_pem")
     proxy_token_hash = sha256_text(proxy_token)
+    dev_control_token_hash = sha256_text(dev_control_token)
+    console_url = load_settings().raw.get("CONSOLE_URL", "").strip()
     binding = {
         "cvm_id": str(_row_value(snapshot, "cvm_id")),
+        "console_url": console_url,
+        "dev_cvm_control_token_sha256": dev_control_token_hash,
         "security_cvm_fqdn": _row_value(snapshot, "security_cvm_fqdn"),
         "security_cvm_proxy_port": int(_row_value(snapshot, "security_cvm_proxy_port")),
         "security_cvm_proxy_token_sha256": proxy_token_hash,
@@ -3213,10 +3228,12 @@ def build_cvm_launch_env(
         "SECURITY_CVM_FQDN": _row_value(snapshot, "security_cvm_fqdn"),
         "SECURITY_CVM_PROXY_PORT": str(_row_value(snapshot, "security_cvm_proxy_port")),
         "SECURITY_CVM_PROXY_TOKEN": proxy_token,
+        "DEV_CVM_CONTROL_TOKEN": dev_control_token,
         "SECURITY_CVM_CA_CERT_B64": b64_text(ca_cert_pem),
         "SECURITY_CVM_ATLS_POLICY_B64": b64_json(security_cvm_atls_policy(snapshot)),
         "AUTHORIZED_SSH_KEYS_B64": b64_text(authorized_keys),
         "SANDBOX_ENV_PLACEHOLDERS_B64": b64_text(sandbox_env),
+        "CONSOLE_URL": console_url,
     }
     security_cvm_connect_host = provider_passthrough_host(_row_value(snapshot, "security_cvm_metadata"))
     if security_cvm_connect_host:
@@ -4225,6 +4242,7 @@ async def persist_cvm_launch_phala_result(
     actor_id: Any,
     metadata: dict[str, Any],
     proxy_token_hash: str,
+    dev_control_token_hash: str,
 ) -> None:
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -4236,7 +4254,7 @@ async def persist_cvm_launch_phala_result(
                     deleted_by = $2
                 WHERE principal_type = 'dev_cvm'
                   AND principal_id = $1
-                  AND purpose = 'PROXY_AUTH'
+                  AND purpose IN ('PROXY_AUTH', 'DEV_CONTROL')
                   AND deleted_at IS NULL
                 """,
                 cvm_id,
@@ -4254,6 +4272,19 @@ async def persist_cvm_launch_phala_result(
                 """,
                 cvm_id,
                 proxy_token_hash,
+            )
+            await conn.execute(
+                """
+                INSERT INTO service_principal_tokens (
+                    principal_type,
+                    principal_id,
+                    purpose,
+                    token_hash
+                )
+                VALUES ('dev_cvm', $1, 'DEV_CONTROL', $2)
+                """,
+                cvm_id,
+                dev_control_token_hash,
             )
             await conn.execute(
                 """
@@ -4292,6 +4323,7 @@ async def persist_cvm_update_provider_result(
     compose_config: str,
     expected_image_measurement: str,
     proxy_token_hash: str,
+    dev_control_token_hash: str,
 ) -> None:
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -4302,7 +4334,7 @@ async def persist_cvm_update_provider_result(
                 SET expires_at = COALESCE(expires_at, now() + INTERVAL '10 minutes')
                 WHERE principal_type = 'dev_cvm'
                   AND principal_id = $1
-                  AND purpose = 'PROXY_AUTH'
+                  AND purpose IN ('PROXY_AUTH', 'DEV_CONTROL')
                   AND deleted_at IS NULL
                   AND expires_at IS NULL
                 """,
@@ -4320,6 +4352,19 @@ async def persist_cvm_update_provider_result(
                 """,
                 cvm_id,
                 proxy_token_hash,
+            )
+            await conn.execute(
+                """
+                INSERT INTO service_principal_tokens (
+                    principal_type,
+                    principal_id,
+                    purpose,
+                    token_hash
+                )
+                VALUES ('dev_cvm', $1, 'DEV_CONTROL', $2)
+                """,
+                cvm_id,
+                dev_control_token_hash,
             )
             await conn.execute(
                 """
@@ -4449,7 +4494,7 @@ async def mark_cvm_launch_failed(operation_id: Any, *, code: str, details: dict[
                     SET deleted_at = now()
                     WHERE principal_type = 'dev_cvm'
                       AND principal_id = $1
-                      AND purpose = 'PROXY_AUTH'
+                      AND purpose IN ('PROXY_AUTH', 'DEV_CONTROL')
                       AND deleted_at IS NULL
                     """,
                     row["target_id"],

@@ -56,6 +56,7 @@ from concrete_console.routes_internal import (
     TrafficLogIn,
     enforce_traffic_log_volume_limit,
     etag_matches,
+    get_dev_security_cvm_atls_policy,
     merge_profile_policies,
     record_sc_control_pull_observation,
     sc_control_etag,
@@ -482,8 +483,12 @@ def test_render_dev_cvm_compose_config_keeps_runtime_values_as_placeholders() ->
     forwarder_section = compose.split("  dev-egress-forwarder:", 1)[1].split("  dev-tunnel:", 1)[0]
     assert "${SECURITY_CVM_PROXY_TOKEN}" not in user_sandbox_section
     assert "${SECURITY_CVM_ATLS_POLICY_B64}" not in user_sandbox_section
+    assert "${DEV_CVM_CONTROL_TOKEN}" not in user_sandbox_section
+    assert "${CONSOLE_URL:-}" not in user_sandbox_section
     assert "${SECURITY_CVM_PROXY_TOKEN}" in forwarder_section
     assert "${SECURITY_CVM_ATLS_POLICY_B64}" in forwarder_section
+    assert "${DEV_CVM_CONTROL_TOKEN}" in forwarder_section
+    assert "${CONSOLE_URL:-}" in forwarder_section
     assert "${SECURITY_CVM_CONNECT_HOST:-}" in compose
     assert "${AUTHORIZED_SSH_KEYS_B64}" in compose
     assert "  dev-egress-forwarder:" in compose
@@ -618,6 +623,133 @@ class AsyncContext:
 
     async def __aexit__(self, exc_type, exc, tb):
         return False
+
+
+class FakePool:
+    def __init__(self, conn):
+        self.conn = conn
+
+    def acquire(self):
+        return AsyncContext(self.conn)
+
+
+class DevControlPolicyConn:
+    def __init__(self, row):
+        self.row = row
+        self.args = None
+
+    async def fetchrow(self, query, *args):
+        self.args = args
+        return self.row
+
+
+def test_dev_control_security_cvm_atls_policy_requires_verified_sc() -> None:
+    conn = DevControlPolicyConn(
+        {
+            "cvm_id": UUID("00000000-0000-4000-8000-000000000031"),
+            "security_cvm_id": UUID("00000000-0000-4000-8000-000000000041"),
+            "security_cvm_fqdn": "sc.example.com",
+            "ca_cert_pem": "-----BEGIN CERTIFICATE-----\nMIIB\n",
+            "metadata": {
+                "passthrough_host": "app-443s.dstack.example.com",
+                "atls_policy": {
+                    "type": "dstack_tdx",
+                    "expected_bootchain": {"mrtd": "a" * 96},
+                    "app_compose": {"docker_compose_file": "services: {}\n"},
+                    "os_image_hash": "b" * 64,
+                },
+            },
+            "expected_image_measurement": "a" * 96,
+            "image_measurement": "a" * 96,
+            "attestation_verified_at": datetime(2026, 5, 28, 12, 0, tzinfo=timezone.utc),
+            "error_reason": None,
+        }
+    )
+    principal = SimpleNamespace(
+        principal_id=UUID("00000000-0000-4000-8000-000000000031"),
+        entity_id=UUID("00000000-0000-4000-8000-000000000001"),
+    )
+
+    result = asyncio.run(
+        get_dev_security_cvm_atls_policy(
+            response=SimpleNamespace(headers={}),
+            current_principal=principal,
+            pool=FakePool(conn),
+        )
+    )
+
+    assert conn.args == (
+        UUID("00000000-0000-4000-8000-000000000031"),
+        UUID("00000000-0000-4000-8000-000000000001"),
+    )
+    assert result["security_cvm_fqdn"] == "sc.example.com"
+    assert result["connect_host"] == "app-443s.dstack.example.com"
+    assert result["ca_cert_sha256"] == "6ed8689d60a419e4b9785827a35338b06c974ac432960f7a9b397eba64c1c574"
+    assert result["atls_policy"]["type"] == "dstack_tdx"
+
+
+def test_dev_control_security_cvm_atls_policy_rejects_unverified_sc() -> None:
+    conn = DevControlPolicyConn(
+        {
+            "cvm_id": UUID("00000000-0000-4000-8000-000000000031"),
+            "security_cvm_id": UUID("00000000-0000-4000-8000-000000000041"),
+            "security_cvm_fqdn": "sc.example.com",
+            "ca_cert_pem": "-----BEGIN CERTIFICATE-----\nMIIB\n",
+            "metadata": {"atls_policy": {"type": "dstack_tdx"}},
+            "expected_image_measurement": "a" * 96,
+            "image_measurement": "b" * 96,
+            "attestation_verified_at": datetime(2026, 5, 28, 12, 0, tzinfo=timezone.utc),
+            "error_reason": None,
+        }
+    )
+    principal = SimpleNamespace(
+        principal_id=UUID("00000000-0000-4000-8000-000000000031"),
+        entity_id=UUID("00000000-0000-4000-8000-000000000001"),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            get_dev_security_cvm_atls_policy(
+                response=SimpleNamespace(headers={}),
+                current_principal=principal,
+                pool=FakePool(conn),
+            )
+        )
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail["error"]["details"]["state"] == "security_cvm_attestation_unverified"
+
+
+def test_dev_control_security_cvm_atls_policy_rejects_drifted_sc() -> None:
+    conn = DevControlPolicyConn(
+        {
+            "cvm_id": UUID("00000000-0000-4000-8000-000000000031"),
+            "security_cvm_id": UUID("00000000-0000-4000-8000-000000000041"),
+            "security_cvm_fqdn": "sc.example.com",
+            "ca_cert_pem": "-----BEGIN CERTIFICATE-----\nMIIB\n",
+            "metadata": {"atls_policy": {"type": "dstack_tdx"}},
+            "expected_image_measurement": "a" * 96,
+            "image_measurement": "a" * 96,
+            "attestation_verified_at": datetime(2026, 5, 28, 12, 0, tzinfo=timezone.utc),
+            "error_reason": "ATTESTATION_DRIFT",
+        }
+    )
+    principal = SimpleNamespace(
+        principal_id=UUID("00000000-0000-4000-8000-000000000031"),
+        entity_id=UUID("00000000-0000-4000-8000-000000000001"),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            get_dev_security_cvm_atls_policy(
+                response=SimpleNamespace(headers={}),
+                current_principal=principal,
+                pool=FakePool(conn),
+            )
+        )
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail["error"]["details"]["state"] == "security_cvm_attestation_unverified"
 
 
 class SecurityCvmAttestationProbeConn:

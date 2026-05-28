@@ -50,6 +50,7 @@ POLICY_BUNDLE_CVM_RPM = 30
 CVM_PROFILE_MUTATION_RPM = 12
 TRAFFIC_LOG_INGEST_PRINCIPAL_RPM = 120
 SC_CONTROL_RPM = 60
+DEV_CONTROL_POLICY_RPM = 30
 API_BODY_LIMIT_BYTES = 1024 * 1024
 TRAFFIC_LOG_BODY_LIMIT_BYTES = 4 * 1024 * 1024
 SECURITY_HEADERS = {
@@ -423,6 +424,8 @@ def route_credential_dimension(method: str, path: str) -> tuple[str, int]:
         return f"{method} {path}", TRAFFIC_LOG_INGEST_PRINCIPAL_RPM
     if method == "GET" and path == "/internal/sc-control/cvms":
         return f"{method} {path}", SC_CONTROL_RPM
+    if method == "GET" and path == "/internal/dev-control/security-cvm-atls-policy":
+        return f"{method} {path}", DEV_CONTROL_POLICY_RPM
 
     cvm_id = cvm_policy_bundle_route_id(method, path)
     if cvm_id is not None:

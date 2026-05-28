@@ -12,7 +12,8 @@ from concrete_console import auth as auth_module
 from concrete_console.auth import CurrentUser, require_current_user
 from concrete_console.app import app
 from concrete_console.db import get_pool
-from concrete_console.internal_auth import parse_service_bearer_authorization
+from concrete_console.crypto import sha256_hex
+from concrete_console.internal_auth import parse_service_bearer_authorization, require_dev_cvm_control_principal
 from concrete_console import routes_auth
 from concrete_console.routes_auth import (
     DevicePollRequest,
@@ -165,6 +166,21 @@ class DeviceStartConn:
         return "INSERT 0 1"
 
 
+class DevControlPrincipalConn:
+    def __init__(self, *, purpose: str):
+        self.purpose = purpose
+        self.seen_hash = None
+
+    async def fetchrow(self, query, *args):
+        self.seen_hash = args[0]
+        return {
+            "principal_type": "dev_cvm",
+            "principal_id": UUID("00000000-0000-4000-8000-000000000031"),
+            "purpose": self.purpose,
+            "entity_id": UUID("00000000-0000-4000-8000-000000000001"),
+        }
+
+
 def test_require_permission_allows_granted_permission() -> None:
     current_user(permissions={"USER_MANAGE"}).require_permission("USER_MANAGE")
 
@@ -235,6 +251,27 @@ def test_parse_service_bearer_rejects_non_base64url_opaque_shape(token) -> None:
 
 def test_parse_service_bearer_accepts_opaque_token() -> None:
     assert parse_service_bearer_authorization("Bearer opaque_token-123") == "opaque_token-123"
+
+
+def test_require_dev_cvm_control_principal_accepts_dev_control_purpose() -> None:
+    conn = DevControlPrincipalConn(purpose="DEV_CONTROL")
+
+    principal = asyncio.run(
+        require_dev_cvm_control_principal("Bearer dev-control-token", pool=FakePool(conn))
+    )
+
+    assert conn.seen_hash == sha256_hex("dev-control-token")
+    assert principal.purpose == "DEV_CONTROL"
+    assert principal.principal_id == UUID("00000000-0000-4000-8000-000000000031")
+
+
+def test_require_dev_cvm_control_principal_rejects_proxy_auth_purpose() -> None:
+    conn = DevControlPrincipalConn(purpose="PROXY_AUTH")
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(require_dev_cvm_control_principal("Bearer proxy-token", pool=FakePool(conn)))
+
+    assert exc.value.status_code == 401
 
 
 def test_device_start_rejects_non_google_provider_before_provider_call() -> None:

@@ -76,3 +76,40 @@ async def require_security_cvm_ingest_principal(
     )
     bind_actor(principal.actor_email)
     return principal
+
+
+async def require_dev_cvm_control_principal(
+    authorization: Annotated[str | None, Header()] = None,
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> CurrentServicePrincipal:
+    token = parse_service_bearer_authorization(authorization)
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT
+                spt.principal_type::text AS principal_type,
+                spt.principal_id,
+                spt.purpose::text AS purpose,
+                c.entity_id
+            FROM service_principal_tokens spt
+            JOIN cvms c
+              ON spt.principal_type = 'dev_cvm'
+             AND c.id = spt.principal_id
+            WHERE spt.token_hash = $1
+              AND spt.deleted_at IS NULL
+              AND (spt.expires_at IS NULL OR spt.expires_at > now())
+              AND c.deleted_at IS NULL
+              AND c.state IN ('PROVISIONING', 'RUNNING')
+            """,
+            sha256_hex(token),
+        )
+    if row is None or row["principal_type"] != "dev_cvm" or row["purpose"] != "DEV_CONTROL":
+        raise api_error(401, "UNAUTHORIZED", "invalid bearer token")
+    principal = CurrentServicePrincipal(
+        principal_type=row["principal_type"],
+        principal_id=row["principal_id"],
+        purpose=row["purpose"],
+        entity_id=row["entity_id"],
+    )
+    bind_actor(principal.actor_email)
+    return principal

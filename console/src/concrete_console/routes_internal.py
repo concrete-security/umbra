@@ -13,8 +13,13 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from concrete_console.db import get_pool
 from concrete_console.errors import api_error
+from concrete_console.crypto import sha256_hex
 from concrete_console.idempotency import advisory_lock_key, request_body_sha256
-from concrete_console.internal_auth import CurrentServicePrincipal, require_security_cvm_ingest_principal
+from concrete_console.internal_auth import (
+    CurrentServicePrincipal,
+    require_dev_cvm_control_principal,
+    require_security_cvm_ingest_principal,
+)
 from concrete_console.profile_secrets import expand_profile_policy_secret_values
 from concrete_console.resources import json_payload, timestamp
 
@@ -167,6 +172,90 @@ async def list_sc_control_cvms(
         return Response(status_code=304, headers={"ETag": etag})
     response.headers["ETag"] = etag
     return body
+
+
+@router.get("/dev-control/security-cvm-atls-policy", response_model=None)
+async def get_dev_security_cvm_atls_policy(
+    response: Response,
+    current_principal: CurrentServicePrincipal = Depends(require_dev_cvm_control_principal),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> dict[str, Any]:
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT
+                c.id AS cvm_id,
+                c.security_cvm_id,
+                sc.fqdn AS security_cvm_fqdn,
+                sc.ca_cert_pem,
+                sc.metadata,
+                sc.expected_image_measurement,
+                sc.image_measurement,
+                sc.attestation_verified_at,
+                sc.error_reason
+            FROM cvms c
+            JOIN security_cvms sc
+              ON sc.id = c.security_cvm_id
+             AND sc.entity_id = c.entity_id
+            WHERE c.id = $1
+              AND c.entity_id = $2
+              AND c.deleted_at IS NULL
+              AND c.state IN ('PROVISIONING', 'RUNNING')
+              AND sc.deleted_at IS NULL
+              AND sc.state = 'RUNNING'
+            """,
+            current_principal.principal_id,
+            current_principal.entity_id,
+        )
+    if row is None:
+        raise api_error(409, "CONFLICT", "Security CVM policy is unavailable", {"state": "security_cvm_unavailable"})
+    metadata = json_payload(row["metadata"] or {})
+    policy = metadata.get("atls_policy") if isinstance(metadata, dict) else None
+    if not isinstance(policy, dict):
+        raise api_error(
+            503,
+            "SERVICE_UNAVAILABLE",
+            "Security CVM aTLS policy has not been materialized",
+            {"component": "security_cvm_atls_policy"},
+        )
+    ca_cert_pem = row["ca_cert_pem"]
+    if not isinstance(ca_cert_pem, str) or not ca_cert_pem:
+        raise api_error(
+            503,
+            "SERVICE_UNAVAILABLE",
+            "Security CVM CA certificate is unavailable",
+            {"component": "security_cvm_ca"},
+        )
+    expected = row["expected_image_measurement"]
+    actual = row["image_measurement"]
+    if (
+        expected is None
+        or actual != expected
+        or row["attestation_verified_at"] is None
+        or row["error_reason"] == "ATTESTATION_DRIFT"
+    ):
+        raise api_error(
+            409,
+            "CONFLICT",
+            "Security CVM attestation is not currently verified",
+            {"state": "security_cvm_attestation_unverified"},
+        )
+    connect_host = None
+    if isinstance(metadata, dict):
+        value = metadata.get("passthrough_host") or metadata.get("connect_host")
+        if isinstance(value, str) and value.strip():
+            connect_host = value.strip()
+    response.headers["Cache-Control"] = "no-store"
+    return {
+        "cvm_id": str(row["cvm_id"]),
+        "security_cvm_id": str(row["security_cvm_id"]),
+        "security_cvm_fqdn": row["security_cvm_fqdn"],
+        "connect_host": connect_host,
+        "ca_cert_sha256": sha256_hex(ca_cert_pem),
+        "atls_policy": policy,
+        "image_measurement": actual,
+        "attestation_verified_at": timestamp(row["attestation_verified_at"]),
+    }
 
 
 @router.post("/traffic-logs")

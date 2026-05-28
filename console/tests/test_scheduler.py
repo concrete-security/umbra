@@ -718,7 +718,9 @@ def security_cvm_resource_row(**overrides):
     return row
 
 
-def test_build_cvm_launch_env_binds_runtime_material() -> None:
+def test_build_cvm_launch_env_binds_runtime_material(monkeypatch) -> None:
+    monkeypatch.delenv("CONSOLE_URL", raising=False)
+
     env, binding = scheduler.build_cvm_launch_env(
         launch_snapshot(),
         public_keys=["ssh-ed25519 zzz label-z", "ssh-ed25519 aaa label-a"],
@@ -726,6 +728,7 @@ def test_build_cvm_launch_env_binds_runtime_material() -> None:
             {"policy": {"sandbox_env": {"ZED": "last", "AWS_ACCESS_KEY_ID": "concrete-proxy-injected"}}}
         ],
         proxy_token="proxy-plaintext",
+        dev_control_token="dev-control-plaintext",
     )
 
     authorized_keys = "ssh-ed25519 aaa label-a\nssh-ed25519 zzz label-z\n"
@@ -733,12 +736,16 @@ def test_build_cvm_launch_env_binds_runtime_material() -> None:
     assert env["SECURITY_CVM_FQDN"] == "sc-abc.sc.example.com"
     assert env["SECURITY_CVM_PROXY_PORT"] == "8080"
     assert env["SECURITY_CVM_PROXY_TOKEN"] == "proxy-plaintext"
+    assert env["DEV_CVM_CONTROL_TOKEN"] == "dev-control-plaintext"
     assert decode_env(env["AUTHORIZED_SSH_KEYS_B64"]) == authorized_keys
     assert decode_env(env["SANDBOX_ENV_PLACEHOLDERS_B64"]) == "AWS_ACCESS_KEY_ID=concrete-proxy-injected\nZED=last\n"
     assert decode_env(env["SECURITY_CVM_CA_CERT_B64"]) == ca_cert
     assert json.loads(decode_env(env["SECURITY_CVM_ATLS_POLICY_B64"])) == security_atls_policy()
+    assert env["CONSOLE_URL"] == ""
     assert binding == {
         "cvm_id": "00000000-0000-4000-8000-000000000031",
+        "console_url": "",
+        "dev_cvm_control_token_sha256": hashlib.sha256(b"dev-control-plaintext").hexdigest(),
         "security_cvm_fqdn": "sc-abc.sc.example.com",
         "security_cvm_proxy_port": 8080,
         "security_cvm_proxy_token_sha256": hashlib.sha256(b"proxy-plaintext").hexdigest(),
@@ -759,6 +766,7 @@ def test_build_cvm_launch_env_includes_security_cvm_connect_host() -> None:
         public_keys=["ssh-ed25519 aaa label-a"],
         profile_rows=[],
         proxy_token="proxy-plaintext",
+        dev_control_token="dev-control-plaintext",
     )
 
     assert env["SECURITY_CVM_CONNECT_HOST"] == "sc-app-443s.dstack.example.com"
@@ -777,6 +785,7 @@ def test_build_cvm_launch_env_includes_phala_security_cvm_connect_host() -> None
         public_keys=["ssh-ed25519 aaa label-a"],
         profile_rows=[],
         proxy_token="proxy-plaintext",
+        dev_control_token="dev-control-plaintext",
     )
 
     assert env["SECURITY_CVM_CONNECT_HOST"] == "sc-app-443s.dstack.example.com"
@@ -838,6 +847,7 @@ def test_build_cvm_launch_env_includes_shade_acme_dns01_env(monkeypatch) -> None
         public_keys=["ssh-ed25519 aaa label-a"],
         profile_rows=[],
         proxy_token="proxy-plaintext",
+        dev_control_token="dev-control-plaintext",
     )
 
     assert env["CLOUDFLARE_API_TOKEN"] == "cf-token"
@@ -1283,10 +1293,15 @@ def test_execute_cvm_launch_phala_deploy_persists_hash_only(monkeypatch) -> None
     assert captured["instance_type"] == "tdx.small"
     assert captured["region"] == "FR-PARIS-1"
     assert env["SECURITY_CVM_PROXY_TOKEN"]
+    assert env["DEV_CVM_CONTROL_TOKEN"]
     proxy_token_hash = hashlib.sha256(env["SECURITY_CVM_PROXY_TOKEN"].encode("utf-8")).hexdigest()
+    dev_control_token_hash = hashlib.sha256(env["DEV_CVM_CONTROL_TOKEN"].encode("utf-8")).hexdigest()
     assert any("UPDATE service_principal_tokens" in query for query, _args in conn.execute_calls)
     insert_calls = [args for query, args in conn.execute_calls if "INSERT INTO service_principal_tokens" in query]
-    assert insert_calls == [(UUID("00000000-0000-4000-8000-000000000031"), proxy_token_hash)]
+    assert insert_calls == [
+        (UUID("00000000-0000-4000-8000-000000000031"), proxy_token_hash),
+        (UUID("00000000-0000-4000-8000-000000000031"), dev_control_token_hash),
+    ]
     metadata_calls = [args for query, args in conn.execute_calls if "UPDATE cvms" in query and "metadata" in query]
     assert len(metadata_calls) == 1
     metadata = json.loads(metadata_calls[0][1])
@@ -1299,6 +1314,7 @@ def test_execute_cvm_launch_phala_deploy_persists_hash_only(monkeypatch) -> None
     assert "app_compose_json" not in metadata["policy_bundle"]
     assert "expected_bootchain" not in metadata["policy_bundle"]
     assert metadata["policy_bundle"]["rtmr3_binding"]["security_cvm_proxy_token_sha256"] == proxy_token_hash
+    assert metadata["policy_bundle"]["rtmr3_binding"]["dev_cvm_control_token_sha256"] == dev_control_token_hash
     progress_calls = [args for query, args in conn.execute_calls if "progress_step = 'cf_txt_create'" in query]
     assert progress_calls == [
         (

@@ -1084,6 +1084,8 @@ def render_dev_cvm_compose_config(resolved: dict[str, str]) -> str:
             "      SECURITY_CVM_ATLS_POLICY_B64: ${SECURITY_CVM_ATLS_POLICY_B64}",
             "      SECURITY_CVM_CA_CERT_B64: ${SECURITY_CVM_CA_CERT_B64}",
             "      SECURITY_CVM_PROXY_TOKEN: ${SECURITY_CVM_PROXY_TOKEN}",
+            "      DEV_CVM_CONTROL_TOKEN: ${DEV_CVM_CONTROL_TOKEN}",
+            "      CONSOLE_URL: ${CONSOLE_URL:-}",
             "    expose:",
             "      - \"3128\"",
             "    networks:",
