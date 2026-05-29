@@ -13,8 +13,8 @@ use crate::{
 };
 
 /// The user-facing skill shipped to AI coding agents, embedded at build time.
-/// This file is generated from `skills/concrete-cli/SKILL.src.md` by
-/// `ops/render-skill.py` (run via `make skill`); edit the source, not this copy.
+/// This file is generated from `skills/concrete-cli/SKILL.md` by
+/// `ops/render-skill.py` (run via `make skill`); edit that crib, not this copy.
 const SKILL_BODY: &str = include_str!("../../../dist/skills/concrete-cli/SKILL.md");
 
 /// Folder name the skill is installed under in every agent's skills directory.
