@@ -1,5 +1,5 @@
 use std::{
-    io::{Read, Write},
+    io::{self, IsTerminal, Read, Write},
     net::{TcpListener, TcpStream},
     thread,
     time::{Duration, Instant},
@@ -16,6 +16,7 @@ use zeroize::Zeroizing;
 
 use crate::{
     cli::AuthCommand,
+    commands::skill,
     config::{self, ConfigSource, ResolvedConfig},
     exit::ExitStatus,
     session::{self, Entity, Session},
@@ -166,7 +167,10 @@ fn login(
             persist_console_url,
             json_output,
         ) {
-            Ok(()) => ExitStatus::Ok,
+            Ok(()) => {
+                maybe_offer_skill(config, json_output);
+                ExitStatus::Ok
+            }
             Err((status, message)) => {
                 crate::style::eprintln_error(&message);
                 status
@@ -227,7 +231,10 @@ fn login(
         json_output,
         None,
     ) {
-        Ok(()) => ExitStatus::Ok,
+        Ok(()) => {
+            maybe_offer_skill(config, json_output);
+            ExitStatus::Ok
+        }
         Err((status, message)) => {
             crate::style::eprintln_error(&message);
             status
@@ -963,6 +970,56 @@ fn status(config: &ResolvedConfig, json_output: bool) -> ExitStatus {
 
 fn format_time(value: chrono::DateTime<Utc>) -> String {
     value.to_rfc3339_opts(SecondsFormat::Secs, true)
+}
+
+/// After a successful login, install the agent skill per the stored preference:
+/// refresh silently when opted in, prompt once when undecided. Never prompts in
+/// JSON mode or a non-interactive shell.
+fn maybe_offer_skill(config: &ResolvedConfig, json_output: bool) {
+    match config.skill_auto_install {
+        // Opted in earlier: refresh quietly so a CLI upgrade propagates.
+        Some(true) => skill::install_on_login(config, true),
+        // Opted out earlier (or CONCRETE_NO_SKILL): do nothing.
+        Some(false) => {}
+        // Not asked yet: prompt once, but only in an interactive text session
+        // with at least one agent to install for.
+        None => {
+            if json_output || !io::stdin().is_terminal() || !io::stderr().is_terminal() {
+                return;
+            }
+            let agents = skill::detected_agents();
+            if agents.is_empty() {
+                return;
+            }
+            let yes = prompt_yes_no(&format!(
+                "Install the Concrete skill for {}? It teaches the AI agent how to drive this CLI.",
+                agents.join(", ")
+            ));
+            // Record the answer so the prompt never reappears.
+            let _ = config::persist_string_values(
+                &config.config_dir,
+                &[(
+                    "skill_auto_install",
+                    if yes { "true" } else { "false" }.to_string(),
+                )],
+            );
+            if yes {
+                skill::install_on_login(config, false);
+            }
+        }
+    }
+}
+
+/// Ask a yes/no question on stderr, defaulting to yes on empty input. Returns
+/// false when stdin cannot be read.
+fn prompt_yes_no(question: &str) -> bool {
+    eprint!("{}", style::info_line(&format!("{question} [Y/n] ")));
+    let _ = io::stderr().flush();
+    let mut line = String::new();
+    if io::stdin().read_line(&mut line).is_err() {
+        return false;
+    }
+    matches!(line.trim().to_ascii_lowercase().as_str(), "" | "y" | "yes")
 }
 
 #[cfg(test)]

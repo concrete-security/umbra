@@ -135,6 +135,10 @@ pub enum Command {
     #[command(subcommand)]
     SecurityCvm(SecurityCvmCommand),
 
+    /// Install the Concrete skill for local AI coding agents.
+    #[command(subcommand)]
+    Skill(SkillCommand),
+
     /// Show a summary of the current entity and visible resources.
     Status,
 
@@ -708,6 +712,19 @@ pub struct SecurityCvmAttestationArgs {
     /// Request a fresh Console-side attestation probe instead of persisted state.
     #[arg(long)]
     pub probe: bool,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum SkillCommand {
+    /// Install the Concrete skill for local AI coding agents.
+    Install(SkillInstallArgs),
+}
+
+#[derive(clap::Args, Debug)]
+pub struct SkillInstallArgs {
+    /// Comma-separated agents to target (claude, codex). Defaults to all detected agents.
+    #[arg(long)]
+    pub agents: Option<String>,
 }
 
 #[derive(clap::Args, Debug)]

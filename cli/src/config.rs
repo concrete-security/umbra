@@ -26,6 +26,7 @@ struct ConfigFile {
     output: Option<String>,
     no_color: Option<bool>,
     log_level: Option<String>,
+    skill_auto_install: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -76,6 +77,9 @@ pub struct ResolvedConfig {
     pub no_color_source: ConfigSource,
     pub log_level: String,
     pub log_level_source: ConfigSource,
+    /// Whether `auth login` should install the agent skill: `Some(true)` opted
+    /// in, `Some(false)` opted out (or `CONCRETE_NO_SKILL`), `None` not asked.
+    pub skill_auto_install: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -303,6 +307,14 @@ impl ResolvedConfig {
             ("warn".to_string(), ConfigSource::Default)
         };
 
+        // CONCRETE_NO_SKILL=1 is a hard opt-out; otherwise the persisted answer
+        // from the first `auth login` prompt decides (None until first asked).
+        let skill_auto_install = if env_bool("CONCRETE_NO_SKILL") == Some(true) {
+            Some(false)
+        } else {
+            file.skill_auto_install.as_deref().and_then(parse_bool)
+        };
+
         Self {
             config_dir,
             config_dir_source,
@@ -335,6 +347,7 @@ impl ResolvedConfig {
             no_color_source,
             log_level,
             log_level_source,
+            skill_auto_install,
         }
     }
 
