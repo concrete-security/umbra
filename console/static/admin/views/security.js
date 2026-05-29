@@ -1,6 +1,22 @@
 (function (A) {
   const UI = A.UI;
 
+  function rebindList(ids) {
+    if (!ids || !ids.length) return "";
+    return `
+      <div class="rounded-input border border-line bg-elev/40 p-3 mt-3">
+        <div class="text-2xs uppercase tracking-wider text-mute mb-2">Dev CVMs requiring rebind</div>
+        <ul class="space-y-1.5">
+          ${ids.map((id) => `
+            <li class="flex items-center justify-between gap-2 text-xs">
+              <span class="font-mono text-ink-dim break-all">${UI.escapeHtml(id)}</span>
+              <span>${UI.copyButton(`concrete cvm update ${id}`, "Copy CLI command")}</span>
+            </li>
+          `).join("")}
+        </ul>
+      </div>`;
+  }
+
   async function renderSecurity() {
     const panel = A.el("panel-security");
     const sc = await A.fetchSecurityCvm();
@@ -85,7 +101,7 @@
             <span class="flex h-6 w-6 items-center justify-center rounded-md bg-accent/10 text-accent">${UI.icon("system", "h-3.5 w-3.5")}</span>
             <h4 class="text-sm font-semibold text-ink">Lifecycle</h4>
           </header>
-          <p class="text-xs text-mute mb-3">Update the Security CVM image to roll out a new measured release, or decommission it to disable egress for this entity.</p>
+          <p class="text-xs text-mute mb-3">Update the Security CVM image to roll out a new measured release. Dev CVMs recover automatically from aTLS-policy-only changes; if the update rotates the Security CVM CA, affected Dev CVMs are listed for rebind.</p>
           <div class="flex flex-wrap items-center gap-2">
             <button type="button" class="btn" id="sc-update">${UI.icon("refresh", "h-4 w-4")} Update image</button>
             <button type="button" class="btn btn-danger" id="sc-decommission">${UI.icon("x", "h-4 w-4")} Decommission…</button>
@@ -190,7 +206,10 @@
       title: "Update Security CVM image",
       subtitle: "Restarts the gateway on the latest measured image. Egress is briefly unavailable while it re-attests.",
       primary: { label: "Start update", run: doUpdate },
-      body: `<p class="text-sm text-mute">Dev CVMs will see brief egress errors during the rollover. Policy is preserved.</p>`,
+      body: `
+        <p class="text-sm text-mute mb-2">Dev CVMs may see brief egress errors during the rollover. If only the Security CVM aTLS policy changes, forwarders fetch a candidate policy from Console and recover without a Dev CVM update.</p>
+        <p class="text-sm text-mute">If the Security CVM CA changes, Console will mark the affected Dev CVMs and this screen will list the rebind actions to run.</p>
+      `,
     });
   }
 
@@ -205,10 +224,32 @@
     UI.toast("Update started", "ok");
     queueMicrotask(async () => {
       try {
-        await A.Ops.poll(op.id);
+        const finalOp = await A.Ops.poll(op.id);
+        if (finalOp.status !== "succeeded") {
+          throw new Error(finalOp.error?.message || finalOp.error?.code || "Security CVM update failed");
+        }
         A.entityScCache = null;
+        showUpdateResult(finalOp);
         renderSecurity();
       } catch (e) { UI.toast(e.message, "err"); }
+    });
+  }
+
+  function showUpdateResult(op) {
+    const ids = op?.result?.dev_cvms_requiring_update || [];
+    if (!ids.length) {
+      UI.toast("Security CVM updated; Dev CVM forwarders can refresh aTLS policy from Console if needed.", "ok");
+      return;
+    }
+    UI.dialog({
+      title: "Dev CVM rebind required",
+      subtitle: "The Security CVM CA changed during this update.",
+      primary: { label: "Open CVMs", run: () => { location.hash = "cvms"; } },
+      secondary: { label: "Close" },
+      body: `
+        <p class="text-sm text-mute">Egress from the listed Dev CVMs fails closed until each CVM update refreshes the bound Security CVM CA and aTLS material. Existing SSH/editor sessions may stay up.</p>
+        ${rebindList(ids)}
+      `,
     });
   }
 

@@ -1,5 +1,21 @@
 (function (A) {
   const UI = A.UI;
+
+  function needsSecurityCvmRebind(cvm) {
+    return cvm?.error_reason === "SECURITY_CVM_REBIND_REQUIRED";
+  }
+
+  function cvmUpdateLabel(cvm) {
+    return needsSecurityCvmRebind(cvm) ? "Rebind SC trust" : "Update";
+  }
+
+  function cvmUpdatePrompt(cvm) {
+    if (needsSecurityCvmRebind(cvm)) {
+      return "Refresh this CVM's bound Security CVM CA and aTLS material. Egress stays fail-closed until this update completes.";
+    }
+    return "Update this CVM to the latest measured image/config and re-attest it. Named volumes are preserved.";
+  }
+
   const Drawer = {
     closeAll() {
       A.selectedCvm = null;
@@ -150,6 +166,15 @@
         "<h3>Profiles</h3><div class=\"chips\">" +
         (profiles || '<span class="muted">none</span>') +
         "</div></div>";
+      if (needsSecurityCvmRebind(cvm)) {
+        html +=
+          '<div class="card"><h3>Security CVM rebind required</h3>' +
+          '<p class="muted">The Security CVM CA changed. Run a CVM update to refresh this CVM\'s measured SC CA and aTLS material before relying on egress.</p>' +
+          (A.canActOnCvms() && A.has(A.P.CVM_MANAGE)
+            ? '<button type="button" class="btn" id="cvm-summary-update">Rebind SC trust</button>'
+            : "") +
+          "</div>";
+      }
       const pending = A.Ops.pendingForCvm(cvm.id);
       if (pending.length) {
         html += '<div class="card"><h3>In progress</h3><p class="state-warn">' + pending.map((o) => o.kind).join(", ") + "</p></div>";
@@ -246,7 +271,7 @@
       if (canManage && cvm.state !== "terminated") {
         if (cvm.state === "running") html += '<button type="button" class="btn" id="cvm-stop">Stop</button>';
         else html += '<button type="button" class="btn" id="cvm-start">Start</button>';
-        html += '<button type="button" class="btn" id="cvm-update">Update</button>';
+        html += '<button type="button" class="btn" id="cvm-update">' + UI.escapeHtml(cvmUpdateLabel(cvm)) + "</button>";
         html += '<button type="button" class="btn danger" id="cvm-terminate">Terminate</button>';
       }
       html += "</div><div id=\"cvm-action-msg\" class=\"msg\"></div></div>";
@@ -326,6 +351,7 @@
       body.querySelector("#cvm-start")?.addEventListener("click", () => Drawer.cvmSyncAction("start"));
       body.querySelector("#cvm-stop")?.addEventListener("click", () => Drawer.cvmSyncAction("stop"));
       body.querySelector("#cvm-update")?.addEventListener("click", () => Drawer.cvmAsyncAction("update"));
+      body.querySelector("#cvm-summary-update")?.addEventListener("click", () => Drawer.cvmAsyncAction("update"));
       body.querySelector("#cvm-terminate")?.addEventListener("click", () => Drawer.cvmAsyncAction("terminate"));
       body.querySelector("#cvm-attach")?.addEventListener("click", () => Drawer.attachProfile(cvm));
       body.querySelectorAll("[data-detach]").forEach((btn) => {
@@ -355,7 +381,7 @@
     async cvmAsyncAction(action) {
       const cvm = A.selectedCvm;
       if (!cvm) return;
-      const labels = { update: "Update this CVM?", terminate: "Terminate this CVM? This cannot be undone." };
+      const labels = { update: cvmUpdatePrompt(cvm), terminate: "Terminate this CVM? This cannot be undone." };
       const ok = await UI.confirm({
         title: action === "terminate" ? "Terminate CVM" : "Update CVM",
         message: labels[action] || "Continue?",

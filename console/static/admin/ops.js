@@ -54,7 +54,10 @@
         const op = await response.json();
         Ops.track(op);
         if (onUpdate) onUpdate(op);
-        if (["succeeded", "failed", "cancelled"].includes(op.status)) return op;
+        if (op.status === "succeeded") return op;
+        if (["failed", "cancelled"].includes(op.status)) {
+          throw new Error(op.error?.message || op.error?.code || `Operation ${op.status}`);
+        }
         await new Promise((r) => setTimeout(r, 2000));
       }
       throw new Error("Operation timed out");

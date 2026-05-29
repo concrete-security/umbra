@@ -47,7 +47,7 @@
             <h4 class="text-sm font-semibold text-ink">Profiles</h4>
             ${UI.helpHint("Profiles bundle the egress policy, secret bindings, and DLP rules that govern what this CVM can do.")}
           </header>
-          <p class="text-xs text-mute mb-2">Pick one or more. The CVM will be governed by the union of these profiles' rules.</p>
+          <p class="text-xs text-mute mb-2">Pick one or more. Console merges the selected profiles into the effective policy the Security CVM pulls.</p>
           ${usable.length ? `
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-2" data-profiles>
               ${usable.map((p) => `

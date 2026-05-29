@@ -47,10 +47,10 @@
           <div class="flex items-center gap-2">
             <span class="flex h-6 w-6 items-center justify-center rounded-md bg-accent/10 text-accent">${UI.icon("system", "h-3.5 w-3.5")}</span>
             <h4 class="text-sm font-semibold text-ink">Policy</h4>
-            ${UI.helpHint("Hosts your CVM may reach, env vars seeded into the sandbox, secrets injected at egress, and DLP rules applied to outbound payloads.")}
+            ${UI.helpHint("Hosts your CVM may reach, env vars seeded into the sandbox, body/WebSocket assertions, traffic attributes, secret injection, and DLP rules.")}
           </div>
         </header>
-        <p class="text-xs text-mute mb-3">Variables seeded into every CVM that attaches this profile. Use the advanced editor below to set egress hosts, redaction rules, and secret bindings.</p>
+        <p class="text-xs text-mute mb-3">Non-secret variables seeded into every CVM that attaches this profile. Use the advanced editor below for destination rules, body/WebSocket assertions, traffic attributes, DLP patterns, and proxy-time secret injection.</p>
 
         <label class="field-label">Sandbox environment</label>
         <div id="sandbox-rows" class="mb-1.5">${rows || `<p class="text-xs text-mute italic mb-1.5">No variables defined.</p>`}</div>
@@ -60,7 +60,7 @@
           <summary class="flex items-center gap-1.5 text-2xs uppercase tracking-wider text-mute cursor-pointer hover:text-ink mb-2">
             ${UI.icon("chevron-right", "h-3 w-3 transition-transform group-open:rotate-90")}
             Advanced policy (raw JSON)
-            ${UI.helpHint("Full policy bundle: egress.allow / redaction / secrets / etc. Validated server-side; refer to the CLI spec.")}
+            ${UI.helpHint("Full policy object: allowed_destinations, blocked_destinations, secret_patterns, secret_injections, and sandbox_env. Destination rules may include body_assertions, websocket_assertions, and traffic_log_attributes. Validated server-side.")}
           </summary>
           <textarea id="profile-advanced" class="textarea-mono w-full" ${readonly ? "readonly" : ""}>${UI.escapeHtml(Object.keys(opaque).length ? JSON.stringify(opaque, null, 2) : "{}")}</textarea>
         </details>

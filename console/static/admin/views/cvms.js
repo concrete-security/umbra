@@ -42,6 +42,21 @@
     return "";
   }
 
+  function needsSecurityCvmRebind(cvm) {
+    return cvm?.error_reason === "SECURITY_CVM_REBIND_REQUIRED";
+  }
+
+  function updateActionLabel(cvm) {
+    return needsSecurityCvmRebind(cvm) ? "Rebind Security CVM trust" : "Update image";
+  }
+
+  function updateConfirmBody(cvm) {
+    if (needsSecurityCvmRebind(cvm)) {
+      return "Refresh this CVM's measured Security CVM CA and aTLS material. Use this after a Security CVM update reports CA rotation.";
+    }
+    return "Update this CVM to the latest measured image/config and re-attest it. Named volumes are preserved.";
+  }
+
   function filterCvms(items, st) {
     let list = items.slice();
     if (A.fleetFilter && A.fleetFilter !== "all") {
@@ -70,7 +85,7 @@
     if (canAct) {
       if (state === "stopped" || state === "error") items.push({ id: "start", label: "Start", icon: "refresh" });
       if (state === "running") items.push({ id: "stop", label: "Stop", icon: "x" });
-      if (state === "running" || state === "stopped") items.push({ id: "update", label: "Update image", icon: "refresh" });
+      if (state === "running" || state === "stopped") items.push({ id: "update", label: updateActionLabel(c), icon: "refresh" });
     }
     items.push({ id: "copy-id", label: "Copy ID", icon: "copy" });
     if (c.fqdn) items.push({ id: "copy-ssh", label: "Copy SSH command", icon: "terminal" });
@@ -161,7 +176,10 @@
         render: (c) => {
           const pending = A.Ops.pendingForCvm(c.id).length;
           const op = pending ? ` <span class="badge badge-pending">${UI.icon("clock", "h-3 w-3")} op</span>` : "";
-          return UI.badge(c.state) + op;
+          const rebind = needsSecurityCvmRebind(c)
+            ? ` <span class="badge badge-warn">${UI.icon("alert", "h-3 w-3")} SC rebind</span>`
+            : "";
+          return UI.badge(c.state) + rebind + op;
         },
       },
       {
@@ -302,7 +320,7 @@
     if (action === "copy-ssh") { navigator.clipboard?.writeText(`concrete ssh ${cvm.id}`); return A.UI.toast("SSH command copied", "ok"); }
     if (action === "start") return runCvmAction(cvm, "start", "Start CVM", "Boot this CVM and reconnect its profile bindings.");
     if (action === "stop") return runCvmAction(cvm, "stop", "Stop CVM", "Suspend this CVM. Disk state is preserved. You can restart it later.");
-    if (action === "update") return runCvmAction(cvm, "update", "Update CVM image", "Re-launch this CVM on the latest measured image. The instance restarts and re-attests.");
+    if (action === "update") return runCvmAction(cvm, "update", updateActionLabel(cvm), updateConfirmBody(cvm));
     if (action === "terminate") {
       const ok = await A.UI.strongConfirm({
         title: "Terminate " + (cvm.fqdn || cvm.id),
@@ -351,9 +369,12 @@
       });
       if (!ok) return;
     } else {
+      const rebindCount = targets.filter(needsSecurityCvmRebind).length;
       const ok = await A.UI.confirm({
         title: `${action.charAt(0).toUpperCase() + action.slice(1)} ${targets.length} CVM${targets.length > 1 ? "s" : ""}`,
-        message: `Apply ${action} to all selected CVMs?`,
+        message: action === "update" && rebindCount
+          ? `Update all selected CVMs? ${rebindCount} need Security CVM trust rebinding after CA rotation.`
+          : `Apply ${action} to all selected CVMs?`,
         okLabel: action.charAt(0).toUpperCase() + action.slice(1),
       });
       if (!ok) return;

@@ -20,6 +20,7 @@
 
     const running = cvms.filter((c) => c.state === "running").length;
     const errored = cvms.filter((c) => c.state === "error" || c.state === "failed").length;
+    const scRebind = cvms.filter((c) => c.error_reason === "SECURITY_CVM_REBIND_REQUIRED").length;
     const userCount = summary?.user_count ?? "—";
     const profileCount = summary?.profile_count ?? (A.ctx?.me?.profiles?.length ?? "—");
     const entityName = summary?.entity?.name || A.ctx.entityName || "Your entity";
@@ -70,7 +71,7 @@
       </section>
 
       <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5">
-        ${UI.statTile({ icon: "cvm", label: "Dev CVMs", value: `${running}/${cvms.length}`, sub: `${cvms.length - running} stopped · ${errored} error${errored === 1 ? "" : "s"}`, href: "#cvms" })}
+        ${UI.statTile({ icon: "cvm", label: "Dev CVMs", value: `${running}/${cvms.length}`, sub: `${cvms.length - running} stopped · ${errored} error${errored === 1 ? "" : "s"}${scRebind ? ` · ${scRebind} SC rebind` : ""}`, tone: scRebind ? "warn" : null, href: "#cvms" })}
         ${scStateTile}
         ${UI.statTile({ icon: "users", label: "Users", value: userCount, sub: "Active members on this entity", href: "#users" })}
         ${UI.statTile({ icon: "traffic", label: "Egress (last 5m)", value: recentTraffic.length, sub: `${countUniqueHosts(recentTraffic)} hosts contacted`, href: "#traffic" })}

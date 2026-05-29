@@ -385,11 +385,9 @@ fn print_update_result(result: &SecurityCvmUpdateResult, json_output: bool) {
             .field("fqdn", sc.fqdn.clone())
             .field("state", sc.state.clone())
             .field("policy version", format!("v{}", sc.policy_version));
-        // Section 7.19: when the SC update bumps the policy and one or more
-        // Dev CVMs in the entity now point at a stale policy version, the
-        // Console returns their ids in `dev_cvms_requiring_update`. Surface
-        // them as an additional field on the confirm so the operator sees
-        // exactly which CVMs they need to relaunch / update next.
+        // Console only populates this list when the SC CA changed. Pure SC
+        // aTLS-policy changes are recovered by Dev CVM forwarders through the
+        // internal Console refresh path.
         if !result.dev_cvms_requiring_update.is_empty() {
             confirm = confirm
                 .field(
