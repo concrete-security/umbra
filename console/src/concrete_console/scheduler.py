@@ -5848,3 +5848,10 @@ def check_operation_scheduler_recent(*, now: float | None = None) -> None:
     current = time.monotonic() if now is None else now
     if current - _last_successful_tick_monotonic > 2 * reconciler_interval_seconds():
         raise RuntimeError("operation scheduler tick is stale")
+
+
+def scheduler_last_tick_age_seconds(*, now: float | None = None) -> float | None:
+    if _last_successful_tick_monotonic is None:
+        return None
+    current = time.monotonic() if now is None else now
+    return max(0.0, current - _last_successful_tick_monotonic)

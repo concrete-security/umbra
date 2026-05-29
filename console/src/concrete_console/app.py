@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import math
 import re
+from pathlib import Path
 from typing import Annotated, AsyncIterator
 from uuid import uuid4
 
@@ -23,6 +24,7 @@ from concrete_console.request_context import resolved_client_ip
 from concrete_console.routes_auth import router as auth_router
 from concrete_console.routes_internal import router as internal_router
 from concrete_console.routes import router
+from concrete_console.routes_admin import router as admin_router
 from concrete_console.scheduler import start_operation_scheduler, stop_operation_scheduler
 
 REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
@@ -46,6 +48,9 @@ METRICS_IP_RPM = 60
 AUDIT_EVENTS_CREDENTIAL_RPM = 60
 TRAFFIC_LOGS_READ_CREDENTIAL_RPM = 30
 ADMIN_RECONCILE_CREDENTIAL_RPM = 6
+ADMIN_OVERVIEW_CREDENTIAL_RPM = 30
+ADMIN_LOGS_STREAM_CREDENTIAL_RPM = 6
+ADMIN_READ_CREDENTIAL_RPM = 120
 POLICY_BUNDLE_CVM_RPM = 30
 CVM_PROFILE_MUTATION_RPM = 12
 TRAFFIC_LOG_INGEST_PRINCIPAL_RPM = 120
@@ -60,6 +65,21 @@ SECURITY_HEADERS = {
     "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'; base-uri 'none'",
     "Cross-Origin-Resource-Policy": "same-origin",
 }
+ADMIN_CSP = (
+    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+    "frame-ancestors 'none'; base-uri 'self'"
+)
+
+
+def _admin_static_dir() -> Path:
+    for candidate in (
+        Path("/app/static/admin"),
+        Path(__file__).resolve().parents[2] / "static" / "admin",
+    ):
+        if candidate.is_dir():
+            return candidate
+    return Path("/app/static/admin")
+
 
 configure_logging()
 log = logger()
@@ -87,6 +107,7 @@ app = FastAPI(title="Concrete Console", version="0.1.0", lifespan=lifespan)
 app.include_router(auth_router)
 app.include_router(internal_router)
 app.include_router(router)
+app.include_router(admin_router)
 
 
 @app.middleware("http")
@@ -271,7 +292,10 @@ async def request_guard_response(request: Request, request_id: str) -> JSONRespo
                 request_id,
             )
 
-    rate_limited = await check_rate_limit(request)
+    if path_exempt_from_rate_limit(request.url.path):
+        rate_limited = None
+    else:
+        rate_limited = await check_rate_limit(request)
     if rate_limited is None:
         return None
     retry_after_seconds, limit_name = rate_limited
@@ -420,6 +444,12 @@ def route_credential_dimension(method: str, path: str) -> tuple[str, int]:
         return f"{method} {path}", TRAFFIC_LOGS_READ_CREDENTIAL_RPM
     if method == "POST" and path == "/api/v1/admin/reconcile":
         return f"{method} {path}", ADMIN_RECONCILE_CREDENTIAL_RPM
+    if method == "GET" and path == "/api/v1/admin/overview":
+        return f"{method} {path}", ADMIN_OVERVIEW_CREDENTIAL_RPM
+    if method == "GET" and path == "/api/v1/admin/logs/stream":
+        return f"{method} {path}", ADMIN_LOGS_STREAM_CREDENTIAL_RPM
+    if method == "GET" and path.startswith("/api/v1/admin/"):
+        return "GET /api/v1/admin/*", ADMIN_READ_CREDENTIAL_RPM
     if method == "POST" and path == "/internal/traffic-logs":
         return f"{method} {path}", TRAFFIC_LOG_INGEST_PRINCIPAL_RPM
     if method == "GET" and path == "/internal/sc-control/cvms":
@@ -461,6 +491,10 @@ def cvm_profile_mutation_route_id(method: str, path: str) -> str | None:
     return None
 
 
+def path_exempt_from_rate_limit(path: str) -> bool:
+    return path == "/admin" or path.startswith("/admin/")
+
+
 def prune_rate_limit_events(events: deque[float], now: float) -> None:
     cutoff = now - RATE_LIMIT_WINDOW_SECONDS
     while events and events[0] <= cutoff:
@@ -485,6 +519,8 @@ def apply_response_headers(request: Request, response: Response, request_id: str
     response.headers["X-Request-Id"] = request_id
     for name, value in SECURITY_HEADERS.items():
         response.headers.setdefault(name, value)
+    if request.url.path == "/admin" or request.url.path.startswith("/admin/"):
+        response.headers["Content-Security-Policy"] = ADMIN_CSP
     if request.url.path in {"/healthz", "/readyz"}:
         response.headers["Cache-Control"] = "public, max-age=60"
     else:
@@ -505,6 +541,57 @@ async def readyz() -> JSONResponse:
         status_code=status,
         content={"checks": checks},
         headers={"Cache-Control": "public, max-age=60"},
+    )
+
+
+def _admin_static_file(name: str) -> Path:
+    static_dir = _admin_static_dir()
+    path = (static_dir / name).resolve()
+    if static_dir.resolve() not in path.parents and path != static_dir.resolve():
+        raise HTTPException(status_code=404, detail="not found")
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="not found")
+    return path
+
+
+@app.get("/admin", include_in_schema=False)
+async def admin_index() -> Response:
+    return _admin_file_response("index.html", "text/html; charset=utf-8")
+
+
+@app.get("/admin/oauth/callback", include_in_schema=False)
+async def admin_oauth_callback() -> Response:
+    return _admin_file_response("oauth-callback.html", "text/html; charset=utf-8")
+
+
+def _admin_asset_media_type(name: str) -> str:
+    if name.endswith(".css"):
+        return "text/css; charset=utf-8"
+    if name.endswith(".js"):
+        return "application/javascript; charset=utf-8"
+    if name.endswith(".svg"):
+        return "image/svg+xml"
+    if name.endswith(".woff2"):
+        return "font/woff2"
+    raise HTTPException(status_code=404, detail="not found")
+
+
+@app.get("/admin/assets/{asset_path:path}", include_in_schema=False)
+async def admin_assets(asset_path: str) -> Response:
+    if not asset_path or ".." in asset_path or asset_path.startswith("/"):
+        raise HTTPException(status_code=404, detail="not found")
+    return _admin_file_response(asset_path, _admin_asset_media_type(asset_path))
+
+
+def _admin_file_response(name: str, media_type: str) -> Response:
+    path = _admin_static_file(name)
+    cache_control = "no-store"
+    if name.endswith(".svg") or name.endswith(".woff2"):
+        cache_control = "public, max-age=300, must-revalidate"
+    return Response(
+        content=path.read_bytes(),
+        media_type=media_type,
+        headers={"Cache-Control": cache_control},
     )
 
 

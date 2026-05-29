@@ -18,6 +18,7 @@ RUN npm ci --ignore-scripts --omit=dev --no-audit --no-fund \
     && ln -sf /app/node_modules/.bin/phala /usr/bin/phala
 COPY alembic ./alembic
 COPY src ./src
+COPY static ./static
 COPY tests ./tests
 COPY entrypoint.sh /entrypoint.sh
 

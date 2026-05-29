@@ -21,6 +21,7 @@ from concrete_console.errors import api_error
 from concrete_console.jwt_keys import get_jwt_manager
 from concrete_console.oidc import (
     IdpOAuthError,
+    OidcSettings,
     exchange_authorization_code,
     google_authorize_redirect,
     oidc_settings,
@@ -35,6 +36,18 @@ router = APIRouter(prefix="/api/v1/auth")
 
 REDIRECT_URI_RE = re.compile(r"^http://127\.0\.0\.1:[0-9]{1,5}/callback$")
 PKCE_RE = re.compile(r"^[A-Za-z0-9._~-]{43,128}$")
+
+
+def admin_oauth_redirect_uri(settings: OidcSettings | None = None) -> str:
+    settings = settings or oidc_settings()
+    return f"{settings.console_url}/admin/oauth/callback"
+
+
+def is_allowed_redirect_uri(redirect_uri: str, *, settings: OidcSettings | None = None) -> bool:
+    settings = settings or oidc_settings()
+    if REDIRECT_URI_RE.fullmatch(redirect_uri):
+        return True
+    return redirect_uri == admin_oauth_redirect_uri(settings)
 
 
 class TokenRequest(BaseModel):
@@ -300,7 +313,7 @@ async def authorize(
         raise api_error(400, "BAD_REQUEST", "client_id is not allowed")
     if response_type != "code":
         raise api_error(400, "BAD_REQUEST", "response_type must be code")
-    if not REDIRECT_URI_RE.fullmatch(redirect_uri):
+    if not is_allowed_redirect_uri(redirect_uri, settings=settings):
         raise api_error(400, "BAD_REQUEST", "redirect_uri is not allowed")
     if code_challenge_method != "S256" or not PKCE_RE.fullmatch(code_challenge):
         raise api_error(400, "BAD_REQUEST", "invalid PKCE challenge")

@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Concrete Console — Signing in</title>
+  <link rel="stylesheet" href="/admin/assets/styles.css" />
+  <link rel="stylesheet" href="/admin/assets/tailwind.css" />
+</head>
+<body class="bg-bg text-ink">
+  <section class="min-h-screen flex items-center justify-center bg-grad-hero p-6">
+    <div class="card card-pad max-w-md w-full text-center">
+      <div class="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-full bg-accent/10">
+        <svg class="h-5 w-5 text-accent animate-pulse" aria-hidden="true">
+          <use href="/admin/assets/icons.svg#i-shield"/>
+        </svg>
+      </div>
+      <h2 class="text-base font-semibold text-ink">Completing sign-in</h2>
+      <p id="login-status" class="mt-1 text-sm text-mute">Exchanging authorization code…</p>
+    </div>
+  </section>
+  <script src="/admin/assets/core.js"></script>
+  <script src="/admin/assets/ui.js"></script>
+  <script src="/admin/assets/api.js"></script>
+  <script src="/admin/assets/app.js"></script>
+</body>
+</html>

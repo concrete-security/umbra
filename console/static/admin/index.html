@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Concrete Console</title>
+  <meta name="description" content="Confidential VM control plane — manage attested AI agent sandboxes, govern egress, and audit every action." />
+  <link rel="preload" href="/admin/assets/icons.svg" as="image" type="image/svg+xml" />
+  <link rel="stylesheet" href="/admin/assets/styles.css" />
+  <link rel="stylesheet" href="/admin/assets/tailwind.css" />
+</head>
+<body class="bg-bg text-ink">
+  <!-- Top bar -->
+  <header class="sticky top-0 z-30 border-b border-line bg-surface/95 backdrop-blur">
+    <div class="flex items-center gap-3 px-5 py-2.5">
+      <a href="/admin" class="flex items-center gap-2 text-ink hover:text-ink-dim">
+        <svg class="h-7 w-7" aria-hidden="true"><use href="/admin/assets/icons.svg#i-brand"/></svg>
+        <span class="font-semibold tracking-tight text-base">Concrete</span>
+        <span class="hidden sm:inline text-mute text-2xs uppercase tracking-[0.18em] mt-0.5 border-l border-line pl-2 ml-1">Console</span>
+      </a>
+      <span id="scope-pill" class="pill chip-accent hidden ml-1 text-2xs"></span>
+
+      <div class="flex-1"></div>
+
+      <label id="entity-wrap" class="entity-select hidden flex items-center gap-2 text-xs">
+        <span class="text-mute">Entity</span>
+        <div class="relative">
+          <select id="entity-select" class="appearance-none rounded-input border border-line bg-panel text-ink px-3 py-1.5 pr-8 text-xs hover:border-accent-dim focus:outline-none focus:ring-2 focus:ring-accent/30">
+          </select>
+          <svg class="h-3 w-3 absolute right-2 top-1/2 -translate-y-1/2 text-mute pointer-events-none" aria-hidden="true"><use href="/admin/assets/icons.svg#i-chevron-down"/></svg>
+        </div>
+      </label>
+
+      <span id="conn-pill" class="pill text-2xs inline-flex items-center gap-1.5 px-2.5 py-0.5">
+        <span class="dot"></span>
+        <span data-conn-text>offline</span>
+      </span>
+
+      <span id="user-pill" class="pill hidden text-2xs inline-flex items-center gap-1.5 px-2.5 py-0.5">
+        <svg class="h-3 w-3" aria-hidden="true"><use href="/admin/assets/icons.svg#i-user"/></svg>
+        <span data-user-text></span>
+      </span>
+
+      <button id="logout-btn" class="btn btn-ghost btn-xs hidden" type="button" aria-label="Sign out">
+        <svg class="h-3.5 w-3.5" aria-hidden="true"><use href="/admin/assets/icons.svg#i-logout"/></svg>
+        <span class="hidden sm:inline">Sign out</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- Login screen -->
+  <section id="login-panel" class="hidden">
+    <div class="min-h-[calc(100vh-54px)] flex items-center justify-center px-6">
+      <div class="w-full max-w-sm text-center">
+        <h1 class="text-2xl font-semibold tracking-tight text-ink">Concrete Console</h1>
+        <button id="login-btn" type="button" class="btn btn-primary mt-6 w-full justify-center px-5 py-2.5 text-base">
+          <svg class="h-4 w-4" aria-hidden="true"><use href="/admin/assets/icons.svg#i-google"/></svg>
+          Sign in with Google
+        </button>
+        <div id="login-status" class="mt-4 text-xs text-mute"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- App shell -->
+  <div id="app-shell" class="hidden">
+    <div class="grid grid-cols-1 md:grid-cols-[220px_1fr] min-h-[calc(100vh-54px)]">
+      <aside class="border-r border-line bg-surface md:py-4 md:px-3">
+        <nav id="tab-nav" class="flex flex-row gap-1 overflow-x-auto p-2 md:flex-col md:gap-0.5 md:p-0"></nav>
+
+        <div class="hidden md:block mt-6 px-3">
+          <button id="kbd-help-btn" type="button" class="flex items-center gap-2 text-2xs text-mute hover:text-ink">
+            <kbd>?</kbd> Keyboard shortcuts
+          </button>
+        </div>
+      </aside>
+
+      <main class="overflow-auto" data-active-panel>
+        <div class="p-5 md:p-7 max-w-[1400px] mx-auto">
+          <section id="panel-overview" class="panel"></section>
+          <section id="panel-cvms" class="panel"></section>
+          <section id="panel-profiles" class="panel"></section>
+          <section id="panel-users" class="panel"></section>
+          <section id="panel-security" class="panel"></section>
+          <section id="panel-traffic" class="panel"></section>
+          <section id="panel-audit" class="panel"></section>
+          <section id="panel-operations" class="panel"></section>
+          <section id="panel-platform" class="panel"></section>
+          <section id="panel-entities" class="panel"></section>
+          <section id="panel-system" class="panel"></section>
+          <section id="panel-logs" class="panel"></section>
+        </div>
+      </main>
+    </div>
+  </div>
+
+  <!-- Drawers -->
+  <aside id="cvm-drawer" class="drawer hidden" aria-hidden="true">
+    <div class="drawer-backdrop" data-close-drawer></div>
+    <div class="drawer-panel">
+      <header class="drawer-header">
+        <button type="button" class="btn btn-ghost btn-xs" data-close-drawer aria-label="Close">
+          <svg class="h-4 w-4" aria-hidden="true"><use href="/admin/assets/icons.svg#i-x"/></svg>
+        </button>
+        <div id="drawer-title" class="drawer-title"></div>
+      </header>
+      <div id="drawer-body" class="drawer-body"></div>
+    </div>
+  </aside>
+
+  <aside id="sc-drawer" class="drawer hidden" aria-hidden="true">
+    <div class="drawer-backdrop" data-close-drawer></div>
+    <div class="drawer-panel">
+      <header class="drawer-header">
+        <button type="button" class="btn btn-ghost btn-xs" data-close-drawer aria-label="Close">
+          <svg class="h-4 w-4" aria-hidden="true"><use href="/admin/assets/icons.svg#i-x"/></svg>
+        </button>
+        <div id="sc-drawer-title" class="drawer-title"></div>
+      </header>
+      <div id="sc-drawer-body" class="drawer-body"></div>
+    </div>
+  </aside>
+
+  <aside id="entity-drawer" class="drawer hidden" aria-hidden="true">
+    <div class="drawer-backdrop" data-close-drawer></div>
+    <div class="drawer-panel">
+      <header class="drawer-header">
+        <button type="button" class="btn btn-ghost btn-xs" data-close-drawer aria-label="Close">
+          <svg class="h-4 w-4" aria-hidden="true"><use href="/admin/assets/icons.svg#i-x"/></svg>
+        </button>
+        <div id="entity-drawer-title" class="drawer-title"></div>
+      </header>
+      <div id="entity-drawer-body" class="drawer-body"></div>
+    </div>
+  </aside>
+
+  <!-- Inline SVG sprite for icons not loadable via use href in older browsers; redundant safe -->
+
+  <script src="/admin/assets/core.js"></script>
+  <script src="/admin/assets/ui.js"></script>
+  <script src="/admin/assets/shortcuts.js"></script>
+  <script src="/admin/assets/api.js"></script>
+  <script src="/admin/assets/ops.js"></script>
+  <script src="/admin/assets/drawer.js"></script>
+  <script src="/admin/assets/launch.js"></script>
+  <script src="/admin/assets/views/overview.js"></script>
+  <script src="/admin/assets/views/cvms.js"></script>
+  <script src="/admin/assets/views/profiles.js"></script>
+  <script src="/admin/assets/views/users.js"></script>
+  <script src="/admin/assets/views/security.js"></script>
+  <script src="/admin/assets/views/traffic.js"></script>
+  <script src="/admin/assets/views/audit.js"></script>
+  <script src="/admin/assets/views/platform.js"></script>
+  <script src="/admin/assets/views/quotas.js"></script>
+  <script src="/admin/assets/views/entities.js"></script>
+  <script src="/admin/assets/views/system.js"></script>
+  <script src="/admin/assets/views/operations.js"></script>
+  <script src="/admin/assets/app.js"></script>
+</body>
+</html>
