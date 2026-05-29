@@ -177,19 +177,6 @@ def build_dev_cvm_attestation_request(snapshot: Any) -> dict[str, Any]:
     }
 
 
-def _security_cvm_attestation_policy_extras(shade_policy: dict[str, Any] | None) -> dict[str, Any]:
-    if not isinstance(shade_policy, dict):
-        return {}
-    extras: dict[str, Any] = {}
-    expected_bootchain = shade_policy.get("expected_bootchain")
-    if isinstance(expected_bootchain, dict) and expected_bootchain:
-        extras["expected_bootchain"] = expected_bootchain
-    os_image_hash = shade_policy.get("os_image_hash")
-    if isinstance(os_image_hash, str) and os_image_hash:
-        extras["os_image_hash"] = os_image_hash
-    return extras
-
-
 def build_security_cvm_attestation_request(
     snapshot: Any,
     *,
@@ -212,11 +199,14 @@ def build_security_cvm_attestation_request(
     metadata = json_payload(_row_value_optional(snapshot, "metadata") or {})
     if not isinstance(metadata, dict):
         metadata = {}
-    policy_source = shade_policy
-    if policy_source is None:
-        stored = metadata.get("atls_policy")
-        if isinstance(stored, dict):
-            policy_source = stored
+    # NOTE: `shade_policy` is accepted for call-site compatibility but intentionally
+    # NOT folded into the verification policy. Injecting the shade-derived
+    # `os_image_hash` / `expected_bootchain` here (added in 8bf96c0) changed the
+    # app-compose.json the atlas verifier reconstructs, producing a spurious
+    # ATTESTATION_IMAGE_MISMATCH (app_compose_hash_mismatch) against the measured
+    # SC quote. The SC verified cleanly with the bare policy below through 2026-05-28.
+    # Re-introducing those assertions requires the measured app-compose to include
+    # the same fields; see docs/specs/security-cvm.md.
     policy: dict[str, Any] = {
         "type": "dstack_tdx",
         "expected_image_measurement": _row_value(snapshot, "expected_image_measurement"),
@@ -228,7 +218,6 @@ def build_security_cvm_attestation_request(
             "ingest_token_sha256": ingest_hash.lower(),
             "ca_export_token_sha256": ca_export_hash.lower(),
         },
-        **_security_cvm_attestation_policy_extras(policy_source),
     }
     return {
         "kind": "security_cvm",

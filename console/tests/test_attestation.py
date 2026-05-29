@@ -147,7 +147,12 @@ def test_build_security_cvm_attestation_request_uses_token_hashes() -> None:
     }
 
 
-def test_build_security_cvm_attestation_request_includes_os_image_hash() -> None:
+def test_build_security_cvm_attestation_request_ignores_shade_policy_extras() -> None:
+    # Regression guard: folding the shade-derived os_image_hash / expected_bootchain
+    # into the SC verification policy (added in 8bf96c0) changed the app-compose.json
+    # the atlas verifier reconstructs and produced a spurious app_compose_hash_mismatch
+    # against the measured SC quote. The kwarg is accepted for call-site compatibility
+    # but MUST NOT appear in the policy.
     request = build_security_cvm_attestation_request(
         {
             "id": UUID("00000000-0000-4000-8000-000000000041"),
@@ -165,8 +170,9 @@ def test_build_security_cvm_attestation_request_includes_os_image_hash() -> None
         },
     )
 
-    assert request["policy"]["os_image_hash"] == "d" * 64
-    assert request["policy"]["expected_bootchain"] == {"mrtd": "e" * 96}
+    assert "os_image_hash" not in request["policy"]
+    assert "expected_bootchain" not in request["policy"]
+    assert request["policy"]["app_compose"] == {"docker_compose_file": "services: {}\n"}
 
 
 def test_atlas_verifier_client_uses_stdin_stdout_contract(tmp_path) -> None:
