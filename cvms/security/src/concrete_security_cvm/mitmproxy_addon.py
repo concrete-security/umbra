@@ -202,7 +202,21 @@ class SecurityCVMProxyAddon:
 
     def _reject(self, flow: Any, result: EnforcementResult) -> None:
         if result.reason == "proxy_auth_unknown":
-            logger.info("proxy_auth_unknown", extra={"cvm_id": None})
+            logger.info(
+                "proxy_auth_unknown",
+                extra={
+                    "cvm_id": None,
+                    "proxy_token_hash_prefix": result.proxy_token_hash_prefix,
+                },
+            )
+        elif result.reason == "policy_secret_injection_conflict":
+            logger.info(
+                "policy_secret_injection_conflict",
+                extra={
+                    "cvm_id": str(result.cvm.cvm_id) if result.cvm is not None else None,
+                    "policy_version": result.cvm.policy_version if result.cvm is not None else None,
+                },
+            )
         if result.traffic_log is not None:
             self.traffic_emitter.enqueue(result.traffic_log)
         flow.response = self.response_factory(

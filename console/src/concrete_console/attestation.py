@@ -177,11 +177,25 @@ def build_dev_cvm_attestation_request(snapshot: Any) -> dict[str, Any]:
     }
 
 
+def _security_cvm_attestation_policy_extras(shade_policy: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(shade_policy, dict):
+        return {}
+    extras: dict[str, Any] = {}
+    expected_bootchain = shade_policy.get("expected_bootchain")
+    if isinstance(expected_bootchain, dict) and expected_bootchain:
+        extras["expected_bootchain"] = expected_bootchain
+    os_image_hash = shade_policy.get("os_image_hash")
+    if isinstance(os_image_hash, str) and os_image_hash:
+        extras["os_image_hash"] = os_image_hash
+    return extras
+
+
 def build_security_cvm_attestation_request(
     snapshot: Any,
     *,
     token_hashes: dict[str, str],
     console_url: str,
+    shade_policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     ingest_hash = token_hashes.get("INGEST")
     ca_export_hash = token_hashes.get("CA_EXPORT")
@@ -195,22 +209,32 @@ def build_security_cvm_attestation_request(
             "ATTESTATION_QUOTE_INVALID",
             {"reason": "security_cvm_token_hash_missing", "purpose": "CA_EXPORT"},
         )
+    metadata = json_payload(_row_value_optional(snapshot, "metadata") or {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+    policy_source = shade_policy
+    if policy_source is None:
+        stored = metadata.get("atls_policy")
+        if isinstance(stored, dict):
+            policy_source = stored
+    policy: dict[str, Any] = {
+        "type": "dstack_tdx",
+        "expected_image_measurement": _row_value(snapshot, "expected_image_measurement"),
+        "app_compose": {"docker_compose_file": _row_value(snapshot, "compose_config")},
+        "rtmr3_binding": {
+            "CONSOLE_URL": console_url,
+            "entity_id": str(_row_value(snapshot, "entity_id")),
+            "sc_id": str(_row_value(snapshot, "id")),
+            "ingest_token_sha256": ingest_hash.lower(),
+            "ca_export_token_sha256": ca_export_hash.lower(),
+        },
+        **_security_cvm_attestation_policy_extras(policy_source),
+    }
     return {
         "kind": "security_cvm",
         "fqdn": _row_value(snapshot, "fqdn"),
-        **attestation_connect_host_payload(json_payload(_row_value_optional(snapshot, "metadata") or {})),
-        "policy": {
-            "type": "dstack_tdx",
-            "expected_image_measurement": _row_value(snapshot, "expected_image_measurement"),
-            "app_compose": {"docker_compose_file": _row_value(snapshot, "compose_config")},
-            "rtmr3_binding": {
-                "CONSOLE_URL": console_url,
-                "entity_id": str(_row_value(snapshot, "entity_id")),
-                "sc_id": str(_row_value(snapshot, "id")),
-                "ingest_token_sha256": ingest_hash.lower(),
-                "ca_export_token_sha256": ca_export_hash.lower(),
-            },
-        },
+        **attestation_connect_host_payload(metadata),
+        "policy": policy,
     }
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
 import re
 import time
 from typing import Callable, Mapping
@@ -42,6 +43,11 @@ class EnforcementResult:
     upstream_headers: dict[str, str]
     traffic_log: TrafficLogRecord | None
     matched_policy_id: str | None = None
+    proxy_token_hash_prefix: str | None = None
+
+
+def proxy_token_hash_prefix(token: str, *, prefix_chars: int = 8) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()[:prefix_chars]
 
 
 @dataclass(frozen=True)
@@ -79,6 +85,7 @@ def enforce_request(
             cvm=None,
             upstream_headers={},
             traffic_log=None,
+            proxy_token_hash_prefix=proxy_token_hash_prefix(token),
         )
 
     return enforce_authenticated_request(
@@ -169,6 +176,7 @@ def enforce_connect_request(request: ProxyRequest, control_map: ControlMap) -> E
             cvm=None,
             upstream_headers={},
             traffic_log=None,
+            proxy_token_hash_prefix=proxy_token_hash_prefix(token),
         )
 
     upstream_headers = strip_proxy_authorization(headers)

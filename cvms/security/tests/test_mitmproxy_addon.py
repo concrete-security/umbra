@@ -303,8 +303,11 @@ def test_blocked_connect_sets_403_and_emits_sanitized_traffic_log() -> None:
 def test_unknown_proxy_bearer_returns_407_without_logging_token(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    import hashlib
+
     proxy_addon, queue = addon()
     flow = FakeFlow(FakeRequest(headers={"Proxy-Authorization": "Bearer wrong-token"}))
+    expected_prefix = hashlib.sha256(b"wrong-token").hexdigest()[:8]
 
     with caplog.at_level(logging.INFO, logger="concrete_security_cvm.mitmproxy_addon"):
         proxy_addon.request(flow)
@@ -315,6 +318,11 @@ def test_unknown_proxy_bearer_returns_407_without_logging_token(
     assert "X-Concrete-Blocked" not in flow.response.headers
     assert len(queue) == 0
     assert "wrong-token" not in caplog.text
+    assert any(
+        getattr(record, "proxy_token_hash_prefix", None) == expected_prefix
+        for record in caplog.records
+        if record.name == "concrete_security_cvm.mitmproxy_addon"
+    )
 
 
 def test_malformed_flow_returns_400_without_traffic_log() -> None:

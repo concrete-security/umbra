@@ -774,6 +774,9 @@ def _parse_pointer_field(
         )
         return None
     for segment in segments_raw:
+        if segment == "-":
+            errors.append(PolicyError(field, "invalid_field", "array-append pointer segment '-' is forbidden"))
+            return None
         if not POINTER_SEGMENT_RE.fullmatch(segment):
             errors.append(
                 PolicyError(field, "invalid_field", "field segments must be 1..64 chars from [A-Za-z0-9_.-]")

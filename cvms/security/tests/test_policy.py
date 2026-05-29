@@ -597,6 +597,18 @@ def test_body_assertion_pointer_rejects_special_chars() -> None:
         parse_effective_policy(raw)
 
 
+def test_body_assertion_pointer_rejects_array_append_segment() -> None:
+    raw = sample_policy()
+    raw["allowed_destinations"] = [
+        slack_rule_with_assertions(
+            body_assertions=[{"kind": "json", "field": "/items/-", "allow_values": ["x"]}]
+        )
+    ]
+
+    with pytest.raises(PolicyValidationError):
+        parse_effective_policy(raw)
+
+
 def test_body_assertion_allow_values_must_be_non_empty() -> None:
     raw = sample_policy()
     raw["allowed_destinations"] = [

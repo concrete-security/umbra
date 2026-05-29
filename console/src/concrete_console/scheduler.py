@@ -1091,6 +1091,7 @@ async def run_security_cvm_provision_attestation_verifier(operation_id: Any, sna
         build_security_cvm_attestation_request,
         verify_with_fetch_retries,
     )
+    from concrete_console.shade_provider.shade import ShadeError
 
     try:
         verifier = AtlasVerifierClient.from_settings()
@@ -1100,10 +1101,12 @@ async def run_security_cvm_provision_attestation_verifier(operation_id: Any, sna
     async with pool.acquire() as conn:
         token_hashes = await fetch_security_cvm_token_hashes(conn, _row_value(snapshot, "id"))
     try:
+        shade_policy = await materialize_security_cvm_shade_policy_for_attestation(snapshot)
         request = build_security_cvm_attestation_request(
             snapshot,
             token_hashes=token_hashes,
             console_url=load_settings().raw.get("CONSOLE_URL", "http://localhost:8000"),
+            shade_policy=shade_policy,
         )
         report = await verify_with_fetch_retries(
             verifier,
@@ -1112,6 +1115,15 @@ async def run_security_cvm_provision_attestation_verifier(operation_id: Any, sna
         )
     except AttestationVerifierUnavailable:
         return False
+    except ShadeError as exc:
+        log.warning("shade_adapter_failed", operation_id=str(operation_id), **shade_error_log_fields(exc))
+        await compensate_security_cvm_provision_resources(snapshot)
+        await mark_security_cvm_provision_failed(
+            operation_id,
+            code="SHADE_BUILD_FAILED",
+            details={"adapter": "shade", "reason": exc.code},
+        )
+        return True
     except AttestationVerifierError as exc:
         await compensate_security_cvm_provision_resources(snapshot)
         await mark_security_cvm_provision_failed(operation_id, code=exc.code, details=exc.details)
@@ -1126,27 +1138,6 @@ async def run_security_cvm_provision_attestation_verifier(operation_id: Any, sna
                 "expected_image_measurement": _row_value(snapshot, "expected_image_measurement"),
                 "reported_image_measurement": report.image_measurement,
             },
-        )
-        return True
-
-    from concrete_console.shade_provider.shade import ShadeClient, ShadeError
-
-    try:
-        deploy_compose_yaml = deployed_compose_from_metadata(_row_value(snapshot, "metadata"))
-        if deploy_compose_yaml is None:
-            raise ShadeError("missing_deploy_compose", field="metadata.deploy_compose_yaml")
-        policy_result = await ShadeClient.from_settings().generate_policy(
-            domain=_row_value(snapshot, "fqdn"),
-            deploy_compose_yaml=deploy_compose_yaml,
-            connect_host=provider_passthrough_host(_row_value(snapshot, "metadata")),
-        )
-    except ShadeError as exc:
-        log.warning("shade_adapter_failed", operation_id=str(operation_id), **shade_error_log_fields(exc))
-        await compensate_security_cvm_provision_resources(snapshot)
-        await mark_security_cvm_provision_failed(
-            operation_id,
-            code="SHADE_BUILD_FAILED",
-            details={"adapter": "shade", "reason": exc.code},
         )
         return True
 
@@ -1169,7 +1160,7 @@ async def run_security_cvm_provision_attestation_verifier(operation_id: Any, sna
                 report.image_measurement,
                 report.rtmr3_digest,
                 verified_at,
-                json.dumps(metadata_with_atls_policy(_row_value(snapshot, "metadata"), policy_result.policy)),
+                json.dumps(metadata_with_atls_policy(_row_value(snapshot, "metadata"), shade_policy)),
             )
             await insert_audit_event(
                 conn,
@@ -1488,6 +1479,7 @@ async def run_security_cvm_update_attestation_verifier(operation_id: Any, snapsh
         build_security_cvm_attestation_request,
         verify_with_fetch_retries,
     )
+    from concrete_console.shade_provider.shade import ShadeError
 
     try:
         verifier = AtlasVerifierClient.from_settings()
@@ -1497,10 +1489,12 @@ async def run_security_cvm_update_attestation_verifier(operation_id: Any, snapsh
     async with pool.acquire() as conn:
         token_hashes = await fetch_security_cvm_token_hashes(conn, _row_value(snapshot, "id"))
     try:
+        shade_policy = await materialize_security_cvm_shade_policy_for_attestation(snapshot)
         request = build_security_cvm_attestation_request(
             snapshot,
             token_hashes=token_hashes,
             console_url=load_settings().raw.get("CONSOLE_URL", "http://localhost:8000"),
+            shade_policy=shade_policy,
         )
         report = await verify_with_fetch_retries(
             verifier,
@@ -1509,6 +1503,14 @@ async def run_security_cvm_update_attestation_verifier(operation_id: Any, snapsh
         )
     except AttestationVerifierUnavailable:
         return False
+    except ShadeError as exc:
+        log.warning("shade_adapter_failed", operation_id=str(operation_id), **shade_error_log_fields(exc))
+        await mark_security_cvm_update_failed(
+            operation_id,
+            code="SHADE_BUILD_FAILED",
+            details={"adapter": "shade", "reason": exc.code},
+        )
+        return True
     except AttestationVerifierError as exc:
         await mark_security_cvm_update_failed(operation_id, code=exc.code, details=exc.details, mark_security_cvm_failed=True)
         return True
@@ -1522,26 +1524,6 @@ async def run_security_cvm_update_attestation_verifier(operation_id: Any, snapsh
                 "reported_image_measurement": report.image_measurement,
             },
             mark_security_cvm_failed=True,
-        )
-        return True
-
-    from concrete_console.shade_provider.shade import ShadeClient, ShadeError
-
-    try:
-        deploy_compose_yaml = deployed_compose_from_metadata(_row_value(snapshot, "metadata"))
-        if deploy_compose_yaml is None:
-            raise ShadeError("missing_deploy_compose", field="metadata.deploy_compose_yaml")
-        policy_result = await ShadeClient.from_settings().generate_policy(
-            domain=_row_value(snapshot, "fqdn"),
-            deploy_compose_yaml=deploy_compose_yaml,
-            connect_host=provider_passthrough_host(_row_value(snapshot, "metadata")),
-        )
-    except ShadeError as exc:
-        log.warning("shade_adapter_failed", operation_id=str(operation_id), **shade_error_log_fields(exc))
-        await mark_security_cvm_update_failed(
-            operation_id,
-            code="SHADE_BUILD_FAILED",
-            details={"adapter": "shade", "reason": exc.code},
         )
         return True
 
@@ -1564,7 +1546,7 @@ async def run_security_cvm_update_attestation_verifier(operation_id: Any, snapsh
                 report.image_measurement,
                 report.rtmr3_digest,
                 verified_at,
-                json.dumps(metadata_with_atls_policy(_row_value(snapshot, "metadata"), policy_result.policy)),
+                json.dumps(metadata_with_atls_policy(_row_value(snapshot, "metadata"), shade_policy)),
             )
             await insert_audit_event(
                 conn,
@@ -3636,6 +3618,28 @@ def deployed_compose_from_metadata(metadata: Any) -> str | None:
     return None
 
 
+async def materialize_security_cvm_shade_policy_for_attestation(snapshot: Any) -> dict[str, Any]:
+    from concrete_console.shade_provider.shade import ShadeClient, ShadeError
+
+    metadata = json_payload(_row_value(snapshot, "metadata") or {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+    atls_policy = metadata.get("atls_policy")
+    if isinstance(atls_policy, dict) and isinstance(atls_policy.get("os_image_hash"), str) and atls_policy["os_image_hash"]:
+        return dict(atls_policy)
+    deploy_compose_yaml = deployed_compose_from_metadata(metadata)
+    if deploy_compose_yaml is None:
+        raise ShadeError("missing_deploy_compose", field="metadata.deploy_compose_yaml")
+    policy_result = await generate_policy_with_connect_retries(
+        ShadeClient.from_settings(),
+        domain=_row_value(snapshot, "fqdn"),
+        deploy_compose_yaml=deploy_compose_yaml,
+        connect_host=provider_passthrough_host(metadata),
+        timeout_seconds=security_cvm_attestation_timeout_seconds(),
+    )
+    return dict(policy_result.policy)
+
+
 def build_cvm_policy_bundle(
     snapshot: Any,
     *,
@@ -5520,7 +5524,8 @@ async def reconcile_security_cvm_attestations(conn: Any) -> list[str]:
                 sc.image_measurement,
                 sc.rtmr3_digest,
                 sc.attestation_verified_at,
-                sc.error_reason
+                sc.error_reason,
+                sc.metadata
             FROM security_cvms sc
             WHERE sc.state = 'RUNNING'
               AND sc.deleted_at IS NULL

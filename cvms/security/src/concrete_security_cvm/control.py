@@ -3,11 +3,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 import hashlib
+import logging
 from types import MappingProxyType
 from typing import Any
 from uuid import UUID
 
 import httpx
+
+
+log = logging.getLogger(__name__)
 
 from concrete_security_cvm.policy import EffectivePolicy, PolicyValidationError, parse_effective_policy, valid_proxy_token_hash
 
@@ -119,6 +123,10 @@ def _parse_entry(raw: Any, index: int, errors: list[str]) -> DevCVMControlEntry 
         policy = EffectivePolicy.deny_all()
         policy_error = str(exc)
         errors.append(f"{field}.merged_policy: {policy_error}")
+        log.error(
+            "merged_policy_invalid",
+            extra={"cvm_id": str(cvm_id), "policy_error": policy_error},
+        )
     return DevCVMControlEntry(
         cvm_id=cvm_id,
         fqdn=fqdn,

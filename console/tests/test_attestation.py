@@ -147,6 +147,28 @@ def test_build_security_cvm_attestation_request_uses_token_hashes() -> None:
     }
 
 
+def test_build_security_cvm_attestation_request_includes_os_image_hash() -> None:
+    request = build_security_cvm_attestation_request(
+        {
+            "id": UUID("00000000-0000-4000-8000-000000000041"),
+            "entity_id": UUID("00000000-0000-4000-8000-000000000001"),
+            "fqdn": "sc.example.com",
+            "expected_image_measurement": "a" * 96,
+            "compose_config": "services: {}\n",
+            "metadata": {"provider": "phala"},
+        },
+        token_hashes={"INGEST": "B" * 64, "CA_EXPORT": "C" * 64},
+        console_url="https://console.example.com",
+        shade_policy={
+            "os_image_hash": "d" * 64,
+            "expected_bootchain": {"mrtd": "e" * 96},
+        },
+    )
+
+    assert request["policy"]["os_image_hash"] == "d" * 64
+    assert request["policy"]["expected_bootchain"] == {"mrtd": "e" * 96}
+
+
 def test_atlas_verifier_client_uses_stdin_stdout_contract(tmp_path) -> None:
     verifier = tmp_path / "verifier.py"
     verifier.write_text(
