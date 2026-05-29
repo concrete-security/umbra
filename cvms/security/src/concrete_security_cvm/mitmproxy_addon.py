@@ -23,6 +23,10 @@ from concrete_security_cvm.traffic import TrafficLogEmitter, TrafficLogRecord
 logger = logging.getLogger(__name__)
 CONNECT_IDENTITY_TTL_SECONDS = 3600
 MAX_CONNECT_IDENTITIES = 4096
+# mitmproxy retains every frame in `flow.websocket.messages` for the flow's lifetime, and the
+# addon only ever needs the latest inbound frame (`messages[-1]`). Cap retention so a long-lived
+# inbound WebSocket channel cannot grow RSS without bound and OOM the SC (tdx.small, no swap).
+WS_MESSAGE_RETENTION = 8
 
 
 ResponseFactory = Callable[[int, bytes, Mapping[str, str]], Any]
@@ -98,6 +102,9 @@ class SecurityCVMProxyAddon:
         self._reject(flow, result)
 
     def websocket_message(self, flow: Any) -> None:
+        # Bound retained frames first, on every call regardless of verdict, so passed/dropped/
+        # injected frames cannot accumulate over the life of a long-lived WebSocket channel.
+        _trim_websocket_messages(flow)
         message = _latest_websocket_message(flow)
         if message is None:
             return
@@ -417,6 +424,16 @@ def _latest_websocket_message(flow: Any) -> Any:
     if not messages:
         return None
     return messages[-1]
+
+
+def _trim_websocket_messages(flow: Any) -> None:
+    websocket = getattr(flow, "websocket", None)
+    messages = getattr(websocket, "messages", None)
+    if messages is None:
+        return
+    excess = len(messages) - WS_MESSAGE_RETENTION
+    if excess > 0:
+        del messages[:excess]
 
 
 def _metadata(flow: Any) -> dict[str, Any]:
