@@ -59,6 +59,36 @@ def test_rate_limit_returns_retry_after(monkeypatch) -> None:
         app_module.clear_rate_limit_state()
 
 
+def test_anonymous_ip_limit_is_independent_of_authenticated_traffic(monkeypatch) -> None:
+    app_module.clear_rate_limit_state()
+    monkeypatch.setattr(app_module, "ANONYMOUS_IP_RPM", 2)
+    monkeypatch.setattr(app_module, "AUTHENTICATED_IP_RPM", 100)
+    authed = SimpleNamespace(
+        client=SimpleNamespace(host="203.0.113.10"),
+        headers={"authorization": "Bearer authed-token"},
+        method="GET",
+        url=SimpleNamespace(path="/api/v1/me"),
+    )
+    anon = SimpleNamespace(
+        client=SimpleNamespace(host="203.0.113.10"),
+        headers={},
+        method="POST",
+        url=SimpleNamespace(path="/api/v1/auth/token"),
+    )
+
+    try:
+        for idx in range(50):
+            assert asyncio.run(app_module.request_guard_response(authed, f"authed-{idx}")) is None
+        assert asyncio.run(app_module.request_guard_response(anon, "anon-1")) is None
+        assert asyncio.run(app_module.request_guard_response(anon, "anon-2")) is None
+        response = asyncio.run(app_module.request_guard_response(anon, "anon-3"))
+
+        assert response.status_code == 429
+        assert json.loads(response.body)["error"]["details"]["limit"] == "ip"
+    finally:
+        app_module.clear_rate_limit_state()
+
+
 def test_route_ip_rate_limit_applies_auth_route_budget(monkeypatch) -> None:
     app_module.clear_rate_limit_state()
     monkeypatch.setattr(app_module, "AUTH_DEVICE_IP_RPM", 1)

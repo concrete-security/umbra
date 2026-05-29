@@ -393,8 +393,13 @@ def rate_limit_dimensions(request: Request) -> list[tuple[RateLimitKey, int, str
     ip_key = resolved_client_ip(request)
     credential = credential_fingerprint(request)
     route_key = f"{request.method} {request.url.path}"
+    ip_scope = "auth" if credential else "anon"
     dimensions: list[tuple[RateLimitKey, int, str]] = [
-        (("ip", ip_key), AUTHENTICATED_IP_RPM if credential else ANONYMOUS_IP_RPM, "ip"),
+        (
+            ("ip", f"{ip_scope}:{ip_key}"),
+            AUTHENTICATED_IP_RPM if credential else ANONYMOUS_IP_RPM,
+            "ip",
+        ),
     ]
     route_ip_budget_value = route_ip_budget(request.method, request.url.path)
     if route_ip_budget_value is not None:
