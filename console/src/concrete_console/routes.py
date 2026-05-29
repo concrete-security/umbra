@@ -88,14 +88,19 @@ POLICY_DESTINATION_FIELDS = {
     "methods",
     "path_prefixes",
     "body_assertions",
+    "websocket_assertions",
     "traffic_log_attributes",
 }
-POLICY_DESTINATION_EXTENSION_FIELDS = {"body_assertions", "traffic_log_attributes"}
+POLICY_DESTINATION_EXTENSION_FIELDS = {"body_assertions", "websocket_assertions", "traffic_log_attributes"}
 POLICY_DESTINATION_MATCH_FIELDS = {"scheme", "host", "ports", "methods", "path_prefixes"}
 POLICY_SECRET_PATTERN_FIELDS = {"id", "name", "pattern", "scan_headers", "scan_body"}
 POLICY_SECRET_INJECTION_FIELDS = {"id", "match", "type", "header", "value", "value_template"}
 POLICY_BODY_ASSERTION_KINDS = {"form", "json"}
 POLICY_BODY_ASSERTION_FIELDS = {"kind", "field", "allow_values"}
+POLICY_WEBSOCKET_ASSERTION_FIELDS = {"direction", "when", "require", "on_violation", "on_drop_emit"}
+POLICY_WEBSOCKET_DIRECTIONS = {"inbound"}
+POLICY_WEBSOCKET_ON_VIOLATIONS = {"drop"}
+POLICY_EMIT_TEMPLATE_RE = re.compile(r"^\{(/[^{}]*)\}$")
 POLICY_TRAFFIC_LOG_ATTR_FIELDS = {"name", "kind", "field"}
 POLICY_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,100}$")
 POLICY_DNS_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
@@ -117,6 +122,10 @@ POLICY_HOP_BY_HOP_HEADERS = {
     "upgrade",
 }
 POLICY_MAX_BODY_ASSERTIONS_PER_RULE = 16
+POLICY_MAX_WEBSOCKET_ASSERTIONS_PER_RULE = 16
+POLICY_MAX_WEBSOCKET_WHEN_PREDICATES = 8
+POLICY_MAX_WEBSOCKET_REQUIRE_PREDICATES = 8
+POLICY_MAX_WEBSOCKET_EMIT_FIELDS = 8
 POLICY_MAX_TRAFFIC_LOG_ATTRIBUTES_PER_RULE = 4
 POLICY_MAX_POINTER_SEGMENTS_JSON = 4
 POLICY_MAX_ALLOW_VALUES = 256
@@ -626,13 +635,18 @@ def _validate_destination_rule(
     _validate_methods(rule.get("methods"), f"{field}.methods", errors)
     _validate_path_prefixes(rule.get("path_prefixes"), f"{field}.path_prefixes", errors)
     if not allow_extensions:
-        for forbidden in ("body_assertions", "traffic_log_attributes"):
+        for forbidden in ("body_assertions", "websocket_assertions", "traffic_log_attributes"):
             if forbidden in rule:
                 errors.append({"field": f"{field}.{forbidden}", "type": "forbidden_field"})
         return
     _validate_body_assertions(
         rule.get("body_assertions"),
         f"{field}.body_assertions",
+        errors,
+    )
+    _validate_websocket_assertions(
+        rule.get("websocket_assertions"),
+        f"{field}.websocket_assertions",
         errors,
     )
     _validate_traffic_log_attributes(
@@ -812,6 +826,83 @@ def _validate_body_assertions(raw: Any, field: str, errors: list[dict[str, Any]]
         if not _validate_pointer(item.get("field"), kind, f"{item_field}.field", errors):
             continue
         _validate_allow_values(item.get("allow_values"), f"{item_field}.allow_values", errors)
+
+
+def _validate_websocket_assertions(raw: Any, field: str, errors: list[dict[str, Any]]) -> None:
+    if raw is None:
+        return
+    if not isinstance(raw, list):
+        errors.append({"field": field, "type": "array_required"})
+        return
+    if len(raw) > POLICY_MAX_WEBSOCKET_ASSERTIONS_PER_RULE:
+        errors.append({"field": field, "type": "too_many", "limit": POLICY_MAX_WEBSOCKET_ASSERTIONS_PER_RULE})
+        return
+    for index, item in enumerate(raw):
+        _validate_websocket_assertion(item, f"{field}.{index}", errors)
+
+
+def _validate_websocket_assertion(item: Any, field: str, errors: list[dict[str, Any]]) -> None:
+    if not isinstance(item, dict):
+        errors.append({"field": field, "type": "object_required"})
+        return
+    for key in sorted(set(item) - POLICY_WEBSOCKET_ASSERTION_FIELDS):
+        errors.append({"field": f"{field}.{key}", "type": "unknown_field"})
+    if item.get("direction") not in POLICY_WEBSOCKET_DIRECTIONS:
+        errors.append({"field": f"{field}.direction", "type": "invalid_direction"})
+    if item.get("on_violation") not in POLICY_WEBSOCKET_ON_VIOLATIONS:
+        errors.append({"field": f"{field}.on_violation", "type": "invalid_on_violation"})
+    _validate_websocket_when(item.get("when"), f"{field}.when", errors)
+    _validate_websocket_require(item.get("require"), f"{field}.require", errors)
+    _validate_websocket_emit(item.get("on_drop_emit"), f"{field}.on_drop_emit", errors)
+
+
+def _validate_websocket_when(raw: Any, field: str, errors: list[dict[str, Any]]) -> None:
+    if not isinstance(raw, dict) or not 1 <= len(raw) <= POLICY_MAX_WEBSOCKET_WHEN_PREDICATES:
+        errors.append({"field": field, "type": "invalid_when"})
+        return
+    for pointer, expected in raw.items():
+        if not _validate_pointer(pointer, "json", f"{field}.{pointer}", errors):
+            continue
+        if not _is_bounded_scalar(expected):
+            errors.append({"field": f"{field}.{pointer}", "type": "invalid_when_value"})
+
+
+def _validate_websocket_require(raw: Any, field: str, errors: list[dict[str, Any]]) -> None:
+    if not isinstance(raw, dict) or not 1 <= len(raw) <= POLICY_MAX_WEBSOCKET_REQUIRE_PREDICATES:
+        errors.append({"field": field, "type": "invalid_require"})
+        return
+    for pointer, matcher in raw.items():
+        if not _validate_pointer(pointer, "json", f"{field}.{pointer}", errors):
+            continue
+        if not isinstance(matcher, dict) or set(matcher) != {"in"}:
+            errors.append({"field": f"{field}.{pointer}", "type": "invalid_matcher"})
+            continue
+        _validate_allow_values(matcher.get("in"), f"{field}.{pointer}.in", errors)
+
+
+def _validate_websocket_emit(raw: Any, field: str, errors: list[dict[str, Any]]) -> None:
+    if raw is None:
+        return
+    if not isinstance(raw, dict) or not 1 <= len(raw) <= POLICY_MAX_WEBSOCKET_EMIT_FIELDS:
+        errors.append({"field": field, "type": "invalid_on_drop_emit"})
+        return
+    for key, template in raw.items():
+        if not isinstance(key, str) or not POLICY_TRAFFIC_LOG_ATTR_NAME_RE.fullmatch(key):
+            errors.append({"field": f"{field}.{key}", "type": "invalid_emit_key"})
+            continue
+        match = POLICY_EMIT_TEMPLATE_RE.fullmatch(template) if isinstance(template, str) else None
+        if match is None:
+            errors.append({"field": f"{field}.{key}", "type": "invalid_emit_template"})
+            continue
+        _validate_pointer(match.group(1), "json", f"{field}.{key}", errors)
+
+
+def _is_bounded_scalar(value: Any) -> bool:
+    if isinstance(value, bool):
+        return True
+    if isinstance(value, str):
+        return 1 <= len(value) <= POLICY_MAX_ALLOW_VALUE_LEN
+    return isinstance(value, (int, float))
 
 
 def _validate_traffic_log_attributes(raw: Any, field: str, errors: list[dict[str, Any]]) -> None:

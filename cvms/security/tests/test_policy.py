@@ -429,6 +429,29 @@ def test_body_assertion_malformed_json_denies() -> None:
     assert decision.allowed is False
 
 
+def test_body_assertion_deeply_nested_json_denies_without_recursion_error() -> None:
+    raw = sample_policy()
+    raw["allowed_destinations"] = [
+        slack_rule_with_assertions(
+            body_assertions=[{"kind": "json", "field": "/channel", "allow_values": ["C0ALLOWED1"]}],
+            traffic_log_attributes=[],
+        )
+    ]
+    policy = parse_effective_policy(raw)
+
+    decision = policy.decide(
+        scheme="https",
+        host="slack.com",
+        port=443,
+        method="POST",
+        path="/api/conversations.history",
+        body=(b"[" * 100_000) + (b"]" * 100_000),
+        headers=JSON_HEADERS,
+    )
+
+    assert decision.allowed is False
+
+
 def test_body_assertion_oversized_body_denies() -> None:
     raw = sample_policy()
     raw["allowed_destinations"] = [slack_rule_with_assertions()]

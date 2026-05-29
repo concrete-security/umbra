@@ -12,6 +12,7 @@ from concrete_security_cvm.control_loop import ControlPlaneState
 from concrete_security_cvm.enforcement import (
     EnforcementResult,
     ProxyRequest,
+    decide_inbound_websocket,
     enforce_authenticated_request,
     enforce_connect_request,
     enforce_request,
@@ -25,6 +26,7 @@ MAX_CONNECT_IDENTITIES = 4096
 
 
 ResponseFactory = Callable[[int, bytes, Mapping[str, str]], Any]
+WebsocketInjector = Callable[[Any, bool, bytes], None]
 
 
 class FlowTranslationError(ValueError):
@@ -42,6 +44,7 @@ class SecurityCVMProxyAddon:
         self.control_state = control_state
         self.traffic_emitter = traffic_emitter
         self.response_factory = response_factory or mitmproxy_response_factory
+        self.websocket_injector: WebsocketInjector = mitmproxy_websocket_injector
         self._connect_identities: dict[str, tuple[str, float]] = {}
 
     def http_connect(self, flow: Any) -> None:
@@ -93,6 +96,40 @@ class SecurityCVMProxyAddon:
                 _metadata(flow)["concrete_traffic_log"] = result.traffic_log
             return
         self._reject(flow, result)
+
+    def websocket_message(self, flow: Any) -> None:
+        message = _latest_websocket_message(flow)
+        if message is None:
+            return
+        # Inbound only (server -> sandbox); a re-entrancy guard skips the ack
+        # frames this hook itself injects.
+        if getattr(message, "from_client", True) or getattr(message, "injected", False):
+            return
+        if not getattr(message, "is_text", False):
+            return
+        content = getattr(message, "content", None)
+        if not isinstance(content, bytes):
+            return
+        control_map = self.control_state.snapshot().control_map
+        cvm = _connect_cvm(flow, control_map, self._connect_identities)
+        if cvm is None:
+            return
+        try:
+            proxy_request = proxy_request_from_flow(flow)
+        except FlowTranslationError:
+            return
+        decision = decide_inbound_websocket(proxy_request, content, cvm)
+        if decision is None or not decision.drop:
+            return
+        message.drop()
+        if decision.traffic_log is not None:
+            self.traffic_emitter.enqueue(decision.traffic_log)
+        if decision.ack_frame is not None:
+            self.websocket_injector(flow, False, decision.ack_frame)
+        logger.info(
+            "websocket_frame_blocked",
+            extra={"cvm_id": str(cvm.cvm_id), "matched_policy_id": decision.matched_policy_id},
+        )
 
     def client_disconnected(self, client_conn: Any) -> None:
         if key := _connection_key_from_connection(client_conn):
@@ -202,6 +239,12 @@ def mitmproxy_response_factory(status_code: int, content: bytes, headers: Mappin
     from mitmproxy import http
 
     return http.Response.make(status_code, content, dict(headers))
+
+
+def mitmproxy_websocket_injector(flow: Any, to_client: bool, message: bytes) -> None:
+    from mitmproxy import ctx
+
+    ctx.master.commands.call("inject.websocket", flow, to_client, message, True)
 
 
 def _blocked_headers(result: EnforcementResult) -> dict[str, str]:
@@ -352,6 +395,14 @@ def _required_str(value: Any, field: str) -> str:
     if not isinstance(value, str) or not value:
         raise FlowTranslationError(f"missing {field}")
     return value
+
+
+def _latest_websocket_message(flow: Any) -> Any:
+    websocket = getattr(flow, "websocket", None)
+    messages = getattr(websocket, "messages", None)
+    if not messages:
+        return None
+    return messages[-1]
 
 
 def _metadata(flow: Any) -> dict[str, Any]:

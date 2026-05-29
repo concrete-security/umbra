@@ -44,6 +44,14 @@ class EnforcementResult:
     matched_policy_id: str | None = None
 
 
+@dataclass(frozen=True)
+class WebsocketFrameDecision:
+    drop: bool
+    ack_frame: bytes | None
+    traffic_log: TrafficLogRecord | None
+    matched_policy_id: str | None = None
+
+
 def enforce_request(
     request: ProxyRequest,
     control_map: ControlMap,
@@ -179,6 +187,29 @@ def enforce_connect_request(request: ProxyRequest, control_map: ControlMap) -> E
         upstream_headers=upstream_headers,
         traffic_log=traffic_log_record(request, cvm, response_code=200),
         matched_policy_id=decision.rule_id,
+    )
+
+
+def decide_inbound_websocket(
+    request: ProxyRequest,
+    content: bytes,
+    cvm: DevCVMControlEntry,
+) -> WebsocketFrameDecision | None:
+    verdict = cvm.merged_policy.decide_inbound_websocket(
+        scheme=request.scheme,
+        host=request.host,
+        port=request.port,
+        content=content,
+    )
+    if verdict is None:
+        return None
+    if not verdict.drop:
+        return WebsocketFrameDecision(drop=False, ack_frame=None, traffic_log=None, matched_policy_id=verdict.rule_id)
+    return WebsocketFrameDecision(
+        drop=True,
+        ack_frame=verdict.ack_frame,
+        traffic_log=traffic_log_record(request, cvm, response_code=None),
+        matched_policy_id=verdict.rule_id,
     )
 
 

@@ -1292,6 +1292,151 @@ def test_validate_profile_policy_rejects_body_assertion_empty_allow_values() -> 
     assert any(error["type"] == "invalid_allow_values" for error in errors)
 
 
+def _ws_assertion(**overrides: object) -> dict[str, object]:
+    entry: dict[str, object] = {
+        "direction": "inbound",
+        "when": {"/type": "events_api"},
+        "require": {"/payload/event/channel": {"in": ["C0ALLOWED"]}},
+        "on_violation": "drop",
+        "on_drop_emit": {"envelope_id": "{/envelope_id}"},
+    }
+    entry.update(overrides)
+    return entry
+
+
+def _ws_rule(**overrides: object) -> dict[str, object]:
+    rule: dict[str, object] = {
+        "id": "slack-socket-mode",
+        "scheme": "https",
+        "host": "wss-primary.slack.com",
+        "ports": [443],
+        "methods": ["GET"],
+        "path_prefixes": ["/"],
+        "websocket_assertions": [_ws_assertion()],
+    }
+    rule.update(overrides)
+    return rule
+
+
+def test_validate_profile_policy_accepts_websocket_assertions() -> None:
+    validate_profile_policy({"allowed_destinations": [_ws_rule()]})
+
+
+def test_validate_profile_policy_rejects_websocket_assertions_on_blocked_destination() -> None:
+    with pytest.raises(HTTPException) as exc:
+        validate_profile_policy({"blocked_destinations": [_ws_rule()]})
+
+    errors = exc.value.detail["error"]["details"]["errors"]
+    assert any(
+        error == {"field": "policy.blocked_destinations.0.websocket_assertions", "type": "forbidden_field"}
+        for error in errors
+    )
+
+
+def test_validate_profile_policy_rejects_websocket_assertions_on_injection_match() -> None:
+    with pytest.raises(HTTPException) as exc:
+        validate_profile_policy(
+            {
+                "secret_injections": [
+                    {
+                        "id": "slack-bearer",
+                        "match": {
+                            "scheme": "https",
+                            "host": "wss-primary.slack.com",
+                            "ports": [443],
+                            "methods": ["GET"],
+                            "path_prefixes": ["/"],
+                            "websocket_assertions": [_ws_assertion()],
+                        },
+                        "type": "request_header",
+                        "header": "authorization",
+                        "value": "xoxb-real",
+                        "value_template": "Bearer ${secret}",
+                    }
+                ]
+            }
+        )
+
+    errors = exc.value.detail["error"]["details"]["errors"]
+    assert any(error["type"] == "forbidden_field" for error in errors)
+
+
+def test_validate_profile_policy_rejects_websocket_outbound_direction() -> None:
+    with pytest.raises(HTTPException) as exc:
+        validate_profile_policy(
+            {"allowed_destinations": [_ws_rule(websocket_assertions=[_ws_assertion(direction="outbound")])]}
+        )
+
+    errors = exc.value.detail["error"]["details"]["errors"]
+    assert any(error["type"] == "invalid_direction" for error in errors)
+
+
+def test_validate_profile_policy_rejects_websocket_invalid_on_violation() -> None:
+    with pytest.raises(HTTPException) as exc:
+        validate_profile_policy(
+            {"allowed_destinations": [_ws_rule(websocket_assertions=[_ws_assertion(on_violation="redact")])]}
+        )
+
+    errors = exc.value.detail["error"]["details"]["errors"]
+    assert any(error["type"] == "invalid_on_violation" for error in errors)
+
+
+def test_validate_profile_policy_rejects_websocket_require_without_in_matcher() -> None:
+    with pytest.raises(HTTPException) as exc:
+        validate_profile_policy(
+            {
+                "allowed_destinations": [
+                    _ws_rule(
+                        websocket_assertions=[
+                            _ws_assertion(require={"/payload/event/channel": {"eq": "C0ALLOWED"}})
+                        ]
+                    )
+                ]
+            }
+        )
+
+    errors = exc.value.detail["error"]["details"]["errors"]
+    assert any(error["type"] == "invalid_matcher" for error in errors)
+
+
+def test_validate_profile_policy_rejects_websocket_require_pointer_too_many_segments() -> None:
+    with pytest.raises(HTTPException) as exc:
+        validate_profile_policy(
+            {
+                "allowed_destinations": [
+                    _ws_rule(websocket_assertions=[_ws_assertion(require={"/a/b/c/d/e": {"in": ["x"]}})])
+                ]
+            }
+        )
+
+    errors = exc.value.detail["error"]["details"]["errors"]
+    assert any(error["type"] == "invalid_field" for error in errors)
+
+
+def test_validate_profile_policy_rejects_websocket_invalid_emit_template() -> None:
+    with pytest.raises(HTTPException) as exc:
+        validate_profile_policy(
+            {
+                "allowed_destinations": [
+                    _ws_rule(websocket_assertions=[_ws_assertion(on_drop_emit={"envelope_id": "literal"})])
+                ]
+            }
+        )
+
+    errors = exc.value.detail["error"]["details"]["errors"]
+    assert any(error["type"] == "invalid_emit_template" for error in errors)
+
+
+def test_validate_profile_policy_rejects_websocket_empty_when() -> None:
+    with pytest.raises(HTTPException) as exc:
+        validate_profile_policy(
+            {"allowed_destinations": [_ws_rule(websocket_assertions=[_ws_assertion(when={})])]}
+        )
+
+    errors = exc.value.detail["error"]["details"]["errors"]
+    assert any(error["type"] == "invalid_when" for error in errors)
+
+
 def test_ensure_no_sandbox_env_conflict_rejects_different_values() -> None:
     with pytest.raises(HTTPException) as exc:
         ensure_no_sandbox_env_conflict(

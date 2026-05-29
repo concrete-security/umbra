@@ -24,16 +24,21 @@ DESTINATION_FIELDS = {
     "methods",
     "path_prefixes",
     "body_assertions",
+    "websocket_assertions",
     "traffic_log_attributes",
 }
-DESTINATION_EXTENSION_FIELDS = {"body_assertions", "traffic_log_attributes"}
+DESTINATION_EXTENSION_FIELDS = {"body_assertions", "websocket_assertions", "traffic_log_attributes"}
 DESTINATION_MATCH_FIELDS = {"scheme", "host", "ports", "methods", "path_prefixes"}
 SECRET_PATTERN_FIELDS = {"id", "name", "pattern", "scan_headers", "scan_body"}
 SECRET_INJECTION_FIELDS = {"id", "match", "type", "header", "value", "value_template"}
 SANDBOX_ENV_FIELDS = {"name", "value"}
 BODY_ASSERTION_FIELDS = {"kind", "field", "allow_values"}
+WEBSOCKET_ASSERTION_FIELDS = {"direction", "when", "require", "on_violation", "on_drop_emit"}
 TRAFFIC_LOG_ATTRIBUTE_FIELDS = {"name", "kind", "field"}
 BODY_ASSERTION_KINDS = {"form", "json"}
+WEBSOCKET_DIRECTIONS = {"inbound"}
+WEBSOCKET_ON_VIOLATIONS = {"drop"}
+EMIT_TEMPLATE_RE = re.compile(r"^\{(/[^{}]*)\}$")
 
 ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,100}$")
 DNS_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
@@ -63,6 +68,10 @@ MAX_BODY_ASSERTION_JSON_DEPTH = 32
 MAX_BODY_ASSERTION_JSON_KEYS = 1024
 MAX_BODY_ASSERTION_JSON_ARRAY = 1024
 MAX_BODY_ASSERTIONS_PER_RULE = 16
+MAX_WEBSOCKET_ASSERTIONS_PER_RULE = 16
+MAX_WEBSOCKET_WHEN_PREDICATES = 8
+MAX_WEBSOCKET_REQUIRE_PREDICATES = 8
+MAX_WEBSOCKET_EMIT_FIELDS = 8
 MAX_TRAFFIC_LOG_ATTRIBUTES_PER_RULE = 4
 MAX_POINTER_SEGMENTS_JSON = 4
 MAX_ALLOW_VALUES = 256
@@ -107,6 +116,46 @@ class BodyAssertion:
 
 
 @dataclass(frozen=True)
+class WebsocketFrameVerdict:
+    drop: bool
+    ack_frame: bytes | None = None
+    rule_id: str | None = None
+
+
+@dataclass(frozen=True)
+class WebsocketAssertion:
+    direction: str
+    when: tuple[tuple[tuple[str, ...], str], ...]
+    require: tuple[tuple[tuple[str, ...], frozenset[str]], ...]
+    emit: tuple[tuple[str, tuple[str, ...]], ...] | None
+
+    def selects(self, frame: Any) -> bool:
+        for pointer, expected in self.when:
+            value = _walk_json_pointer(frame, pointer)
+            if value is _MISSING or _scalar_to_str(value) != expected:
+                return False
+        return True
+
+    def requirements_pass(self, frame: Any) -> bool:
+        for pointer, allow_values in self.require:
+            value = _walk_json_pointer(frame, pointer)
+            if value is _MISSING or _scalar_to_str(value) not in allow_values:
+                return False
+        return True
+
+    def render_emit(self, frame: Any) -> bytes | None:
+        if self.emit is None:
+            return None
+        rendered: dict[str, str] = {}
+        for key, pointer in self.emit:
+            value = _walk_json_pointer(frame, pointer)
+            if value is _MISSING:
+                return None
+            rendered[key] = _scalar_to_str(value)
+        return json.dumps(rendered, separators=(",", ":")).encode("utf-8")
+
+
+@dataclass(frozen=True)
 class TrafficLogAttribute:
     name: str
     kind: str
@@ -128,6 +177,7 @@ class DestinationRule:
     methods: tuple[str, ...]
     path_prefixes: tuple[str, ...]
     body_assertions: tuple[BodyAssertion, ...] = ()
+    websocket_assertions: tuple[WebsocketAssertion, ...] = ()
     traffic_log_attributes: tuple[TrafficLogAttribute, ...] = ()
 
     def matches(self, *, scheme: str, host: str, port: int, method: str, path: str) -> bool:
@@ -150,6 +200,9 @@ class DestinationRule:
 
     def body_assertions_pass(self, body: bytes, headers: Mapping[str, str]) -> bool:
         return all(assertion.evaluate(body, headers) for assertion in self.body_assertions)
+
+    def selecting_websocket_assertions(self, frame: Any) -> list[WebsocketAssertion]:
+        return [assertion for assertion in self.websocket_assertions if assertion.selects(frame)]
 
     def extract_traffic_log_attributes(self, body: bytes, headers: Mapping[str, str]) -> dict[str, str]:
         attributes: dict[str, str] = {}
@@ -256,6 +309,40 @@ class EffectivePolicy:
             if rule.matches_tunnel(**request):
                 return PolicyDecision(True, "allowed_destination", rule.rule_id, matched_rule=rule)
         return PolicyDecision(False, "destination_not_allowed")
+
+    def decide_inbound_websocket(
+        self,
+        *,
+        scheme: str,
+        host: str,
+        port: int,
+        content: bytes,
+    ) -> WebsocketFrameVerdict | None:
+        # A tunnel grant authorizes the CONNECTION; inbound CONTENT is governed
+        # only by `websocket_assertions`. The frame is parsed once and every
+        # selecting assertion across ALL tunnel-matching allow rules is gathered;
+        # a rule that grants the host but carries no assertions contributes
+        # nothing to frame selection (it does NOT "allow all inbound"). Delivery
+        # is the UNION of allows: deliver iff any selecting assertion's `require`
+        # passes. This closes cross-rule fail-open while keeping profiles
+        # additive (adding a profile can only add allowed channels).
+        if not content or len(content) > MAX_BODY_ASSERTION_BYTES:
+            return None
+        frame = _parse_json_body(content)
+        if frame is _MISSING:
+            return None
+        selecting: list[tuple[WebsocketAssertion, str | None]] = []
+        for rule in self.allowed_destinations:
+            if not rule.matches_tunnel(scheme=scheme, host=host, port=port):
+                continue
+            for assertion in rule.selecting_websocket_assertions(frame):
+                selecting.append((assertion, rule.rule_id))
+        if not selecting:
+            return None
+        if any(assertion.requirements_pass(frame) for assertion, _ in selecting):
+            return WebsocketFrameVerdict(drop=False)
+        assertion, rule_id = selecting[0]
+        return WebsocketFrameVerdict(drop=True, ack_frame=assertion.render_emit(frame), rule_id=rule_id)
 
     def render_injection_headers(
         self,
@@ -387,11 +474,17 @@ def _parse_destination_rule(
     methods = _parse_methods(raw.get("methods"), f"{field}.methods", errors)
     path_prefixes = _parse_path_prefixes(raw.get("path_prefixes"), f"{field}.path_prefixes", errors)
     body_assertions: list[BodyAssertion] = []
+    websocket_assertions: list[WebsocketAssertion] = []
     traffic_log_attributes: list[TrafficLogAttribute] = []
     if allow_extensions:
         body_assertions = _parse_body_assertions(
             raw.get("body_assertions", []),
             f"{field}.body_assertions",
+            errors,
+        )
+        websocket_assertions = _parse_websocket_assertions(
+            raw.get("websocket_assertions", []),
+            f"{field}.websocket_assertions",
             errors,
         )
         traffic_log_attributes = _parse_traffic_log_attributes(
@@ -409,6 +502,7 @@ def _parse_destination_rule(
         methods=tuple(methods),
         path_prefixes=tuple(path_prefixes),
         body_assertions=tuple(body_assertions),
+        websocket_assertions=tuple(websocket_assertions),
         traffic_log_attributes=tuple(traffic_log_attributes),
     )
 
@@ -451,6 +545,156 @@ def _parse_body_assertions(
             continue
         assertions.append(BodyAssertion(kind=kind, field=segments, allow_values=frozenset(allow_values)))
     return assertions
+
+
+def _parse_websocket_assertions(
+    raw: Any,
+    field: str,
+    errors: list[PolicyError],
+) -> list[WebsocketAssertion]:
+    if raw is None or raw == []:
+        return []
+    if not isinstance(raw, list):
+        errors.append(PolicyError(field, "array_required", "websocket_assertions must be an array"))
+        return []
+    if len(raw) > MAX_WEBSOCKET_ASSERTIONS_PER_RULE:
+        errors.append(
+            PolicyError(
+                field,
+                "too_many",
+                f"websocket_assertions must contain at most {MAX_WEBSOCKET_ASSERTIONS_PER_RULE} entries",
+            )
+        )
+        return []
+    assertions: list[WebsocketAssertion] = []
+    for index, item in enumerate(raw):
+        assertion = _parse_websocket_assertion(item, f"{field}.{index}", errors)
+        if assertion is not None:
+            assertions.append(assertion)
+    return assertions
+
+
+def _parse_websocket_assertion(
+    raw: Any,
+    field: str,
+    errors: list[PolicyError],
+) -> WebsocketAssertion | None:
+    if not isinstance(raw, dict):
+        errors.append(PolicyError(field, "object_required", "websocket assertion must be an object"))
+        return None
+    _reject_unknown_fields(raw, WEBSOCKET_ASSERTION_FIELDS, field, errors)
+    direction = raw.get("direction")
+    if direction not in WEBSOCKET_DIRECTIONS:
+        errors.append(PolicyError(f"{field}.direction", "invalid_direction", "direction must be inbound"))
+    on_violation = raw.get("on_violation")
+    if on_violation not in WEBSOCKET_ON_VIOLATIONS:
+        errors.append(PolicyError(f"{field}.on_violation", "invalid_on_violation", "on_violation must be drop"))
+    when = _parse_websocket_when(raw.get("when"), f"{field}.when", errors)
+    require = _parse_websocket_require(raw.get("require"), f"{field}.require", errors)
+    emit = _parse_websocket_emit(raw.get("on_drop_emit"), f"{field}.on_drop_emit", errors)
+    if (
+        direction not in WEBSOCKET_DIRECTIONS
+        or on_violation not in WEBSOCKET_ON_VIOLATIONS
+        or when is None
+        or require is None
+        or emit is False
+    ):
+        return None
+    return WebsocketAssertion(direction=direction, when=when, require=require, emit=emit)
+
+
+def _parse_websocket_when(
+    raw: Any,
+    field: str,
+    errors: list[PolicyError],
+) -> tuple[tuple[tuple[str, ...], str], ...] | None:
+    if not isinstance(raw, dict) or not 1 <= len(raw) <= MAX_WEBSOCKET_WHEN_PREDICATES:
+        errors.append(
+            PolicyError(field, "invalid_when", f"when must be 1..{MAX_WEBSOCKET_WHEN_PREDICATES} pointer predicates")
+        )
+        return None
+    predicates: list[tuple[tuple[str, ...], str]] = []
+    for pointer, expected in raw.items():
+        segments = _parse_pointer_field(pointer, "json", f"{field}.{pointer}", errors)
+        if segments is None:
+            return None
+        if not _is_scalar(expected) or not _valid_scalar_len(expected):
+            errors.append(
+                PolicyError(f"{field}.{pointer}", "invalid_when_value", "when value must be a bounded scalar")
+            )
+            return None
+        predicates.append((segments, _scalar_to_str(expected)))
+    return tuple(predicates)
+
+
+def _parse_websocket_require(
+    raw: Any,
+    field: str,
+    errors: list[PolicyError],
+) -> tuple[tuple[tuple[str, ...], frozenset[str]], ...] | None:
+    if not isinstance(raw, dict) or not 1 <= len(raw) <= MAX_WEBSOCKET_REQUIRE_PREDICATES:
+        errors.append(
+            PolicyError(
+                field, "invalid_require", f"require must be 1..{MAX_WEBSOCKET_REQUIRE_PREDICATES} pointer matchers"
+            )
+        )
+        return None
+    predicates: list[tuple[tuple[str, ...], frozenset[str]]] = []
+    for pointer, matcher in raw.items():
+        segments = _parse_pointer_field(pointer, "json", f"{field}.{pointer}", errors)
+        if segments is None:
+            return None
+        if not isinstance(matcher, dict) or set(matcher) != {"in"}:
+            errors.append(
+                PolicyError(f"{field}.{pointer}", "invalid_matcher", 'matcher must be {"in": [...]}')
+            )
+            return None
+        allow_values = _parse_allow_values(matcher.get("in"), f"{field}.{pointer}.in", errors)
+        if allow_values is None:
+            return None
+        predicates.append((segments, frozenset(allow_values)))
+    return tuple(predicates)
+
+
+def _parse_websocket_emit(
+    raw: Any,
+    field: str,
+    errors: list[PolicyError],
+) -> tuple[tuple[str, tuple[str, ...]], ...] | None | bool:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict) or not 1 <= len(raw) <= MAX_WEBSOCKET_EMIT_FIELDS:
+        errors.append(
+            PolicyError(field, "invalid_on_drop_emit", f"on_drop_emit must be 1..{MAX_WEBSOCKET_EMIT_FIELDS} fields")
+        )
+        return False
+    fields: list[tuple[str, tuple[str, ...]]] = []
+    for key, template in raw.items():
+        if not isinstance(key, str) or not TRAFFIC_LOG_ATTRIBUTE_NAME_RE.fullmatch(key):
+            errors.append(PolicyError(f"{field}.{key}", "invalid_emit_key", "emit key must be 1..32 chars [a-z_]"))
+            return False
+        if not isinstance(template, str) or not (match := EMIT_TEMPLATE_RE.fullmatch(template)):
+            errors.append(
+                PolicyError(f"{field}.{key}", "invalid_emit_template", "emit value must be a single {/pointer}")
+            )
+            return False
+        segments = _parse_pointer_field(match.group(1), "json", f"{field}.{key}", errors)
+        if segments is None:
+            return False
+        fields.append((key, segments))
+    return tuple(fields)
+
+
+def _is_scalar(value: Any) -> bool:
+    if isinstance(value, bool):
+        return True
+    return isinstance(value, (str, int, float))
+
+
+def _valid_scalar_len(value: Any) -> bool:
+    if isinstance(value, str):
+        return 1 <= len(value) <= MAX_ALLOW_VALUE_LEN
+    return True
 
 
 def _parse_traffic_log_attributes(
@@ -835,7 +1079,10 @@ def _parse_json_body(body: bytes) -> Any:
         return _MISSING
     try:
         value = json.loads(decoded)
-    except json.JSONDecodeError:
+    except (ValueError, RecursionError):
+        # json.JSONDecodeError is a ValueError; RecursionError escapes json on
+        # deeply-nested input. Fail closed on any parse failure rather than
+        # letting a sandbox-controlled body crash the WS hook or DLP path.
         return _MISSING
     if not _validate_json_bounds(value, depth=0):
         return _MISSING
