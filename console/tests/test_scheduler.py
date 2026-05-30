@@ -1483,6 +1483,53 @@ def test_execute_cvm_launch_phala_deploy_requires_security_cvm_atls_policy(monke
     }
 
 
+def test_materialize_security_cvm_shade_policy_regenerates_not_stale(monkeypatch) -> None:
+    # Regression for the egress 502: 8bf96c0 short-circuited to the stored metadata.atls_policy
+    # whenever it carried an os_image_hash, freezing the policy at the OLD image after an SC image
+    # update. The Dev forwarder then verified the new-image SC against the stale old-image
+    # app_compose -> app_compose_hash_mismatch -> fail-closed 502 on every egress CONNECT. The
+    # policy MUST be regenerated from the currently-deployed compose, never the stored copy.
+    captured: dict[str, object] = {}
+
+    class FakeShadeClient:
+        @classmethod
+        def from_settings(cls):
+            return cls()
+
+    async def fake_generate(client, *, domain, deploy_compose_yaml, connect_host, timeout_seconds):
+        captured["deploy_compose_yaml"] = deploy_compose_yaml
+        return SimpleNamespace(
+            policy={
+                "type": "dstack_tdx",
+                "app_compose": {"docker_compose_file": deploy_compose_yaml},
+                "os_image_hash": "newhash",
+            }
+        )
+
+    monkeypatch.setattr("concrete_console.shade_provider.shade.ShadeClient", FakeShadeClient)
+    monkeypatch.setattr(scheduler, "generate_policy_with_connect_retries", fake_generate)
+    monkeypatch.setattr(scheduler, "security_cvm_attestation_timeout_seconds", lambda: 30)
+
+    snapshot = {
+        "fqdn": "sc.example.com",
+        "metadata": {
+            # Stale stored policy pinned to the OLD image — must NOT be returned.
+            "atls_policy": {
+                "os_image_hash": "OLDHASH",
+                "app_compose": {"docker_compose_file": "OLD-image-compose"},
+            },
+            "deploy_compose_yaml": "NEW-image-compose",
+        },
+    }
+
+    result = asyncio.run(scheduler.materialize_security_cvm_shade_policy_for_attestation(snapshot))
+
+    # Regenerated from the deployed compose, not the stale stored policy.
+    assert captured["deploy_compose_yaml"] == "NEW-image-compose"
+    assert result["app_compose"]["docker_compose_file"] == "NEW-image-compose"
+    assert result["os_image_hash"] == "newhash"
+
+
 def test_execute_cvm_update_finalise_materializes_current_policy_bundle(monkeypatch) -> None:
     pending_bundle = {
         "compose_template": "services: {}\n",

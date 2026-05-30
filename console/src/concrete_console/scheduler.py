@@ -3624,9 +3624,15 @@ async def materialize_security_cvm_shade_policy_for_attestation(snapshot: Any) -
     metadata = json_payload(_row_value(snapshot, "metadata") or {})
     if not isinstance(metadata, dict):
         metadata = {}
-    atls_policy = metadata.get("atls_policy")
-    if isinstance(atls_policy, dict) and isinstance(atls_policy.get("os_image_hash"), str) and atls_policy["os_image_hash"]:
-        return dict(atls_policy)
+    # Always regenerate the SC aTLS policy from the *currently deployed* compose. A prior
+    # short-circuit (8bf96c0) returned the stored `metadata.atls_policy` whenever it carried an
+    # `os_image_hash`, so the policy was never refreshed after an SC image update: the stored
+    # policy's `app_compose` kept the OLD image digest while the SC actually ran the NEW image.
+    # The Dev egress forwarder verifies the SC against this policy, so it saw an
+    # app_compose_hash_mismatch against the new-image quote and fail-closed every egress CONNECT
+    # with a 502 — even though the Console's own verify (which uses the current compose_config)
+    # passed. Regenerating from `deploy_compose_yaml` keeps the forwarder's policy in lockstep
+    # with the deployed image. See 21f1fbb (the sibling Console-verify fix).
     deploy_compose_yaml = deployed_compose_from_metadata(metadata)
     if deploy_compose_yaml is None:
         raise ShadeError("missing_deploy_compose", field="metadata.deploy_compose_yaml")
