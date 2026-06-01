@@ -21,6 +21,7 @@ from concrete_console.audit import AUDIT_ACTIONS
 from concrete_console.auth import CurrentUser, require_current_user
 from concrete_console.db import get_pool
 from concrete_console.errors import api_error
+from concrete_console.log_config import logger
 from concrete_console.metrics import prometheus_text
 from concrete_console.readiness import run_ready_checks
 from concrete_console.resources import (
@@ -41,6 +42,8 @@ from concrete_console.scheduler import scheduler_last_tick_age_seconds
 from concrete_console.tee_provider.phala import PhalaClient, PhalaError, concrete_cvm_name
 
 router = APIRouter(prefix="/api/v1/admin")
+
+log = logger()
 
 PHALA_CVM_NAME_PREFIX = re.compile(r"^concrete-v0-cvm-")
 
@@ -124,7 +127,18 @@ def parse_operation_cursor(cursor: str | None) -> tuple[datetime, UUID] | None:
         ) from exc
 
 
-async def phala_status_by_name() -> dict[str, dict[str, Any]]:
+# Live Phala CVM status enriches the dashboard's CVM list and overview, but the
+# underlying call spawns the Phala CLI (subprocess + network round-trip). The
+# dashboard polls every ~10s, so we cache the result process-wide and serve it
+# stale-while-revalidate: a stale read returns the last known value immediately
+# and refreshes in the background, keeping the CLI off every request's hot path.
+PHALA_STATUS_TTL_SECONDS = 20.0
+_phala_status_cache: dict[str, dict[str, Any]] = {}
+_phala_status_cache_at: float | None = None
+_phala_status_refresh_task: asyncio.Task[None] | None = None
+
+
+async def _fetch_phala_status_by_name() -> dict[str, dict[str, Any]]:
     try:
         client = PhalaClient.from_settings()
     except PhalaError:
@@ -144,6 +158,31 @@ async def phala_status_by_name() -> dict[str, dict[str, Any]]:
             "uptime": row.get("uptime"),
         }
     return by_name
+
+
+async def _refresh_phala_status_cache() -> None:
+    global _phala_status_cache, _phala_status_cache_at
+    _phala_status_cache = await _fetch_phala_status_by_name()
+    _phala_status_cache_at = time.monotonic()
+
+
+async def _refresh_phala_status_background() -> None:
+    try:
+        await _refresh_phala_status_cache()
+    except Exception:  # best-effort: keep serving the last known status
+        log.warning("phala_status_refresh_failed", exc_info=True)
+
+
+async def phala_status_by_name() -> dict[str, dict[str, Any]]:
+    global _phala_status_refresh_task
+    if _phala_status_cache_at is None:
+        # Cold cache: the first caller must wait for a real result.
+        await _refresh_phala_status_cache()
+    elif time.monotonic() - _phala_status_cache_at >= PHALA_STATUS_TTL_SECONDS:
+        # Stale: serve the cached value now and refresh in the background.
+        if _phala_status_refresh_task is None or _phala_status_refresh_task.done():
+            _phala_status_refresh_task = asyncio.create_task(_refresh_phala_status_background())
+    return _phala_status_cache
 
 
 def parse_metrics_summary() -> dict[str, Any]:

@@ -226,7 +226,7 @@
         '>All</option></select></div>';
 
       const rows = items.map((t, idx) => [
-        UI.fmtTs(t.timestamp),
+        '<span class="text-mute" title="' + UI.escapeHtml(UI.fmtTsFull(t.timestamp)) + '">' + UI.escapeHtml(UI.fmtTsShort(t.timestamp)) + "</span>",
         UI.escapeHtml(t.method || "—"),
         UI.escapeHtml(t.destination_host || "—"),
         UI.escapeHtml((t.path || "—").slice(0, 48)),
@@ -258,7 +258,7 @@
       const res = await A.api(path);
       const items = res.ok ? (await res.json()).items || [] : [];
       const rows = items.map((a) => [
-        UI.fmtTs(a.timestamp),
+        '<span class="text-mute" title="' + UI.escapeHtml(UI.fmtTsFull(a.timestamp)) + '">' + UI.escapeHtml(UI.fmtTsShort(a.timestamp)) + "</span>",
         UI.escapeHtml(a.action),
         UI.escapeHtml(a.actor_email || "—"),
       ]);

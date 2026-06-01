@@ -46,8 +46,8 @@
         <header class="flex items-center justify-between mb-2">
           <div class="flex items-center gap-2">
             <span class="flex h-6 w-6 items-center justify-center rounded-md bg-accent/10 text-accent">${UI.icon("system", "h-3.5 w-3.5")}</span>
-            <h4 class="text-sm font-semibold text-ink">Policy</h4>
-            ${UI.helpHint("Hosts your CVM may reach, env vars seeded into the sandbox, body/WebSocket assertions, traffic attributes, secret injection, and DLP rules.")}
+            <h4 class="text-sm font-semibold text-ink">Edit policy</h4>
+            ${UI.helpHint("Raw policy editor. Non-secret sandbox env vars get a key/value editor; destination rules, secret injection, DLP patterns, and WebSocket assertions live in the advanced JSON. The summary above reflects the saved policy.")}
           </div>
         </header>
         <p class="text-xs text-mute mb-3">Non-secret variables seeded into every CVM that attaches this profile. Use the advanced editor below for destination rules, body/WebSocket assertions, traffic attributes, DLP patterns, and proxy-time secret injection.</p>
@@ -56,7 +56,7 @@
         <div id="sandbox-rows" class="mb-1.5">${rows || `<p class="text-xs text-mute italic mb-1.5">No variables defined.</p>`}</div>
         ${readonly ? "" : `<button type="button" class="btn btn-ghost btn-xs" id="add-sandbox-row">${UI.icon("plus", "h-3.5 w-3.5")} Add variable</button>`}
 
-        <details class="mt-4 group" ${Object.keys(opaque).length ? "open" : ""}>
+        <details class="mt-4 group">
           <summary class="flex items-center gap-1.5 text-2xs uppercase tracking-wider text-mute cursor-pointer hover:text-ink mb-2">
             ${UI.icon("chevron-right", "h-3 w-3 transition-transform group-open:rotate-90")}
             Advanced policy (raw JSON)
@@ -64,6 +64,233 @@
           </summary>
           <textarea id="profile-advanced" class="textarea-mono w-full" ${readonly ? "readonly" : ""}>${UI.escapeHtml(Object.keys(opaque).length ? JSON.stringify(opaque, null, 2) : "{}")}</textarea>
         </details>
+      </section>`;
+  }
+
+  // ── Policy read view (egress map) ────────────────────────────────────────
+  // Renders the saved policy as a human-readable capability summary: where the
+  // sandbox may egress, which credentials the SC injects, what DLP patterns are
+  // scanned, and which inbound frames are filtered. Editing stays on the raw
+  // sandbox-env rows + advanced JSON below (see sandboxEditor).
+
+  const esc = (s) => UI.escapeHtml(s == null ? "" : String(s));
+  const arr = (x) => (Array.isArray(x) ? x : []);
+  const trunc = (s, n) => {
+    s = String(s == null ? "" : s);
+    return s.length > n ? s.slice(0, n - 1) + "…" : s;
+  };
+  const lastSeg = (ptr) => {
+    const segs = String(ptr || "").split("/").filter(Boolean);
+    return segs.length ? segs[segs.length - 1] : String(ptr || "");
+  };
+  const fmtMethods = (m) => {
+    m = arr(m);
+    if (!m.length) return "ANY";
+    return m.length <= 4 ? m.join(" ") : m.slice(0, 3).join(" ") + " +" + (m.length - 3);
+  };
+  const fmtPaths = (p) => {
+    p = arr(p);
+    if (!p.length || p.includes("/")) return "all paths";
+    return p.length === 1 ? p[0] : p[0] + " +" + (p.length - 1);
+  };
+  const fmtValues = (vals, max) => {
+    vals = arr(vals);
+    max = max || 3;
+    const head = vals.slice(0, max).map((v) => trunc(v, 12));
+    return head.join(", ") + (vals.length > max ? " +" + (vals.length - max) : "");
+  };
+  const maskTpl = (tpl) =>
+    typeof tpl === "string" && tpl.includes("${secret}") ? tpl.replace("${secret}", "••••") : "••••";
+  const wildHostMatch = (a, b) => {
+    if (!a || !b) return false;
+    a = String(a).toLowerCase();
+    b = String(b).toLowerCase();
+    if (a === b) return true;
+    const suf = (h) => (h.startsWith("*.") ? h.slice(1) : null);
+    const sa = suf(a);
+    const sb = suf(b);
+    if (sb && a.endsWith(sb)) return true;
+    if (sa && b.endsWith(sa)) return true;
+    return false;
+  };
+
+  function destLabel(rule) {
+    const scheme = rule.scheme ? `<span class="scheme">${esc(rule.scheme)}://</span>` : "";
+    const ports = arr(rule.ports);
+    const portTxt =
+      ports.length && !(ports.length === 1 && (ports[0] === 443 || ports[0] === 80))
+        ? " :" + ports.join(",")
+        : "";
+    return { scheme, host: esc(rule.host || "—"), portTxt: esc(portTxt) };
+  }
+
+  function allowedLane(rule, injections) {
+    const { scheme, host, portTxt } = destLabel(rule);
+    const bodyA = arr(rule.body_assertions);
+    const wsA = arr(rule.websocket_assertions);
+    const logA = arr(rule.traffic_log_attributes);
+    const secrets = injections.filter((inj) => wildHostMatch(inj.match && inj.match.host, rule.host));
+
+    const guards = [];
+    if (secrets.length)
+      guards.push(
+        `<span class="chip chip-accent">${UI.icon("key", "h-3 w-3")} ${secrets.length} secret${secrets.length === 1 ? "" : "s"}</span>`
+      );
+    if (bodyA.length)
+      guards.push(`<span class="chip chip-warn">${UI.icon("filter", "h-3 w-3")} body-gated</span>`);
+    if (wsA.length)
+      guards.push(`<span class="chip chip-accent">${UI.icon("filter", "h-3 w-3")} inbound filter</span>`);
+    if (logA.length) guards.push(`<span class="chip">${UI.icon("traffic", "h-3 w-3")} logged</span>`);
+
+    const detail = [];
+    bodyA.forEach((a) =>
+      detail.push(
+        `<div class="row">only when <b>${esc(lastSeg(a.field))}</b> ∈ {${esc(fmtValues(a.allow_values))}} <span class="egress-mono">(${esc(a.kind)})</span></div>`
+      )
+    );
+    wsA.forEach((w) => detail.push(`<div class="row">${wsSentence(w)}</div>`));
+    logA.forEach((t) =>
+      detail.push(`<div class="row">logs <b>${esc(t.name)}</b> from <span class="egress-mono">${esc(t.field)}</span></div>`)
+    );
+
+    const detailHtml = detail.length
+      ? `<details class="egress-detail"><summary>guardrail details</summary><div class="rows">${detail.join("")}</div></details>`
+      : "";
+
+    return `<div class="egress-lane">
+        <div class="egress-lane-head">
+          <span class="host">${scheme}${host}</span>
+          <span class="meta">${esc(fmtMethods(rule.methods))} · ${esc(fmtPaths(rule.path_prefixes))}${portTxt}</span>
+        </div>
+        ${guards.length ? `<div class="egress-guards">${guards.join("")}</div>` : ""}
+        ${detailHtml}
+      </div>`;
+  }
+
+  function wsSentence(w) {
+    const when = w.when && typeof w.when === "object" ? w.when : {};
+    const whenTxt =
+      Object.entries(when)
+        .map(([k, v]) => `${esc(lastSeg(k))}=${esc(trunc(v, 16))}`)
+        .join(", ") || "any";
+    const req = w.require && typeof w.require === "object" ? w.require : {};
+    const reqTxt = Object.entries(req)
+      .map(([k, m]) => `<b>${esc(lastSeg(k))}</b> ∈ {${esc(fmtValues(m && m.in))}}`)
+      .join(" and ");
+    const tail = reqTxt ? `deliver only when ${reqTxt}; else drop` : "drop";
+    return `inbound <span class="egress-mono">${whenTxt}</span> frames: ${tail}`;
+  }
+
+  function blockedLane(rule) {
+    const { scheme, host, portTxt } = destLabel(rule);
+    const paths = arr(rule.path_prefixes);
+    const hasPath = paths.length && !paths.includes("/");
+    const isHttps = (rule.scheme || "https") === "https";
+    const warn =
+      hasPath && isHttps
+        ? `<div class="egress-note">${UI.icon("alert", "h-3.5 w-3.5")} Path prefixes can't be enforced on an HTTPS CONNECT tunnel — this blocks the entire host.</div>`
+        : "";
+    return `<div class="egress-lane is-deny">
+        <div class="egress-lane-head">
+          <span class="host">${scheme}${host}</span>
+          <span class="meta">${esc(fmtMethods(rule.methods))} · ${hasPath ? esc(fmtPaths(paths)) : "all paths"}${portTxt}</span>
+        </div>${warn}
+      </div>`;
+  }
+
+  function secretRow(inj) {
+    const m = inj.match && typeof inj.match === "object" ? inj.match : {};
+    const dest = m.host
+      ? `${m.scheme ? esc(m.scheme) + "://" : ""}${esc(m.host)}${
+          arr(m.path_prefixes).length && !arr(m.path_prefixes).includes("/") ? " " + esc(fmtPaths(m.path_prefixes)) : ""
+        }`
+      : "any allowed destination";
+    return `<div class="egress-row">
+        <span class="name">${esc(inj.id || "secret")}</span>
+        <span class="arrow">→ sets</span>
+        <span class="egress-mono">${esc(inj.header || "")}</span>:
+        <span class="mask">${esc(maskTpl(inj.value_template))}</span>
+        <span class="arrow">on</span>
+        <span class="egress-mono">${dest}</span>
+      </div>`;
+  }
+
+  function dlpRow(pat) {
+    const scopeTxt =
+      [pat.scan_headers ? "headers" : null, pat.scan_body ? "body" : null].filter(Boolean).join(" + ") || "—";
+    return `<div class="egress-row">
+        <span class="name">${esc(pat.name || pat.id || "pattern")}</span>
+        <span class="egress-mono">${esc(trunc(pat.pattern, 48))}</span>
+        <span class="egress-spacer"></span>
+        <span class="chip">${esc(scopeTxt)}</span>
+      </div>`;
+  }
+
+  function policyView(policy) {
+    policy = policy && typeof policy === "object" ? policy : {};
+    const allowed = arr(policy.allowed_destinations);
+    const blocked = arr(policy.blocked_destinations);
+    const injections = arr(policy.secret_injections);
+    const patterns = arr(policy.secret_patterns);
+    const env = policy.sandbox_env && typeof policy.sandbox_env === "object" ? policy.sandbox_env : {};
+    const envKeys = Object.keys(env);
+    const wsCount = allowed.reduce((n, r) => n + arr(r.websocket_assertions).length, 0);
+
+    const bits = [`<span><b>${allowed.length}</b> allowed host${allowed.length === 1 ? "" : "s"}</span>`];
+    if (blocked.length) bits.push(`<span><b>${blocked.length}</b> blocked</span>`);
+    if (injections.length)
+      bits.push(`<span><b>${injections.length}</b> secret${injections.length === 1 ? "" : "s"} injected</span>`);
+    if (patterns.length) bits.push(`<span><b>${patterns.length}</b> DLP pattern${patterns.length === 1 ? "" : "s"}</span>`);
+    if (wsCount) bits.push(`<span>inbound filtered</span>`);
+    if (envKeys.length) bits.push(`<span><b>${envKeys.length}</b> env var${envKeys.length === 1 ? "" : "s"}</span>`);
+
+    const laneHtml = allowed.length
+      ? allowed.map((r) => allowedLane(r, injections)).join("")
+      : `<div class="egress-lane is-allnone">
+           <div class="egress-lane-head">
+             <span class="host">${UI.icon("shield", "h-3.5 w-3.5")} Deny all egress</span>
+           </div>
+           <div class="egress-guards"><span class="meta">No destinations allowed — every outbound request is blocked by default.</span></div>
+         </div>`;
+
+    const sub = (icon, title, rows) =>
+      `<div class="egress-sub"><div class="egress-sub-title">${UI.icon(icon, "h-3.5 w-3.5")} ${esc(title)}</div>${rows}</div>`;
+
+    const blockedHtml = blocked.length ? sub("x", "Blocked destinations", blocked.map(blockedLane).join("")) : "";
+    const secretsHtml = injections.length ? sub("key", "Injected secrets", injections.map(secretRow).join("")) : "";
+    const dlpHtml = patterns.length ? sub("shield", "Data-loss prevention", patterns.map(dlpRow).join("")) : "";
+    const envHtml = envKeys.length
+      ? sub(
+          "system",
+          "Sandbox environment",
+          envKeys
+            .map(
+              (k) =>
+                `<div class="egress-row"><span class="name">${esc(k)}</span><span class="arrow">=</span><span class="egress-mono">${esc(trunc(env[k], 60))}</span></div>`
+            )
+            .join("")
+        )
+      : "";
+
+    return `
+      <section class="card card-pad mb-3">
+        <header class="flex items-center gap-2 mb-3">
+          <span class="flex h-6 w-6 items-center justify-center rounded-md bg-accent/10 text-accent">${UI.icon("shield", "h-3.5 w-3.5")}</span>
+          <h4 class="text-sm font-semibold text-ink">What this profile can do</h4>
+          ${UI.helpHint("Rendered from the saved policy: destinations the sandbox may reach, credentials the Security CVM injects, DLP patterns scanned on egress, and inbound frames filtered. Edit the raw policy below.")}
+        </header>
+        <div class="egress">
+          <div class="egress-summary">${bits.join("")}</div>
+          <div class="egress-flow">
+            <div class="egress-origin">
+              <span class="glyph">${UI.icon("cvm", "h-4 w-4")}</span>
+              <span class="title">Agent sandbox</span>
+              <span class="conduit">${UI.icon("shield", "h-3 w-3")} guarded egress</span>
+            </div>
+            <div class="egress-lanes">${laneHtml}</div>
+          </div>
+          ${blockedHtml}${secretsHtml}${dlpHtml}${envHtml}
+        </div>
       </section>`;
   }
 
@@ -170,7 +397,9 @@
         <div id="profile-msg" class="mt-2 text-sm"></div>
       </section>
 
-      ${sandboxEditor(p.policy || {}, readonly)}
+      ${policyView(p.policy || {})}
+
+      ${readonly ? "" : sandboxEditor(p.policy || {}, false)}
 
       <section class="card card-pad mb-3">
         <header class="flex items-center gap-2 mb-2">
@@ -441,4 +670,6 @@
 
   A.Views = A.Views || {};
   A.Views.renderProfiles = renderProfiles;
+  // Pure policy renderer, reusable read-only (e.g. CVM drawer effective policy).
+  A.Views.profilePolicyView = policyView;
 })(window.Admin);

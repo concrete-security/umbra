@@ -394,3 +394,144 @@ textarea.json-editor {
   border-radius: 8px;
   padding: 10px;
 }
+
+/* ── Profile policy egress map (read view, views/profiles.js) ───────────── */
+.egress { display: flex; flex-direction: column; gap: 14px; }
+
+.egress-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.egress-summary b { color: var(--text); font-weight: 600; }
+
+.egress-flow {
+  display: grid;
+  grid-template-columns: 148px 1fr;
+  gap: 16px;
+  align-items: start;
+}
+@media (max-width: 720px) {
+  .egress-flow { grid-template-columns: 1fr; }
+}
+
+.egress-origin {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  text-align: center;
+  padding: 14px 10px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--elevated);
+}
+.egress-origin .glyph {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 34px;
+  width: 34px;
+  border-radius: 9px;
+  background: rgba(106, 160, 246, 0.12);
+  color: var(--accent);
+}
+.egress-origin .title { font-size: 0.85rem; font-weight: 600; color: var(--text); }
+.egress-origin .conduit {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.66rem;
+  color: var(--ok);
+  border: 1px solid rgba(70, 195, 123, 0.4);
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+
+.egress-lanes { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.egress-lane {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--ok);
+  border-radius: 10px;
+  background: var(--elevated);
+  padding: 9px 12px;
+}
+.egress-lane.is-deny { border-left-color: var(--err); }
+.egress-lane.is-allnone {
+  border-left-color: var(--err);
+  background: rgba(240, 113, 120, 0.06);
+}
+.egress-lane-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+}
+.egress-lane .host {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--mono);
+  font-size: 0.86rem;
+  font-weight: 600;
+  color: var(--text);
+  word-break: break-all;
+}
+.egress-lane .host .scheme { color: var(--muted); font-weight: 400; }
+.egress-lane .meta { font-family: var(--mono); font-size: 0.74rem; color: var(--muted); }
+.egress-guards { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; }
+
+.egress-detail { margin-top: 8px; }
+.egress-detail summary {
+  cursor: pointer;
+  list-style: none;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+.egress-detail summary::-webkit-details-marker { display: none; }
+.egress-detail summary:hover,
+.egress-detail[open] summary { color: var(--text); }
+.egress-detail .rows { margin-top: 6px; display: flex; flex-direction: column; gap: 4px; }
+.egress-detail .rows .row { font-size: 0.78rem; color: var(--muted); }
+.egress-detail .rows .row b { color: var(--text); font-weight: 600; font-family: var(--mono); }
+.egress-mono { font-family: var(--mono); color: var(--text); }
+
+.egress-sub { border-top: 1px solid var(--border); padding-top: 12px; }
+.egress-sub-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+.egress-row {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 5px 8px;
+  padding: 6px 0;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+.egress-row + .egress-row { border-top: 1px dashed rgba(36, 48, 66, 0.7); }
+.egress-row .name { font-family: var(--mono); font-weight: 600; color: var(--text); }
+.egress-row .arrow { color: var(--muted); }
+.egress-row .mask { font-family: var(--mono); color: var(--accent); }
+.egress-spacer { flex: 1 1 auto; }
+
+.egress-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin-top: 7px;
+  font-size: 0.74rem;
+  color: var(--warn);
+}
+.egress-note svg { flex: none; margin-top: 1px; }

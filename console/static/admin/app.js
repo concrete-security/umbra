@@ -82,8 +82,30 @@
     refreshActivePanel();
   }
 
-  async function refreshActivePanel() {
+  function hasOpenExpansion() {
+    // Something the user actively drilled into: a visible egress detail or an
+    // open <details>. The periodic poll's wholesale re-render would collapse it.
+    const containers = [A.el("panel-" + A.activeTab)];
+    ["cvm-drawer", "sc-drawer"].forEach((id) => {
+      const d = A.el(id);
+      if (d && !d.classList.contains("hidden")) containers.push(d);
+    });
+    return containers.some((c) => {
+      if (!c) return false;
+      if (c.querySelector("details[open]")) return true;
+      const eg = c.querySelector("#egress-detail");
+      return !!eg && !eg.classList.contains("hidden");
+    });
+  }
+
+  async function refreshActivePanel(opts = {}) {
     if (A.refreshInFlight || Date.now() < A.pollBackoffUntil) return;
+    if (opts.poll && hasOpenExpansion()) {
+      // Passive refresh while the user has something expanded — skip the
+      // re-render so it doesn't collapse. The next poll resumes once they close it.
+      A.setConn("live", "live");
+      return;
+    }
     A.refreshInFlight = true;
     try {
       A.pollSnapshot = {};
@@ -177,7 +199,7 @@
     if (document.hidden) return;
     const delay = Math.max(A.POLL_MS, Math.max(0, A.pollBackoffUntil - Date.now()));
     A.pollTimer = setTimeout(async () => {
-      await refreshActivePanel();
+      await refreshActivePanel({ poll: true });
       schedulePoll();
     }, delay);
   }
@@ -194,7 +216,7 @@
       if (A.pollTimer) clearTimeout(A.pollTimer);
       A.pollTimer = null;
     } else {
-      refreshActivePanel();
+      refreshActivePanel({ poll: true });
       schedulePoll();
     }
   }

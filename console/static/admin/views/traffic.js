@@ -37,7 +37,7 @@
       .join("");
 
     const cols = [
-      { key: "timestamp", label: "Time", render: (t) => `<span class="text-mute" title="${UI.escapeHtml(UI.fmtTsFull(t.timestamp))}">${UI.fmtTs(t.timestamp)}</span>` },
+      { key: "timestamp", label: "Time", render: (t) => `<span class="text-mute" title="${UI.escapeHtml(UI.fmtTsFull(t.timestamp))}">${UI.escapeHtml(UI.fmtTsShort(t.timestamp))}</span>` },
       { key: "cvm_id", label: "CVM", render: (t) => t.cvm_id ? UI.copyButton(t.cvm_id, String(t.cvm_id).slice(0, 8)) : '<span class="text-mute">—</span>' },
       { key: "method", label: "Method", render: (t) => `<span class="font-mono text-2xs text-ink">${UI.escapeHtml(t.method || "—")}</span>` },
       { key: "host", label: "Host", render: (t) => `<span class="font-mono text-2xs">${UI.escapeHtml(t.destination_host || "—")}</span>` },

@@ -22,6 +22,14 @@
       return Number.isNaN(d.getTime()) ? ts : d.toISOString().replace("T", " ").slice(0, 19);
     },
 
+    // Compact UTC date + time (MM-DD HH:MM:SS) for log tables where the time
+    // alone is ambiguous about which day an event occurred.
+    fmtTsShort(ts) {
+      if (!ts) return "—";
+      const d = new Date(ts);
+      return Number.isNaN(d.getTime()) ? ts : d.toISOString().slice(5, 19).replace("T", " ");
+    },
+
     relTime(ts) {
       if (!ts) return "—";
       const d = new Date(ts);
