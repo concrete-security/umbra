@@ -127,7 +127,7 @@
       if (dest) {
         const host = dest.getAttribute("data-node-dest");
         if (host && host !== "__other") {
-          A.trafficState = { from: "", to: "", hostFilter: host, cursor: null };
+          A.trafficState = { from: "", to: "", hostFilter: host, items: [], nextCursor: null, summary: null };
         }
         if (A.has(A.P.TRAFFIC)) location.hash = "traffic";
         return;

@@ -5665,6 +5665,48 @@ async def list_traffic_logs(
     return list_page([traffic_log_resource(row) for row in rows[:limit]], next_cursor=next_cursor)
 
 
+@router.get("/traffic-logs/summary")
+async def list_traffic_log_host_summary(
+    cvm_id: UUID | None = None,
+    security_cvm_id: UUID | None = None,
+    from_: datetime | None = Query(default=None, alias="from"),
+    to: datetime | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+    current_user: CurrentUser = Depends(require_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> dict:
+    current_user.require_permission("TRAFFIC_LOGS_VIEW")
+    clauses = ["sc.entity_id = $1", "tl.destination_host IS NOT NULL"]
+    values: list[object] = [current_user.entity_id]
+
+    def bind(value: object) -> str:
+        values.append(value)
+        return f"${len(values)}"
+
+    if cvm_id is not None:
+        clauses.append(f"tl.cvm_id = {bind(cvm_id)}")
+    if security_cvm_id is not None:
+        clauses.append(f"tl.security_cvm_id = {bind(security_cvm_id)}")
+    if from_ is not None:
+        clauses.append(f"tl.timestamp >= {bind(from_)}")
+    if to is not None:
+        clauses.append(f"tl.timestamp <= {bind(to)}")
+
+    values.append(limit)
+    query = f"""
+        SELECT tl.destination_host AS host, count(*)::int AS count
+        FROM traffic_logs tl
+        JOIN security_cvms sc ON sc.id = tl.security_cvm_id
+        WHERE {' AND '.join(clauses)}
+        GROUP BY tl.destination_host
+        ORDER BY count DESC, tl.destination_host ASC
+        LIMIT ${len(values)}
+    """
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(query, *values)
+    return {"hosts": [{"host": row["host"], "count": row["count"]} for row in rows]}
+
+
 @router.get("/operations/{operation_id}")
 async def get_operation(
     operation_id: UUID,

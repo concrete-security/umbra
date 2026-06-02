@@ -252,6 +252,16 @@
     return response.json();
   }
 
+  async function fetchTrafficHostSummary(params) {
+    const q = new URLSearchParams(params || {});
+    const path = A.isPlatform()
+      ? adminQuery("traffic-logs/summary", Object.fromEntries(q))
+      : "/api/v1/traffic-logs/summary?" + q.toString();
+    const response = await api(path);
+    if (!response.ok) return { hosts: [] };
+    return response.json();
+  }
+
   async function parseError(response) {
     try {
       const err = await response.json();
@@ -278,5 +288,6 @@
   A.fetchSecurityCvm = fetchSecurityCvm;
   A.fetchEntitySc = fetchEntitySc;
   A.fetchTrafficLogs = fetchTrafficLogs;
+  A.fetchTrafficHostSummary = fetchTrafficHostSummary;
   A.parseError = parseError;
 })(window.Admin);
