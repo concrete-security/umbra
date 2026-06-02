@@ -151,6 +151,31 @@
   }
 
   // ── Stat strip ───────────────────────────────────────────────────────────
+  function plural(n, singular, pluralLabel) {
+    return n === 1 ? singular : pluralLabel || singular + "s";
+  }
+
+  function secretPillHtml(m) {
+    const s = m.secrets || {};
+    if (!s.configured) return "";
+    const label = s.active
+      ? `${s.active} injected`
+      : `${s.configured} secret ${plural(s.configured, "binding")}`;
+    const detail = s.active
+      ? `${s.active} recent allowed ${plural(s.active, "request")} matched secret-injection policy in the last ${m.stats.windowMin}m.`
+      : `${s.configured} secret ${plural(s.configured, "binding")} attached to ${s.cvms} live ${plural(s.cvms, "CVM")}.`;
+    const title = detail + " Secret values remain outside the sandbox.";
+    return `<span class="topo-stat-pill is-secret" title="${UI.escapeHtml(title)}">${UI.icon("key", "h-3.5 w-3.5")}${UI.escapeHtml(label)}</span>`;
+  }
+
+  function secretLineHtml(secrets, windowMin) {
+    if (!secrets?.configured) return "";
+    const label = secrets.active
+      ? `<b>${secrets.active}</b> injected last ${windowMin}m`
+      : `<b>${secrets.configured}</b> secret ${plural(secrets.configured, "binding")}`;
+    return `<span class="topo-sc-secret">${UI.icon("key", "h-3 w-3")}${label}</span>`;
+  }
+
   function renderStats(m) {
     const el = S.root.querySelector("[data-topo-stats]");
     const st = m.stats;
@@ -167,6 +192,7 @@
       <div class="topo-stats-left">
         <span class="topo-scope">${UI.icon("entity", "h-3.5 w-3.5")}${UI.escapeHtml(m.scope.entityName || "Topology")}</span>
         ${scPill}
+        ${secretPillHtml(m)}
       </div>
       <div class="topo-stats-metrics">
         ${items
@@ -192,6 +218,7 @@
     el.innerHTML = `
       <span class="topo-legend-item"><span class="topo-swatch is-allow"></span>Allowed — routed through the Security CVM</span>
       <span class="topo-legend-item"><span class="topo-swatch is-block"></span>Blocked — stopped at the gateway</span>
+      ${m.secrets?.configured ? `<span class="topo-legend-item"><span class="topo-swatch is-secret"></span>Secret injection — added at the gateway</span>` : ""}
       <span class="topo-legend-note">${UI.icon("info", "h-3.5 w-3.5")} Last ${m.stats.windowMin}m · click any node to inspect</span>`;
   }
 
@@ -270,10 +297,11 @@
         S.nodeEls.set(key, el);
       }
       el.className = "topo-node topo-cvm " + (node.error ? "is-error" : node.ok ? "is-ok" : "is-idle");
-      el.title = `${node.fqdn || node.id}\n${node.state}${node.profiles?.length ? " · " + node.profiles.map((p) => p.name).join(", ") : ""}`;
+      el.title = `${node.fqdn || node.id}\n${node.state}${node.profiles?.length ? " · " + node.profiles.map((p) => p.name).join(", ") : ""}${node.secrets ? "\n" + node.secrets + " secret " + plural(node.secrets, "binding") + " on attached profiles" : ""}`;
       el.innerHTML = `
         <span class="${UI.dotClass(node.state)}"></span>
         <span class="topo-node-label">${UI.escapeHtml(node.label)}</span>
+        ${node.secrets ? `<span class="topo-node-secret" title="${node.secrets} secret ${plural(node.secrets, "binding")}">${UI.icon("key", "h-3 w-3")}</span>` : ""}
         ${node.total ? `<span class="topo-node-count">${node.total}</span>` : ""}`;
       place(el, pos);
     });
@@ -310,13 +338,14 @@
       }
       const sc = layout.sc.node;
       el.className = "topo-node topo-sc " + (sc.ok ? "is-ok" : "is-warn");
-      el.title = `${sc.fqdn || "Security CVM"}\n${sc.state}`;
+      el.title = `${sc.fqdn || "Security CVM"}\n${sc.state}${sc.secrets?.configured ? "\n" + sc.secrets.configured + " secret " + plural(sc.secrets.configured, "binding") + " at the gateway" : ""}`;
       el.innerHTML = `
         <span class="topo-sc-ring"></span>
         <span class="topo-sc-badge">${UI.icon("shield", "h-6 w-6")}</span>
         <span class="topo-sc-meta">
           <span class="topo-sc-title">Security CVM</span>
           <span class="topo-sc-sub">${sc.ok ? "enforcing policy" : UI.escapeHtml(sc.state || "offline")}</span>
+          ${secretLineHtml(sc.secrets, m.stats.windowMin)}
         </span>`;
       place(el, layout.sc.pos);
     }

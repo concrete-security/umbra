@@ -573,6 +573,12 @@ textarea.json-editor {
 }
 .topo-stat-pill.is-ok { color: var(--ok); border-color: rgba(70, 195, 123, 0.4); }
 .topo-stat-pill.is-warn { color: var(--warn); border-color: rgba(230, 184, 74, 0.4); }
+.topo-stat-pill.is-secret {
+  color: var(--warn);
+  border-color: rgba(230, 184, 74, 0.34);
+  background: rgba(230, 184, 74, 0.06);
+}
+.topo-stat-pill svg { flex: none; }
 .topo-stats-metrics { display: flex; align-items: center; gap: 22px; flex-wrap: wrap; }
 .topo-metric { display: flex; flex-direction: column; gap: 1px; line-height: 1.1; }
 .topo-metric-val { font-size: 1.15rem; font-weight: 700; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
@@ -644,6 +650,18 @@ textarea.json-editor {
   padding: 1px 7px;
   font-variant-numeric: tabular-nums;
 }
+.topo-node-secret {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 18px;
+  width: 18px;
+  border-radius: 999px;
+  color: var(--warn);
+  border: 1px solid rgba(230, 184, 74, 0.28);
+  background: rgba(230, 184, 74, 0.08);
+  flex: none;
+}
 .topo-more {
   border-style: dashed;
   color: var(--muted);
@@ -689,6 +707,19 @@ textarea.json-editor {
 .topo-sc-sub { font-size: 0.66rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
 .topo-sc.is-ok .topo-sc-sub { color: var(--ok); }
 .topo-sc.is-warn .topo-sc-sub { color: var(--warn); }
+.topo-sc-secret {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 2px;
+  font-size: 0.65rem;
+  color: var(--warn);
+}
+.topo-sc-secret b {
+  color: var(--text);
+  font-weight: 700;
+}
+.topo-sc-secret svg { flex: none; }
 
 /* Destination nodes */
 .topo-dest {
@@ -721,6 +752,7 @@ textarea.json-editor {
 .topo-swatch { height: 9px; width: 9px; border-radius: 999px; display: inline-block; }
 .topo-swatch.is-allow { background: var(--accent); box-shadow: 0 0 8px rgba(106, 160, 246, 0.6); }
 .topo-swatch.is-block { background: var(--err); box-shadow: 0 0 8px rgba(240, 113, 120, 0.6); }
+.topo-swatch.is-secret { background: var(--warn); box-shadow: 0 0 8px rgba(230, 184, 74, 0.45); }
 .topo-legend-note { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; }
 .topo-legend-note svg { height: 14px; width: 14px; }
 
@@ -745,5 +777,7 @@ textarea.json-editor {
   .topo-stage { height: clamp(420px, 70vh, 620px); }
   .topo-node { font-size: 0.72rem; padding: 5px 9px; }
   .topo-node-label { max-width: 84px; }
+  .topo-node-secret { height: 16px; width: 16px; }
+  .topo-sc-secret { font-size: 0.6rem; }
   .topo-dest-host { max-width: 96px; }
 }

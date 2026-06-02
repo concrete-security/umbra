@@ -13,13 +13,14 @@
     if (!panel) return;
 
     const hasTraffic = A.has(A.P.TRAFFIC);
-    const [cvms, sc, traffic] = await Promise.all([
+    const [cvms, sc, traffic, profiles] = await Promise.all([
       A.fetchCvms(),
       A.fetchSecurityCvm(),
       hasTraffic ? A.fetchTrafficLogs({ limit: String(TRAFFIC_LIMIT), from: windowFromIso() }) : Promise.resolve({ items: [] }),
+      A.fetchProfiles ? A.fetchProfiles() : Promise.resolve([]),
     ]);
 
-    const model = buildModel(cvms || [], sc, (traffic && traffic.items) || [], hasTraffic);
+    const model = buildModel(cvms || [], sc, (traffic && traffic.items) || [], hasTraffic, profiles || []);
     A.Graph.render(panel, model);
   }
 
@@ -43,9 +44,129 @@
     return topSet.has(host) ? host : "__other";
   }
 
-  function buildModel(allCvms, sc, items, hasTrafficPerm) {
+  function asArray(value) {
+    return Array.isArray(value) ? value : [];
+  }
+
+  function policyFor(profile) {
+    return profile && profile.policy && typeof profile.policy === "object" ? profile.policy : {};
+  }
+
+  function injectionRules(profile) {
+    return asArray(policyFor(profile).secret_injections).filter((injection) => injection && typeof injection === "object");
+  }
+
+  function hostMatches(pattern, host) {
+    if (!pattern) return true;
+    if (!host) return false;
+    pattern = String(pattern).toLowerCase();
+    host = String(host).toLowerCase();
+    if (pattern === "*") return true;
+    if (pattern === host) return true;
+    if (!pattern.startsWith("*.")) return false;
+    const suffix = pattern.slice(1);
+    return host.endsWith(suffix) && host.length > suffix.length;
+  }
+
+  function pathMatches(prefixes, path) {
+    prefixes = asArray(prefixes);
+    if (!prefixes.length || prefixes.includes("/")) return true;
+    if (!path) return false;
+    path = String(path);
+    return prefixes.some((prefix) => path.startsWith(String(prefix)));
+  }
+
+  function methodMatches(methods, method) {
+    methods = asArray(methods);
+    if (!methods.length) return true;
+    if (!method) return false;
+    const upper = String(method).toUpperCase();
+    return methods.some((m) => String(m).toUpperCase() === upper);
+  }
+
+  function portMatches(ports, port) {
+    ports = asArray(ports);
+    if (!ports.length || port == null) return true;
+    const n = Number(port);
+    return Number.isFinite(n) && ports.some((p) => Number(p) === n);
+  }
+
+  function schemeMatches(scheme, protocol) {
+    if (!scheme || !protocol) return true;
+    return String(scheme).toLowerCase() === String(protocol).toLowerCase();
+  }
+
+  function injectionMatchesTraffic(injection, traffic) {
+    const match = injection.match && typeof injection.match === "object" ? injection.match : {};
+    return (
+      schemeMatches(match.scheme, traffic.protocol) &&
+      hostMatches(match.host, traffic.destination_host || traffic.destination_ip) &&
+      portMatches(match.ports, traffic.port) &&
+      methodMatches(match.methods, traffic.method) &&
+      pathMatches(match.path_prefixes, traffic.path)
+    );
+  }
+
+  function secretSummaryFor(liveCvms, profileById, items, hasTrafficPerm) {
+    const perCvm = new Map();
+    const rulesByCvm = new Map();
+    const uniqueRules = new Map();
+    const profileIds = new Set();
+    const hosts = new Set();
+
+    liveCvms.forEach((cvm) => {
+      const rules = [];
+      asArray(cvm.profiles).forEach((binding) => {
+        const profile = profileById.get(String(binding.id || ""));
+        if (!profile) return;
+        injectionRules(profile).forEach((injection, index) => {
+          const id = injection.id || String(index);
+          const key = `${profile.id}:${id}`;
+          const match = injection.match && typeof injection.match === "object" ? injection.match : {};
+          const rule = { key, profileId: profile.id, profileName: profile.name, injection };
+          rules.push(rule);
+          uniqueRules.set(key, rule);
+          profileIds.add(profile.id);
+          if (match.host) hosts.add(String(match.host));
+        });
+      });
+      perCvm.set(cvm.id, rules.length);
+      if (rules.length) rulesByCvm.set(cvm.id, rules);
+    });
+
+    const activeHosts = new Set();
+    const activeCvms = new Set();
+    let active = 0;
+    if (hasTrafficPerm) {
+      items.forEach((traffic) => {
+        if (!traffic.cvm_id || isBlocked(traffic.response_code)) return;
+        const rules = rulesByCvm.get(traffic.cvm_id);
+        if (!rules || !rules.length) return;
+        const matched = rules.find((rule) => injectionMatchesTraffic(rule.injection, traffic));
+        if (!matched) return;
+        active += 1;
+        activeCvms.add(traffic.cvm_id);
+        if (traffic.destination_host || traffic.destination_ip) activeHosts.add(traffic.destination_host || traffic.destination_ip);
+      });
+    }
+
+    return {
+      configured: uniqueRules.size,
+      active,
+      cvms: rulesByCvm.size,
+      profiles: profileIds.size,
+      hosts: hosts.size,
+      activeCvms: activeCvms.size,
+      activeHosts: activeHosts.size,
+      perCvm,
+    };
+  }
+
+  function buildModel(allCvms, sc, items, hasTrafficPerm, profiles) {
     const DEAD = new Set(["terminated", "decommissioned"]);
     const live = allCvms.filter((c) => !DEAD.has(String(c.state).toLowerCase()));
+    const profileById = new Map(asArray(profiles).map((profile) => [String(profile.id), profile]));
+    const secrets = secretSummaryFor(live, profileById, items, hasTrafficPerm);
 
     // Per-CVM traffic tallies.
     const tally = new Map(); // cvm_id → {total, allowed, blocked}
@@ -72,6 +193,7 @@
         total: t.total,
         allowed: t.allowed,
         blocked: t.blocked,
+        secrets: secrets.perCvm.get(c.id) || 0,
       };
     });
 
@@ -135,12 +257,13 @@
         isPlatform: A.isPlatform(),
         canLaunch: A.canActOnCvms() && A.has(A.P.CVM_LAUNCH),
       },
-      sc: sc ? { id: sc.id, fqdn: sc.fqdn, state: sc.state, ok: scState === "running" } : null,
+      sc: sc ? { id: sc.id, fqdn: sc.fqdn, state: sc.state, ok: scState === "running", secrets } : null,
       hasTrafficPerm,
       cvms: shownCvms,
       moreCvms,
       dests,
       flows,
+      secrets,
       stats: {
         cvmsRunning: running,
         cvmsTotal: live.length,
@@ -152,6 +275,7 @@
         allowedPct: total ? Math.round((allowed / total) * 100) : 0,
         blockedPct: total ? Math.round((blocked / total) * 100) : 0,
         reqPerMin: Math.round(total / WINDOW_MIN),
+        secrets,
       },
     };
   }

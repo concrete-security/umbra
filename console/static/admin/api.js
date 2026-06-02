@@ -236,6 +236,14 @@
     return response.json();
   }
 
+  async function fetchProfiles() {
+    const eid = A.viewEntityId();
+    if (!eid) return [];
+    const response = await api("/api/v1/entities/" + eid + "/profiles");
+    if (!response.ok) return [];
+    return (await response.json()).items || [];
+  }
+
   async function fetchEntitySc() {
     if (A.entityScCache) return A.entityScCache;
     A.entityScCache = await fetchSecurityCvm();
@@ -286,6 +294,7 @@
   A.fetchCvmDetail = fetchCvmDetail;
   A.fetchEntitySummary = fetchEntitySummary;
   A.fetchSecurityCvm = fetchSecurityCvm;
+  A.fetchProfiles = fetchProfiles;
   A.fetchEntitySc = fetchEntitySc;
   A.fetchTrafficLogs = fetchTrafficLogs;
   A.fetchTrafficHostSummary = fetchTrafficHostSummary;
