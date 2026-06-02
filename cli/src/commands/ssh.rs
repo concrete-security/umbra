@@ -965,12 +965,6 @@ fn session_name(value: Option<&str>, prefix: &str) -> Result<String, String> {
     }
 }
 
-// CSI ? 25 h ensures the cursor is visible; CSI 1 SP q (DECSCUSR) selects a
-// blinking block. dtach does not propagate the outer terminal's cursor mode
-// when re-attaching, so we restore it explicitly on attach. New sessions pick
-// the same state up from /etc/profile.d/concrete-env.sh.
-const TERMINAL_CURSOR_RESTORE: &str = "printf '\\033[?25h\\033[1 q'; ";
-
 // CSI ? 25 h shows the cursor on the *local* terminal. ssh restores termios on
 // exit but not DECTCEM, and dtach (unlike tmux/screen) never saves or restores
 // terminal state — so when a full-screen TUI inside the session is detached or
@@ -1057,7 +1051,7 @@ fn ps_remote_command() -> String {
 fn attach_remote_command(session_name: &str) -> String {
     let socket = format!("/run/concrete/sessions/{session_name}.sock");
     format!(
-        "sock={}; [ -S \"$sock\" ] || {{ echo \"missing session\" >&2; exit 1; }}; {TERMINAL_CURSOR_RESTORE}exec dtach -a \"$sock\" -r winch",
+        "sock={}; [ -S \"$sock\" ] || {{ echo \"missing session\" >&2; exit 1; }}; exec dtach -a \"$sock\" -r winch",
         shell_quote(&socket),
     )
 }
@@ -1430,10 +1424,13 @@ mod tests {
     }
 
     #[test]
-    fn attach_remote_command_restores_terminal_cursor() {
+    fn attach_remote_command_is_plain_dtach_attach() {
+        // Cursor restoration is handled locally by the CLI after ssh returns,
+        // not injected into the remote attach command.
         let command = attach_remote_command("ssh-20260526-120000");
-        assert!(command.contains("printf '\\033[?25h\\033[1 q'; "));
-        assert!(command.contains("dtach -a \"$sock\" -r winch"));
+        assert!(!command.contains("printf"));
+        assert!(!command.contains("?25h"));
+        assert!(command.contains("exec dtach -a \"$sock\" -r winch"));
     }
 
     #[test]
