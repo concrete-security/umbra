@@ -375,6 +375,7 @@ async def admin_list_audit_events(
 async def admin_list_traffic_logs(
     entity_id: UUID | None = None,
     cvm_id: UUID | None = None,
+    destination_host: str | None = Query(default=None, max_length=255),
     from_: datetime | None = Query(default=None, alias="from"),
     to: datetime | None = None,
     limit: int = Query(default=100, ge=1, le=1000),
@@ -395,6 +396,8 @@ async def admin_list_traffic_logs(
         clauses.append(f"sc.entity_id = {bind(entity_id)}")
     if cvm_id is not None:
         clauses.append(f"tl.cvm_id = {bind(cvm_id)}")
+    if destination_host is not None:
+        clauses.append(f"tl.destination_host = {bind(destination_host)}")
     if from_ is not None:
         clauses.append(f"tl.timestamp >= {bind(from_)}")
     if to is not None:

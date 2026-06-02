@@ -5605,6 +5605,7 @@ async def lock_security_cvm_for_decommission(conn: asyncpg.Connection, entity_id
 async def list_traffic_logs(
     cvm_id: UUID | None = None,
     security_cvm_id: UUID | None = None,
+    destination_host: str | None = Query(default=None, max_length=255),
     from_: datetime | None = Query(default=None, alias="from"),
     to: datetime | None = None,
     limit: int = Query(default=100, ge=1, le=1000),
@@ -5625,6 +5626,8 @@ async def list_traffic_logs(
         clauses.append(f"tl.cvm_id = {bind(cvm_id)}")
     if security_cvm_id is not None:
         clauses.append(f"tl.security_cvm_id = {bind(security_cvm_id)}")
+    if destination_host is not None:
+        clauses.append(f"tl.destination_host = {bind(destination_host)}")
     if from_ is not None:
         clauses.append(f"tl.timestamp >= {bind(from_)}")
     if to is not None:
