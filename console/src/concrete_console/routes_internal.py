@@ -384,13 +384,16 @@ def merge_profile_policies(profile_rows: list[dict[str, Any]]) -> dict[str, Any]
                     secret_material=secret_material,
                 )
             )
-    return {
-        "allowed_destinations": merge_union_lists(policies, "allowed_destinations"),
+    egress_boundary_policies = [policy for policy in policies if policy.get("egress_boundary") is True]
+    allowed_destination_policies = egress_boundary_policies or policies
+    merged = {
+        "allowed_destinations": merge_union_lists(allowed_destination_policies, "allowed_destinations"),
         "blocked_destinations": merge_intersection_lists(policies, "blocked_destinations"),
         "secret_patterns": merge_union_lists(policies, "secret_patterns"),
         "secret_injections": merge_union_lists(policies, "secret_injections"),
         "sandbox_env": merge_sandbox_env(policies),
     }
+    return merged
 
 
 def merge_union_lists(policies: list[dict[str, Any]], field: str) -> list[Any]:

@@ -74,6 +74,7 @@ SANDBOX_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 SANDBOX_ENV_RESERVED_NAMES = {"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "PATH", "HOME"}
 SANDBOX_ENV_RESERVED_PREFIXES = ("CONCRETE_", "SECURITY_CVM_", "AUTHORIZED_SSH_", "SANDBOX_ENV_")
 POLICY_TOP_LEVEL_FIELDS = {
+    "egress_boundary",
     "allowed_destinations",
     "blocked_destinations",
     "secret_patterns",
@@ -534,6 +535,9 @@ def validate_profile_policy(policy: dict[str, Any]) -> None:
     errors: list[dict[str, Any]] = []
     for key in sorted(set(policy) - POLICY_TOP_LEVEL_FIELDS):
         errors.append({"field": f"policy.{key}", "type": "unknown_field"})
+    egress_boundary = policy.get("egress_boundary")
+    if egress_boundary is not None and not isinstance(egress_boundary, bool):
+        errors.append({"field": "policy.egress_boundary", "type": "boolean_required"})
     sandbox_env = policy.get("sandbox_env")
     if sandbox_env is not None:
         if not isinstance(sandbox_env, dict):
@@ -689,6 +693,8 @@ def _validate_path_prefixes(raw: Any, field: str, errors: list[dict[str, Any]]) 
 
 
 def _valid_policy_host(host: str) -> bool:
+    if host == "*":
+        return True
     if host != host.lower() or host.endswith(".") or len(host) > 253:
         return False
     if host.startswith("*."):

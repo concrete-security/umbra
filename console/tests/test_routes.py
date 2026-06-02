@@ -930,6 +930,18 @@ def test_validate_profile_policy_accepts_sandbox_env() -> None:
     validate_profile_policy({"sandbox_env": {"PLACEHOLDER": "value"}})
 
 
+def test_validate_profile_policy_accepts_egress_boundary() -> None:
+    validate_profile_policy({"egress_boundary": True})
+
+
+def test_validate_profile_policy_rejects_non_boolean_egress_boundary() -> None:
+    with pytest.raises(HTTPException) as exc:
+        validate_profile_policy({"egress_boundary": "true"})
+
+    errors = exc.value.detail["error"]["details"]["errors"]
+    assert errors == [{"field": "policy.egress_boundary", "type": "boolean_required"}]
+
+
 def test_validate_profile_policy_rejects_unknown_top_level_field() -> None:
     with pytest.raises(HTTPException) as exc:
         validate_profile_policy({"sandbox_env": {"PLACEHOLDER": "value"}, "opaque": {"kept": True}})
@@ -980,6 +992,54 @@ def test_validate_profile_policy_rejects_invalid_destination_schema() -> None:
         error == {"field": "policy.allowed_destinations.0.path_prefixes.0", "type": "invalid_path_prefix"}
         for error in errors
     )
+
+
+def test_validate_profile_policy_accepts_wildcard_destination_host() -> None:
+    validate_profile_policy(
+        {
+            "allowed_destinations": [
+                {
+                    "id": "internet-https",
+                    "scheme": "https",
+                    "host": "*",
+                    "ports": [443],
+                    "methods": ["GET", "POST"],
+                    "path_prefixes": ["/"],
+                }
+            ],
+            "blocked_destinations": [
+                {
+                    "id": "block-public-internet",
+                    "scheme": "https",
+                    "host": "*",
+                    "ports": [443],
+                    "methods": ["POST"],
+                    "path_prefixes": ["/upload"],
+                }
+            ],
+        }
+    )
+
+
+def test_validate_profile_policy_rejects_malformed_wildcard_destination_host() -> None:
+    for host in ("*.", "**", "*.com"):
+        with pytest.raises(HTTPException) as exc:
+            validate_profile_policy(
+                {
+                    "allowed_destinations": [
+                        {
+                            "id": "bad-wildcard",
+                            "scheme": "https",
+                            "host": host,
+                            "ports": [443],
+                            "methods": ["GET"],
+                            "path_prefixes": ["/"],
+                        }
+                    ]
+                }
+            )
+        errors = exc.value.detail["error"]["details"]["errors"]
+        assert {"field": "policy.allowed_destinations.0.host", "type": "invalid_host"} in errors
 
 
 def test_validate_profile_policy_allows_npm_scoped_package_path_prefix() -> None:
@@ -1730,6 +1790,72 @@ def test_merge_profile_policies_denies_intersect_with_missing_field() -> None:
     )
 
     assert merged["blocked_destinations"] == []
+
+
+def test_merge_profile_policies_boundary_allow_list_ignores_open_profile() -> None:
+    boundary_rule = {
+        "id": "github-only",
+        "scheme": "https",
+        "host": "api.github.com",
+        "ports": [443],
+        "methods": ["GET"],
+        "path_prefixes": ["/"],
+    }
+    open_rule = {
+        "id": "internet-https",
+        "scheme": "https",
+        "host": "*",
+        "ports": [443],
+        "methods": ["GET"],
+        "path_prefixes": ["/"],
+    }
+
+    merged = merge_profile_policies(
+        [
+            {"policy": {"allowed_destinations": [open_rule]}},
+            {"policy": {"egress_boundary": True, "allowed_destinations": [boundary_rule]}},
+        ]
+    )
+
+    assert merged["allowed_destinations"] == [boundary_rule]
+
+
+def test_merge_profile_policies_boundary_air_gap_ignores_open_profile() -> None:
+    merged = merge_profile_policies(
+        [
+            {
+                "policy": {
+                    "allowed_destinations": [
+                        {
+                            "id": "internet-https",
+                            "scheme": "https",
+                            "host": "*",
+                            "ports": [443],
+                            "methods": ["GET"],
+                            "path_prefixes": ["/"],
+                        }
+                    ]
+                }
+            },
+            {"policy": {"egress_boundary": True, "allowed_destinations": []}},
+        ]
+    )
+
+    assert merged["allowed_destinations"] == []
+
+
+def test_merge_profile_policies_multiple_boundaries_union_their_allow_lists() -> None:
+    github_rule = {"id": "github", "host": "api.github.com"}
+    anthropic_rule = {"id": "anthropic", "host": "api.anthropic.com"}
+
+    merged = merge_profile_policies(
+        [
+            {"policy": {"egress_boundary": True, "allowed_destinations": [github_rule]}},
+            {"policy": {"egress_boundary": True, "allowed_destinations": [anthropic_rule]}},
+        ]
+    )
+
+    assert merged["allowed_destinations"] == [github_rule, anthropic_rule]
 
 
 def test_merge_profile_policies_rejects_sandbox_env_conflict() -> None:

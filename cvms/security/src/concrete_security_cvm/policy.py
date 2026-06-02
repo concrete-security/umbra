@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import ipaddress
 import json
 import re
 from typing import Any, Mapping
@@ -193,6 +194,8 @@ class DestinationRule:
         return self.scheme == scheme.lower() and self._host_matches(host.lower().rstrip(".")) and port in self.ports
 
     def _host_matches(self, host: str) -> bool:
+        if self.host == "*":
+            return _public_internet_host(host)
         if self.host.startswith("*."):
             suffix = self.host[2:]
             return host.endswith(f".{suffix}") and host != suffix
@@ -468,7 +471,13 @@ def _parse_destination_rule(
         errors.append(PolicyError(f"{field}.scheme", "invalid_scheme", "scheme must be http or https"))
         scheme = "https"
     if not isinstance(host, str) or not _valid_policy_host(host):
-        errors.append(PolicyError(f"{field}.host", "invalid_host", "host must be lower-case DNS or leading wildcard"))
+        errors.append(
+            PolicyError(
+                f"{field}.host",
+                "invalid_host",
+                "host must be '*', lower-case DNS, or leading wildcard",
+            )
+        )
         host = ""
     ports = _parse_ports(raw.get("ports"), scheme, f"{field}.ports", errors)
     methods = _parse_methods(raw.get("methods"), f"{field}.methods", errors)
@@ -975,6 +984,8 @@ def _reject_unknown_fields(raw: dict[str, Any], allowed: set[str], field: str, e
 
 
 def _valid_policy_host(host: str) -> bool:
+    if host == "*":
+        return True
     if host != host.lower() or host.endswith(".") or len(host) > 253:
         return False
     if host.startswith("*."):
@@ -986,6 +997,23 @@ def _valid_policy_host(host: str) -> bool:
 def _valid_dns_name(host: str) -> bool:
     labels = host.split(".")
     return len(labels) >= 2 and all(DNS_LABEL_RE.fullmatch(label) for label in labels)
+
+
+def _public_internet_host(host: str) -> bool:
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return _valid_dns_name(host)
+    if (
+        address.is_loopback
+        or address.is_private
+        or address.is_link_local
+        or address.is_multicast
+        or address.is_reserved
+        or address.is_unspecified
+    ):
+        return False
+    return address.is_global
 
 
 def valid_proxy_token_hash(value: str) -> bool:

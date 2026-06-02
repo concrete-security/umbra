@@ -97,6 +97,105 @@ def test_blocked_destinations_precede_allow_rules() -> None:
     assert decision.rule_id == "block.upload"
 
 
+def test_wildcard_host_allows_public_internet_dns_and_ip_literals() -> None:
+    raw = sample_policy()
+    raw["allowed_destinations"] = [
+        {
+            "id": "internet",
+            "scheme": "https",
+            "host": "*",
+            "ports": [443],
+            "methods": ["GET"],
+            "path_prefixes": ["/"],
+        }
+    ]
+    raw["blocked_destinations"] = []
+    policy = parse_effective_policy(raw)
+
+    assert policy.decide(
+        scheme="https",
+        host="example.com",
+        port=443,
+        method="GET",
+        path="/",
+    ).allowed
+    assert policy.decide(
+        scheme="https",
+        host="93.184.216.34",
+        port=443,
+        method="GET",
+        path="/",
+    ).allowed
+
+
+def test_wildcard_host_rejects_non_internet_destinations() -> None:
+    raw = sample_policy()
+    raw["allowed_destinations"] = [
+        {
+            "id": "internet",
+            "scheme": "https",
+            "host": "*",
+            "ports": [443],
+            "methods": ["GET"],
+            "path_prefixes": ["/"],
+        }
+    ]
+    raw["blocked_destinations"] = []
+    policy = parse_effective_policy(raw)
+
+    for host in ("localhost", "internal", "127.0.0.1", "10.0.0.1", "169.254.1.1", "224.0.0.1", "::1"):
+        decision = policy.decide(
+            scheme="https",
+            host=host,
+            port=443,
+            method="GET",
+            path="/",
+        )
+        assert not decision.allowed, host
+
+
+def test_blocked_destination_precedes_wildcard_allow() -> None:
+    raw = sample_policy()
+    raw["allowed_destinations"] = [
+        {
+            "id": "internet",
+            "scheme": "https",
+            "host": "*",
+            "ports": [443],
+            "methods": ["POST"],
+            "path_prefixes": ["/"],
+        }
+    ]
+    policy = parse_effective_policy(raw)
+
+    decision = policy.decide(
+        scheme="https",
+        host="uploads.github.com",
+        port=443,
+        method="POST",
+        path="/asset",
+    )
+
+    assert decision.allowed is False
+    assert decision.reason == "blocked_destination"
+    assert decision.rule_id == "block.upload"
+
+
+def test_empty_allowed_destinations_remain_air_gapped() -> None:
+    raw = sample_policy()
+    raw["allowed_destinations"] = []
+    raw["blocked_destinations"] = []
+    policy = parse_effective_policy(raw)
+
+    assert not policy.decide(
+        scheme="https",
+        host="example.com",
+        port=443,
+        method="GET",
+        path="/",
+    ).allowed
+
+
 def test_injection_headers_render_after_match() -> None:
     policy = parse_effective_policy(sample_policy())
 

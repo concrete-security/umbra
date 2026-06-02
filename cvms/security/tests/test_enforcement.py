@@ -164,6 +164,65 @@ def test_encoded_slash_npm_scoped_package_request_is_allowed() -> None:
     assert result.allowed is True
 
 
+def test_wildcard_allowed_request_still_runs_injection_and_logs() -> None:
+    policy_body = policy()
+    policy_body["allowed_destinations"] = [
+        {
+            "id": "internet",
+            "scheme": "https",
+            "host": "*",
+            "ports": [443],
+            "methods": ["POST"],
+            "path_prefixes": ["/"],
+        }
+    ]
+    policy_body["blocked_destinations"] = []
+
+    result = enforce_request(request(), control_map(policy_body))
+
+    assert result.allowed is True
+    assert result.response_code is None
+    assert result.upstream_headers["authorization"] == "Bearer sk-ant-real"
+    assert result.traffic_log is not None
+    assert result.traffic_log.destination_host == "api.anthropic.com"
+    assert result.matched_policy_id == "internet"
+
+
+def test_wildcard_allowed_request_still_runs_dlp() -> None:
+    policy_body = policy()
+    policy_body["allowed_destinations"] = [
+        {
+            "id": "internet",
+            "scheme": "https",
+            "host": "*",
+            "ports": [443],
+            "methods": ["POST"],
+            "path_prefixes": ["/"],
+        }
+    ]
+    policy_body["blocked_destinations"] = []
+
+    result = enforce_request(request(body=("ghp_" + ("A" * 36)).encode("utf-8")), control_map(policy_body))
+
+    assert result.allowed is False
+    assert result.response_code == 403
+    assert result.reason == "dlp_secret_detected"
+
+
+def test_empty_allowed_destinations_air_gap_records_authenticated_denial() -> None:
+    policy_body = policy()
+    policy_body["allowed_destinations"] = []
+    policy_body["blocked_destinations"] = []
+
+    result = enforce_request(request(), control_map(policy_body))
+
+    assert result.allowed is False
+    assert result.response_code == 403
+    assert result.reason == "destination_not_allowed"
+    assert result.traffic_log is not None
+    assert result.traffic_log.response_code == 403
+
+
 def test_authenticated_request_reuses_connect_identity_without_proxy_auth() -> None:
     cvm = control_map().lookup_proxy_token("proxy-token")
     assert cvm is not None
