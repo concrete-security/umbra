@@ -362,6 +362,9 @@
     if (!res.ok) return UI.emptyV2({ icon: "alert", title: "Failed to load profile" });
     const p = await res.json();
     const etag = res.headers.get("ETag") || "";
+    if (!etag) {
+      console.warn("Profile ETag not found in response headers");
+    }
     const readonly = !A.canManageProfiles();
     const attached = (p.attached_cvms || [])
       .map(

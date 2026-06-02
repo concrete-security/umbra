@@ -206,7 +206,10 @@
     }
     const response = await api("/api/v1/cvms/" + cvmId);
     if (!response.ok) return null;
-    return response.json();
+    const cvm = await response.json();
+    const etag = response.headers.get("ETag");
+    if (etag) cvm._etag = etag;
+    return cvm;
   }
 
   async function fetchEntitySummary() {

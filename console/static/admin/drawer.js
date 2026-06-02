@@ -415,9 +415,13 @@
       const sel = A.el("drawer-body").querySelector("#attach-profile");
       const profileId = sel?.value;
       if (!profileId) return;
+      const etag = cvm._etag || (await A.fetchCvmDetail(cvm.id))?._etag;
       const response = await A.api("/api/v1/cvms/" + cvm.id + "/profiles", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(etag ? { "If-Match": etag } : {}),
+        },
         body: JSON.stringify({ profile_id: profileId }),
       });
       if (response.ok) {
@@ -430,7 +434,11 @@
     async detachProfile(cvmId, profileId) {
       const ok = await UI.confirm({ title: "Detach profile", message: "Remove this profile from the CVM?" });
       if (!ok) return;
-      const response = await A.api("/api/v1/cvms/" + cvmId + "/profiles/" + profileId, { method: "DELETE" });
+      const etag = A.selectedCvm?._etag || (await A.fetchCvmDetail(cvmId))?._etag;
+      const response = await A.api("/api/v1/cvms/" + cvmId + "/profiles/" + profileId, {
+        method: "DELETE",
+        headers: etag ? { "If-Match": etag } : {},
+      });
       if (response.ok) {
         UI.toast("Profile detached", "ok");
         A.selectedCvm = await A.fetchCvmDetail(cvmId);
