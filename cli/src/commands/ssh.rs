@@ -376,7 +376,11 @@ fn run_ssh(invocation: SshInvocation<'_>, config: &ResolvedConfig) -> ExitStatus
     };
     let mut ssh = base_ssh_command(&prepared, invocation.allocate_tty);
     ssh.arg(invocation.remote_command);
-    match ssh.status() {
+    let result = ssh.status();
+    // ssh has handed the terminal back; make sure the cursor is visible no
+    // matter how the remote session (or a detached TUI) left it.
+    restore_local_cursor(invocation.allocate_tty);
+    match result {
         Ok(status) if status.success() => ExitStatus::Ok,
         Ok(status) => {
             crate::style::eprintln_error(&format!("[error] ssh exited with status {status}"));
@@ -967,6 +971,32 @@ fn session_name(value: Option<&str>, prefix: &str) -> Result<String, String> {
 // the same state up from /etc/profile.d/concrete-env.sh.
 const TERMINAL_CURSOR_RESTORE: &str = "printf '\\033[?25h\\033[1 q'; ";
 
+// CSI ? 25 h shows the cursor on the *local* terminal. ssh restores termios on
+// exit but not DECTCEM, and dtach (unlike tmux/screen) never saves or restores
+// terminal state — so when a full-screen TUI inside the session is detached or
+// dies with the cursor hidden, the local terminal is left cursorless and no
+// later prompt brings it back. We emit the show-cursor sequence locally once
+// ssh returns, regardless of how the remote left things. Visibility only: we
+// never touch cursor shape (DECSCUSR) so we don't override the user's cursor.
+const LOCAL_CURSOR_RESTORE: &str = "\x1b[?25h";
+
+fn local_cursor_restore_sequence(allocate_tty: bool, stderr_is_tty: bool) -> Option<&'static str> {
+    if allocate_tty && stderr_is_tty {
+        Some(LOCAL_CURSOR_RESTORE)
+    } else {
+        None
+    }
+}
+
+fn restore_local_cursor(allocate_tty: bool) {
+    if let Some(sequence) = local_cursor_restore_sequence(allocate_tty, io::stderr().is_terminal())
+    {
+        let mut stderr = io::stderr();
+        let _ = stderr.write_all(sequence.as_bytes());
+        let _ = stderr.flush();
+    }
+}
+
 fn dtach_remote_command(session_name: &str, program_command: &str) -> String {
     let socket = format!("/run/concrete/sessions/{session_name}.sock");
     format!(
@@ -1404,6 +1434,26 @@ mod tests {
         let command = attach_remote_command("ssh-20260526-120000");
         assert!(command.contains("printf '\\033[?25h\\033[1 q'; "));
         assert!(command.contains("dtach -a \"$sock\" -r winch"));
+    }
+
+    #[test]
+    fn local_cursor_restore_only_fires_for_interactive_ttys() {
+        // Interactive session on a real terminal: emit show-cursor.
+        assert_eq!(local_cursor_restore_sequence(true, true), Some("\x1b[?25h"));
+        // Non-interactive (ps/kill/alias) or redirected stderr: stay silent so
+        // we never write escape bytes into a pipe, file, or log.
+        assert_eq!(local_cursor_restore_sequence(true, false), None);
+        assert_eq!(local_cursor_restore_sequence(false, true), None);
+        assert_eq!(local_cursor_restore_sequence(false, false), None);
+    }
+
+    #[test]
+    fn local_cursor_restore_is_visibility_only() {
+        // Show-cursor (DECTCEM) only — never DECSCUSR cursor shape — so we do
+        // not override the user's configured cursor style.
+        let sequence = local_cursor_restore_sequence(true, true).unwrap();
+        assert_eq!(sequence, "\x1b[?25h");
+        assert!(!sequence.contains(" q"));
     }
 
     #[test]
