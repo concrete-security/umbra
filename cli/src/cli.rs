@@ -551,6 +551,10 @@ pub struct KeyAddArgs {
     /// Path to an OpenSSH public key file. Reads stdin when omitted.
     #[arg(long)]
     pub file: Option<PathBuf>,
+
+    /// Private SSH key file to remember locally for this registered public key.
+    #[arg(long)]
+    pub identity_file: Option<PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]

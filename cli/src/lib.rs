@@ -18,6 +18,7 @@ mod exit;
 mod operation;
 mod session;
 mod ssh_identity;
+mod ssh_identity_store;
 mod style;
 
 pub use exit::ExitStatus;

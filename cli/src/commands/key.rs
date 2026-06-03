@@ -2,7 +2,7 @@ use std::{
     collections::BTreeMap,
     fs,
     io::{self, Read},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use reqwest::blocking::Client;
@@ -15,7 +15,8 @@ use crate::{
     config::ResolvedConfig,
     console::{console_session, read_empty_response, read_json_response},
     exit::ExitStatus,
-    style,
+    ssh_identity::{self, persistable_path},
+    ssh_identity_store, style,
 };
 
 #[derive(Debug, Deserialize)]
@@ -109,6 +110,17 @@ fn add(config: &ResolvedConfig, args: KeyAddArgs, json_output: bool) -> ExitStat
             return ExitStatus::Error;
         }
     };
+    let identity = match resolve_key_add_identity(
+        args.file.as_deref(),
+        args.identity_file.as_deref(),
+        &public_key,
+    ) {
+        Ok(value) => value,
+        Err((status, message)) => {
+            crate::style::eprintln_error(&message);
+            return status;
+        }
+    };
     let (console_url, session) = match console_session(config) {
         Ok(value) => value,
         Err((status, message)) => {
@@ -123,6 +135,18 @@ fn add(config: &ResolvedConfig, args: KeyAddArgs, json_output: bool) -> ExitStat
             return status;
         }
     };
+    if let Some(path) = identity.path.as_deref() {
+        if let Err(err) =
+            ssh_identity_store::write_identity(&config.config_dir, &key.id, &persistable_path(path))
+        {
+            crate::style::eprintln_error(&format!(
+                "[error] failed to remember SSH identity path: {err}"
+            ));
+            return ExitStatus::Error;
+        }
+    } else if let Some(message) = identity.warning.as_deref() {
+        eprintln!("{}", style::info_line(message));
+    }
     let output = key_output(&key);
     if json_output {
         println!(
@@ -137,6 +161,112 @@ fn add(config: &ResolvedConfig, args: KeyAddArgs, json_output: bool) -> ExitStat
         println!("{}", style::render_confirm(&confirm));
     }
     ExitStatus::Ok
+}
+
+#[derive(Debug)]
+struct KeyAddIdentity {
+    path: Option<PathBuf>,
+    warning: Option<String>,
+}
+
+fn resolve_key_add_identity(
+    public_key_path: Option<&Path>,
+    explicit_identity: Option<&Path>,
+    public_key: &str,
+) -> Result<KeyAddIdentity, (ExitStatus, String)> {
+    let Some(public_fingerprint) = ssh_identity::public_key_text_fingerprint(public_key) else {
+        if explicit_identity.is_some() {
+            return Err((
+                ExitStatus::Error,
+                "[error] public key is not a valid OpenSSH public key".to_string(),
+            ));
+        }
+        return Ok(KeyAddIdentity {
+            path: None,
+            warning: None,
+        });
+    };
+    if let Some(path) = explicit_identity {
+        let path = ssh_identity::resolve_explicit_identity(path)?;
+        let private_fingerprint =
+            ssh_identity::private_key_fingerprint(&path).ok_or_else(|| {
+                (
+                    ExitStatus::Usage,
+                    format!(
+                        "[usage] SSH identity file {} is not a readable OpenSSH private key",
+                        path.display()
+                    ),
+                )
+            })?;
+        if private_fingerprint != public_fingerprint {
+            return Err((
+                ExitStatus::Usage,
+                format!(
+                    "[usage] SSH identity file {} does not match the public key being registered",
+                    path.display()
+                ),
+            ));
+        }
+        return Ok(KeyAddIdentity {
+            path: Some(path),
+            warning: None,
+        });
+    }
+
+    let Some(public_key_path) = public_key_path else {
+        return Ok(KeyAddIdentity {
+            path: None,
+            warning: Some(
+                "registered SSH key, but no local private key path was provided; pass --identity-file to remember one"
+                    .to_string(),
+            ),
+        });
+    };
+    let Some(candidate) = inferred_private_key_path(public_key_path) else {
+        return Ok(KeyAddIdentity {
+            path: None,
+            warning: Some(format!(
+                "registered SSH key, but could not infer a local private key from {}; pass --identity-file to remember one",
+                public_key_path.display()
+            )),
+        });
+    };
+    if !candidate.is_file() {
+        return Ok(KeyAddIdentity {
+            path: None,
+            warning: Some(format!(
+                "registered SSH key, but inferred private key {} does not exist; pass --identity-file to remember one",
+                candidate.display()
+            )),
+        });
+    }
+    let Some(private_fingerprint) = ssh_identity::private_key_fingerprint(&candidate) else {
+        return Ok(KeyAddIdentity {
+            path: None,
+            warning: Some(format!(
+                "registered SSH key, but inferred private key {} is not readable; pass --identity-file to remember one",
+                candidate.display()
+            )),
+        });
+    };
+    if private_fingerprint != public_fingerprint {
+        return Ok(KeyAddIdentity {
+            path: None,
+            warning: Some(format!(
+                "registered SSH key, but inferred private key {} does not match; pass --identity-file to remember one",
+                candidate.display()
+            )),
+        });
+    }
+    Ok(KeyAddIdentity {
+        path: Some(candidate),
+        warning: None,
+    })
+}
+
+fn inferred_private_key_path(public_key_path: &Path) -> Option<PathBuf> {
+    (public_key_path.extension().and_then(|ext| ext.to_str()) == Some("pub"))
+        .then(|| public_key_path.with_extension(""))
 }
 
 fn remove(config: &ResolvedConfig, key_id: &str, json_output: bool) -> ExitStatus {
@@ -255,6 +385,7 @@ fn ssh_key_algorithm(public_key: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{fs, process::Command};
 
     #[test]
     fn ssh_key_algorithm_uses_openssh_prefix() {
@@ -262,5 +393,65 @@ mod tests {
             ssh_key_algorithm("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest user@example"),
             "ssh-ed25519"
         );
+    }
+
+    #[test]
+    fn key_add_identity_infers_sibling_private_key() {
+        let dir = std::env::temp_dir().join(format!("concrete-key-add-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).expect("temp dir created");
+        let private_key = dir.join("work_ed25519");
+        let public_key_path = dir.join("work_ed25519.pub");
+        Command::new("ssh-keygen")
+            .arg("-t")
+            .arg("ed25519")
+            .arg("-N")
+            .arg("")
+            .arg("-f")
+            .arg(&private_key)
+            .output()
+            .expect("ssh-keygen succeeds");
+        let public_key = fs::read_to_string(&public_key_path).expect("public key readable");
+
+        let identity = resolve_key_add_identity(Some(&public_key_path), None, &public_key)
+            .expect("identity resolves");
+
+        assert_eq!(identity.path, Some(private_key));
+        assert!(identity.warning.is_none());
+        fs::remove_dir_all(dir).expect("temp dir removed");
+    }
+
+    #[test]
+    fn key_add_identity_rejects_explicit_mismatch() {
+        let dir = std::env::temp_dir().join(format!("concrete-key-add-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).expect("temp dir created");
+        let first_private_key = dir.join("first_ed25519");
+        let first_public_key = dir.join("first_ed25519.pub");
+        let second_private_key = dir.join("second_ed25519");
+        Command::new("ssh-keygen")
+            .arg("-t")
+            .arg("ed25519")
+            .arg("-N")
+            .arg("")
+            .arg("-f")
+            .arg(&first_private_key)
+            .output()
+            .expect("first ssh-keygen succeeds");
+        Command::new("ssh-keygen")
+            .arg("-t")
+            .arg("ed25519")
+            .arg("-N")
+            .arg("")
+            .arg("-f")
+            .arg(&second_private_key)
+            .output()
+            .expect("second ssh-keygen succeeds");
+        let public_key = fs::read_to_string(first_public_key).expect("public key readable");
+
+        let err = resolve_key_add_identity(None, Some(&second_private_key), &public_key)
+            .expect_err("mismatch rejected");
+
+        assert!(matches!(err.0, ExitStatus::Usage));
+        assert!(err.1.contains("does not match"));
+        fs::remove_dir_all(dir).expect("temp dir removed");
     }
 }

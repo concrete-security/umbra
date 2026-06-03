@@ -25,7 +25,7 @@ use crate::{
     console::console_session,
     exit::ExitStatus,
     session::Session,
-    ssh_identity, style,
+    ssh_identity, ssh_identity_store, style,
 };
 
 #[derive(Debug, Deserialize)]
@@ -42,6 +42,12 @@ struct MeSshKey {
 #[derive(Debug, Deserialize)]
 struct MeSshKeyListPage {
     items: Vec<MeSshKey>,
+}
+
+#[derive(Debug)]
+struct InstalledSshKey {
+    id: String,
+    fingerprint: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -527,13 +533,21 @@ fn prepare_ssh(
     let identity_file = if let Some(path) = explicit_identity {
         Some(ssh_identity::resolve_explicit_identity(path)?)
     } else {
-        let fingerprints = match installed_key_fingerprints(console_url, &session, &cvm) {
+        let installed_keys = match installed_keys(console_url, &session, &cvm) {
             Ok(value) => value,
             Err((status, message)) => {
                 return Err((status, message));
             }
         };
-        let identity = ssh_identity::resolve_session_identity(config, None, &fingerprints)?;
+        let fingerprints = installed_keys
+            .iter()
+            .map(|key| key.fingerprint.clone())
+            .collect::<Vec<_>>();
+        let identity = if let Some(identity) = resolve_stored_identity(config, &installed_keys) {
+            Some(identity)
+        } else {
+            ssh_identity::resolve_session_identity(config, None, &fingerprints)?
+        };
         if identity.is_none() && !fingerprints.is_empty() {
             eprintln!(
                 "{}",
@@ -612,11 +626,11 @@ fn fetch_cvm(
     crate::console::read_json_response(response, "fetch Dev CVM")
 }
 
-fn installed_key_fingerprints(
+fn installed_keys(
     console_url: &str,
     session: &Session,
     cvm: &Cvm,
-) -> Result<Vec<String>, (ExitStatus, String)> {
+) -> Result<Vec<InstalledSshKey>, (ExitStatus, String)> {
     if cvm.ssh_keys.is_empty() {
         return Ok(Vec::new());
     }
@@ -640,8 +654,32 @@ fn installed_key_fingerprints(
         .items
         .into_iter()
         .filter(|key| installed_ids.contains(key.id.as_str()))
-        .map(|key| key.fingerprint)
+        .map(|key| InstalledSshKey {
+            id: key.id,
+            fingerprint: key.fingerprint,
+        })
         .collect())
+}
+
+fn resolve_stored_identity(
+    config: &ResolvedConfig,
+    installed_keys: &[InstalledSshKey],
+) -> Option<PathBuf> {
+    let stored = ssh_identity_store::read(&config.config_dir);
+    for key in installed_keys {
+        let Some(path) = stored.get(&key.id) else {
+            continue;
+        };
+        if path.is_file()
+            && ssh_identity::private_key_matches_fingerprints(
+                path,
+                std::slice::from_ref(&key.fingerprint),
+            )
+        {
+            return Some(path.clone());
+        }
+    }
+    None
 }
 
 fn resolve_policy_path(
@@ -1202,6 +1240,7 @@ fn shell_quote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{fs, process::Command};
 
     #[test]
     fn shell_quote_wraps_and_escapes_single_quotes() {
@@ -1266,6 +1305,43 @@ mod tests {
         let config = render_editor_ssh_config("concrete-cvm-1", &prepared).unwrap();
         assert!(config.contains("IdentityFile \"/home/u/.ssh/concrete_dev_ed25519\""));
         assert!(config.contains("IdentitiesOnly yes"));
+    }
+
+    #[test]
+    fn stored_identity_resolves_by_installed_key_id() {
+        let dir = std::env::temp_dir().join(format!("concrete-ssh-store-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).expect("temp dir created");
+        let private_key = dir.join("registered_ed25519");
+        let public_key = dir.join("registered_ed25519.pub");
+        Command::new("ssh-keygen")
+            .arg("-t")
+            .arg("ed25519")
+            .arg("-N")
+            .arg("")
+            .arg("-f")
+            .arg(&private_key)
+            .output()
+            .expect("ssh-keygen succeeds");
+        let fingerprint =
+            ssh_identity::public_key_fingerprint(&public_key).expect("fingerprint parsed");
+        ssh_identity_store::write_identity(&dir, "key-1", &private_key)
+            .expect("identity path stored");
+        let config = ResolvedConfig::resolve(crate::config::ConfigOverrides {
+            config_dir: Some(dir.clone()),
+            ..Default::default()
+        });
+
+        let resolved = resolve_stored_identity(
+            &config,
+            &[InstalledSshKey {
+                id: "key-1".to_string(),
+                fingerprint,
+            }],
+        )
+        .expect("stored identity resolved");
+
+        assert_eq!(resolved, private_key);
+        fs::remove_dir_all(dir).expect("temp dir removed");
     }
 
     #[test]

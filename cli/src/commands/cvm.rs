@@ -24,7 +24,7 @@ use crate::{
     operation::{self, Operation},
     session::Session,
     ssh_identity::{self, persistable_path},
-    style,
+    ssh_identity_store, style,
 };
 
 #[derive(Debug, Deserialize)]
@@ -657,7 +657,8 @@ fn selected_launch_ssh_keys(
             .iter()
             .map(|key| key.fingerprint.clone())
             .collect::<Vec<_>>();
-        let identity = ssh_identity::discover_private_key_for_fingerprints(&fingerprints);
+        let identity = resolve_launch_identity(config, &selected)
+            .or_else(|| ssh_identity::discover_private_key_for_fingerprints(&fingerprints));
         return Ok((args.ssh_keys.clone(), identity));
     }
     let keys = fetch_launch_keys(console_url, session)?;
@@ -677,10 +678,13 @@ fn selected_launch_ssh_keys(
             .iter()
             .map(|key| key.fingerprint.clone())
             .collect::<Vec<_>>();
-        let mut identity = ssh_identity::discover_private_key_for_fingerprints(&fingerprints);
+        let selected = keys.items.iter().collect::<Vec<_>>();
+        let mut identity = resolve_launch_identity(config, &selected)
+            .or_else(|| ssh_identity::discover_private_key_for_fingerprints(&fingerprints));
         if identity.is_none() {
             let (private_key, public_key) = ensure_default_ssh_keypair(config)?;
             let key = create_launch_key(console_url, session, "default", &public_key)?;
+            remember_launch_identity(config, &key.id, &private_key)?;
             eprintln!(
                 "{}",
                 style::info_line(&format!(
@@ -724,6 +728,7 @@ fn selected_launch_ssh_keys(
     }
     let (private_key, public_key) = ensure_default_ssh_keypair(config)?;
     let key = create_launch_key(console_url, session, "default", &public_key)?;
+    remember_launch_identity(config, &key.id, &private_key)?;
     eprintln!(
         "{}",
         style::info_line(&format!(
@@ -732,6 +737,38 @@ fn selected_launch_ssh_keys(
         ))
     );
     Ok((vec![key.id], Some(private_key)))
+}
+
+fn remember_launch_identity(
+    config: &ResolvedConfig,
+    key_id: &str,
+    identity_file: &Path,
+) -> Result<(), (ExitStatus, String)> {
+    ssh_identity_store::write_identity(&config.config_dir, key_id, &persistable_path(identity_file))
+        .map_err(|err| {
+            (
+                ExitStatus::Error,
+                format!("[error] failed to remember SSH identity path: {err}"),
+            )
+        })
+}
+
+fn resolve_launch_identity(config: &ResolvedConfig, keys: &[&ConsoleSshKey]) -> Option<PathBuf> {
+    let stored = ssh_identity_store::read(&config.config_dir);
+    for key in keys {
+        let Some(path) = stored.get(&key.id) else {
+            continue;
+        };
+        if path.is_file()
+            && ssh_identity::private_key_matches_fingerprints(
+                path,
+                std::slice::from_ref(&key.fingerprint),
+            )
+        {
+            return Some(path.clone());
+        }
+    }
+    None
 }
 
 fn fetch_launch_profiles(

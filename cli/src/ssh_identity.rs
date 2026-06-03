@@ -1,7 +1,7 @@
 use std::{
     collections::HashSet,
-    ffi::OsString,
     fs,
+    io::Write,
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
@@ -111,7 +111,8 @@ fn resolve_session_identity_in(
         .map(String::as_str)
         .collect();
     if let Some(path) = default_identity {
-        if path.is_file() && (wanted.is_empty() || private_key_matches_fingerprints(path, &wanted))
+        if path.is_file()
+            && (wanted.is_empty() || private_key_matches_fingerprints_set(path, &wanted))
         {
             return Some(path.to_path_buf());
         }
@@ -124,23 +125,7 @@ pub fn persistable_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
-fn private_key_matches_fingerprints(private_key: &Path, wanted: &HashSet<&str>) -> bool {
-    if wanted.is_empty() {
-        return false;
-    }
-    let public_key = public_key_path_for_private_key(private_key);
-    public_key_fingerprint(&public_key)
-        .map(|fingerprint| wanted.contains(fingerprint.as_str()))
-        .unwrap_or(false)
-}
-
-fn public_key_path_for_private_key(private_key: &Path) -> PathBuf {
-    let mut value: OsString = private_key.as_os_str().to_os_string();
-    value.push(".pub");
-    PathBuf::from(value)
-}
-
-fn public_key_fingerprint(path: &Path) -> Option<String> {
+pub fn public_key_fingerprint(path: &Path) -> Option<String> {
     let output = Command::new("ssh-keygen")
         .arg("-lf")
         .arg(path)
@@ -150,7 +135,63 @@ fn public_key_fingerprint(path: &Path) -> Option<String> {
     if !output.status.success() {
         return None;
     }
-    let line = String::from_utf8_lossy(&output.stdout);
+    parse_fingerprint_line(&String::from_utf8_lossy(&output.stdout))
+}
+
+pub fn public_key_text_fingerprint(public_key: &str) -> Option<String> {
+    let mut child = Command::new("ssh-keygen")
+        .arg("-lf")
+        .arg("-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    {
+        let mut stdin = child.stdin.take()?;
+        stdin.write_all(public_key.as_bytes()).ok()?;
+        if !public_key.ends_with('\n') {
+            stdin.write_all(b"\n").ok()?;
+        }
+    }
+    let output = child.wait_with_output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_fingerprint_line(&String::from_utf8_lossy(&output.stdout))
+}
+
+pub fn private_key_fingerprint(private_key: &Path) -> Option<String> {
+    let output = Command::new("ssh-keygen")
+        .arg("-y")
+        .arg("-f")
+        .arg(private_key)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let public_key = String::from_utf8_lossy(&output.stdout);
+    public_key_text_fingerprint(&public_key)
+}
+
+pub fn private_key_matches_fingerprints(private_key: &Path, fingerprints: &[String]) -> bool {
+    let wanted: HashSet<&str> = fingerprints.iter().map(String::as_str).collect();
+    private_key_matches_fingerprints_set(private_key, &wanted)
+}
+
+fn private_key_matches_fingerprints_set(private_key: &Path, wanted: &HashSet<&str>) -> bool {
+    if wanted.is_empty() {
+        return false;
+    }
+    private_key_fingerprint(private_key)
+        .map(|fingerprint| wanted.contains(fingerprint.as_str()))
+        .unwrap_or(false)
+}
+
+fn parse_fingerprint_line(line: &str) -> Option<String> {
     let fingerprint = line.split_whitespace().nth(1)?;
     fingerprint
         .starts_with("SHA256:")
