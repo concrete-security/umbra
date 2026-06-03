@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import gzip
 import hashlib
 import logging
 from typing import Mapping
@@ -10,6 +11,7 @@ import pytest
 
 from concrete_security_cvm.control import ControlMap
 from concrete_security_cvm.control_loop import ControlPlaneState
+from concrete_security_cvm.enforcement import DLP_SCAN_BODY_LIMIT_BYTES
 from concrete_security_cvm.mitmproxy_addon import SecurityCVMProxyAddon
 from concrete_security_cvm.traffic import TrafficLogClient, TrafficLogEmitter, TrafficLogQueue
 
@@ -209,6 +211,89 @@ def test_response_is_streamed_and_logs_streamed_byte_count() -> None:
     assert log.bytes_transferred == 4096 + 4096 + 808
     assert "concrete_streamed_bytes" not in flow.metadata
     assert "concrete_traffic_log" not in flow.metadata
+
+
+def test_gzip_encoded_request_body_is_decoded_before_dlp_scan() -> None:
+    # SD-01 regression: a sandbox must not hide a secret behind
+    # `Content-Encoding: gzip`. The SC scans the DECODED body, so the gzipped
+    # GitHub token is detected and the request is blocked before injection.
+    proxy_addon, queue = addon()
+    secret_body = b'{"leak":"ghp_' + b"A" * 36 + b'"}'
+    request = FakeRequest(headers={"Proxy-Authorization": "Bearer proxy-token", "Content-Encoding": "gzip"})
+    request.raw_content = gzip.compress(secret_body)
+    flow = FakeFlow(request)
+
+    proxy_addon.request(flow)
+
+    assert flow.response is not None
+    assert flow.response.status_code == 403
+    assert flow.response.headers["X-Concrete-Block-Reason"] == "dlp_secret_detected"
+    # The real credential MUST NOT have been injected onto a blocked request.
+    assert flow.request.headers.get("authorization") != "Bearer sk-ant-real"
+    batch = queue.drain_batch()
+    assert batch is not None
+    assert batch.records[0].response_code == 403
+
+
+def test_undecodable_content_encoding_fails_closed() -> None:
+    # A declared encoding whose body does not decompress must be rejected, not
+    # forwarded with an unscanned body.
+    proxy_addon, _queue = addon()
+    request = FakeRequest(headers={"Proxy-Authorization": "Bearer proxy-token", "Content-Encoding": "gzip"})
+    request.raw_content = b"this is not gzip"
+    flow = FakeFlow(request)
+
+    proxy_addon.request(flow)
+
+    assert flow.response is not None
+    assert flow.response.status_code == 400
+    assert flow.request.headers.get("authorization") != "Bearer sk-ant-real"
+
+
+def test_unsupported_content_encoding_fails_closed() -> None:
+    # br/zstd request bodies cannot be inspected by the SC, so they fail closed.
+    proxy_addon, _queue = addon()
+    request = FakeRequest(headers={"Proxy-Authorization": "Bearer proxy-token", "Content-Encoding": "br"})
+    request.raw_content = b"\x8b\x00brotli-ish-bytes"
+    flow = FakeFlow(request)
+
+    proxy_addon.request(flow)
+
+    assert flow.response is not None
+    assert flow.response.status_code == 400
+
+
+def test_multi_member_gzip_body_is_fully_decoded_for_dlp() -> None:
+    # SD-01 round-2: a secret hidden in a LATER gzip member must still be caught.
+    # zlib.decompressobj decodes only member 1; conformant servers decode all
+    # members, so the SC must decode them all or the secret is forwarded unseen.
+    proxy_addon, _queue = addon()
+    benign = gzip.compress(b'{"telemetry":"ok"}')
+    secret = gzip.compress(b'{"leak":"ghp_' + b"A" * 36 + b'"}')
+    request = FakeRequest(headers={"Proxy-Authorization": "Bearer proxy-token", "Content-Encoding": "gzip"})
+    request.raw_content = benign + secret
+    flow = FakeFlow(request)
+
+    proxy_addon.request(flow)
+
+    assert flow.response is not None
+    assert flow.response.status_code == 403
+    assert flow.response.headers["X-Concrete-Block-Reason"] == "dlp_secret_detected"
+    assert flow.request.headers.get("authorization") != "Bearer sk-ant-real"
+
+
+def test_decode_window_overflow_fails_closed() -> None:
+    # A small gzip that decodes beyond the scan window must be rejected, not
+    # forwarded partially-scanned (a secret could hide past the window cheaply).
+    proxy_addon, _queue = addon()
+    request = FakeRequest(headers={"Proxy-Authorization": "Bearer proxy-token", "Content-Encoding": "gzip"})
+    request.raw_content = gzip.compress(b"A" * (DLP_SCAN_BODY_LIMIT_BYTES + 1024))
+    flow = FakeFlow(request)
+
+    proxy_addon.request(flow)
+
+    assert flow.response is not None
+    assert flow.response.status_code == 400
 
 
 def test_allowed_connect_uses_authority_and_logs_tunnel_before_http_request() -> None:

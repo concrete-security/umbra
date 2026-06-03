@@ -66,6 +66,8 @@ def mitmdump_args(*, script_path: str | None = None, env: Mapping[str, str] | No
         f"confdir={confdir}",
         "--set",
         "ssl_insecure=false",
+        "--set",
+        "flow_detail=0",
         "-s",
         script_path or str(Path(__file__).resolve()),
     ]

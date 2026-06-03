@@ -4,12 +4,14 @@ from dataclasses import replace
 from datetime import datetime, timezone
 import logging
 import time
+import zlib
 from typing import Any, Callable, Mapping
 from urllib.parse import urlsplit
 from uuid import UUID
 
 from concrete_security_cvm.control_loop import ControlPlaneState
 from concrete_security_cvm.enforcement import (
+    DLP_SCAN_BODY_LIMIT_BYTES,
     EnforcementResult,
     ProxyRequest,
     decide_inbound_websocket,
@@ -87,17 +89,24 @@ class SecurityCVMProxyAddon:
         else:
             result = enforce_request(proxy_request, control_map)
         if result.allowed:
+            metadata = _metadata(flow)
+            if result.cvm is not None:
+                metadata["concrete_cvm_id"] = str(result.cvm.cvm_id)
+                metadata["concrete_websocket_governed"] = result.cvm.merged_policy.websocket_governed(
+                    scheme=proxy_request.scheme,
+                    host=proxy_request.host,
+                    port=proxy_request.port,
+                )
             _replace_headers(flow.request.headers, result.upstream_headers)
             if (connect_only or proxy_request.method == "CONNECT") and result.cvm is not None:
                 if result.traffic_log is not None:
                     self.traffic_emitter.enqueue(result.traffic_log)
-                _metadata(flow)["concrete_connect_allowed"] = True
-                _metadata(flow)["concrete_cvm_id"] = str(result.cvm.cvm_id)
+                metadata["concrete_connect_allowed"] = True
                 if key := _client_connection_key(flow):
                     self._remember_connect_identity(key, result.cvm.cvm_id)
                 return
             if result.traffic_log is not None:
-                _metadata(flow)["concrete_traffic_log"] = result.traffic_log
+                metadata["concrete_traffic_log"] = result.traffic_log
             return
         self._reject(flow, result)
 
@@ -112,35 +121,130 @@ class SecurityCVMProxyAddon:
         # frames this hook itself injects.
         if getattr(message, "from_client", True) or getattr(message, "injected", False):
             return
-        if not getattr(message, "is_text", False):
+        if _is_websocket_control_message(message):
             return
-        content = getattr(message, "content", None)
-        if not isinstance(content, bytes):
-            return
+        content = _websocket_message_content(message) or b""
+        metadata = _metadata(flow)
+        was_governed = metadata.get("concrete_websocket_governed") is True
+        flow_cvm_id = _flow_cvm_id(flow)
         control_map = self.control_state.snapshot().control_map
         cvm = _connect_cvm(flow, control_map, self._connect_identities)
-        if cvm is None:
-            return
         try:
             proxy_request = proxy_request_from_flow(flow)
         except FlowTranslationError:
+            if was_governed:
+                self._drop_websocket_frame(
+                    flow,
+                    message,
+                    None,
+                    cvm_id=flow_cvm_id,
+                    reason="websocket_request_malformed",
+                )
+            return
+        if cvm is None:
+            if was_governed:
+                self._drop_websocket_frame(
+                    flow,
+                    message,
+                    proxy_request,
+                    cvm_id=flow_cvm_id,
+                    reason="websocket_cvm_unresolved",
+                )
+            return
+        tunnel_decision = cvm.merged_policy.decide_tunnel(
+            scheme=proxy_request.scheme,
+            host=proxy_request.host,
+            port=proxy_request.port,
+        )
+        if not tunnel_decision.allowed:
+            self._drop_websocket_frame(
+                flow,
+                message,
+                proxy_request,
+                cvm_id=cvm.cvm_id,
+                matched_policy_id=tunnel_decision.rule_id,
+                reason=tunnel_decision.reason,
+            )
+            return
+        current_governed = cvm.merged_policy.websocket_governed(
+            scheme=proxy_request.scheme,
+            host=proxy_request.host,
+            port=proxy_request.port,
+        )
+        if not current_governed:
+            if was_governed:
+                self._drop_websocket_frame(
+                    flow,
+                    message,
+                    proxy_request,
+                    cvm_id=cvm.cvm_id,
+                    reason="websocket_governance_removed",
+                )
+            return
+        if getattr(message, "is_text", False) is not True:
+            self._drop_websocket_frame(
+                flow,
+                message,
+                proxy_request,
+                cvm_id=cvm.cvm_id,
+                reason="websocket_non_text_data",
+            )
             return
         decision = decide_inbound_websocket(proxy_request, content, cvm)
-        if decision is None or not decision.drop:
+        if decision is None:
+            self._drop_websocket_frame(
+                flow,
+                message,
+                proxy_request,
+                cvm_id=cvm.cvm_id,
+                reason="websocket_decision_missing",
+            )
             return
-        message.drop()
-        if decision.traffic_log is not None:
-            self.traffic_emitter.enqueue(decision.traffic_log)
-        if decision.ack_frame is not None:
-            self.websocket_injector(flow, False, decision.ack_frame)
-        logger.info(
-            "websocket_frame_blocked",
-            extra={"cvm_id": str(cvm.cvm_id), "matched_policy_id": decision.matched_policy_id},
+        if not decision.drop:
+            if decision.lifecycle:
+                # Lifecycle (hello/disconnect) frames are delivered unfiltered
+                # under the SC bound; emit a contents-free traffic log so the
+                # bounded telemetry channel is auditable (cf. dropped frames).
+                self.traffic_emitter.enqueue(_websocket_traffic_log_record(proxy_request, cvm.cvm_id))
+            return
+        self._drop_websocket_frame(
+            flow,
+            message,
+            proxy_request,
+            cvm_id=cvm.cvm_id,
+            matched_policy_id=decision.matched_policy_id,
+            ack_frame=decision.ack_frame,
+            reason="websocket_policy",
         )
 
     def client_disconnected(self, client_conn: Any) -> None:
         if key := _connection_key_from_connection(client_conn):
             self._connect_identities.pop(key, None)
+
+    def _drop_websocket_frame(
+        self,
+        flow: Any,
+        message: Any,
+        request: ProxyRequest | None,
+        *,
+        cvm_id: UUID | None,
+        matched_policy_id: str | None = None,
+        ack_frame: bytes | None = None,
+        reason: str,
+    ) -> None:
+        message.drop()
+        if request is not None and cvm_id is not None:
+            self.traffic_emitter.enqueue(_websocket_traffic_log_record(request, cvm_id))
+        if ack_frame is not None:
+            self.websocket_injector(flow, False, ack_frame)
+        logger.info(
+            "websocket_frame_blocked",
+            extra={
+                "cvm_id": str(cvm_id) if cvm_id is not None else None,
+                "matched_policy_id": matched_policy_id,
+                "reason": reason,
+            },
+        )
 
     def _remember_connect_identity(self, key: str, cvm_id: UUID) -> None:
         now = time.monotonic()
@@ -256,6 +360,23 @@ def proxy_request_from_flow(flow: Any) -> ProxyRequest:
     )
 
 
+def _websocket_traffic_log_record(request: ProxyRequest, cvm_id: UUID) -> TrafficLogRecord:
+    return TrafficLogRecord(
+        timestamp=request.timestamp or datetime.now(timezone.utc),
+        cvm_id=cvm_id,
+        source_ip=request.source_ip,
+        destination_ip=request.destination_ip,
+        destination_host=request.host,
+        protocol=request.scheme,
+        port=request.port,
+        method=request.method.upper(),
+        path=request.path,
+        response_code=None,
+        bytes_transferred=0,
+        attributes={},
+    )
+
+
 def mitmproxy_response_factory(status_code: int, content: bytes, headers: Mapping[str, str]) -> Any:
     from mitmproxy import http
 
@@ -294,6 +415,7 @@ def _blocked_body(result: EnforcementResult) -> bytes:
 
     reason_messages = {
         "blocked_destination": "Reason: the destination is explicitly blocked.",
+        "body_assertion_failed": "Reason: this endpoint is allowed only for specific request body values.",
         "destination_not_allowed": "Reason: this endpoint is not allowed.",
         "dlp_secret_detected": "Reason: profile DLP policy detected sensitive data.",
         "dlp_scan_timeout": "Reason: profile DLP scanning timed out.",
@@ -380,11 +502,124 @@ def _replace_headers(headers: Any, values: Mapping[str, str]) -> None:
 
 
 def _request_body(request: Any) -> bytes:
+    """Return the Content-Encoding-DECODED request body for inspection.
+
+    `ProxyRequest.body` feeds DLP secret scanning, body assertions, and
+    traffic-log attribute extraction — never request forwarding (mitmproxy
+    forwards the original on-wire body untouched). Those inspectors must see the
+    DECODED bytes: scanning the still-compressed `raw_content` lets a sandbox
+    hide a secret behind `Content-Encoding: gzip` and slip it past DLP. When a
+    declared content-coding cannot be decoded (unsupported codec, or a body that
+    does not actually decompress) the SC fails CLOSED by raising
+    FlowTranslationError, so the request is rejected rather than forwarded with
+    an unreadable, unscanned body.
+    """
+    raw = _raw_request_body(request)
+    encoding = _request_content_encoding(request)
+    if encoding is None or not raw:
+        return raw
+    decoded = _decode_content_codings(raw, encoding, limit=DLP_SCAN_BODY_LIMIT_BYTES)
+    if decoded is None:
+        raise FlowTranslationError(f"undecodable content-encoding: {encoding!r}")
+    return decoded
+
+
+def _raw_request_body(request: Any) -> bytes:
     for attr in ("raw_content", "content"):
         value = getattr(request, attr, None)
         if isinstance(value, bytes):
             return value
     return b""
+
+
+def _request_content_encoding(request: Any) -> str | None:
+    raw = _header_value(getattr(request, "headers", None), "content-encoding")
+    if raw is None:
+        return None
+    token = str(raw).strip()
+    if not token or token.lower() == "identity":
+        return None
+    return token
+
+
+def _header_value(headers: Any, name: str) -> str | None:
+    # Real mitmproxy headers are case-insensitive; plain-dict test fakes are not,
+    # so match case-insensitively over items().
+    if headers is None:
+        return None
+    items = getattr(headers, "items", None)
+    if callable(items):
+        for key, value in items():
+            if str(key).lower() == name:
+                return str(value)
+    getter = getattr(headers, "get", None)
+    if callable(getter):
+        value = getter(name)
+        if value is not None:
+            return str(value)
+    return None
+
+
+def _decode_content_codings(raw: bytes, encoding: str, *, limit: int) -> bytes | None:
+    # Content-Encoding lists codings in the order they were applied; undo them
+    # right-to-left. Any unsupported coding fails the whole decode (caller fails
+    # closed). Output is bounded to `limit` so a compression bomb cannot OOM the
+    # SC; that matches the existing DLP scan-window truncation.
+    codings = [token.strip().lower() for token in encoding.split(",") if token.strip()]
+    decoded = raw
+    for coding in reversed(codings):
+        if coding == "identity":
+            continue
+        decoded = _inflate(decoded, coding, limit=limit)
+        if decoded is None:
+            return None
+    return decoded
+
+
+def _inflate(raw: bytes, coding: str, *, limit: int) -> bytes | None:
+    if coding in ("gzip", "x-gzip"):
+        wbits = 16 + zlib.MAX_WBITS
+    elif coding == "deflate":
+        wbits = zlib.MAX_WBITS
+    else:
+        # br / zstd / compress / unknown: the SC cannot inspect the plaintext,
+        # so it must not forward it. Caller fails closed.
+        return None
+    decoded = _inflate_members(raw, wbits, limit)
+    if decoded is None and coding == "deflate":
+        # Some servers emit raw DEFLATE with no zlib header.
+        decoded = _inflate_members(raw, -zlib.MAX_WBITS, limit)
+    return decoded
+
+
+def _inflate_members(raw: bytes, wbits: int, limit: int) -> bytes | None:
+    # A Content-Encoding stream MAY be a concatenation of compressed members
+    # (RFC 1952 §2.2 for gzip); conformant servers decode them ALL, so the SC
+    # must too — otherwise a secret hidden in a later member is forwarded
+    # unscanned (the destination reassembles it). Decode every member, bounded
+    # to `limit`. Returns None to fail CLOSED when: a member is corrupt/
+    # truncated, a member does not finish within the byte budget, OR the total
+    # decoded output would exceed the budget (a body we cannot fully scan must
+    # be rejected, not forwarded half-scanned).
+    chunks: list[bytes] = []
+    total = 0
+    remaining = raw
+    while remaining:
+        decompressor = zlib.decompressobj(wbits)
+        try:
+            # +1 so an over-budget member yields a non-final result we can
+            # detect (eof False) rather than silently truncating.
+            out = decompressor.decompress(remaining, (limit - total) + 1)
+        except zlib.error:
+            return None
+        if not decompressor.eof:
+            return None
+        chunks.append(out)
+        total += len(out)
+        if total > limit:
+            return None
+        remaining = decompressor.unused_data
+    return b"".join(chunks)
 
 
 def _response_body_size(response: Any) -> int:
@@ -436,6 +671,36 @@ def _trim_websocket_messages(flow: Any) -> None:
         del messages[:excess]
 
 
+def _is_websocket_control_message(message: Any) -> bool:
+    for attr in ("opcode", "type"):
+        raw = getattr(message, attr, None)
+        opcode = _websocket_opcode_name(raw)
+        if opcode in {"ping", "pong", "close"}:
+            return True
+    return False
+
+
+def _websocket_opcode_name(raw: Any) -> str | None:
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        value = raw
+    else:
+        name = getattr(raw, "name", None)
+        value = name if isinstance(name, str) else str(raw)
+    value = value.rsplit(".", 1)[-1].lower()
+    return value or None
+
+
+def _websocket_message_content(message: Any) -> bytes | None:
+    content = getattr(message, "content", None)
+    if isinstance(content, bytes):
+        return content
+    if isinstance(content, str):
+        return content.encode("utf-8")
+    return None
+
+
 def _metadata(flow: Any) -> dict[str, Any]:
     metadata = getattr(flow, "metadata", None)
     if isinstance(metadata, dict):
@@ -458,6 +723,16 @@ def _connect_cvm(flow: Any, control_map: Any, identities: Mapping[str, tuple[str
     except ValueError:
         return None
     return control_map.lookup_cvm_id(cvm_id)
+
+
+def _flow_cvm_id(flow: Any) -> UUID | None:
+    raw = _metadata(flow).get("concrete_cvm_id")
+    if not isinstance(raw, str):
+        return None
+    try:
+        return UUID(raw)
+    except ValueError:
+        return None
 
 
 def _client_connection_key(flow: Any) -> str | None:

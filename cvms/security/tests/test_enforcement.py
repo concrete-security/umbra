@@ -325,6 +325,53 @@ def test_dlp_timeout_blocks_authenticated_request() -> None:
     assert result.reason == "dlp_scan_timeout"
 
 
+def test_dlp_scans_utf16_declared_body() -> None:
+    # SD-01 round-2: a secret in a declared non-utf-8 charset must not evade the
+    # utf-8-only scan; the destination would read it cleanly.
+    leaked = "ghp_" + ("A" * 36)
+    result = enforce_request(
+        request(
+            body=leaked.encode("utf-16"),
+            headers={
+                "Proxy-Authorization": "Bearer proxy-token",
+                "Content-Type": "application/json; charset=utf-16",
+            },
+        ),
+        control_map(),
+    )
+
+    assert result.allowed is False
+    assert result.reason == "dlp_secret_detected"
+
+
+def test_dlp_scans_utf16_undeclared_body_via_nul_strip() -> None:
+    # Even with no declared charset, utf-16's interleaved NULs must not hide an
+    # ASCII secret from the scanner.
+    leaked = "ghp_" + ("A" * 36)
+    result = enforce_request(request(body=leaked.encode("utf-16-le")), control_map())
+
+    assert result.allowed is False
+    assert result.reason == "dlp_secret_detected"
+
+
+def test_dlp_undecodable_charset_fails_closed() -> None:
+    # A declared charset the SC cannot decode means it cannot be sure it scanned
+    # the plaintext the destination will read: block rather than allow.
+    result = enforce_request(
+        request(
+            body=b"harmless",
+            headers={
+                "Proxy-Authorization": "Bearer proxy-token",
+                "Content-Type": "text/plain; charset=made-up-codec",
+            },
+        ),
+        control_map(),
+    )
+
+    assert result.allowed is False
+    assert result.reason == "dlp_undecodable_body"
+
+
 def slack_policy() -> dict[str, object]:
     return {
         "allowed_destinations": [
@@ -422,7 +469,7 @@ def test_body_assertion_form_with_wrong_content_type_denies() -> None:
 
     assert result.allowed is False
     assert result.response_code == 403
-    assert result.reason == "destination_not_allowed"
+    assert result.reason == "body_assertion_failed"
 
 
 @pytest.mark.parametrize(
@@ -465,9 +512,31 @@ def test_body_assertion_unallowed_channel_denies_with_traffic_log() -> None:
 
     assert result.allowed is False
     assert result.response_code == 403
-    assert result.reason == "destination_not_allowed"
+    assert result.reason == "body_assertion_failed"
     assert result.traffic_log is not None
     assert result.traffic_log.response_code == 403
+
+
+def test_body_assertion_failure_is_ceiling_over_broad_allow_and_prevents_injection() -> None:
+    policy_body = slack_policy()
+    policy_body["allowed_destinations"].append(
+        {
+            "id": "internet",
+            "scheme": "https",
+            "host": "*",
+            "ports": [443],
+            "methods": ["POST"],
+            "path_prefixes": ["/"],
+        }
+    )
+
+    result = enforce_request(slack_request(body=b"channel=C0NOTALLOWED"), control_map(policy_body))
+
+    assert result.allowed is False
+    assert result.response_code == 403
+    assert result.reason == "body_assertion_failed"
+    assert result.matched_policy_id == "slack-read-conv-form"
+    assert result.upstream_headers["authorization"] == "Bearer concrete-proxy-injected"
 
 
 def test_body_assertion_malformed_body_denies() -> None:

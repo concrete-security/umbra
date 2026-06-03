@@ -20,6 +20,10 @@ class DLPScanTimeout(RuntimeError):
     pass
 
 
+class DLPUndecodableBody(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class ProxyRequest:
     source_ip: str
@@ -56,6 +60,7 @@ class WebsocketFrameDecision:
     ack_frame: bytes | None
     traffic_log: TrafficLogRecord | None
     matched_policy_id: str | None = None
+    lifecycle: bool = False
 
 
 def enforce_request(
@@ -127,6 +132,8 @@ def enforce_authenticated_request(
         )
     except DLPScanTimeout:
         return _blocked_result(request, cvm, upstream_headers, "dlp_scan_timeout", None)
+    except DLPUndecodableBody:
+        return _blocked_result(request, cvm, upstream_headers, "dlp_undecodable_body", None)
     if dlp_match is not None:
         return _blocked_result(request, cvm, upstream_headers, "dlp_secret_detected", dlp_match)
 
@@ -212,7 +219,13 @@ def decide_inbound_websocket(
     if verdict is None:
         return None
     if not verdict.drop:
-        return WebsocketFrameDecision(drop=False, ack_frame=None, traffic_log=None, matched_policy_id=verdict.rule_id)
+        return WebsocketFrameDecision(
+            drop=False,
+            ack_frame=None,
+            traffic_log=None,
+            matched_policy_id=verdict.rule_id,
+            lifecycle=verdict.lifecycle,
+        )
     return WebsocketFrameDecision(
         drop=True,
         ack_frame=verdict.ack_frame,
@@ -251,16 +264,53 @@ def find_dlp_match(
     now: Callable[[], float] = time.monotonic,
 ) -> str | None:
     header_blob = "\n".join(f"{name}: {value}" for name, value in sorted(headers.items()))
-    body_text = body[:DLP_SCAN_BODY_LIMIT_BYTES].decode("utf-8", errors="ignore")
+    body_views = _dlp_body_views(headers, body)
     deadline = now() + timeout_seconds
     for pattern in patterns:  # type: ignore[assignment]
         _raise_if_dlp_deadline_elapsed(now, deadline)
         if pattern.scan_headers and pattern.compiled.search(header_blob):
             return pattern.pattern_id
+        if pattern.scan_body:
+            for view in body_views:
+                _raise_if_dlp_deadline_elapsed(now, deadline)
+                if pattern.compiled.search(view):
+                    return pattern.pattern_id
         _raise_if_dlp_deadline_elapsed(now, deadline)
-        if pattern.scan_body and pattern.compiled.search(body_text):
-            return pattern.pattern_id
-        _raise_if_dlp_deadline_elapsed(now, deadline)
+    return None
+
+
+def _dlp_body_views(headers: Mapping[str, str], body: bytes) -> list[str]:
+    # DLP regexes target ASCII secrets, but a client can hide one from a single
+    # utf-8 view: utf-16/utf-32 interleave NUL bytes inside the token, and an
+    # explicit non-utf-8 charset transforms it. Scan several decodings so a
+    # charset-honoring destination cannot read a secret the SC missed.
+    clipped = body[:DLP_SCAN_BODY_LIMIT_BYTES]
+    views = [clipped.decode("utf-8", errors="ignore")]
+    if b"\x00" in clipped:
+        # Recovers ASCII secrets from utf-16/utf-32 regardless of any declared
+        # charset (the NULs are what break the utf-8 view).
+        views.append(clipped.replace(b"\x00", b"").decode("utf-8", errors="ignore"))
+    charset = _declared_charset(headers)
+    if charset is not None:
+        try:
+            views.append(clipped.decode(charset, errors="ignore"))
+        except (LookupError, ValueError) as exc:
+            # A declared charset the SC cannot decode means it cannot be sure it
+            # scanned the plaintext the destination will read: fail closed.
+            raise DLPUndecodableBody(str(exc)) from exc
+    return views
+
+
+def _declared_charset(headers: Mapping[str, str]) -> str | None:
+    content_type = headers.get("content-type") or headers.get("Content-Type")
+    if not content_type:
+        return None
+    for part in str(content_type).split(";")[1:]:
+        key, _, value = part.partition("=")
+        if key.strip().lower() == "charset":
+            charset = value.strip().strip('"').lower()
+            if charset and charset not in ("utf-8", "utf8", "us-ascii", "ascii"):
+                return charset
     return None
 
 

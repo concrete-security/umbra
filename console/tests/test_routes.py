@@ -1421,6 +1421,30 @@ def test_validate_profile_policy_rejects_websocket_assertions_on_injection_match
     assert any(error["type"] == "forbidden_field" for error in errors)
 
 
+def test_validate_profile_policy_rejects_lifecycle_when_target() -> None:
+    # Lifecycle frames are governed solely by the SC bound; a when:{/type:hello}
+    # guard is dead/misleading and must be rejected at authoring time.
+    for lifecycle_type in ("hello", "disconnect"):
+        with pytest.raises(HTTPException) as exc:
+            validate_profile_policy(
+                {
+                    "allowed_destinations": [
+                        _ws_rule(
+                            websocket_assertions=[
+                                _ws_assertion(
+                                    when={"/type": lifecycle_type},
+                                    require={"/num_connections": {"in": ["1"]}},
+                                )
+                            ]
+                        )
+                    ]
+                }
+            )
+
+        errors = exc.value.detail["error"]["details"]["errors"]
+        assert any(error["type"] == "lifecycle_when_forbidden" for error in errors)
+
+
 def test_validate_profile_policy_rejects_websocket_outbound_direction() -> None:
     with pytest.raises(HTTPException) as exc:
         validate_profile_policy(

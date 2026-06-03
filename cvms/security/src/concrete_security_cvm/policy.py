@@ -39,6 +39,27 @@ TRAFFIC_LOG_ATTRIBUTE_FIELDS = {"name", "kind", "field"}
 BODY_ASSERTION_KINDS = {"form", "json"}
 WEBSOCKET_DIRECTIONS = {"inbound"}
 WEBSOCKET_ON_VIOLATIONS = {"drop"}
+WEBSOCKET_LIFECYCLE_TYPES = {"hello", "disconnect"}
+WEBSOCKET_LIFECYCLE_FIELDS = {"type", "num_connections", "debug_info", "connection_info", "reason"}
+# Lifecycle (`hello`/`disconnect`) frames bypass `websocket_assertions` content
+# filtering — they carry no `require`-checkable payload — so their VALUES are
+# bounded to keep them a narrow telemetry channel and not a smuggling path for
+# attacker-controlled text reaching the sandbox. Genuine Slack envelopes sit far
+# inside these limits: short host/app-id/reason strings, small ints, and flat
+# scalar maps. A `hello`/`disconnect` frame whose values exceed these bounds (a
+# nested object, a long string, a non-int connection count) is NOT treated as a
+# lifecycle frame; it falls through to normal selection and is dropped, since
+# lifecycle frames match no channel/sender assertion.
+MAX_LIFECYCLE_STRING_LEN = 128
+MAX_LIFECYCLE_INT = 1_000_000
+MAX_LIFECYCLE_MAP_KEYS = 16
+# Hard per-frame ceiling on the TOTAL attacker-controlled text (map keys + string
+# values across debug_info/connection_info + reason) an exempt lifecycle frame
+# may carry. Per-value bounds alone are a floor, not a ceiling: 16 keys x 2 maps x
+# 128-char keys+values is ~8 KB of free text per frame. Genuine Slack hello/
+# disconnect telemetry is well under 256 bytes, so this preserves real frames
+# while collapsing the smuggling channel to a small bounded residual.
+MAX_LIFECYCLE_CONTENT_BYTES = 256
 EMIT_TEMPLATE_RE = re.compile(r"^\{(/[^{}]*)\}$")
 
 ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,100}$")
@@ -121,6 +142,11 @@ class WebsocketFrameVerdict:
     drop: bool
     ack_frame: bytes | None = None
     rule_id: str | None = None
+    # True when the frame is delivered under the connector lifecycle exemption
+    # (hello/disconnect) rather than by a passing assertion. The SC emits a
+    # contents-free traffic log for these so the bounded telemetry channel is
+    # auditable.
+    lifecycle: bool = False
 
 
 @dataclass(frozen=True)
@@ -291,12 +317,28 @@ class EffectivePolicy:
         for rule in self.blocked_destinations:
             if rule.matches(**request):
                 return PolicyDecision(False, "blocked_destination", rule.rule_id)
+        first_plain_allow: DestinationRule | None = None
+        body_assertion_failed_rule_id: str | None = None
         for rule in self.allowed_destinations:
             if not rule.matches(**request):
                 continue
-            if rule.body_assertions and not rule.body_assertions_pass(body, headers or {}):
+            if not rule.body_assertions:
+                if first_plain_allow is None:
+                    first_plain_allow = rule
                 continue
-            return PolicyDecision(True, "allowed_destination", rule.rule_id, matched_rule=rule)
+            if rule.body_assertions_pass(body, headers or {}):
+                return PolicyDecision(True, "allowed_destination", rule.rule_id, matched_rule=rule)
+            if body_assertion_failed_rule_id is None:
+                body_assertion_failed_rule_id = rule.rule_id
+        if body_assertion_failed_rule_id is not None:
+            return PolicyDecision(False, "body_assertion_failed", body_assertion_failed_rule_id)
+        if first_plain_allow is not None:
+            return PolicyDecision(
+                True,
+                "allowed_destination",
+                first_plain_allow.rule_id,
+                matched_rule=first_plain_allow,
+            )
         return PolicyDecision(False, "destination_not_allowed")
 
     def decide_tunnel(self, *, scheme: str, host: str, port: int) -> PolicyDecision:
@@ -313,6 +355,12 @@ class EffectivePolicy:
                 return PolicyDecision(True, "allowed_destination", rule.rule_id, matched_rule=rule)
         return PolicyDecision(False, "destination_not_allowed")
 
+    def websocket_governed(self, *, scheme: str, host: str, port: int) -> bool:
+        return any(
+            rule.websocket_assertions and rule.matches_tunnel(scheme=scheme, host=host, port=port)
+            for rule in self.allowed_destinations
+        )
+
     def decide_inbound_websocket(
         self,
         *,
@@ -323,25 +371,44 @@ class EffectivePolicy:
     ) -> WebsocketFrameVerdict | None:
         # A tunnel grant authorizes the CONNECTION; inbound CONTENT is governed
         # only by `websocket_assertions`. The frame is parsed once and every
-        # selecting assertion across ALL tunnel-matching allow rules is gathered;
+        # assertion across ALL tunnel-matching allow rules is gathered;
         # a rule that grants the host but carries no assertions contributes
-        # nothing to frame selection (it does NOT "allow all inbound"). Delivery
-        # is the UNION of allows: deliver iff any selecting assertion's `require`
-        # passes. This closes cross-rule fail-open while keeping profiles
-        # additive (adding a profile can only add allowed channels).
-        if not content or len(content) > MAX_BODY_ASSERTION_BYTES:
-            return None
-        frame = _parse_json_body(content)
-        if frame is _MISSING:
-            return None
-        selecting: list[tuple[WebsocketAssertion, str | None]] = []
+        # nothing to frame governance. If at least one assertion governs the
+        # tunnel, unparseable, oversized, or unselected data frames drop by
+        # default. Delivery is the UNION of allows: deliver iff any selecting
+        # assertion's `require` passes. This keeps profiles additive (adding a
+        # profile can only add allowed channels) without failing open.
+        matching_assertions: list[tuple[WebsocketAssertion, str | None]] = []
         for rule in self.allowed_destinations:
             if not rule.matches_tunnel(scheme=scheme, host=host, port=port):
                 continue
-            for assertion in rule.selecting_websocket_assertions(frame):
-                selecting.append((assertion, rule.rule_id))
-        if not selecting:
+            for assertion in rule.websocket_assertions:
+                matching_assertions.append((assertion, rule.rule_id))
+        if not matching_assertions:
             return None
+        default_rule_id = matching_assertions[0][1]
+        if not content or len(content) > MAX_BODY_ASSERTION_BYTES:
+            return WebsocketFrameVerdict(drop=True, rule_id=default_rule_id)
+        frame = _parse_json_body(content)
+        if frame is _MISSING:
+            return WebsocketFrameVerdict(drop=True, rule_id=default_rule_id)
+        # Frames whose top-level `type` is a connector lifecycle envelope
+        # (hello/disconnect) are governed SOLELY by the SC lifecycle bound,
+        # never by profile `websocket_assertions`. Resolving them here — before
+        # selection — means an in-bound telemetry envelope is delivered while an
+        # over-bound one is dropped REGARDLESS of any assertion, so a profile
+        # cannot author `when:{"/type":"hello"}` to re-deliver an oversized frame
+        # through the cross-rule union.
+        if _is_lifecycle_type(frame):
+            if _is_websocket_lifecycle_frame(frame):
+                return WebsocketFrameVerdict(drop=False, lifecycle=True, rule_id=default_rule_id)
+            return WebsocketFrameVerdict(drop=True, rule_id=default_rule_id)
+        selecting: list[tuple[WebsocketAssertion, str | None]] = []
+        for assertion, rule_id in matching_assertions:
+            if assertion.selects(frame):
+                selecting.append((assertion, rule_id))
+        if not selecting:
+            return WebsocketFrameVerdict(drop=True, rule_id=default_rule_id)
         if any(assertion.requirements_pass(frame) for assertion, _ in selecting):
             return WebsocketFrameVerdict(drop=False)
         assertion, rule_id = selecting[0]
@@ -997,6 +1064,84 @@ def _valid_policy_host(host: str) -> bool:
 def _valid_dns_name(host: str) -> bool:
     labels = host.split(".")
     return len(labels) >= 2 and all(DNS_LABEL_RE.fullmatch(label) for label in labels)
+
+
+def _is_lifecycle_type(frame: Any) -> bool:
+    return isinstance(frame, dict) and isinstance(frame.get("type"), str) and frame["type"] in WEBSOCKET_LIFECYCLE_TYPES
+
+
+def _is_websocket_lifecycle_frame(frame: Any) -> bool:
+    """True iff `frame` is an EXEMPT (deliverable) lifecycle envelope.
+
+    A lifecycle-TYPED frame that fails any check here is not exempt and is
+    dropped by the caller (it is never re-routed through assertion selection).
+    """
+    if not _is_lifecycle_type(frame):
+        return False
+    if not set(frame).issubset(WEBSOCKET_LIFECYCLE_FIELDS):
+        return False
+    # The lifecycle exemption skips the `require` content check, so it must stay
+    # a narrow telemetry envelope: bound the VALUES (not just the key set) so a
+    # remote cannot smuggle attacker-controlled text to the sandbox through
+    # `debug_info`/`connection_info`/`reason`.
+    if "num_connections" in frame:
+        count = frame["num_connections"]
+        if isinstance(count, bool) or not isinstance(count, int) or not 0 <= count <= MAX_LIFECYCLE_INT:
+            return False
+    if "reason" in frame and not _is_bounded_lifecycle_str(frame["reason"]):
+        return False
+    for field in ("debug_info", "connection_info"):
+        if field in frame and not _is_bounded_lifecycle_map(frame[field]):
+            return False
+    # Per-value bounds are a floor; a hard per-frame ceiling closes the residual
+    # multi-key channel so a single exempt frame cannot carry a useful payload.
+    if _lifecycle_content_size(frame) > MAX_LIFECYCLE_CONTENT_BYTES:
+        return False
+    return True
+
+
+def _lifecycle_content_size(frame: dict) -> int:
+    total = 0
+    reason = frame.get("reason")
+    if isinstance(reason, str):
+        total += len(reason)
+    for field in ("debug_info", "connection_info"):
+        mapping = frame.get(field)
+        if isinstance(mapping, dict):
+            for key, value in mapping.items():
+                if isinstance(key, str):
+                    total += len(key)
+                if isinstance(value, str):
+                    total += len(value)
+    return total
+
+
+def _is_bounded_lifecycle_str(value: Any) -> bool:
+    return isinstance(value, str) and len(value) <= MAX_LIFECYCLE_STRING_LEN
+
+
+def _is_bounded_lifecycle_scalar(value: Any) -> bool:
+    if value is None or isinstance(value, bool):
+        return True
+    if isinstance(value, int):
+        return -MAX_LIFECYCLE_INT <= value <= MAX_LIFECYCLE_INT
+    if isinstance(value, float):
+        return True
+    return _is_bounded_lifecycle_str(value)
+
+
+def _is_bounded_lifecycle_map(value: Any) -> bool:
+    # Genuine lifecycle telemetry is a small, flat map of scalars; a nested
+    # object or a long string is the smuggling vector and disqualifies the
+    # exemption.
+    if not isinstance(value, dict) or len(value) > MAX_LIFECYCLE_MAP_KEYS:
+        return False
+    for key, item in value.items():
+        if not isinstance(key, str) or len(key) > MAX_LIFECYCLE_STRING_LEN:
+            return False
+        if not _is_bounded_lifecycle_scalar(item):
+            return False
+    return True
 
 
 def _public_internet_host(host: str) -> bool:

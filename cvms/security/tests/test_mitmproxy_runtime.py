@@ -46,6 +46,7 @@ def test_mitmdump_args_pin_internal_listener_and_tmpfs_confdir(tmp_path) -> None
     assert args[:7] == ["mitmdump", "--mode", "regular", "--listen-host", "0.0.0.0", "--listen-port", "8181"]
     assert f"confdir={tmp_path}" in args
     assert "ssl_insecure=false" in args
+    assert "flow_detail=0" in args
     assert args[-2:] == ["-s", "/app/addon.py"]
 
 

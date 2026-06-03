@@ -305,7 +305,7 @@ def test_body_assertion_form_match_allows_request() -> None:
     assert decision.matched_rule.rule_id == "slack-read"
 
 
-def test_body_assertion_form_mismatch_falls_through_to_deny() -> None:
+def test_body_assertion_form_mismatch_denies_with_specific_reason() -> None:
     raw = sample_policy()
     raw["allowed_destinations"] = [slack_rule_with_assertions()]
     policy = parse_effective_policy(raw)
@@ -321,7 +321,7 @@ def test_body_assertion_form_mismatch_falls_through_to_deny() -> None:
     )
 
     assert decision.allowed is False
-    assert decision.reason == "destination_not_allowed"
+    assert decision.reason == "body_assertion_failed"
 
 
 def test_body_assertion_wrong_content_type_denies() -> None:
@@ -340,7 +340,7 @@ def test_body_assertion_wrong_content_type_denies() -> None:
     )
 
     assert decision.allowed is False
-    assert decision.reason == "destination_not_allowed"
+    assert decision.reason == "body_assertion_failed"
 
 
 def test_body_assertion_form_missing_field_denies() -> None:

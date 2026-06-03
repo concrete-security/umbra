@@ -871,6 +871,13 @@ def _validate_websocket_when(raw: Any, field: str, errors: list[dict[str, Any]])
             continue
         if not _is_bounded_scalar(expected):
             errors.append({"field": f"{field}.{pointer}", "type": "invalid_when_value"})
+            continue
+        # Lifecycle-typed frames (hello/disconnect) are governed SOLELY by the
+        # SC's lifecycle bound, never by `websocket_assertions`; a
+        # `when:{"/type":"hello"}` guard is dead and misleading (the SC resolves
+        # lifecycle frames before selection), so reject it at authoring time.
+        if pointer == "/type" and expected in ("hello", "disconnect"):
+            errors.append({"field": f"{field}.{pointer}", "type": "lifecycle_when_forbidden"})
 
 
 def _validate_websocket_require(raw: Any, field: str, errors: list[dict[str, Any]]) -> None:
