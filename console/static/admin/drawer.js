@@ -16,6 +16,78 @@
     return "Update this CVM to the latest measured image/config and re-attest it. Named volumes are preserved.";
   }
 
+  function measurementRecordFromAttestation(base, attestation) {
+    const verdict = attestation?.verdict || {};
+    return {
+      expected_image_measurement: attestation?.expected_image_measurement || base?.expected_image_measurement,
+      image_measurement: verdict.image_measurement_seen || attestation?.image_measurement || base?.image_measurement,
+      rtmr3_digest: verdict.rtmr3_digest_seen || attestation?.rtmr3_digest || base?.rtmr3_digest,
+      attestation_verified_at: verdict.verified_at || attestation?.attestation_verified_at || base?.attestation_verified_at,
+      verified: verdict.verified ?? attestation?.verified ?? base?.verified,
+      failure_reason: verdict.failure_reason || attestation?.failure_reason || null,
+    };
+  }
+
+  function measurementStatus(record) {
+    const expected = record?.expected_image_measurement;
+    const seen = record?.image_measurement;
+    const verifiedAt = record?.attestation_verified_at;
+    const mismatch = expected && seen && expected !== seen;
+    if (record?.failure_reason || mismatch) {
+      return `<span class="chip chip-warn">${UI.icon("alert", "h-3 w-3")} Attestation drift</span>`;
+    }
+    if (record?.verified === true || (expected && seen && verifiedAt)) {
+      return `<span class="chip chip-ok">${UI.icon("check", "h-3 w-3")} Verified${verifiedAt ? " " + UI.escapeHtml(UI.relTime(verifiedAt)) : ""}</span>`;
+    }
+    if (expected && seen) {
+      return `<span class="chip chip-ok">${UI.icon("check", "h-3 w-3")} Matches expected</span>`;
+    }
+    if (seen) {
+      return `<span class="chip chip-ok">${UI.icon("check", "h-3 w-3")} Image seen</span>`;
+    }
+    if (expected) {
+      return '<span class="chip chip-warn">Awaiting attestation</span>';
+    }
+    return '<span class="chip chip-warn">Not measured</span>';
+  }
+
+  function measurementRow(label, content, hint) {
+    return `
+      <div class="rounded-input border border-line bg-bg/40 p-3">
+        <div class="flex items-center gap-1.5 text-2xs uppercase tracking-wider text-mute mb-1">
+          ${UI.escapeHtml(label)}${hint ? " " + UI.helpHint(hint) : ""}
+        </div>
+        <div class="font-mono text-2xs text-ink-dim break-all">${content}</div>
+      </div>`;
+  }
+
+  function measurementCard(record, title) {
+    const expected = record?.expected_image_measurement;
+    const seen = record?.image_measurement;
+    const rtmr3 = record?.rtmr3_digest;
+    const verifiedAt = record?.attestation_verified_at;
+    const verifiedAtHtml = verifiedAt
+      ? `<span title="${UI.escapeHtml(UI.fmtTsFull(verifiedAt))}">${UI.escapeHtml(UI.fmtTsFull(verifiedAt))}</span>`
+      : '<span class="text-mute">—</span>';
+    const failure = record?.failure_reason
+      ? `<p class="mt-2 text-xs text-warn">${UI.escapeHtml(record.failure_reason)}</p>`
+      : "";
+    return `
+      <div class="card">
+        <div class="flex items-start justify-between gap-3 mb-3">
+          <h3>${UI.escapeHtml(title || "Measurements")}</h3>
+          ${measurementStatus(record)}
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+          ${measurementRow("Expected image", UI.digestCopy(expected), "Console's expected guest image measurement.")}
+          ${measurementRow("Image seen", UI.digestCopy(seen), "Guest image measurement reported by attestation; this is not the app container digest.")}
+          ${measurementRow("RTMR3", UI.digestCopy(rtmr3), "Runtime configuration binding digest reported by attestation.")}
+          ${measurementRow("Attested", verifiedAtHtml)}
+        </div>
+        ${failure}
+      </div>`;
+  }
+
   const Drawer = {
     closeAll() {
       A.selectedCvm = null;
@@ -175,9 +247,6 @@
         " · Type: " +
         UI.escapeHtml(cvm.instance_type || "—") +
         "</p>";
-      if (cvm.image_measurement) {
-        html += '<p class="mono muted">Measurement: ' + UI.escapeHtml(cvm.image_measurement.slice(0, 24)) + "…</p>";
-      }
       if (cvm.phala_status) {
         html += "<p>Phala: " + UI.escapeHtml(cvm.phala_status) + " " + UI.escapeHtml(cvm.phala_uptime || "") + "</p>";
       }
@@ -187,6 +256,7 @@
         "<h3>Profiles</h3><div class=\"chips\">" +
         (profiles || '<span class="muted">none</span>') +
         "</div></div>";
+      html += measurementCard(measurementRecordFromAttestation(cvm, null), "Measurements");
       if (needsSecurityCvmRebind(cvm)) {
         html +=
           '<div class="card"><h3>Security CVM rebind required</h3>' +
@@ -495,20 +565,22 @@
       if (A.drawerTab === "egress" && A.has(A.P.TRAFFIC)) {
         html += await Drawer.renderEgressPanel(null, true);
       } else {
-        html += '<div class="card"><p>FQDN: <span class="mono">' + UI.escapeHtml(sc.fqdn || "—") + "</span></p>";
-        html += "<p>State: " + UI.badge(sc.state) + "</p></div>";
+        html += '<div class="card"><h3>Security CVM</h3><p>FQDN: <span class="mono">' + UI.escapeHtml(sc.fqdn || "—") + "</span></p>";
+        html += "<p>State: " + UI.badge(sc.state) + "</p>";
+        if (sc.region || sc.instance_type) {
+          html += "<p>Region: " + UI.escapeHtml(sc.region || "—") + " · Type: " + UI.escapeHtml(sc.instance_type || "—") + "</p>";
+        }
+        if (sc.error_reason) html += '<p class="err">' + UI.escapeHtml(sc.error_reason) + "</p>";
+        html += "</div>";
+        let measurement = measurementRecordFromAttestation(sc, null);
         if ((A.has(A.P.USER_MANAGE) || A.isPlatform()) && A.isHomeEntity()) {
           const att = await A.api("/api/v1/entities/" + A.viewEntityId() + "/security-cvm/attestation");
           if (att.ok) {
             const a = await att.json();
-            html +=
-              '<div class="card"><h3>Attestation</h3><p class="mono muted">Image: ' +
-              UI.escapeHtml((a.image_measurement || "—").slice(0, 32)) +
-              '…</p><p class="mono muted">Verified: ' +
-              UI.escapeHtml(a.attestation_verified_at || "—") +
-              "</p></div>";
+            measurement = measurementRecordFromAttestation(sc, a);
           }
         }
+        html += measurementCard(measurement, "Measurements");
       }
       body.innerHTML = html;
       body.querySelectorAll("[data-dtab]").forEach((btn) => {

@@ -17,6 +17,72 @@
       </div>`;
   }
 
+  function measurementFromSecurityCvm(sc, attestation) {
+    const verdict = attestation?.verdict || {};
+    const expected = attestation?.expected_image_measurement || sc?.expected_image_measurement;
+    const seen = verdict.image_measurement_seen || sc?.image_measurement;
+    const rtmr3 = verdict.rtmr3_digest_seen || sc?.rtmr3_digest;
+    const verifiedAt = verdict.verified_at || sc?.attestation_verified_at;
+    const inferredVerified = expected && seen && expected === seen && rtmr3 && verifiedAt;
+    return {
+      expected_image_measurement: expected,
+      image_measurement: seen,
+      rtmr3_digest: rtmr3,
+      attestation_verified_at: verifiedAt,
+      verified: verdict.verified ?? (inferredVerified ? true : undefined),
+      failure_reason: verdict.failure_reason || null,
+      hasAny: !!(expected || seen || rtmr3 || verifiedAt),
+    };
+  }
+
+  function measurementChip(measurement) {
+    const expected = measurement?.expected_image_measurement;
+    const seen = measurement?.image_measurement;
+    const verifiedAt = measurement?.attestation_verified_at;
+    const mismatch = expected && seen && expected !== seen;
+    if (measurement?.failure_reason || mismatch) {
+      return `<span class="chip chip-warn">${UI.icon("alert", "h-3 w-3")} Attestation drift</span>`;
+    }
+    if (measurement?.verified === true || (expected && seen && verifiedAt)) {
+      return `<span class="chip chip-ok">${UI.icon("check", "h-3 w-3")} Verified${verifiedAt ? " " + UI.escapeHtml(UI.relTime(verifiedAt)) : ""}</span>`;
+    }
+    if (expected && seen) {
+      return `<span class="chip chip-ok">${UI.icon("check", "h-3 w-3")} Matches expected</span>`;
+    }
+    if (seen) {
+      return `<span class="chip chip-ok">${UI.icon("check", "h-3 w-3")} Image seen</span>`;
+    }
+    if (expected) {
+      return '<span class="chip chip-warn">Awaiting attestation</span>';
+    }
+    return '<span class="chip chip-warn">Not measured</span>';
+  }
+
+  function measurementTile(label, content, hint) {
+    return `
+      <div class="rounded-input border border-line bg-bg/40 p-3">
+        <div class="flex items-center gap-1.5 text-2xs uppercase tracking-wider text-mute mb-1">
+          ${UI.escapeHtml(label)}${hint ? " " + UI.helpHint(hint) : ""}
+        </div>
+        <div class="font-mono text-2xs text-ink-dim break-all">${content}</div>
+      </div>`;
+  }
+
+  function measurementGrid(measurement) {
+    const verifiedAt = measurement?.attestation_verified_at;
+    const verifiedAtHtml = verifiedAt
+      ? `<span title="${UI.escapeHtml(UI.fmtTsFull(verifiedAt))}">${UI.escapeHtml(UI.fmtTsFull(verifiedAt))}</span>`
+      : '<span class="text-mute">—</span>';
+    return `
+      <div class="relative mt-4 grid grid-cols-1 md:grid-cols-2 gap-3">
+        ${measurementTile("Expected image", UI.digestCopy(measurement?.expected_image_measurement), "Console's expected guest image measurement.")}
+        ${measurementTile("Image seen", UI.digestCopy(measurement?.image_measurement), "Guest image measurement reported by attestation; this is not the app container digest.")}
+        ${measurementTile("RTMR3 digest", UI.digestCopy(measurement?.rtmr3_digest), "Runtime configuration binding digest reported by attestation.")}
+        ${measurementTile("Attested", verifiedAtHtml)}
+      </div>
+      ${measurement?.failure_reason ? `<p class="relative mt-2 text-xs text-warn">${UI.escapeHtml(measurement.failure_reason)}</p>` : ""}`;
+  }
+
   async function renderSecurity() {
     const panel = A.el("panel-security");
     const sc = await A.fetchSecurityCvm();
@@ -38,14 +104,15 @@
     }
 
     let attestation = null;
-    if (A.has(A.P.USER_MANAGE) || A.isPlatform()) {
+    const canProbe = A.isHomeEntity() && (A.has(A.P.USER_MANAGE) || A.isPlatform());
+    if (canProbe) {
       const att = await A.api("/api/v1/entities/" + A.viewEntityId() + "/security-cvm/attestation");
       if (att.ok) attestation = await att.json();
     }
 
     const stateLower = String(sc.state || "").toLowerCase();
     const isLive = stateLower === "running";
-    const verifiedAgo = attestation?.attestation_verified_at ? UI.relTime(attestation.attestation_verified_at) : null;
+    const measurement = measurementFromSecurityCvm(sc, attestation);
 
     panel.innerHTML =
       UI.pageHeader("Security CVM", "The egress gateway your Dev CVMs route through. It enforces your egress policy, injects secrets at the boundary, and produces tamper-evident traffic logs.", { icon: "shield" }) +
@@ -61,7 +128,7 @@
             <div class="min-w-0">
               <div class="flex flex-wrap items-center gap-2">
                 <span class="text-2xs uppercase tracking-wider text-mute">Attestation</span>
-                ${attestation ? `<span class="chip chip-ok">${UI.icon("check", "h-3 w-3")} Verified ${verifiedAgo}</span>` : `<span class="chip chip-warn">Not measured</span>`}
+                ${measurementChip(measurement)}
               </div>
               <h3 class="mt-1 text-2xl font-semibold text-ink tracking-tight">${isLive ? "Live and enforcing policy" : `Security CVM is ${UI.escapeHtml(sc.state)}`}</h3>
               <p class="mt-1.5 text-sm text-mute max-w-2xl">
@@ -75,23 +142,12 @@
             </div>
           </div>
           <div class="flex flex-wrap items-center gap-2">
-            ${attestation && canConfig ? `<button type="button" class="btn btn-sm" id="sc-refresh-attest">${UI.icon("refresh", "h-3.5 w-3.5")} Re-attest</button>` : ""}
+            ${canProbe && canConfig ? `<button type="button" class="btn btn-sm" id="sc-refresh-attest">${UI.icon("refresh", "h-3.5 w-3.5")} Re-attest</button>` : ""}
             ${A.has(A.P.TRAFFIC) ? `<button type="button" class="btn btn-sm" id="sc-view-egress">${UI.icon("traffic", "h-3.5 w-3.5")} View egress</button>` : ""}
           </div>
         </div>
 
-        ${attestation ? `
-          <div class="relative mt-4 grid grid-cols-1 md:grid-cols-2 gap-3">
-            <div class="rounded-input border border-line bg-bg/40 p-3">
-              <div class="flex items-center gap-1.5 text-2xs uppercase tracking-wider text-mute mb-1">${UI.icon("key", "h-3 w-3")} Image measurement ${UI.helpHint("Hash of the exact Security CVM image running. Compare against the build artifact to verify integrity.")}</div>
-              <div class="font-mono text-2xs text-ink-dim break-all">${UI.escapeHtml(attestation.image_measurement || "—")}</div>
-            </div>
-            <div class="rounded-input border border-line bg-bg/40 p-3">
-              <div class="flex items-center gap-1.5 text-2xs uppercase tracking-wider text-mute mb-1">${UI.icon("key", "h-3 w-3")} RTMR3 digest ${UI.helpHint("Runtime measurement register 3 — covers the boot sequence inside the TEE. Should match the expected reference value.")}</div>
-              <div class="font-mono text-2xs text-ink-dim break-all">${UI.escapeHtml(attestation.rtmr3_digest || "—")}</div>
-            </div>
-          </div>
-        ` : ""}
+        ${measurementGrid(measurement)}
       </section>` +
 
       // Lifecycle card

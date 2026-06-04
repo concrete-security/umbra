@@ -274,6 +274,18 @@
       return `<button type="button" class="copy-pill" data-copy="${UI.escapeHtml(value)}" title="Copy ${UI.escapeHtml(value)}">${UI.escapeHtml(display)}${UI.icon("copy", "h-3 w-3 ml-1 opacity-60")}</button>`;
     },
 
+    shortDigest(value, head = 18, tail = 10) {
+      const s = String(value || "");
+      if (!s) return "—";
+      if (s.length <= head + tail + 3) return s;
+      return `${s.slice(0, head)}...${s.slice(-tail)}`;
+    },
+
+    digestCopy(value, label) {
+      if (!value) return '<span class="text-mute">—</span>';
+      return UI.copyButton(value, label || UI.shortDigest(value));
+    },
+
     helpHint(content) {
       return `<button type="button" class="help-hint" data-hint="${UI.escapeHtml(content)}" aria-label="${UI.escapeHtml(content)}">?</button>`;
     },

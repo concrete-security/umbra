@@ -50,14 +50,23 @@
 
   <!-- Login screen -->
   <section id="login-panel" class="hidden">
-    <div class="min-h-[calc(100vh-54px)] flex items-center justify-center px-6">
-      <div class="w-full max-w-sm text-center">
-        <h1 class="text-2xl font-semibold tracking-tight text-ink">Concrete Console</h1>
-        <button id="login-btn" type="button" class="btn btn-primary mt-6 w-full justify-center px-5 py-2.5 text-base">
-          <svg class="h-4 w-4" aria-hidden="true"><use href="/admin/assets/icons.svg#i-google"/></svg>
-          Sign in with Google
-        </button>
-        <div id="login-status" class="mt-4 text-xs text-mute"></div>
+    <div class="login-shell">
+      <div class="login-card">
+        <div class="login-copy">
+          <div class="login-brand-row">
+            <svg aria-hidden="true"><use href="/admin/assets/icons.svg#i-brand"/></svg>
+            <span>Concrete Console</span>
+          </div>
+          <h1>Sign in to Console</h1>
+          <p>Use an authorized Google account to manage CVMs, policies, users, audit events, and traffic logs.</p>
+        </div>
+        <div class="login-action">
+          <button id="login-btn" type="button" class="btn btn-primary">
+            <svg aria-hidden="true"><use href="/admin/assets/icons.svg#i-google"/></svg>
+            Sign in with Google
+          </button>
+          <div id="login-status" class="login-status"></div>
+        </div>
       </div>
     </div>
   </section>

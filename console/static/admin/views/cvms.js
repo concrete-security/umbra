@@ -37,6 +37,7 @@
     if (col === "entity") return String(c.entity_name || "").toLowerCase();
     if (col === "fqdn") return String(c.fqdn || "").toLowerCase();
     if (col === "region") return String(c.region || "").toLowerCase();
+    if (col === "attested") return c.attestation_verified_at || "";
     if (col === "profiles") return (c.profiles || []).length;
     if (col === "updated_at") return c.updated_at || "";
     return "";
@@ -55,6 +56,26 @@
       return "Refresh this CVM's measured Security CVM CA and aTLS material. Use this after a Security CVM update reports CA rotation.";
     }
     return "Update this CVM to the latest measured image/config and re-attest it. Named volumes are preserved.";
+  }
+
+  function measurementBadge(cvm) {
+    const expected = cvm?.expected_image_measurement;
+    const seen = cvm?.image_measurement;
+    const verifiedAt = cvm?.attestation_verified_at;
+    const mismatch = expected && seen && expected !== seen;
+    if (mismatch) {
+      return `<span class="chip chip-warn" title="Expected ${UI.escapeHtml(UI.shortDigest(expected))}; saw ${UI.escapeHtml(UI.shortDigest(seen))}">${UI.icon("alert", "h-3 w-3")} Drift</span>`;
+    }
+    if (expected && seen && verifiedAt) {
+      return `<span class="chip chip-ok" title="${UI.escapeHtml(UI.fmtTsFull(verifiedAt))}">${UI.icon("check", "h-3 w-3")} ${UI.escapeHtml(UI.relTime(verifiedAt))}</span>`;
+    }
+    if (expected && seen) {
+      return `<span class="chip chip-ok">${UI.icon("check", "h-3 w-3")} Seen</span>`;
+    }
+    if (expected) {
+      return '<span class="chip chip-warn">Pending</span>';
+    }
+    return '<span class="text-mute">—</span>';
   }
 
   function filterCvms(items, st) {
@@ -132,7 +153,7 @@
           icon: "cvm",
           actions: canLaunch ? `<button type="button" class="btn btn-primary" id="cvms-launch">${UI.icon("plus", "h-4 w-4")} Launch CVM</button>` : "",
         }) +
-        UI.skeletonTable(6, 5);
+        UI.skeletonTable(isPlatform ? 9 : 8, 5);
     }
 
     const cvms = await A.fetchCvms();
@@ -194,6 +215,7 @@
     cols.push(
       { key: "fqdn", label: "FQDN", render: (c) => c.fqdn ? UI.copyButton(c.fqdn) : '<span class="text-mute">—</span>' },
       { key: "region", label: "Region", render: (c) => UI.escapeHtml(c.region || "—") },
+      { key: "attested", label: "Attested", render: measurementBadge },
       {
         key: "profiles",
         label: "Profiles",

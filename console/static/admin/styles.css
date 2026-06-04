@@ -90,15 +90,94 @@ h1 { margin: 0; font-size: 1rem; font-weight: 600; letter-spacing: -0.02em; }
 .btn:disabled { opacity: 0.45; cursor: not-allowed; }
 
 #login-panel {
-  max-width: 440px;
-  margin: 48px auto;
-  padding: 24px;
-  background: var(--panel);
+  min-height: calc(100vh - 54px);
+  margin: 0;
+  padding: clamp(24px, 6vw, 64px);
+  background:
+    linear-gradient(180deg, rgba(15, 22, 32, 0.92), rgba(10, 14, 20, 1)),
+    var(--bg);
+}
+.login-shell {
+  min-height: inherit;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.login-card {
+  width: min(100%, 760px);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 280px;
+  gap: 28px;
+  align-items: center;
+  padding: 30px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.025), rgba(255, 255, 255, 0)), var(--panel);
   border: 1px solid var(--border);
   border-radius: var(--radius);
+  box-shadow: var(--shadow);
 }
-#login-panel h2 { margin: 0 0 8px; font-size: 1.1rem; }
-.login-status { margin-top: 14px; font-size: 0.85rem; color: var(--muted); }
+.login-brand-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+.login-brand-row svg {
+  width: 30px;
+  height: 30px;
+  color: var(--accent);
+}
+.login-copy h1 {
+  margin: 18px 0 10px;
+  font-size: 1.75rem;
+  line-height: 1.15;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+}
+.login-copy p {
+  max-width: 380px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+.login-action {
+  min-width: 0;
+  padding-left: 28px;
+  border-left: 1px solid var(--border);
+}
+.login-action .btn {
+  width: 100%;
+  min-height: 44px;
+  padding: 10px 14px;
+  font-size: 0.94rem;
+}
+.login-action .btn svg {
+  width: 16px;
+  height: 16px;
+}
+.login-status {
+  min-height: 18px;
+  margin-top: 12px;
+  font-size: 0.78rem;
+  color: var(--muted);
+  text-align: center;
+}
+@media (max-width: 720px) {
+  .login-card {
+    grid-template-columns: 1fr;
+    gap: 22px;
+    padding: 24px;
+  }
+  .login-action {
+    padding-left: 0;
+    padding-top: 22px;
+    border-left: 0;
+    border-top: 1px solid var(--border);
+  }
+}
 
 .app-shell {
   display: grid;
