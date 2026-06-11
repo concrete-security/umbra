@@ -10,30 +10,44 @@
         .replace(/"/g, "&quot;");
     },
 
-    fmtTs(ts) {
-      if (!ts) return "—";
+    _pad2(n) {
+      return String(n).padStart(2, "0");
+    },
+
+    _parseTs(ts) {
+      if (!ts) return null;
       const d = new Date(ts);
-      return Number.isNaN(d.getTime()) ? ts : d.toISOString().slice(11, 19);
+      return Number.isNaN(d.getTime()) ? null : d;
+    },
+
+    _fmtLocalTime(d) {
+      return `${UI._pad2(d.getHours())}:${UI._pad2(d.getMinutes())}:${UI._pad2(d.getSeconds())}`;
+    },
+
+    _fmtLocalDate(d) {
+      return `${d.getFullYear()}-${UI._pad2(d.getMonth() + 1)}-${UI._pad2(d.getDate())}`;
+    },
+
+    fmtTs(ts) {
+      const d = UI._parseTs(ts);
+      return d ? UI._fmtLocalTime(d) : ts || "—";
     },
 
     fmtTsFull(ts) {
-      if (!ts) return "—";
-      const d = new Date(ts);
-      return Number.isNaN(d.getTime()) ? ts : d.toISOString().replace("T", " ").slice(0, 19);
+      const d = UI._parseTs(ts);
+      return d ? `${UI._fmtLocalDate(d)} ${UI._fmtLocalTime(d)}` : ts || "—";
     },
 
-    // Compact UTC date + time (MM-DD HH:MM:SS) for log tables where the time
-    // alone is ambiguous about which day an event occurred.
     fmtTsShort(ts) {
-      if (!ts) return "—";
-      const d = new Date(ts);
-      return Number.isNaN(d.getTime()) ? ts : d.toISOString().slice(5, 19).replace("T", " ");
+      const d = UI._parseTs(ts);
+      return d
+        ? `${UI._pad2(d.getMonth() + 1)}-${UI._pad2(d.getDate())} ${UI._fmtLocalTime(d)}`
+        : ts || "—";
     },
 
     relTime(ts) {
-      if (!ts) return "—";
-      const d = new Date(ts);
-      if (Number.isNaN(d.getTime())) return ts;
+      const d = UI._parseTs(ts);
+      if (!d) return ts || "—";
       const diff = Math.max(0, Date.now() - d.getTime());
       const s = Math.floor(diff / 1000);
       if (s < 5) return "just now";
@@ -44,7 +58,7 @@
       if (h < 24) return `${h}h ago`;
       const days = Math.floor(h / 24);
       if (days < 7) return `${days}d ago`;
-      return d.toISOString().slice(0, 10);
+      return UI._fmtLocalDate(d);
     },
 
     fmtBytes(n) {
