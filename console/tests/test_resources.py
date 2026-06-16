@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 from concrete_console.resources import (
@@ -8,10 +8,12 @@ from concrete_console.resources import (
     profile_member_resource,
     profile_resource,
     redacted_profile_policy,
+    resolve_traffic_timeseries,
     security_cvm_attestation_resource,
     security_cvm_resource,
     ssh_key_resource,
     traffic_log_resource,
+    traffic_timeseries_payload,
     user_quota_resource,
     user_resource,
 )
@@ -398,3 +400,120 @@ def test_security_cvm_attestation_resource_derives_image_mismatch() -> None:
 
     assert resource["verdict"]["verified"] is False
     assert resource["verdict"]["failure_reason"] == "ATTESTATION_IMAGE_MISMATCH"
+
+
+def test_resolve_traffic_timeseries_auto_defaults_to_trailing_24h() -> None:
+    now = datetime(2026, 6, 16, 12, 0, 30, tzinfo=timezone.utc)
+    plan = resolve_traffic_timeseries(None, None, 60, None, now=now)
+    assert plan["granularity"] == "auto"
+    assert plan["unit"] is None
+    assert plan["hi"] == now
+    # 24h / 60 buckets = 1440s, and lo is floored to a width boundary at/below now-24h.
+    assert plan["bucket_seconds"] == 1440
+    assert plan["lo"] <= now - timedelta(hours=24)
+    assert int(plan["lo"].timestamp()) % plan["bucket_seconds"] == 0
+    assert plan["starts"][0] == plan["lo"]
+
+
+def test_resolve_traffic_timeseries_auto_uses_explicit_range_and_floors_lo() -> None:
+    now = datetime(2026, 6, 16, 12, 0, 0, tzinfo=timezone.utc)
+    frm = datetime(2026, 6, 16, 9, 0, 0, tzinfo=timezone.utc)
+    to = datetime(2026, 6, 16, 12, 0, 0, tzinfo=timezone.utc)
+    plan = resolve_traffic_timeseries(frm, to, 60, "auto", now=now)
+    assert plan["hi"] == to
+    # 3h / 60 = 180s buckets; lo floored to a 180s boundary (already aligned here).
+    assert plan["bucket_seconds"] == 180
+    assert plan["lo"] == frm
+
+
+def test_resolve_traffic_timeseries_falls_back_on_inverted_range() -> None:
+    now = datetime(2026, 6, 16, 12, 0, 0, tzinfo=timezone.utc)
+    frm = datetime(2026, 6, 16, 15, 0, 0, tzinfo=timezone.utc)
+    to = datetime(2026, 6, 16, 12, 0, 0, tzinfo=timezone.utc)
+    plan = resolve_traffic_timeseries(frm, to, 60, None, now=now)
+    assert plan["hi"] == to
+    assert plan["lo"] <= to - timedelta(hours=24)
+    assert plan["bucket_seconds"] > 0
+
+
+def test_resolve_traffic_timeseries_day_aligns_to_utc_midnight() -> None:
+    now = datetime(2026, 6, 16, 12, 30, 0, tzinfo=timezone.utc)
+    frm = datetime(2026, 6, 14, 9, 15, 0, tzinfo=timezone.utc)
+    plan = resolve_traffic_timeseries(frm, now, 60, "day", now=now)
+    assert plan["granularity"] == "day"
+    assert plan["unit"] == "day"
+    assert plan["bucket_seconds"] is None
+    # Buckets start at UTC midnight: 06-14, 06-15, 06-16.
+    assert [s.isoformat() for s in plan["starts"]] == [
+        "2026-06-14T00:00:00+00:00",
+        "2026-06-15T00:00:00+00:00",
+        "2026-06-16T00:00:00+00:00",
+    ]
+
+
+def test_resolve_traffic_timeseries_week_starts_monday() -> None:
+    now = datetime(2026, 6, 16, 0, 0, 0, tzinfo=timezone.utc)  # Tuesday
+    frm = datetime(2026, 6, 8, 0, 0, 0, tzinfo=timezone.utc)  # Monday
+    plan = resolve_traffic_timeseries(frm, now, 60, "week", now=now)
+    # 2026-06-15 is the Monday of the week containing 06-16.
+    assert plan["starts"][0] == datetime(2026, 6, 8, tzinfo=timezone.utc)
+    assert plan["starts"][-1] == datetime(2026, 6, 15, tzinfo=timezone.utc)
+    assert all(s.weekday() == 0 for s in plan["starts"])
+
+
+def test_resolve_traffic_timeseries_month_steps_across_year_boundary() -> None:
+    now = datetime(2026, 2, 10, 0, 0, 0, tzinfo=timezone.utc)
+    frm = datetime(2025, 12, 20, 0, 0, 0, tzinfo=timezone.utc)
+    plan = resolve_traffic_timeseries(frm, now, 60, "month", now=now)
+    assert [s.isoformat() for s in plan["starts"]] == [
+        "2025-12-01T00:00:00+00:00",
+        "2026-01-01T00:00:00+00:00",
+        "2026-02-01T00:00:00+00:00",
+    ]
+
+
+def _auto_plan(lo, hi, width):
+    starts = [
+        datetime.fromtimestamp(epoch, tz=timezone.utc)
+        for epoch in range(int(lo.timestamp()), int(hi.timestamp()) + 1, width)
+    ]
+    return {"lo": lo, "hi": hi, "granularity": "auto", "unit": None, "bucket_seconds": width, "starts": starts}
+
+
+def test_traffic_timeseries_payload_fills_gaps_totals_and_cumulative() -> None:
+    width = 60
+    lo = datetime(2026, 6, 16, 12, 0, 0, tzinfo=timezone.utc)
+    hi = datetime(2026, 6, 16, 12, 3, 0, tzinfo=timezone.utc)  # 4 buckets: 12:00..12:03
+    rows = [
+        {"bucket": datetime(2026, 6, 16, 12, 0, 0, tzinfo=timezone.utc), "allowed": 5, "blocked": 1},
+        {"bucket": datetime(2026, 6, 16, 12, 2, 0, tzinfo=timezone.utc), "allowed": 3, "blocked": 2},
+    ]
+    payload = traffic_timeseries_payload(rows, _auto_plan(lo, hi, width))
+    assert payload["bucket_seconds"] == width
+    assert payload["granularity"] == "auto"
+    buckets = payload["buckets"]
+    assert len(buckets) == 4
+    assert [b["allowed"] for b in buckets] == [5, 0, 3, 0]
+    assert [b["blocked"] for b in buckets] == [1, 0, 2, 0]
+    # Cumulative is a running total over the window (proof of growth).
+    assert [b["cumulative"] for b in buckets] == [6, 6, 11, 11]
+    # Gap buckets are present and zeroed.
+    assert buckets[1]["ts"] == "2026-06-16T12:01:00Z"
+    assert payload["totals"]["allowed"] == 8
+    assert payload["totals"]["blocked"] == 3
+    assert payload["totals"]["total"] == 11
+    # Peak is the tallest single bucket (the spike) and where it occurred.
+    assert payload["totals"]["peak"] == 6
+    assert payload["totals"]["peak_ts"] == "2026-06-16T12:00:00Z"
+
+
+def test_traffic_timeseries_payload_handles_no_rows() -> None:
+    width = 60
+    lo = datetime(2026, 6, 16, 12, 0, 0, tzinfo=timezone.utc)
+    hi = datetime(2026, 6, 16, 12, 2, 0, tzinfo=timezone.utc)
+    payload = traffic_timeseries_payload([], _auto_plan(lo, hi, width))
+    assert payload["totals"]["total"] == 0
+    assert payload["totals"]["peak"] == 0
+    assert payload["totals"]["peak_ts"] is None
+    assert len(payload["buckets"]) == 3
+    assert all(b["allowed"] == 0 and b["blocked"] == 0 and b["cumulative"] == 0 for b in payload["buckets"])

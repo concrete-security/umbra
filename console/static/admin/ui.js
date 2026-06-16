@@ -569,6 +569,9 @@
               if (preset === "1h") fromDate.setHours(now.getHours() - 1);
               else if (preset === "24h") fromDate.setDate(now.getDate() - 1);
               else if (preset === "7d") fromDate.setDate(now.getDate() - 7);
+              else if (preset === "30d") fromDate.setDate(now.getDate() - 30);
+              else if (preset === "90d") fromDate.setDate(now.getDate() - 90);
+              else if (preset === "1y") fromDate.setFullYear(now.getFullYear() - 1);
               const toLocal = (d) => {
                 const tz = new Date(d.getTime() - d.getTimezoneOffset() * 60000);
                 return tz.toISOString().slice(0, 16);

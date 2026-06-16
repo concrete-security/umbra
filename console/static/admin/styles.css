@@ -872,3 +872,111 @@ textarea.json-editor {
   .topo-sc-secret { font-size: 0.6rem; }
   .topo-dest-host { max-width: 96px; }
 }
+
+/* ── Traffic timeseries chart ─────────────────────────────────────────── */
+.tchart { position: relative; width: 100%; height: 180px; cursor: crosshair; }
+.tchart-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+.tchart-area-allow { fill: var(--accent); fill-opacity: 0.16; }
+.tchart-area-block { fill: var(--err); fill-opacity: 0.34; }
+.tchart-line-allow { fill: none; stroke: var(--accent); stroke-width: 1.5; stroke-linejoin: round; }
+.tchart-line-block { fill: none; stroke: var(--err); stroke-width: 1.5; stroke-linejoin: round; }
+.tchart-bar-allow { fill: var(--accent); fill-opacity: 0.9; }
+.tchart-bar-block { fill: var(--err); fill-opacity: 0.92; }
+.tchart-cum-line { fill: none; stroke: var(--warn); stroke-width: 1.75; stroke-linejoin: round; stroke-linecap: round; }
+.tchart-baseline { stroke: var(--border); stroke-width: 1; }
+.tchart-cmax {
+  position: absolute;
+  top: 2px;
+  right: 4px;
+  font-size: 0.62rem;
+  color: var(--warn);
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+.tchart-peak {
+  position: absolute;
+  width: 7px;
+  height: 7px;
+  margin: -4px 0 0 -3.5px;
+  border-radius: 2px;
+  background: var(--warn);
+  transform: rotate(45deg);
+  box-shadow: 0 0 0 2px var(--bg);
+  display: none;
+}
+.tchart-gran { display: inline-flex; gap: 4px; }
+/* HTML hover overlay, positioned in % so it never distorts with the SVG */
+.tchart-overlay { position: absolute; inset: 0; pointer-events: none; }
+.tchart-guide {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--muted);
+  opacity: 0.5;
+  display: none;
+}
+.tchart-dot {
+  position: absolute;
+  width: 7px;
+  height: 7px;
+  margin: -3.5px 0 0 -3.5px;
+  border-radius: 50%;
+  background: var(--text);
+  box-shadow: 0 0 0 2px var(--bg);
+  display: none;
+}
+.tchart-tip {
+  position: absolute;
+  z-index: 5;
+  transform: translate(-50%, -100%);
+  margin-top: -10px;
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  white-space: nowrap;
+  font-size: 0.7rem;
+  line-height: 1.45;
+  display: none;
+}
+.tchart-tip-time { color: var(--muted); margin-bottom: 2px; }
+.tchart-tip-row { display: flex; align-items: center; gap: 6px; }
+.tchart-tip-sw { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+.tchart-tip-sw.is-allow { background: var(--accent); }
+.tchart-tip-sw.is-block { background: var(--err); }
+.tchart-tip-sw.is-cum { background: var(--warn); }
+.tchart-tip-val { margin-left: auto; font-variant-numeric: tabular-nums; color: var(--text); }
+.tchart-ymax {
+  position: absolute;
+  top: 2px;
+  left: 4px;
+  font-size: 0.62rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+.tchart-xaxis {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 6px;
+  font-size: 0.62rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.tchart-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.78rem;
+  color: var(--muted);
+}

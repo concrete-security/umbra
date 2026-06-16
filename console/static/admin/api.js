@@ -270,6 +270,16 @@
     return response.json();
   }
 
+  async function fetchTrafficTimeseries(params) {
+    const q = new URLSearchParams(params || {});
+    const path = A.isPlatform()
+      ? adminQuery("traffic-logs/timeseries", Object.fromEntries(q))
+      : "/api/v1/traffic-logs/timeseries?" + q.toString();
+    const response = await api(path);
+    if (!response.ok) return null;
+    return response.json();
+  }
+
   async function parseError(response) {
     try {
       const err = await response.json();
@@ -298,5 +308,6 @@
   A.fetchEntitySc = fetchEntitySc;
   A.fetchTrafficLogs = fetchTrafficLogs;
   A.fetchTrafficHostSummary = fetchTrafficHostSummary;
+  A.fetchTrafficTimeseries = fetchTrafficTimeseries;
   A.parseError = parseError;
 })(window.Admin);

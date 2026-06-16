@@ -447,6 +447,8 @@ def route_credential_dimension(method: str, path: str) -> tuple[str, int]:
         return f"{method} {path}", AUDIT_EVENTS_CREDENTIAL_RPM
     if method == "GET" and path == "/api/v1/traffic-logs":
         return f"{method} {path}", TRAFFIC_LOGS_READ_CREDENTIAL_RPM
+    if method == "GET" and path == "/api/v1/traffic-logs/timeseries":
+        return f"{method} {path}", TRAFFIC_LOGS_READ_CREDENTIAL_RPM
     if method == "POST" and path == "/api/v1/admin/reconcile":
         return f"{method} {path}", ADMIN_RECONCILE_CREDENTIAL_RPM
     if method == "GET" and path == "/api/v1/admin/overview":

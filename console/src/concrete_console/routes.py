@@ -53,6 +53,11 @@ from concrete_console.resources import (
     ssh_key_resource,
     timestamp,
     traffic_log_resource,
+    TRAFFIC_BLOCK_CODE,
+    TRAFFIC_TIMESERIES_DEFAULT_BUCKETS,
+    TRAFFIC_TIMESERIES_MAX_BUCKETS,
+    resolve_traffic_timeseries,
+    traffic_timeseries_payload,
     user_quota_resource,
     user_resource,
 )
@@ -5844,6 +5849,78 @@ async def list_traffic_log_host_summary(
     async with pool.acquire() as conn:
         rows = await conn.fetch(query, *values)
     return {"hosts": [{"host": row["host"], "count": row["count"]} for row in rows]}
+
+
+@router.get("/traffic-logs/timeseries")
+async def list_traffic_log_timeseries(
+    cvm_id: UUID | None = None,
+    security_cvm_id: UUID | None = None,
+    destination_host: str | None = Query(default=None, max_length=255),
+    from_: datetime | None = Query(default=None, alias="from"),
+    to: datetime | None = None,
+    buckets: int = Query(default=TRAFFIC_TIMESERIES_DEFAULT_BUCKETS, ge=1, le=TRAFFIC_TIMESERIES_MAX_BUCKETS),
+    granularity: str | None = Query(default=None, max_length=8),
+    current_user: CurrentUser = Depends(require_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> dict:
+    current_user.require_permission("TRAFFIC_LOGS_VIEW")
+    plan = resolve_traffic_timeseries(from_, to, buckets, granularity, now=datetime.now(timezone.utc))
+    clauses = ["sc.entity_id = $1"]
+    values: list[object] = [current_user.entity_id]
+
+    def bind(value: object) -> str:
+        values.append(value)
+        return f"${len(values)}"
+
+    clauses.append(f"tl.timestamp >= {bind(plan['lo'])}")
+    clauses.append(f"tl.timestamp <= {bind(plan['hi'])}")
+    if cvm_id is not None:
+        clauses.append(f"tl.cvm_id = {bind(cvm_id)}")
+    if security_cvm_id is not None:
+        clauses.append(f"tl.security_cvm_id = {bind(security_cvm_id)}")
+    if destination_host is not None:
+        clauses.append(f"tl.destination_host = {bind(destination_host)}")
+
+    rows = await fetch_traffic_timeseries_rows(pool, clauses, values, plan)
+    return traffic_timeseries_payload(rows, plan)
+
+
+async def fetch_traffic_timeseries_rows(
+    pool: asyncpg.Pool,
+    clauses: list[str],
+    values: list[object],
+    plan: dict,
+) -> list[asyncpg.Record]:
+    """Group traffic_logs into the plan's buckets with allowed/blocked counts.
+
+    Calendar plans truncate to UTC ``date_trunc`` boundaries; the ``auto`` plan
+    uses fixed ``bucket_seconds``-wide epoch buckets. Blocked is the SC policy
+    convention HTTP 403; everything else (including an unset code) counts allowed.
+    """
+    params = list(values)
+    params.append(TRAFFIC_BLOCK_CODE)
+    block_param = f"${len(params)}"
+    if plan["unit"] is not None:
+        params.append(plan["unit"])
+        # date_trunc on the UTC wall-clock so day/week/month align to UTC boundaries.
+        bucket_expr = f"date_trunc(${len(params)}, tl.timestamp AT TIME ZONE 'UTC')"
+    else:
+        params.append(plan["bucket_seconds"])
+        width_param = f"${len(params)}"
+        bucket_expr = f"to_timestamp(floor(extract(epoch FROM tl.timestamp) / {width_param}) * {width_param})"
+    query = f"""
+        SELECT
+            {bucket_expr} AS bucket,
+            count(*) FILTER (WHERE tl.response_code IS DISTINCT FROM {block_param})::int AS allowed,
+            count(*) FILTER (WHERE tl.response_code = {block_param})::int AS blocked
+        FROM traffic_logs tl
+        JOIN security_cvms sc ON sc.id = tl.security_cvm_id
+        WHERE {' AND '.join(clauses)}
+        GROUP BY bucket
+        ORDER BY bucket
+    """
+    async with pool.acquire() as conn:
+        return await conn.fetch(query, *params)
 
 
 @router.get("/operations/{operation_id}")

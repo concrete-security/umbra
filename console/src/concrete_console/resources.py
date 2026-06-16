@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
+import math
 from typing import Any
 
 from concrete_console.profile_secrets import redacted_profile_policy as redact_profile_policy
@@ -197,6 +198,174 @@ def traffic_log_resource(row: Any) -> dict[str, Any]:
         "response_code": row["response_code"],
         "bytes_transferred": row["bytes_transferred"],
         "attributes": attributes,
+    }
+
+
+# Egress blocked at the Security CVM is logged as HTTP 403 (enforcement.py _blocked_result).
+TRAFFIC_BLOCK_CODE = 403
+
+# Bound how many time buckets one timeseries request can ask for so the query and
+# the SVG chart stay cheap regardless of the selected range.
+TRAFFIC_TIMESERIES_MAX_BUCKETS = 500
+TRAFFIC_TIMESERIES_DEFAULT_BUCKETS = 60
+# Default lookback when the caller does not pin a time range.
+TRAFFIC_TIMESERIES_DEFAULT_WINDOW = timedelta(hours=24)
+
+# Calendar-aligned granularities. "auto" falls back to fixed-width epoch buckets
+# sized to fit the range. The calendar units truncate to UTC boundaries (day =
+# midnight, week = Monday, month = the 1st) so day-to-day / week-to-week /
+# month-to-month comparisons line up exactly.
+TRAFFIC_TIMESERIES_GRANULARITIES = ("auto", "hour", "day", "week", "month")
+_CALENDAR_DEFAULT_WINDOW = {
+    "hour": timedelta(hours=48),
+    "day": timedelta(days=30),
+    "week": timedelta(weeks=12),
+    "month": timedelta(days=365),
+}
+
+
+def _floor_to_calendar_unit(dt: datetime, unit: str) -> datetime:
+    dt = dt.astimezone(timezone.utc)
+    if unit == "hour":
+        return dt.replace(minute=0, second=0, microsecond=0)
+    day = dt.replace(hour=0, minute=0, second=0, microsecond=0)
+    if unit == "day":
+        return day
+    if unit == "week":
+        return day - timedelta(days=day.weekday())  # back to Monday
+    if unit == "month":
+        return day.replace(day=1)
+    raise ValueError(f"unsupported calendar unit: {unit}")
+
+
+def _next_calendar_unit(dt: datetime, unit: str) -> datetime:
+    if unit == "hour":
+        return dt + timedelta(hours=1)
+    if unit == "day":
+        return dt + timedelta(days=1)
+    if unit == "week":
+        return dt + timedelta(weeks=1)
+    if unit == "month":
+        return dt.replace(year=dt.year + 1, month=1) if dt.month == 12 else dt.replace(month=dt.month + 1)
+    raise ValueError(f"unsupported calendar unit: {unit}")
+
+
+def resolve_traffic_timeseries(
+    from_: datetime | None,
+    to: datetime | None,
+    buckets: int,
+    granularity: str | None,
+    *,
+    now: datetime,
+) -> dict[str, Any]:
+    """Resolve a traffic-timeseries plan: window, bucket boundaries, and bucketing mode.
+
+    Returns a dict with ``lo``/``hi`` (datetimes), ``granularity`` (the resolved
+    mode), ``starts`` (the ordered bucket-start datetimes, gap-free), and exactly
+    one of ``unit`` (calendar ``date_trunc`` unit) or ``bucket_seconds`` (fixed
+    epoch width) describing how the DB query must bucket rows.
+    """
+    granularity = (granularity or "auto").lower()
+    if granularity not in TRAFFIC_TIMESERIES_GRANULARITIES:
+        granularity = "auto"
+    hi = to or now
+
+    if granularity == "auto":
+        lo = from_ if from_ is not None else hi - TRAFFIC_TIMESERIES_DEFAULT_WINDOW
+        if lo >= hi:
+            lo = hi - TRAFFIC_TIMESERIES_DEFAULT_WINDOW
+        buckets = max(1, min(TRAFFIC_TIMESERIES_MAX_BUCKETS, buckets))
+        span = (hi - lo).total_seconds()
+        width = max(1, math.ceil(span / buckets))
+        lo_epoch = math.floor(lo.timestamp() / width) * width
+        hi_epoch = math.floor(hi.timestamp() / width) * width
+        starts = [
+            datetime.fromtimestamp(epoch, tz=timezone.utc)
+            for epoch in range(lo_epoch, hi_epoch + 1, width)
+        ]
+        return {
+            "lo": datetime.fromtimestamp(lo_epoch, tz=timezone.utc),
+            "hi": hi,
+            "granularity": "auto",
+            "unit": None,
+            "bucket_seconds": width,
+            "starts": starts,
+        }
+
+    lo = from_ if from_ is not None else hi - _CALENDAR_DEFAULT_WINDOW[granularity]
+    if lo >= hi:
+        lo = hi - _CALENDAR_DEFAULT_WINDOW[granularity]
+    starts: list[datetime] = []
+    cur = _floor_to_calendar_unit(lo, granularity)
+    while cur <= hi:
+        starts.append(cur)
+        cur = _next_calendar_unit(cur, granularity)
+    # Safety bound: keep the most recent buckets if an extreme range/unit combo
+    # would blow past the cap (the UI never offers such combos).
+    if len(starts) > TRAFFIC_TIMESERIES_MAX_BUCKETS:
+        starts = starts[-TRAFFIC_TIMESERIES_MAX_BUCKETS:]
+    return {
+        "lo": starts[0] if starts else _floor_to_calendar_unit(lo, granularity),
+        "hi": hi,
+        "granularity": granularity,
+        "unit": granularity,
+        "bucket_seconds": None,
+        "starts": starts,
+    }
+
+
+def traffic_timeseries_payload(rows: Any, plan: dict[str, Any]) -> dict[str, Any]:
+    """Build a gap-free, cumulative timeseries payload from grouped rows.
+
+    DB rows are sparse (only buckets with traffic appear); this fills every bucket
+    start in ``plan["starts"]`` with zeros, adds a running cumulative total (proof
+    of growth across the window), and reports the per-bucket peak (the spikes).
+    """
+    counts: dict[int, tuple[int, int]] = {}
+    for row in rows:
+        bucket = row["bucket"]
+        if bucket.tzinfo is None:
+            bucket = bucket.replace(tzinfo=timezone.utc)
+        counts[int(bucket.timestamp())] = (int(row["allowed"]), int(row["blocked"]))
+
+    points: list[dict[str, Any]] = []
+    total_allowed = 0
+    total_blocked = 0
+    cumulative = 0
+    peak = 0
+    peak_ts: str | None = None
+    for start in plan["starts"]:
+        allowed, blocked = counts.get(int(start.timestamp()), (0, 0))
+        bucket_total = allowed + blocked
+        total_allowed += allowed
+        total_blocked += blocked
+        cumulative += bucket_total
+        ts = timestamp(start)
+        if bucket_total > peak:
+            peak = bucket_total
+            peak_ts = ts
+        points.append(
+            {
+                "ts": ts,
+                "allowed": allowed,
+                "blocked": blocked,
+                "cumulative": cumulative,
+            }
+        )
+
+    return {
+        "from": timestamp(plan["lo"]),
+        "to": timestamp(plan["hi"]),
+        "granularity": plan["granularity"],
+        "bucket_seconds": plan["bucket_seconds"],
+        "buckets": points,
+        "totals": {
+            "allowed": total_allowed,
+            "blocked": total_blocked,
+            "total": total_allowed + total_blocked,
+            "peak": peak,
+            "peak_ts": peak_ts,
+        },
     }
 
 

@@ -32,8 +32,13 @@ from concrete_console.resources import (
     security_cvm_resource,
     timestamp,
     traffic_log_resource,
+    TRAFFIC_TIMESERIES_DEFAULT_BUCKETS,
+    TRAFFIC_TIMESERIES_MAX_BUCKETS,
+    resolve_traffic_timeseries,
+    traffic_timeseries_payload,
 )
 from concrete_console.routes import (
+    fetch_traffic_timeseries_rows,
     parse_audit_cursor,
     parse_traffic_log_cursor,
     traffic_log_cursor,
@@ -480,6 +485,40 @@ async def admin_traffic_log_host_summary(
     async with pool.acquire() as conn:
         rows = await conn.fetch(query, *values)
     return {"hosts": [{"host": row["host"], "count": row["count"]} for row in rows]}
+
+
+@router.get("/traffic-logs/timeseries")
+async def admin_traffic_log_timeseries(
+    entity_id: UUID | None = None,
+    cvm_id: UUID | None = None,
+    destination_host: str | None = Query(default=None, max_length=255),
+    from_: datetime | None = Query(default=None, alias="from"),
+    to: datetime | None = None,
+    buckets: int = Query(default=TRAFFIC_TIMESERIES_DEFAULT_BUCKETS, ge=1, le=TRAFFIC_TIMESERIES_MAX_BUCKETS),
+    granularity: str | None = Query(default=None, max_length=8),
+    current_user: CurrentUser = Depends(require_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> dict:
+    require_platform_operator(current_user)
+    plan = resolve_traffic_timeseries(from_, to, buckets, granularity, now=datetime.now(timezone.utc))
+    clauses = ["TRUE"]
+    values: list[object] = []
+
+    def bind(value: object) -> str:
+        values.append(value)
+        return f"${len(values)}"
+
+    clauses.append(f"tl.timestamp >= {bind(plan['lo'])}")
+    clauses.append(f"tl.timestamp <= {bind(plan['hi'])}")
+    if entity_id is not None:
+        clauses.append(f"sc.entity_id = {bind(entity_id)}")
+    if cvm_id is not None:
+        clauses.append(f"tl.cvm_id = {bind(cvm_id)}")
+    if destination_host is not None:
+        clauses.append(f"tl.destination_host = {bind(destination_host)}")
+
+    rows = await fetch_traffic_timeseries_rows(pool, clauses, values, plan)
+    return traffic_timeseries_payload(rows, plan)
 
 
 @router.get("/cvms")
