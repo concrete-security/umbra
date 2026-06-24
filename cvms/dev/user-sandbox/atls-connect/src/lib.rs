@@ -92,8 +92,36 @@ pub fn load_policy(path: &Path) -> Result<Policy> {
     let policy: Policy = serde_json::from_slice(&policy_bytes)
         .map_err(|error| HelperError::new(format!("invalid aTLS policy JSON: {error}")))?;
     validate_policy(&policy)?;
+    // ===== CONCRETE TEMPORARY: SC aTLS image-policy check disabled (delete to re-enable) =====
+    // The delivered policy is still validated above (strict, well-formed). Here we strip the
+    // image/runtime pins so the Dev egress forwarder accepts any genuine SC TEE at the bound
+    // FQDN regardless of its app image, avoiding fleet-wide Dev CVM updates on SC image bumps.
+    // See docs/sc-policy-check-disabled.md.
+    let policy = force_disable_sc_runtime_verification(policy);
+    // ===== END CONCRETE TEMPORARY =====
     Ok(policy)
 }
+
+// ===== CONCRETE TEMPORARY: SC aTLS image-policy check disabled =====
+// Forces runtime verification OFF on the loaded SC policy so the Dev egress forwarder accepts
+// ANY genuine SC TEE at the bound FQDN, regardless of its app image. Genuine-TEE proof is
+// retained by atlas-rs (DCAP quote, TCB status, cert-in-event-log binding, EKM anti-replay,
+// RTMR replay); only bootchain/app_compose/os_image pinning is skipped.
+// TO RE-ENABLE: delete this fn, its call site in load_policy() above, and the marked unit test
+// (`temporarily_forces_runtime_verification_disabled`). validate_policy() already enforces the
+// strict policy on the delivered input. See docs/sc-policy-check-disabled.md.
+fn force_disable_sc_runtime_verification(mut policy: Policy) -> Policy {
+    match &mut policy {
+        Policy::DstackTdx(tdx) => {
+            tdx.disable_runtime_verification = true;
+            tdx.expected_bootchain = None;
+            tdx.app_compose = None;
+            tdx.os_image_hash = None;
+        }
+    }
+    policy
+}
+// ===== END CONCRETE TEMPORARY =====
 
 pub fn validate_policy(policy: &Policy) -> Result<()> {
     match policy {
@@ -295,6 +323,26 @@ mod tests {
         assert_eq!(request.port, 443);
         assert!(load_policy(&request.policy_path).is_ok());
     }
+
+    // ===== CONCRETE TEMPORARY: SC aTLS image-policy check disabled =====
+    // Verifies load_policy() strips the image/runtime pins from a strict delivered policy.
+    // Delete this test when re-enabling. See docs/sc-policy-check-disabled.md.
+    #[test]
+    fn temporarily_forces_runtime_verification_disabled() {
+        let temp = tempdir().unwrap();
+        let policy_path = temp.path().join("policy.json");
+        fs::write(&policy_path, strict_policy_json()).unwrap();
+
+        match load_policy(&policy_path).unwrap() {
+            Policy::DstackTdx(tdx) => {
+                assert!(tdx.disable_runtime_verification);
+                assert!(tdx.expected_bootchain.is_none());
+                assert!(tdx.app_compose.is_none());
+                assert!(tdx.os_image_hash.is_none());
+            }
+        }
+    }
+    // ===== END CONCRETE TEMPORARY =====
 
     #[test]
     fn rejects_runtime_verification_bypass() {
