@@ -14,12 +14,19 @@ from concrete_console import routes as routes_module
 from concrete_console.routes import (
     AdminKeysRotate,
     AdminReconcile,
+    AssignedFilter,
     AuditExportCreate,
     CVMCreate,
+    CvmStateFilter,
     SECURITY_CVM_PROVISION_REDACTION,
     SecurityCVMCreate,
+    UserStatusFilter,
     apply_provider_cvm_lifecycle_action,
     cvm_etag,
+    cvm_list_state_clauses,
+    profile_list_assigned_clauses,
+    user_list_assigned_clauses,
+    user_list_status_clauses,
     cvm_provider_app_id,
     deprovision_security_cvm_dns_records,
     entity_quota_usage,
@@ -377,6 +384,99 @@ def test_cvm_create_rejects_duplicate_profile_ids() -> None:
 
     with pytest.raises(ValidationError):
         cvm_create(profile_ids=[profile_id, profile_id])
+
+
+@pytest.mark.parametrize(
+    ("state", "expected_clauses", "expected_values"),
+    [
+        # Omitted / alive: live rows only, no state predicate (the default).
+        (None, ["c.deleted_at IS NULL"], []),
+        (CvmStateFilter.alive, ["c.deleted_at IS NULL"], []),
+        # all: drop the live-row clause -> includes terminated.
+        (CvmStateFilter.all, [], []),
+        # terminated: drop the live-row clause (it is soft-deleted) and match it.
+        (CvmStateFilter.terminated, ["c.state = $2"], ["TERMINATED"]),
+        # Concrete states: live rows + state match; value UPPERCASE and bound at
+        # $2 (never interpolated -- asserting the exact clause proves it).
+        (CvmStateFilter.provisioning, ["c.deleted_at IS NULL", "c.state = $2"], ["PROVISIONING"]),
+        (CvmStateFilter.running, ["c.deleted_at IS NULL", "c.state = $2"], ["RUNNING"]),
+        (CvmStateFilter.stopped, ["c.deleted_at IS NULL", "c.state = $2"], ["STOPPED"]),
+        (CvmStateFilter.failed, ["c.deleted_at IS NULL", "c.state = $2"], ["FAILED"]),
+    ],
+)
+def test_cvm_list_state_clauses(state, expected_clauses, expected_values) -> None:
+    clauses, values = cvm_list_state_clauses(state, next_param_index=2)
+    assert clauses == expected_clauses
+    assert values == expected_values
+
+
+def test_cvm_list_state_clauses_binds_state_at_the_given_param_index() -> None:
+    # The `$N` placeholder follows the index the caller passes (the route puts
+    # it after entity_id); the value is bound, never string-interpolated.
+    clauses, values = cvm_list_state_clauses(CvmStateFilter.failed, next_param_index=5)
+    assert clauses == ["c.deleted_at IS NULL", "c.state = $5"]
+    assert values == ["FAILED"]
+
+
+@pytest.mark.parametrize(
+    ("assigned", "expected_clauses"),
+    [
+        # Omitted: no membership predicate (every visible profile).
+        (None, []),
+        # yes / no: the current-user membership LEFT JOIN exposes pu.user_id.
+        (AssignedFilter.yes, ["pu.user_id IS NOT NULL"]),
+        (AssignedFilter.no, ["pu.user_id IS NULL"]),
+    ],
+)
+def test_profile_list_assigned_clauses(assigned, expected_clauses) -> None:
+    assert profile_list_assigned_clauses(assigned) == expected_clauses
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_clauses"),
+    [
+        # Omitted: all non-erased users (the default live-row clause).
+        (None, ["u.deleted_at IS NULL"]),
+        # active / deactivated keep the live-row clause and split on deactivated_at.
+        (UserStatusFilter.active, ["u.deactivated_at IS NULL", "u.deleted_at IS NULL"]),
+        (UserStatusFilter.deactivated, ["u.deactivated_at IS NOT NULL", "u.deleted_at IS NULL"]),
+        # erased: drops the base live-row clause and matches soft-deleted rows
+        # (keeping `deleted_at IS NULL` would always return nothing).
+        (UserStatusFilter.erased, ["u.deleted_at IS NOT NULL"]),
+    ],
+)
+def test_user_list_status_clauses(status, expected_clauses) -> None:
+    assert user_list_status_clauses(status) == expected_clauses
+
+
+@pytest.mark.parametrize(
+    ("assigned", "expected_clauses"),
+    [
+        # Omitted: no membership predicate (any membership).
+        (None, []),
+        # yes / no: belongs to >=1 live profile, or to none. The EXISTS joins
+        # entity_profiles and drops soft-deleted profiles so the filter matches
+        # the displayed `profiles` subquery.
+        (
+            AssignedFilter.yes,
+            [
+                "EXISTS (SELECT 1 FROM profile_users pu "
+                "JOIN entity_profiles ep ON ep.id = pu.profile_id "
+                "WHERE pu.user_id = u.id AND ep.deleted_at IS NULL)"
+            ],
+        ),
+        (
+            AssignedFilter.no,
+            [
+                "NOT EXISTS (SELECT 1 FROM profile_users pu "
+                "JOIN entity_profiles ep ON ep.id = pu.profile_id "
+                "WHERE pu.user_id = u.id AND ep.deleted_at IS NULL)"
+            ],
+        ),
+    ],
+)
+def test_user_list_assigned_clauses(assigned, expected_clauses) -> None:
+    assert user_list_assigned_clauses(assigned) == expected_clauses
 
 
 def test_resolve_cvm_launch_config_uses_defaults(monkeypatch) -> None:

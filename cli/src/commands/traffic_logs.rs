@@ -8,7 +8,7 @@ use serde_json::Value;
 use crate::{
     cli::TrafficLogsArgs,
     config::ResolvedConfig,
-    console::{console_session, read_json_response, validate_uuid},
+    console::{console_session, push_query, read_json_response, validate_uuid},
     exit::ExitStatus,
     style,
 };
@@ -155,12 +155,6 @@ fn print_traffic_logs(page: TrafficLogListPage, json_output: bool, args: &Traffi
     println!("{}", style::traffic_logs_table(&views, &filter));
     if let Some(cursor) = &page.next_cursor {
         eprintln!("{}", style::next_cursor_diagnostic(cursor));
-    }
-}
-
-fn push_query(query: &mut Vec<(&'static str, String)>, key: &'static str, value: &Option<String>) {
-    if let Some(value) = value {
-        query.push((key, value.clone()));
     }
 }
 

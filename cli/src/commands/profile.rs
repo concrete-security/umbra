@@ -11,9 +11,14 @@ use serde_json::{json, Map, Value};
 use uuid::Uuid;
 
 use crate::{
-    cli::{ProfileCommand, ProfileConfigureArgs, ProfileCreateArgs, ProfileMembersCommand},
+    cli::{
+        wire, ProfileCommand, ProfileConfigureArgs, ProfileCreateArgs, ProfileListArgs,
+        ProfileMembersCommand,
+    },
     config::ResolvedConfig,
-    console::{self, console_session, read_empty_response, read_json_response, read_with_etag},
+    console::{
+        self, console_session, fetch_list, read_empty_response, read_json_response, read_with_etag,
+    },
     exit::ExitStatus,
     session::Session,
     style,
@@ -77,7 +82,7 @@ struct ProfileMemberOutput<'a> {
 pub fn run(command: ProfileCommand, config: &ResolvedConfig, json: bool) -> ExitStatus {
     match command {
         ProfileCommand::Create(args) => create(config, args, json),
-        ProfileCommand::List => list(config, json),
+        ProfileCommand::List(args) => list(config, args, json),
         ProfileCommand::Show => show(config, json),
         ProfileCommand::Configure(args) => configure(config, args, json),
         ProfileCommand::Members(command) => members(config, command, json),
@@ -122,7 +127,7 @@ fn create(config: &ResolvedConfig, args: ProfileCreateArgs, json_output: bool) -
     ExitStatus::Ok
 }
 
-fn list(config: &ResolvedConfig, json_output: bool) -> ExitStatus {
+fn list(config: &ResolvedConfig, args: ProfileListArgs, json_output: bool) -> ExitStatus {
     let (console_url, session) = match console_session(config) {
         Ok(value) => value,
         Err((status, message)) => {
@@ -130,13 +135,19 @@ fn list(config: &ResolvedConfig, json_output: bool) -> ExitStatus {
             return status;
         }
     };
-    let page = match fetch_profiles(console_url, &session) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            crate::style::eprintln_error(&message);
-            return status;
-        }
-    };
+    // Build the query string `?assigned=..` from --assigned. The Console does
+    // the filtering, not the CLI.
+    let query = args.query_params();
+    let path = format!("/api/v1/entities/{}/profiles", session.entity.id);
+    let page: ProfileListPage =
+        match fetch_list(console_url, &session, &path, &query, "list profiles") {
+            Ok(value) => value,
+            Err((status, message)) => {
+                crate::style::eprintln_error(&message);
+                return status;
+            }
+        };
+    let assigned_filter = args.assigned.map(wire);
     if json_output {
         println!(
             "{}",
@@ -157,12 +168,27 @@ fn list(config: &ResolvedConfig, json_output: bool) -> ExitStatus {
                 extra: &p.extra,
             })
             .collect();
-        println!("{}", style::profile_list_cards(&views));
+        let filter = style::ProfileListFilter {
+            assigned: assigned_filter,
+        };
+        println!("{}", style::profile_list_cards(&views, &filter));
         if let Some(cursor) = page.next_cursor {
             eprintln!("{}", style::next_cursor_diagnostic(&cursor));
         }
     }
     ExitStatus::Ok
+}
+
+impl ProfileListArgs {
+    fn query_params(&self) -> Vec<(&'static str, String)> {
+        let mut query: Vec<(&'static str, String)> = Vec::new();
+        // No --assigned -> send no `assigned` param (the Console lists every
+        // visible profile). Otherwise send "yes" or "no".
+        if let Some(assigned) = self.assigned {
+            query.push(("assigned", wire(assigned)));
+        }
+        query
+    }
 }
 
 fn show(config: &ResolvedConfig, json_output: bool) -> ExitStatus {
@@ -415,26 +441,6 @@ fn selected_profile_session(
     Ok((console_url, session, profile_id))
 }
 
-fn fetch_profiles(
-    console_url: &str,
-    session: &Session,
-) -> Result<ProfileListPage, (ExitStatus, String)> {
-    let response = Client::new()
-        .get(format!(
-            "{console_url}/api/v1/entities/{}/profiles",
-            session.entity.id
-        ))
-        .bearer_auth(&session.access_token)
-        .send()
-        .map_err(|err| {
-            (
-                ExitStatus::Error,
-                format!("[error] failed to list profiles: {err}"),
-            )
-        })?;
-    read_json_response(response, "list profiles")
-}
-
 fn create_profile(
     console_url: &str,
     session: &Session,
@@ -682,6 +688,20 @@ fn print_member_output(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::Assigned;
+
+    #[test]
+    fn profile_list_query_params_maps_assigned_flag() {
+        // No --assigned -> empty query; Some -> one `assigned=<value>` pair.
+        let cases = [
+            (None, vec![]),
+            (Some(Assigned::Yes), vec![("assigned", "yes".to_string())]),
+            (Some(Assigned::No), vec![("assigned", "no".to_string())]),
+        ];
+        for (assigned, expected) in cases {
+            assert_eq!(ProfileListArgs { assigned }.query_params(), expected);
+        }
+    }
 
     #[test]
     fn read_policy_rejects_non_object_json() {
