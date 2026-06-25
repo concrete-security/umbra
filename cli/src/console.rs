@@ -13,7 +13,7 @@
 use std::time::Duration;
 
 use reqwest::{
-    blocking::Response,
+    blocking::{Client, Response},
     header::{ETAG, RETRY_AFTER},
 };
 use serde::de::DeserializeOwned;
@@ -213,6 +213,52 @@ pub(crate) fn validate_uuid(name: &str, value: &str) -> Result<(), String> {
     uuid::Uuid::parse_str(value)
         .map(|_| ())
         .map_err(|_| format!("[usage] {name} must be a UUID"))
+}
+
+/// Adds one `key=value` pair to a URL query string (the `?state=running&...`
+/// part of the request), but only when the value exists; `None` is skipped.
+///
+/// ```text
+/// push_query(q, "state", Some("running"))  ->  q gets ("state", "running")
+/// push_query(q, "cursor", None)            ->  q unchanged
+/// ```
+pub(crate) fn push_query(
+    query: &mut Vec<(&'static str, String)>,
+    key: &'static str,
+    value: &Option<String>,
+) {
+    if let Some(value) = value {
+        query.push((key, value.clone()));
+    }
+}
+
+/// Calls a Console list endpoint (HTTP GET) with the session token and the
+/// given query filters, and returns the parsed JSON page. Returns an error
+/// if the request fails.
+///
+/// ```text
+/// fetch_list(.., "/api/v1/cvms", [("state", "running")])
+///   ->  GET /api/v1/cvms?state=running  ->  parsed list of CVMs
+/// ```
+pub(crate) fn fetch_list<T: DeserializeOwned>(
+    console_url: &str,
+    session: &Session,
+    path: &str,
+    query: &[(&'static str, String)],
+    action: &str,
+) -> Result<T, (ExitStatus, String)> {
+    let response = Client::new()
+        .get(format!("{console_url}{path}"))
+        .bearer_auth(&session.access_token)
+        .query(query)
+        .send()
+        .map_err(|err| {
+            (
+                ExitStatus::Error,
+                format!("[error] failed to {action}: {err}"),
+            )
+        })?;
+    read_json_response(response, action)
 }
 
 /// Convert a non-2xx [`Response`] into a `[<bracket>] <message>` string the

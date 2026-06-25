@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import binascii
 from datetime import datetime, timezone
+from enum import Enum
 import hashlib
 import json
 import re
@@ -1834,14 +1835,22 @@ async def get_entity(
 @router.get("/entities/{entity_id}/users")
 async def list_users(
     entity_id: UUID,
+    status: UserStatusFilter | None = None,
+    assigned: AssignedFilter | None = None,
     current_user: CurrentUser = Depends(require_current_user),
     pool: asyncpg.Pool = Depends(get_pool),
 ) -> dict:
     current_user.require_entity(entity_id)
     current_user.require_permission("USER_MANAGE")
+    # --status replaces the base live-row clause (so `erased` can match deleted
+    # rows); --assigned adds a membership predicate. Neither binds a value.
+    clauses = ["u.entity_id = $1"]
+    clauses.extend(user_list_status_clauses(status))
+    clauses.extend(user_list_assigned_clauses(assigned))
+    where_clause = " AND ".join(clauses)
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            """
+            f"""
             SELECT
                 u.id,
                 u.email,
@@ -1872,8 +1881,7 @@ async def list_users(
             FROM users u
             JOIN entities e ON e.id = u.entity_id
             LEFT JOIN user_permissions up ON up.user_id = u.id
-            WHERE u.entity_id = $1
-              AND u.deleted_at IS NULL
+            WHERE {where_clause}
             GROUP BY u.id, e.name
             ORDER BY u.email
             """,
@@ -2052,14 +2060,20 @@ async def clear_entity_quota(
 @router.get("/entities/{entity_id}/profiles")
 async def list_profiles(
     entity_id: UUID,
+    assigned: AssignedFilter | None = None,
     current_user: CurrentUser = Depends(require_current_user),
     pool: asyncpg.Pool = Depends(get_pool),
 ) -> dict:
     current_user.require_entity(entity_id)
     can_manage = "USER_MANAGE" in current_user.permissions
+    # The --assigned clauses use only `pu.user_id` (no bind values), so they are
+    # AND-ed straight into the WHERE; the Console does the filtering.
+    clauses = ["ep.entity_id = $1", "ep.deleted_at IS NULL", "($3 OR pu.user_id IS NOT NULL)"]
+    clauses.extend(profile_list_assigned_clauses(assigned))
+    where_clause = " AND ".join(clauses)
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            """
+            f"""
             SELECT
                 ep.id,
                 ep.entity_id,
@@ -2073,9 +2087,7 @@ async def list_profiles(
             LEFT JOIN profile_users pu
               ON pu.profile_id = ep.id
              AND pu.user_id = $2
-            WHERE ep.entity_id = $1
-              AND ep.deleted_at IS NULL
-              AND ($3 OR pu.user_id IS NOT NULL)
+            WHERE {where_clause}
             ORDER BY ep.name
             """,
             entity_id,
@@ -3769,14 +3781,137 @@ def audit_export_filters_payload(body: AuditExportCreate) -> dict[str, Any]:
     }
 
 
+class CvmStateFilter(str, Enum):
+    """Lifecycle-state values accepted by ``cvm list --state`` / ``GET /cvms?state=``."""
+
+    alive = "alive"
+    all = "all"
+    provisioning = "provisioning"
+    running = "running"
+    stopped = "stopped"
+    failed = "failed"
+    terminated = "terminated"
+
+
+def cvm_list_state_clauses(
+    state: CvmStateFilter | None,
+    *,
+    next_param_index: int,
+) -> tuple[list[str], list[object]]:
+    """Return the ``(clauses, values)`` for the ``state`` filter, to AND into the
+    ``GET /cvms`` query (``values`` bind from ``$next_param_index``).
+
+    - ``None`` / ``alive``: keep ``c.deleted_at IS NULL``; no state predicate.
+    - ``all``: drop the ``deleted_at`` clause (includes terminated rows).
+    - ``terminated``: drop the ``deleted_at`` clause and match
+      ``c.state = 'TERMINATED'`` (terminate sets both, so keeping it returns nothing).
+    - a concrete state: keep ``deleted_at`` and match ``c.state = $N`` (uppercased).
+    """
+    if state is None or state is CvmStateFilter.alive:
+        return ["c.deleted_at IS NULL"], []
+    if state is CvmStateFilter.all:
+        return [], []
+    if state is CvmStateFilter.terminated:
+        return [f"c.state = ${next_param_index}"], ["TERMINATED"]
+    # A concrete state: keep live rows and match exactly that state.
+    return (
+        ["c.deleted_at IS NULL", f"c.state = ${next_param_index}"],
+        [state.value.upper()],
+    )
+
+
+class AssignedFilter(str, Enum):
+    """Membership values accepted by ``--assigned`` on ``profile list`` / ``user list``."""
+
+    yes = "yes"
+    no = "no"
+
+
+class UserStatusFilter(str, Enum):
+    """Account-status values accepted by ``user list --status`` / ``GET .../users?status=``."""
+
+    active = "active"
+    deactivated = "deactivated"
+    erased = "erased"
+
+
+def profile_list_assigned_clauses(assigned: AssignedFilter | None) -> list[str]:
+    """Return the clauses for the ``assigned`` filter, to AND into the
+    ``GET /profiles`` query. The membership LEFT JOIN exposes ``pu.user_id`` for
+    the current user (``NULL`` when they are not a member).
+
+    - ``None``: no membership predicate (every visible profile).
+    - ``yes``: ``pu.user_id IS NOT NULL`` (you are a member).
+    - ``no``: ``pu.user_id IS NULL`` (you are not a member).
+
+    Note: for a non-manager the base visibility clause already restricts the
+    result to profiles they belong to (``$N OR pu.user_id IS NOT NULL``), so
+    ``--assigned no`` AND-s an unsatisfiable predicate and returns zero rows by
+    design. Only managers (who can see profiles they are not members of) get a
+    meaningful ``--assigned no`` result.
+    """
+    if assigned is None:
+        return []
+    if assigned is AssignedFilter.yes:
+        return ["pu.user_id IS NOT NULL"]
+    return ["pu.user_id IS NULL"]
+
+
+def user_list_status_clauses(status: UserStatusFilter | None) -> list[str]:
+    """Return the clauses for the ``status`` filter, to AND into the users-list
+    query. Account status is derived from ``u.deactivated_at`` / ``u.deleted_at``.
+
+    - ``None``: keep ``u.deleted_at IS NULL`` (all non-erased users, the default).
+    - ``active``: ``u.deactivated_at IS NULL AND u.deleted_at IS NULL``.
+    - ``deactivated``: ``u.deactivated_at IS NOT NULL AND u.deleted_at IS NULL``.
+    - ``erased``: ``u.deleted_at IS NOT NULL`` (drops the base live-row clause,
+      which would otherwise return nothing).
+    """
+    if status is None:
+        return ["u.deleted_at IS NULL"]
+    if status is UserStatusFilter.active:
+        return ["u.deactivated_at IS NULL", "u.deleted_at IS NULL"]
+    if status is UserStatusFilter.deactivated:
+        return ["u.deactivated_at IS NOT NULL", "u.deleted_at IS NULL"]
+    # erased: the row is soft-deleted, so drop the base live-row clause.
+    return ["u.deleted_at IS NOT NULL"]
+
+
+def user_list_assigned_clauses(assigned: AssignedFilter | None) -> list[str]:
+    """Return the clauses for the ``assigned`` filter, to AND into the users-list
+    query. Membership is tested against ``profile_users`` for the user, joined to
+    ``entity_profiles`` so soft-deleted profiles do not count as a membership —
+    this keeps the filter consistent with the displayed ``profiles`` subquery,
+    which also drops ``ep.deleted_at IS NOT NULL`` rows.
+
+    - ``None``: no membership predicate (any membership).
+    - ``yes``: belongs to at least one live profile (``EXISTS (...)``).
+    - ``no``: belongs to no live profile (``NOT EXISTS (...)``).
+    """
+    if assigned is None:
+        return []
+    exists = (
+        "EXISTS (SELECT 1 FROM profile_users pu "
+        "JOIN entity_profiles ep ON ep.id = pu.profile_id "
+        "WHERE pu.user_id = u.id AND ep.deleted_at IS NULL)"
+    )
+    if assigned is AssignedFilter.yes:
+        return [exists]
+    return [f"NOT {exists}"]
+
+
 @router.get("/cvms")
 async def list_cvms(
     profile_id: UUID | None = None,
+    state: CvmStateFilter | None = None,
     current_user: CurrentUser = Depends(require_current_user),
     pool: asyncpg.Pool = Depends(get_pool),
 ) -> dict:
-    clauses = ["c.entity_id = $1", "c.deleted_at IS NULL"]
+    clauses = ["c.entity_id = $1"]
     values: list[object] = [current_user.entity_id]
+    state_clauses, state_values = cvm_list_state_clauses(state, next_param_index=len(values) + 1)
+    clauses.extend(state_clauses)
+    values.extend(state_values)
     if "CVM_MANAGE" not in current_user.permissions:
         values.append(current_user.id)
         clauses.append(f"c.owner_id = ${len(values)}")

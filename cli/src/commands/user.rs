@@ -9,11 +9,11 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::{
-    cli::{UserAddArgs, UserCommand, UserPermissionsCommand},
+    cli::{wire, UserAddArgs, UserCommand, UserListArgs, UserPermissionsCommand},
     config::ResolvedConfig,
     console::{
-        console_session, read_empty_response, read_etag_only, read_json_response, read_with_etag,
-        validate_uuid,
+        console_session, fetch_list, read_empty_response, read_etag_only, read_json_response,
+        read_with_etag, validate_uuid,
     },
     exit::ExitStatus,
     session::Session,
@@ -89,7 +89,7 @@ struct UserEraseOutput<'a> {
 pub fn run(command: UserCommand, config: &ResolvedConfig, json: bool) -> ExitStatus {
     match command {
         UserCommand::Add(args) => add(config, args, json),
-        UserCommand::List => list(config, json),
+        UserCommand::List(args) => list(config, args, json),
         UserCommand::Show { user_id } => show(config, &user_id, json),
         UserCommand::Deactivate { user_id } => lifecycle(config, &user_id, "deactivate", json),
         UserCommand::Reactivate { user_id } => lifecycle(config, &user_id, "reactivate", json),
@@ -189,7 +189,7 @@ fn add(config: &ResolvedConfig, args: UserAddArgs, json_output: bool) -> ExitSta
     ExitStatus::Ok
 }
 
-fn list(config: &ResolvedConfig, json_output: bool) -> ExitStatus {
+fn list(config: &ResolvedConfig, args: UserListArgs, json_output: bool) -> ExitStatus {
     let (console_url, session) = match console_session(config) {
         Ok(value) => value,
         Err((status, message)) => {
@@ -197,13 +197,19 @@ fn list(config: &ResolvedConfig, json_output: bool) -> ExitStatus {
             return status;
         }
     };
-    let page = match fetch_users(console_url, &session) {
+    // Build the query string `?status=..&assigned=..` from --status and
+    // --assigned. The Console does the filtering, not the CLI.
+    let query = args.query_params();
+    let path = format!("/api/v1/entities/{}/users", session.entity.id);
+    let page: UserListPage = match fetch_list(console_url, &session, &path, &query, "list users") {
         Ok(value) => value,
         Err((status, message)) => {
             crate::style::eprintln_error(&message);
             return status;
         }
     };
+    let status_filter = args.status.map(wire);
+    let assigned_filter = args.assigned.map(wire);
     if json_output {
         println!(
             "{}",
@@ -223,12 +229,31 @@ fn list(config: &ResolvedConfig, json_output: bool) -> ExitStatus {
                 extra: &user.extra,
             })
             .collect();
-        println!("{}", style::user_list_cards(&views));
+        let filter = style::UserListFilter {
+            status: status_filter,
+            assigned: assigned_filter,
+        };
+        println!("{}", style::user_list_cards(&views, &filter));
         if let Some(cursor) = page.next_cursor {
             eprintln!("{}", style::next_cursor_diagnostic(&cursor));
         }
     }
     ExitStatus::Ok
+}
+
+impl UserListArgs {
+    fn query_params(&self) -> Vec<(&'static str, String)> {
+        let mut query: Vec<(&'static str, String)> = Vec::new();
+        // Each flag is sent only when set; absent flags are omitted so the
+        // Console keeps its defaults (all non-erased users, any membership).
+        if let Some(status) = self.status {
+            query.push(("status", wire(status)));
+        }
+        if let Some(assigned) = self.assigned {
+            query.push(("assigned", wire(assigned)));
+        }
+        query
+    }
 }
 
 fn show(config: &ResolvedConfig, user_id: &str, json_output: bool) -> ExitStatus {
@@ -483,23 +508,6 @@ fn permissions_revoke(
         println!("{}", style::render_confirm(&confirm));
     }
     ExitStatus::Ok
-}
-
-fn fetch_users(console_url: &str, session: &Session) -> Result<UserListPage, (ExitStatus, String)> {
-    let response = Client::new()
-        .get(format!(
-            "{console_url}/api/v1/entities/{}/users",
-            session.entity.id
-        ))
-        .bearer_auth(&session.access_token)
-        .send()
-        .map_err(|err| {
-            (
-                ExitStatus::Error,
-                format!("[error] failed to list users: {err}"),
-            )
-        })?;
-    read_json_response(response, "list users")
 }
 
 fn fetch_user_with_etag(
@@ -787,6 +795,37 @@ fn print_user(user: &User, json_output: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::{Assigned, UserStatus};
+
+    #[test]
+    fn user_list_query_params_maps_status_and_assigned_flags() {
+        // Absent flags are omitted; present flags appear as `status` then
+        // `assigned`, each carrying clap's lowercase value.
+        let cases = [
+            (None, None, vec![]),
+            (
+                Some(UserStatus::Deactivated),
+                None,
+                vec![("status", "deactivated".to_string())],
+            ),
+            (
+                None,
+                Some(Assigned::No),
+                vec![("assigned", "no".to_string())],
+            ),
+            (
+                Some(UserStatus::Erased),
+                Some(Assigned::Yes),
+                vec![
+                    ("status", "erased".to_string()),
+                    ("assigned", "yes".to_string()),
+                ],
+            ),
+        ];
+        for (status, assigned, expected) in cases {
+            assert_eq!(UserListArgs { status, assigned }.query_params(), expected);
+        }
+    }
 
     #[test]
     fn derived_name_uses_email_local_part() {

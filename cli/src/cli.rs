@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -341,10 +341,11 @@ pub struct EntityListArgs {
     pub cursor: Option<String>,
 }
 
+/// The `concrete cvm` subcommands. Each variant is one subcommand.
 #[derive(Subcommand, Debug)]
 pub enum CvmCommand {
     /// List Dev CVMs visible to the current user.
-    List,
+    List(CvmListArgs),
 
     /// Launch a Dev CVM.
     Launch(CvmLaunchArgs),
@@ -378,6 +379,50 @@ pub enum CvmCommand {
 
     /// Terminate a Dev CVM.
     Terminate(CvmTerminateArgs),
+}
+
+/// Arguments for the `concrete cvm list` subcommand. The `--state` flag is
+/// optional: `concrete cvm list` lists all non-terminated CVMs, while
+/// `concrete cvm list --state <STATE>` keeps only CVMs in that state.
+#[derive(clap::Args, Debug)]
+pub struct CvmListArgs {
+    /// Show only CVMs in this lifecycle state (default: alive -- non-terminated).
+    #[arg(long, value_enum)]
+    pub state: Option<CvmStateFilter>,
+}
+
+/// The string clap accepts for a `--flag` enum value and the Console expects as
+/// its query parameter -- clap's own lowercase variant name.
+///
+/// `wire(Assigned::Yes) -> "yes"`   `wire(CvmStateFilter::Terminated) -> "terminated"`
+pub fn wire<T: ValueEnum>(value: T) -> String {
+    value
+        .to_possible_value()
+        .expect("filter enums declare no `#[value(skip)]` variant")
+        .get_name()
+        .to_owned()
+}
+
+/// States accepted by the `concrete cvm list --state` flag.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum CvmStateFilter {
+    Provisioning,
+    Running,
+    Stopped,
+    Failed,
+    Terminated,
+    /// All non-terminated CVMs (the default).
+    Alive,
+    /// Every state, including terminated.
+    All,
+}
+
+/// Values accepted by the `--assigned` flag on `concrete profile list` and
+/// `concrete user list`. Shared because both filter on membership.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum Assigned {
+    Yes,
+    No,
 }
 
 #[derive(clap::Args, Debug)]
@@ -563,7 +608,7 @@ pub enum ProfileCommand {
     Create(ProfileCreateArgs),
 
     /// List profiles visible to the current user.
-    List,
+    List(ProfileListArgs),
 
     /// Show the selected profile.
     Show,
@@ -574,6 +619,17 @@ pub enum ProfileCommand {
     /// Manage users assigned to the selected profile.
     #[command(subcommand)]
     Members(ProfileMembersCommand),
+}
+
+/// Arguments for the `concrete profile list` subcommand. The `--assigned` flag
+/// is optional: `concrete profile list` lists every visible profile, while
+/// `concrete profile list --assigned <yes|no>` keeps only the profiles you are
+/// (or are not) a member of.
+#[derive(clap::Args, Debug)]
+pub struct ProfileListArgs {
+    /// Show only profiles you are a member of, or only those you are not.
+    #[arg(long, value_enum)]
+    pub assigned: Option<Assigned>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -764,7 +820,7 @@ pub enum UserCommand {
     Add(UserAddArgs),
 
     /// List users in the current entity.
-    List,
+    List(UserListArgs),
 
     /// Show one user.
     Show {
@@ -793,6 +849,29 @@ pub enum UserCommand {
     /// Manage user permission grants.
     #[command(subcommand)]
     Permissions(UserPermissionsCommand),
+}
+
+/// Arguments for the `concrete user list` subcommand. Both flags are optional
+/// and combine: `concrete user list` lists all non-erased users, `--status`
+/// keeps only users in that account status, and `--assigned` keeps only users
+/// who belong to at least one profile (or to none).
+#[derive(clap::Args, Debug)]
+pub struct UserListArgs {
+    /// Show only users in this account status.
+    #[arg(long, value_enum)]
+    pub status: Option<UserStatus>,
+
+    /// Show only users who belong to at least one profile, or only those who belong to none.
+    #[arg(long, value_enum)]
+    pub assigned: Option<Assigned>,
+}
+
+/// Account statuses accepted by the `concrete user list --status` flag.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum UserStatus {
+    Active,
+    Deactivated,
+    Erased,
 }
 
 #[derive(clap::Args, Debug)]

@@ -17,9 +17,9 @@ use serde_json::{json, Map, Value};
 use uuid::Uuid;
 
 use crate::{
-    cli::{CvmCommand, CvmLaunchArgs, CvmTerminateArgs, CvmUpdateArgs},
+    cli::{wire, CvmCommand, CvmLaunchArgs, CvmListArgs, CvmTerminateArgs, CvmUpdateArgs},
     config::{self, ResolvedConfig},
-    console::{read_json_response, read_with_etag, validate_uuid},
+    console::{fetch_list, push_query, read_json_response, read_with_etag, validate_uuid},
     exit::ExitStatus,
     operation::{self, Operation},
     session::Session,
@@ -185,7 +185,7 @@ impl LifecycleAction {
 
 pub fn run(command: CvmCommand, config: &ResolvedConfig, json: bool) -> ExitStatus {
     match command {
-        CvmCommand::List => list(config, json),
+        CvmCommand::List(args) => list(config, args, json),
         CvmCommand::Launch(args) => launch(config, args, json),
         CvmCommand::Attach { cvm_id } => profile_mutation(config, &cvm_id, Mutation::Attach, json),
         CvmCommand::Detach { cvm_id } => profile_mutation(config, &cvm_id, Mutation::Detach, json),
@@ -200,7 +200,7 @@ pub fn run(command: CvmCommand, config: &ResolvedConfig, json: bool) -> ExitStat
     }
 }
 
-fn list(config: &ResolvedConfig, json_output: bool) -> ExitStatus {
+fn list(config: &ResolvedConfig, args: CvmListArgs, json_output: bool) -> ExitStatus {
     let profile_id = match optional_profile_filter(config) {
         Ok(value) => value,
         Err(message) => {
@@ -215,15 +215,38 @@ fn list(config: &ResolvedConfig, json_output: bool) -> ExitStatus {
             return status;
         }
     };
-    let page = match fetch_cvms(console_url, &session, profile_id.as_deref()) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            style::eprintln_error(&message);
-            return status;
-        }
-    };
-    print_cvm_list(page, json_output, profile_id.as_deref());
+    // Assemble the query string `?state=..&profile_id=..` from --state and the
+    // global --profile. The Console does the filtering, not the CLI.
+    let mut query = args.query_params();
+    push_query(&mut query, "profile_id", &profile_id);
+    let page: CvmListPage =
+        match fetch_list(console_url, &session, "/api/v1/cvms", &query, "list CVMs") {
+            Ok(value) => value,
+            Err((status, message)) => {
+                style::eprintln_error(&message);
+                return status;
+            }
+        };
+    let state_filter = args.state.map(wire);
+    print_cvm_list(
+        page,
+        json_output,
+        profile_id.as_deref(),
+        state_filter.as_deref(),
+    );
     ExitStatus::Ok
+}
+
+impl CvmListArgs {
+    fn query_params(&self) -> Vec<(&'static str, String)> {
+        let mut query: Vec<(&'static str, String)> = Vec::new();
+        // No --state -> send no `state` param (the Console defaults to alive).
+        // Otherwise send its lowercase value (incl. an explicit `--state alive`).
+        if let Some(state) = self.state {
+            query.push(("state", wire(state)));
+        }
+        query
+    }
 }
 
 fn launch(config: &ResolvedConfig, args: CvmLaunchArgs, json_output: bool) -> ExitStatus {
@@ -1005,26 +1028,6 @@ fn selected_profile(config: &ResolvedConfig) -> Result<&str, (ExitStatus, String
     Ok(profile_id)
 }
 
-fn fetch_cvms(
-    console_url: &str,
-    session: &Session,
-    profile_id: Option<&str>,
-) -> Result<CvmListPage, (ExitStatus, String)> {
-    let mut request = Client::new()
-        .get(format!("{console_url}/api/v1/cvms"))
-        .bearer_auth(&session.access_token);
-    if let Some(profile_id) = profile_id {
-        request = request.query(&[("profile_id", profile_id)]);
-    }
-    let response = request.send().map_err(|err| {
-        (
-            ExitStatus::Error,
-            format!("[error] failed to list CVMs: {err}"),
-        )
-    })?;
-    read_json_response(response, "list CVMs")
-}
-
 fn fetch_cvm_with_etag(
     console_url: &str,
     session: &Session,
@@ -1404,7 +1407,12 @@ fn policy_document(bundle: &PolicyBundle) -> Value {
     policy
 }
 
-fn print_cvm_list(page: CvmListPage, json_output: bool, profile_filter: Option<&str>) {
+fn print_cvm_list(
+    page: CvmListPage,
+    json_output: bool,
+    profile_filter: Option<&str>,
+    state_filter: Option<&str>,
+) {
     if json_output {
         println!(
             "{}",
@@ -1432,6 +1440,7 @@ fn print_cvm_list(page: CvmListPage, json_output: bool, profile_filter: Option<&
         .collect();
     let filter = style::CvmListFilter {
         profile: profile_filter.map(str::to_string),
+        state: state_filter.map(str::to_string),
     };
     println!("{}", style::cvm_list_cards(&views, &filter));
     if let Some(cursor) = page.next_cursor {
@@ -1532,6 +1541,48 @@ fn validate_cvm_config_value(name: &str, value: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::CvmStateFilter;
+
+    #[test]
+    fn cvm_list_query_params_maps_state_flag() {
+        // No --state -> empty query; Some -> one `state=<value>` pair carrying
+        // clap's lowercase variant name.
+        let cases = [
+            (None, vec![]),
+            (
+                Some(CvmStateFilter::Alive),
+                vec![("state", "alive".to_string())],
+            ),
+            (
+                Some(CvmStateFilter::Terminated),
+                vec![("state", "terminated".to_string())],
+            ),
+        ];
+        for (state, expected) in cases {
+            assert_eq!(CvmListArgs { state }.query_params(), expected);
+        }
+    }
+
+    #[test]
+    fn cvm_list_query_composes_state_with_profile_filter() {
+        // Like `list()`: `--state` and the global `--profile` go into one query.
+        let args = CvmListArgs {
+            state: Some(CvmStateFilter::Running),
+        };
+        let mut query = args.query_params();
+        let profile_id = Some("00000000-0000-4000-8000-000000000099".to_string());
+        push_query(&mut query, "profile_id", &profile_id);
+        assert_eq!(
+            query,
+            vec![
+                ("state", "running".to_string()),
+                (
+                    "profile_id",
+                    "00000000-0000-4000-8000-000000000099".to_string()
+                ),
+            ]
+        );
+    }
 
     #[test]
     fn policy_document_maps_policy_bundle_to_atls_policy() {
