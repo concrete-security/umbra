@@ -369,5 +369,64 @@ async def smoke():
     await security_cvm_http.wait_closed()
 
 
+def ca_distribution_smoke():
+    import hashlib
+    from types import SimpleNamespace
+
+    forwarder = load_forwarder_module()
+
+    pem = "-----BEGIN CERTIFICATE-----\nMIIBexampleCA\n-----END CERTIFICATE-----\n"
+    sha = hashlib.sha256(pem.encode("utf-8")).hexdigest()
+
+    # extract_validated_ca: happy path returns the PEM.
+    assert (
+        forwarder.extract_validated_ca(
+            {"security_cvm_fqdn": "sc.example.com", "ca_cert_pem": pem, "ca_cert_sha256": sha},
+            "sc.example.com",
+        )
+        == pem
+    )
+    # Rejects a CA bound to a different SC FQDN.
+    assert (
+        forwarder.extract_validated_ca(
+            {"security_cvm_fqdn": "evil.example.com", "ca_cert_pem": pem, "ca_cert_sha256": sha},
+            "sc.example.com",
+        )
+        is None
+    )
+    # Rejects a self-inconsistent digest.
+    assert (
+        forwarder.extract_validated_ca(
+            {"security_cvm_fqdn": "sc.example.com", "ca_cert_pem": pem, "ca_cert_sha256": "0" * 64},
+            "sc.example.com",
+        )
+        is None
+    )
+    # Rejects a non-certificate payload and a non-dict payload.
+    assert (
+        forwarder.extract_validated_ca(
+            {"security_cvm_fqdn": "sc.example.com", "ca_cert_pem": "nope", "ca_cert_sha256": sha},
+            "sc.example.com",
+        )
+        is None
+    )
+    assert forwarder.extract_validated_ca("nope", "sc.example.com") is None
+
+    # write_ca_distribution: atomic publish, change detection, world-readable mode.
+    with tempfile.TemporaryDirectory() as temp:
+        path = Path(temp) / "shared" / "security-cvm-ca.pem"
+        config = SimpleNamespace(ca_distribution_path=path)
+        assert forwarder.write_ca_distribution(config, pem) is True
+        assert path.read_text(encoding="utf-8") == pem
+        assert stat.S_IMODE(path.stat().st_mode) == 0o444
+        assert forwarder.write_ca_distribution(config, pem) is False  # unchanged → no rewrite
+        rotated = "-----BEGIN CERTIFICATE-----\nMIIBrotatedCA\n-----END CERTIFICATE-----\n"
+        assert forwarder.write_ca_distribution(config, rotated) is True
+        assert path.read_text(encoding="utf-8") == rotated
+
+    print("ca_distribution_smoke: OK")
+
+
 if __name__ == "__main__":
+    ca_distribution_smoke()
     asyncio.run(smoke())

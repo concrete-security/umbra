@@ -52,6 +52,8 @@ class ForwarderConfig:
     ca_cert_path: Path
     atls_connect_cmd: tuple[str, ...]
     atls_connect_timeout_seconds: float
+    ca_distribution_path: Path
+    ca_refresh_interval_seconds: float
 
 
 @dataclass(frozen=True)
@@ -195,6 +197,10 @@ def load_config(runtime_dir: Path = Path("/run/concrete")) -> ForwarderConfig:
         ca_cert_path=ca_path,
         atls_connect_cmd=argv,
         atls_connect_timeout_seconds=float(os.environ.get("DEV_EGRESS_ATLS_CONNECT_TIMEOUT_SECONDS", "10")),
+        ca_distribution_path=Path(
+            os.environ.get("DEV_EGRESS_CA_DISTRIBUTION_PATH", "/var/lib/concrete-ca/security-cvm-ca.pem")
+        ),
+        ca_refresh_interval_seconds=float(os.environ.get("DEV_EGRESS_CA_REFRESH_INTERVAL_SECONDS", "60")),
     )
 
 
@@ -481,6 +487,116 @@ def fetch_refreshed_atls_policy(config: ForwarderConfig) -> RefreshedAtlsPolicy 
     return RefreshedAtlsPolicy(policy_path=config.atls_policy_refresh_path, connect_host=connect_host)
 
 
+def extract_validated_ca(payload: object, expected_fqdn: str) -> str | None:
+    """Validate a /dev-control/security-cvm-ca payload and return its CA PEM, or None.
+
+    Pure (no I/O) so it can be unit-tested. Confirms the CA is for the launch-bound SC FQDN,
+    is a PEM certificate, and is self-consistent with the response's own sha256.
+    """
+    if not isinstance(payload, dict):
+        log("ca_fetch_rejected reason=malformed_payload")
+        return None
+    if payload.get("security_cvm_fqdn") != expected_fqdn:
+        log("ca_fetch_rejected reason=fqdn_mismatch")
+        return None
+    ca_pem = payload.get("ca_cert_pem")
+    if not isinstance(ca_pem, str) or "-----BEGIN CERTIFICATE-----" not in ca_pem:
+        log("ca_fetch_rejected reason=invalid_ca")
+        return None
+    expected_sha = payload.get("ca_cert_sha256")
+    if not isinstance(expected_sha, str) or hashlib.sha256(ca_pem.encode("utf-8")).hexdigest() != expected_sha:
+        log("ca_fetch_rejected reason=ca_sha_mismatch")
+        return None
+    return ca_pem
+
+
+def fetch_security_cvm_ca(config: ForwarderConfig) -> str | None:
+    """Fetch the current SC mitmproxy CA from the RTMR3-bound Console origin.
+
+    Reaches the Console directly over the egress uplink (not through the SC proxy), so it works
+    even while the sandbox's currently-trusted SC CA is stale after a rotation.
+    """
+    if config.console_url is None:
+        return None
+    parsed = urlsplit(config.console_url)
+    connection = http.client.HTTPSConnection(parsed.hostname, parsed.port or 443, timeout=5)
+    try:
+        connection.request(
+            "GET",
+            "/internal/dev-control/security-cvm-ca",
+            headers={
+                "Authorization": f"Bearer {config.dev_control_token}",
+                "Accept": "application/json",
+            },
+        )
+        response = connection.getresponse()
+        body = response.read(1024 * 1024 + 1)
+    except OSError as exc:
+        log(f"ca_fetch_failed reason={exc}")
+        return None
+    finally:
+        connection.close()
+    if response.status != 200:
+        log(f"ca_fetch_unavailable status={response.status}")
+        return None
+    if len(body) > 1024 * 1024:
+        log("ca_fetch_rejected reason=response_too_large")
+        return None
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        log("ca_fetch_rejected reason=malformed_json")
+        return None
+    return extract_validated_ca(payload, config.security_cvm_fqdn)
+
+
+def write_ca_distribution(config: ForwarderConfig, ca_pem: str) -> bool:
+    """Atomically publish the SC CA to the sandbox-shared path. Returns True if it changed."""
+    data = ca_pem.encode("utf-8")
+    path = config.ca_distribution_path
+    try:
+        if path.read_bytes() == data:
+            return False
+    except OSError:
+        pass
+    path.parent.mkdir(parents=True, exist_ok=True)
+    mode = stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH
+    tmp = path.with_name(path.name + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(data)
+    os.chmod(tmp, mode)
+    os.replace(tmp, path)
+    log("ca_distribution_updated")
+    return True
+
+
+def seed_ca_distribution(config: ForwarderConfig) -> None:
+    """Publish the launch-material CA at startup so the sandbox has a baseline before polling."""
+    try:
+        ca_pem = config.ca_cert_path.read_text(encoding="utf-8")
+        write_ca_distribution(config, ca_pem)
+    except OSError as exc:
+        log(f"ca_distribution_seed_skipped reason={exc}")
+
+
+async def ca_distribution_loop(config: ForwarderConfig) -> None:
+    """Poll the Console for the current SC CA and republish it for the sandbox to re-install."""
+    if config.console_url is None:
+        log("ca_distribution_disabled reason=no_console_url")
+        return
+    while True:
+        try:
+            await asyncio.sleep(config.ca_refresh_interval_seconds)
+            ca_pem = await asyncio.to_thread(fetch_security_cvm_ca, config)
+            if ca_pem is not None:
+                await asyncio.to_thread(write_ca_distribution, config, ca_pem)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # keep the proxy serving even if CA refresh fails
+            log(f"ca_distribution_error reason={exc}")
+
+
 async def open_security_proxy_tunnel(upstream: VerifiedUpstream, config: ForwarderConfig) -> None:
     host = config.security_cvm_fqdn
     if config.security_cvm_public_port != 443:
@@ -751,11 +867,16 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
 
 async def main() -> None:
     config = load_config()
+    seed_ca_distribution(config)
+    ca_task = asyncio.create_task(ca_distribution_loop(config))
     server = await asyncio.start_server(lambda r, w: handle_client(r, w, config), config.listen_host, config.listen_port)
     sockets = ", ".join(str(sock.getsockname()) for sock in server.sockets or [])
     log(f"listening on {sockets}")
-    async with server:
-        await server.serve_forever()
+    try:
+        async with server:
+            await server.serve_forever()
+    finally:
+        ca_task.cancel()
 
 
 if __name__ == "__main__":

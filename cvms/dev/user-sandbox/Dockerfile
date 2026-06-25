@@ -125,12 +125,14 @@ COPY cvms/dev/user-sandbox/concrete-agent-codex.sh /usr/local/bin/codex
 COPY cvms/dev/user-sandbox/entrypoint.sh /entrypoint.sh
 COPY cvms/dev/user-sandbox/concrete-dev-tunnel.py /usr/local/bin/concrete-dev-tunnel
 COPY cvms/dev/user-sandbox/concrete-dev-egress-forwarder.py /usr/local/bin/concrete-dev-egress-forwarder
+COPY cvms/dev/user-sandbox/concrete-ca-refresh.py /usr/local/bin/concrete-ca-refresh
 COPY --from=atls-connect-builder /tmp/atls-connect-target/release/concrete-atls-connect /usr/local/bin/concrete-atls-connect
 
 RUN chmod +x \
       /entrypoint.sh \
       /usr/local/bin/concrete-dev-tunnel \
       /usr/local/bin/concrete-dev-egress-forwarder \
+      /usr/local/bin/concrete-ca-refresh \
       /usr/local/bin/concrete-atls-connect \
       /usr/local/lib/concrete/concrete-update-agents.sh \
       /usr/local/bin/claude \

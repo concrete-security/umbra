@@ -1160,6 +1160,7 @@ def render_dev_cvm_compose_config(resolved: dict[str, str]) -> str:
             "      - dev-cursor-server:/home/dev/.cursor-server",
             "      - dev-vscode-server:/home/dev/.vscode-server",
             "      - dev-docker-data:/var/lib/docker",
+            "      - cvm-ca:/var/lib/concrete-ca:ro",
             "    expose:",
             "      - \"22\"",
             "    healthcheck:",
@@ -1191,6 +1192,8 @@ def render_dev_cvm_compose_config(resolved: dict[str, str]) -> str:
             "      SECURITY_CVM_PROXY_TOKEN: ${SECURITY_CVM_PROXY_TOKEN}",
             "      DEV_CVM_CONTROL_TOKEN: ${DEV_CVM_CONTROL_TOKEN}",
             "      CONSOLE_URL: ${CONSOLE_URL:-}",
+            "    volumes:",
+            "      - cvm-ca:/var/lib/concrete-ca",
             "    expose:",
             "      - \"3128\"",
             "    networks:",
@@ -1237,6 +1240,7 @@ def render_dev_cvm_compose_config(resolved: dict[str, str]) -> str:
             "  dev-cursor-server:",
             "  dev-vscode-server:",
             "  dev-docker-data:",
+            "  cvm-ca:",
             "",
         ]
     )

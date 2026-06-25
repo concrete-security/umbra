@@ -342,6 +342,11 @@ else
   echo "user-sandbox: dockerd missing; continuing without Docker daemon" >&2
 fi
 
+# Follow Security CVM CA rotation at runtime (re-installs the forwarder-published SC CA into the
+# shared trust bundle), so an SC update does not require a fleet-wide cvm.update. See
+# docs/specs/dev-cvm.md §3.6/§4.5.
+concrete-ca-refresh >/var/log/concrete-ca-refresh.log 2>&1 &
+
 exec /usr/sbin/sshd -D -e -f /etc/ssh/sshd_config \
   -h /run/sshd/ssh_host_ed25519_key \
   -h /run/sshd/ssh_host_rsa_key
