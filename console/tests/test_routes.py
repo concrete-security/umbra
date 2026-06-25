@@ -64,6 +64,7 @@ from concrete_console.routes_internal import (
     enforce_traffic_log_volume_limit,
     etag_matches,
     get_dev_security_cvm_atls_policy,
+    get_dev_security_cvm_ca,
     merge_profile_policies,
     record_sc_control_pull_observation,
     sc_control_etag,
@@ -842,6 +843,74 @@ def test_dev_control_security_cvm_atls_policy_rejects_drifted_sc() -> None:
     with pytest.raises(HTTPException) as exc:
         asyncio.run(
             get_dev_security_cvm_atls_policy(
+                response=SimpleNamespace(headers={}),
+                current_principal=principal,
+                pool=FakePool(conn),
+            )
+        )
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail["error"]["details"]["state"] == "security_cvm_attestation_unverified"
+
+
+def test_dev_control_security_cvm_ca_returns_ca_for_verified_sc() -> None:
+    conn = DevControlPolicyConn(
+        {
+            "cvm_id": UUID("00000000-0000-4000-8000-000000000031"),
+            "security_cvm_id": UUID("00000000-0000-4000-8000-000000000041"),
+            "security_cvm_fqdn": "sc.example.com",
+            "ca_cert_pem": "-----BEGIN CERTIFICATE-----\nMIIB\n",
+            "expected_image_measurement": "a" * 96,
+            "image_measurement": "a" * 96,
+            "attestation_verified_at": datetime(2026, 5, 28, 12, 0, tzinfo=timezone.utc),
+            "error_reason": None,
+        }
+    )
+    principal = SimpleNamespace(
+        principal_id=UUID("00000000-0000-4000-8000-000000000031"),
+        entity_id=UUID("00000000-0000-4000-8000-000000000001"),
+    )
+
+    response = SimpleNamespace(headers={})
+    result = asyncio.run(
+        get_dev_security_cvm_ca(
+            response=response,
+            current_principal=principal,
+            pool=FakePool(conn),
+        )
+    )
+
+    assert conn.args == (
+        UUID("00000000-0000-4000-8000-000000000031"),
+        UUID("00000000-0000-4000-8000-000000000001"),
+    )
+    assert result["security_cvm_fqdn"] == "sc.example.com"
+    assert result["ca_cert_pem"] == "-----BEGIN CERTIFICATE-----\nMIIB\n"
+    assert result["ca_cert_sha256"] == "6ed8689d60a419e4b9785827a35338b06c974ac432960f7a9b397eba64c1c574"
+    assert response.headers["Cache-Control"] == "no-store"
+
+
+def test_dev_control_security_cvm_ca_rejects_unverified_sc() -> None:
+    conn = DevControlPolicyConn(
+        {
+            "cvm_id": UUID("00000000-0000-4000-8000-000000000031"),
+            "security_cvm_id": UUID("00000000-0000-4000-8000-000000000041"),
+            "security_cvm_fqdn": "sc.example.com",
+            "ca_cert_pem": "-----BEGIN CERTIFICATE-----\nMIIB\n",
+            "expected_image_measurement": "a" * 96,
+            "image_measurement": "b" * 96,
+            "attestation_verified_at": datetime(2026, 5, 28, 12, 0, tzinfo=timezone.utc),
+            "error_reason": None,
+        }
+    )
+    principal = SimpleNamespace(
+        principal_id=UUID("00000000-0000-4000-8000-000000000031"),
+        entity_id=UUID("00000000-0000-4000-8000-000000000001"),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            get_dev_security_cvm_ca(
                 response=SimpleNamespace(headers={}),
                 current_principal=principal,
                 pool=FakePool(conn),

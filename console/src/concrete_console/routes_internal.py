@@ -258,6 +258,80 @@ async def get_dev_security_cvm_atls_policy(
     }
 
 
+@router.get("/dev-control/security-cvm-ca", response_model=None)
+async def get_dev_security_cvm_ca(
+    response: Response,
+    current_principal: CurrentServicePrincipal = Depends(require_dev_cvm_control_principal),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> dict[str, Any]:
+    """Serve the current SC mitmproxy CA to an attached Dev CVM for runtime re-install.
+
+    The Dev egress forwarder polls this so the sandbox can follow SC CA rotation without a
+    fleet-wide ``cvm.update``. Returns the *public* CA cert only (already delivered to the Dev
+    CVM as launch material); gated identically to the SC aTLS policy route — same control-token
+    principal, same verified-attestation requirement.
+    """
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT
+                c.id AS cvm_id,
+                c.security_cvm_id,
+                sc.fqdn AS security_cvm_fqdn,
+                sc.ca_cert_pem,
+                sc.expected_image_measurement,
+                sc.image_measurement,
+                sc.attestation_verified_at,
+                sc.error_reason
+            FROM cvms c
+            JOIN security_cvms sc
+              ON sc.id = c.security_cvm_id
+             AND sc.entity_id = c.entity_id
+            WHERE c.id = $1
+              AND c.entity_id = $2
+              AND c.deleted_at IS NULL
+              AND c.state IN ('PROVISIONING', 'RUNNING')
+              AND sc.deleted_at IS NULL
+              AND sc.state = 'RUNNING'
+            """,
+            current_principal.principal_id,
+            current_principal.entity_id,
+        )
+    if row is None:
+        raise api_error(409, "CONFLICT", "Security CVM CA is unavailable", {"state": "security_cvm_unavailable"})
+    ca_cert_pem = row["ca_cert_pem"]
+    if not isinstance(ca_cert_pem, str) or not ca_cert_pem:
+        raise api_error(
+            503,
+            "SERVICE_UNAVAILABLE",
+            "Security CVM CA certificate is unavailable",
+            {"component": "security_cvm_ca"},
+        )
+    expected = row["expected_image_measurement"]
+    actual = row["image_measurement"]
+    if (
+        expected is None
+        or actual != expected
+        or row["attestation_verified_at"] is None
+        or row["error_reason"] == "ATTESTATION_DRIFT"
+    ):
+        raise api_error(
+            409,
+            "CONFLICT",
+            "Security CVM attestation is not currently verified",
+            {"state": "security_cvm_attestation_unverified"},
+        )
+    response.headers["Cache-Control"] = "no-store"
+    return {
+        "cvm_id": str(row["cvm_id"]),
+        "security_cvm_id": str(row["security_cvm_id"]),
+        "security_cvm_fqdn": row["security_cvm_fqdn"],
+        "ca_cert_sha256": sha256_hex(ca_cert_pem),
+        "ca_cert_pem": ca_cert_pem,
+        "attestation_verified_at": timestamp(row["attestation_verified_at"]),
+    }
+
+
 @router.post("/traffic-logs")
 async def ingest_traffic_logs(
     body: TrafficLogBatch,
