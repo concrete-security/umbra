@@ -1,0 +1,12 @@
+# Pinned Rust toolchain for reproducible local builds and CI.
+#
+# The project targets stable Rust (see AGENTS.md → "CLI Conventions: Rust 2021,
+# stable toolchain"); there are no nightly-only features in the workspace.
+#
+# Pin a specific stable release rather than the floating `stable` channel: `make
+# check` runs `cargo clippy --all-targets -- -D warnings`, so a new stable that
+# adds a default lint would otherwise turn CI red with no code change. Bump this
+# deliberately and re-run `make check` when you do.
+[toolchain]
+channel = "1.92.0"
+components = ["rustfmt", "clippy"]
