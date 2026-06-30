@@ -428,9 +428,12 @@
     const pick = overlay.querySelector("input[name=prof-pick]:checked");
     if (!pick) { UI.toast("Pick a profile", "err"); return false; }
     const profileId = pick.value;
+    const pRes = await A.api("/api/v1/profiles/" + profileId);
+    if (!pRes.ok) { UI.toast(await A.parseError(pRes), "err"); return false; }
+    const etag = pRes.headers.get("ETag") || "";
     const response = await A.api("/api/v1/profiles/" + profileId + "/users", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "Idempotency-Key": A.newIdempotencyKey() },
+      headers: { "Content-Type": "application/json", "Idempotency-Key": A.newIdempotencyKey(), ...(etag ? { "If-Match": etag } : {}) },
       body: JSON.stringify({ user_id: selectedUserId }),
     });
     if (!response.ok) { UI.toast(await A.parseError(response), "err"); return false; }
@@ -446,7 +449,13 @@
       danger: true,
     });
     if (!ok) return;
-    const response = await A.api("/api/v1/profiles/" + profileId + "/users/" + selectedUserId, { method: "DELETE" });
+    const pRes = await A.api("/api/v1/profiles/" + profileId);
+    if (!pRes.ok) { UI.toast(await A.parseError(pRes), "err"); return; }
+    const etag = pRes.headers.get("ETag") || "";
+    const response = await A.api("/api/v1/profiles/" + profileId + "/users/" + selectedUserId, {
+      method: "DELETE",
+      headers: etag ? { "If-Match": etag } : {},
+    });
     if (response.status === 204 || response.ok) {
       UI.toast("Profile membership revoked", "ok");
       renderUsers();
