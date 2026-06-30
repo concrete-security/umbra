@@ -177,11 +177,18 @@
     const hash = location.hash.slice(1);
     if (!hash) return;
     if (hash.startsWith("cvm/")) {
-      A.Drawer.openCvm(hash.slice(4), A.has(A.P.TRAFFIC) ? "egress" : "summary");
+      const id = hash.slice(4);
+      // Opening the drawer sets location.hash itself, which fires hashchange and
+      // re-enters here. If we're already on this CVM, do nothing so we don't
+      // clobber the active tab (e.g. snap a freshly-opened Summary back to Egress).
+      if (A.drawerKind === "cvm" && A.selectedCvm?.id === id) return;
+      A.Drawer.openCvm(id, "summary");
       return;
     }
     if (hash.startsWith("sc/")) {
-      A.Drawer.openSc(hash.slice(3), A.has(A.P.TRAFFIC) ? "egress" : "summary");
+      const id = hash.slice(3);
+      if (A.drawerKind === "sc" && A.selectedSc?.id === id) return;
+      A.Drawer.openSc(id, A.has(A.P.TRAFFIC) ? "egress" : "summary");
       return;
     }
     const tabId = hash.split("/")[0];
