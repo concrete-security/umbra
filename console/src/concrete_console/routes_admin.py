@@ -353,7 +353,7 @@ async def admin_list_audit_events(
     if to is not None:
         clauses.append(f"timestamp <= {bind(to)}")
     if after_seq is not None:
-        clauses.append(f"seq > {bind(after_seq)}")
+        clauses.append(f"seq < {bind(after_seq)}")
 
     values.append(limit + 1)
     query = f"""
@@ -362,7 +362,7 @@ async def admin_list_audit_events(
             before, after, ip_address, description, request_id, timestamp, prev_hash, row_hash
         FROM audit_events
         WHERE {' AND '.join(clauses)}
-        ORDER BY seq ASC
+        ORDER BY seq DESC
         LIMIT ${len(values)}
     """
     async with pool.acquire() as conn:

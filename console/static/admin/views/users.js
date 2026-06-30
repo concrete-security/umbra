@@ -514,4 +514,10 @@
 
   A.Views = A.Views || {};
   A.Views.renderUsers = renderUsers;
+  // Deep-link target: focus a specific user (e.g. from the CVM detail drawer).
+  A.Views.selectUser = function (id) {
+    selectedUserId = id;
+    userFilter = "all";
+    userSearch = "";
+  };
 })(window.Admin);

@@ -117,7 +117,7 @@
   function bindOverlay() {
     S.overlay.addEventListener("click", (e) => {
       const cvm = e.target.closest("[data-node-cvm]");
-      if (cvm) return void A.Drawer.openCvm(cvm.getAttribute("data-node-cvm"));
+      if (cvm) return void A.Drawer.openCvm(cvm.getAttribute("data-node-cvm"), "summary");
       const sc = e.target.closest("[data-node-sc]");
       if (sc) {
         if (S.model?.sc) A.Drawer.openSc(S.model.sc);

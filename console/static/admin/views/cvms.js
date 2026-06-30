@@ -344,9 +344,17 @@
       body: "{}",
     });
     if (!response.ok) { A.UI.toast(await A.parseError(response), "err"); return; }
+    const label = action.charAt(0).toUpperCase() + action.slice(1);
+    // start/stop are synchronous and return the CVM resource; update/terminate
+    // return a 202 operation we poll to completion.
+    if (action === "start" || action === "stop") {
+      A.UI.toast(`${label} accepted`, "ok");
+      await A.refreshActivePanel();
+      return;
+    }
     const op = await response.json();
     A.Ops.track(op);
-    A.UI.toast(`${action.charAt(0).toUpperCase() + action.slice(1)} started`, "ok");
+    A.UI.toast(`${label} started`, "ok");
     try {
       await A.Ops.poll(op.id);
       await A.refreshActivePanel();

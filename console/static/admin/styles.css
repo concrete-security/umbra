@@ -229,6 +229,18 @@ tr.clickable:hover td { background: var(--elevated); }
   border: 1px solid var(--border);
 }
 .chip.link-chip, button.chip { cursor: pointer; }
+button.chip.link-chip:hover { border-color: var(--accent); color: var(--accent); }
+.link-inline {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: var(--accent);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.link-inline:hover { color: var(--text); }
 .chip-x { border: none; background: transparent; color: var(--muted); cursor: pointer; margin-left: 4px; }
 
 .filter-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }

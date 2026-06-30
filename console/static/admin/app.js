@@ -106,6 +106,10 @@
       A.setConn("live", "live");
       return;
     }
+    // Passive polls re-render the active panel wholesale; preserve the scroll
+    // position so a background refresh never yanks the page back to the top.
+    const scrollEl = document.querySelector("main[data-active-panel]");
+    const savedScroll = opts.poll && scrollEl ? scrollEl.scrollTop : null;
     A.refreshInFlight = true;
     try {
       A.pollSnapshot = {};
@@ -145,6 +149,7 @@
       A.setConn("err", "error");
     } finally {
       A.refreshInFlight = false;
+      if (savedScroll != null && scrollEl) scrollEl.scrollTop = savedScroll;
     }
   }
 

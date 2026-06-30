@@ -142,13 +142,33 @@
     },
 
     renderCvmSummary(cvm) {
+      const canManage = A.canActOnCvms() && A.has(A.P.CVM_MANAGE);
+      const canSeeUsers = A.has(A.P.USER_MANAGE) || A.has(A.P.PERM_MANAGE);
+      const canSeeProfiles = A.has(A.P.USER_MANAGE) || (A.ctx?.me?.profiles || []).length > 0;
+
+      const ownerEmail = cvm.owner?.email || cvm.owner_email || "—";
+      const ownerId = cvm.owner?.id;
+      const ownerHtml =
+        ownerId && canSeeUsers
+          ? '<button type="button" class="link-inline" data-open-user="' + UI.escapeHtml(ownerId) + '">' + UI.escapeHtml(ownerEmail) + "</button>"
+          : UI.escapeHtml(ownerEmail);
+
       const profiles = (cvm.profiles || [])
-        .map((p) => '<span class="chip">' + UI.escapeHtml(p.name) + "</span>")
+        .map((p) =>
+          canSeeProfiles
+            ? '<button type="button" class="chip link-chip" data-open-profile="' + UI.escapeHtml(p.id) + '">' + UI.escapeHtml(p.name) + "</button>"
+            : '<span class="chip">' + UI.escapeHtml(p.name) + "</span>"
+        )
         .join("");
+
+      let actionHtml = "";
+      if (canManage && cvm.state === "running") actionHtml = '<button type="button" class="btn" id="cvm-summary-stop">Stop</button>';
+      else if (canManage && cvm.state === "stopped") actionHtml = '<button type="button" class="btn" id="cvm-summary-start">Start</button>';
+
       let html =
         '<div class="card"><h3>Instance</h3>' +
         "<p>Owner: " +
-        UI.escapeHtml(cvm.owner?.email || cvm.owner_email || "—") +
+        ownerHtml +
         "</p>" +
         "<p>Region: " +
         UI.escapeHtml(cvm.region || "—") +
@@ -162,6 +182,7 @@
         html += "<p>Phala: " + UI.escapeHtml(cvm.phala_status) + " " + UI.escapeHtml(cvm.phala_uptime || "") + "</p>";
       }
       if (cvm.error_reason) html += '<p class="err">' + UI.escapeHtml(cvm.error_reason) + "</p>";
+      if (actionHtml) html += '<div class="toolbar">' + actionHtml + '</div><div id="cvm-action-msg" class="msg"></div>';
       html +=
         "<h3>Profiles</h3><div class=\"chips\">" +
         (profiles || '<span class="muted">none</span>') +
@@ -350,6 +371,22 @@
       });
       body.querySelector("#cvm-start")?.addEventListener("click", () => Drawer.cvmSyncAction("start"));
       body.querySelector("#cvm-stop")?.addEventListener("click", () => Drawer.cvmSyncAction("stop"));
+      body.querySelector("#cvm-summary-start")?.addEventListener("click", () => Drawer.cvmSyncAction("start"));
+      body.querySelector("#cvm-summary-stop")?.addEventListener("click", () => Drawer.cvmSyncAction("stop"));
+      body.querySelectorAll("[data-open-profile]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          A.selectedProfileId = btn.dataset.openProfile;
+          Drawer.closeAll();
+          A.selectTab("profiles");
+        });
+      });
+      body.querySelectorAll("[data-open-user]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          A.Views.selectUser && A.Views.selectUser(btn.dataset.openUser);
+          Drawer.closeAll();
+          A.selectTab("users");
+        });
+      });
       body.querySelector("#cvm-update")?.addEventListener("click", () => Drawer.cvmAsyncAction("update"));
       body.querySelector("#cvm-summary-update")?.addEventListener("click", () => Drawer.cvmAsyncAction("update"));
       body.querySelector("#cvm-terminate")?.addEventListener("click", () => Drawer.cvmAsyncAction("terminate"));
