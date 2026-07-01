@@ -17,8 +17,15 @@ use crate::{
     style,
 };
 
-const ENTITY_QUOTA_RESOURCES: &[&str] = &["dev_cvms", "ssh_keys", "users", "profiles"];
-const USER_QUOTA_RESOURCES: &[&str] = &["dev_cvms", "ssh_keys"];
+const ENTITY_QUOTA_RESOURCES: &[&str] = &[
+    "dev_cvms",
+    "ssh_keys",
+    "users",
+    "profiles",
+    "disk_gb_per_cvm",
+    "disk_gb_total",
+];
+const USER_QUOTA_RESOURCES: &[&str] = &["dev_cvms", "ssh_keys", "disk_gb_per_cvm", "disk_gb_total"];
 
 #[derive(Debug)]
 enum QuotaScope {
@@ -425,5 +432,15 @@ mod tests {
             .expect_err("profiles is entity-only");
 
         assert_eq!(err, "[usage] unknown quota resource for scope: profiles");
+    }
+
+    #[test]
+    fn disk_resources_valid_for_both_scopes() {
+        for resource in ["disk_gb_per_cvm", "disk_gb_total"] {
+            validate_resource(&QuotaScope::Entity("entity-1".to_string()), resource)
+                .expect("disk resource valid at entity scope");
+            validate_resource(&QuotaScope::User("user-1".to_string()), resource)
+                .expect("disk resource valid at user scope");
+        }
     }
 }

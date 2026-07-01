@@ -67,6 +67,7 @@ struct Cvm {
     state: String,
     instance_type: Option<String>,
     region: Option<String>,
+    disk_size_gb: Option<u64>,
     ssh_keys: Vec<SshKeyRef>,
     fqdn: Option<String>,
     expected_image_measurement: Option<String>,
@@ -574,6 +575,7 @@ struct LaunchRequest {
     ssh_identity: Option<PathBuf>,
     instance_type: Option<String>,
     region: Option<String>,
+    disk_size_gb: Option<u32>,
 }
 
 fn prepare_launch(
@@ -612,6 +614,10 @@ fn prepare_launch(
         ssh_identity,
         instance_type,
         region,
+        // Disk size has no CLI-side default: send only what the user passed and
+        // let the Console apply DEV_CVM_DEFAULT_DISK_GB when omitted. clap has
+        // already range-checked the flag value.
+        disk_size_gb: args.disk_size,
     })
 }
 
@@ -1102,6 +1108,9 @@ fn submit_launch(
     if let Some(value) = &launch.region {
         body.insert("region".to_string(), Value::String(value.clone()));
     }
+    if let Some(value) = launch.disk_size_gb {
+        body.insert("disk_size_gb".to_string(), Value::Number(value.into()));
+    }
     let response = Client::new()
         .post(format!("{console_url}/api/v1/cvms"))
         .bearer_auth(access_token)
@@ -1445,6 +1454,7 @@ fn print_cvm_list(
             fqdn: cvm.fqdn.as_deref(),
             instance_type: cvm.instance_type.as_deref(),
             region: cvm.region.as_deref(),
+            disk_size_gb: cvm.disk_size_gb,
             profile_names: cvm.profiles.iter().map(|p| p.name.clone()).collect(),
             ssh_key_labels: cvm.ssh_keys.iter().map(|k| k.label.clone()).collect(),
             owner_email: &cvm.owner.email,

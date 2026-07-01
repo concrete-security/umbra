@@ -435,6 +435,10 @@ pub struct CvmLaunchArgs {
     #[arg(long)]
     pub region: Option<String>,
 
+    /// Disk size in GB. Defaults to the Console default when omitted.
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=1_048_576))]
+    pub disk_size: Option<u32>,
+
     /// Submit the launch and return the operation handle without polling.
     #[arg(long)]
     pub no_wait: bool,
