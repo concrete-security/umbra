@@ -18,6 +18,7 @@ use uuid::Uuid;
 
 use crate::{
     cli::{wire, CvmCommand, CvmLaunchArgs, CvmListArgs, CvmTerminateArgs, CvmUpdateArgs},
+    commands::{resolve_cvm, resolve_cvm_explicit},
     config::{self, ResolvedConfig},
     console::{fetch_list, push_query, read_json_response, read_with_etag, validate_uuid},
     exit::ExitStatus,
@@ -187,13 +188,41 @@ pub fn run(command: CvmCommand, config: &ResolvedConfig, json: bool) -> ExitStat
     match command {
         CvmCommand::List(args) => list(config, args, json),
         CvmCommand::Launch(args) => launch(config, args, json),
-        CvmCommand::Attach { cvm_id } => profile_mutation(config, &cvm_id, Mutation::Attach, json),
-        CvmCommand::Detach { cvm_id } => profile_mutation(config, &cvm_id, Mutation::Detach, json),
-        CvmCommand::Start { cvm_id } => {
-            lifecycle_action(config, &cvm_id, LifecycleAction::Start, json)
+        CvmCommand::Attach { target } => {
+            match resolve_cvm(target.cvm_id.as_deref(), target.cvm.as_deref(), config) {
+                Ok(cvm_id) => profile_mutation(config, &cvm_id, Mutation::Attach, json),
+                Err(message) => {
+                    style::eprintln_error(&message);
+                    ExitStatus::Usage
+                }
+            }
         }
-        CvmCommand::Stop { cvm_id } => {
-            lifecycle_action(config, &cvm_id, LifecycleAction::Stop, json)
+        CvmCommand::Detach { target } => {
+            match resolve_cvm(target.cvm_id.as_deref(), target.cvm.as_deref(), config) {
+                Ok(cvm_id) => profile_mutation(config, &cvm_id, Mutation::Detach, json),
+                Err(message) => {
+                    style::eprintln_error(&message);
+                    ExitStatus::Usage
+                }
+            }
+        }
+        CvmCommand::Start { target } => {
+            match resolve_cvm(target.cvm_id.as_deref(), target.cvm.as_deref(), config) {
+                Ok(cvm_id) => lifecycle_action(config, &cvm_id, LifecycleAction::Start, json),
+                Err(message) => {
+                    style::eprintln_error(&message);
+                    ExitStatus::Usage
+                }
+            }
+        }
+        CvmCommand::Stop { target } => {
+            match resolve_cvm_explicit(target.cvm_id.as_deref(), target.cvm.as_deref()) {
+                Ok(cvm_id) => lifecycle_action(config, &cvm_id, LifecycleAction::Stop, json),
+                Err(message) => {
+                    style::eprintln_error(&message);
+                    ExitStatus::Usage
+                }
+            }
         }
         CvmCommand::Update(args) => update(config, args, json),
         CvmCommand::Terminate(args) => terminate(config, args, json),
@@ -419,7 +448,18 @@ fn lifecycle_action(
 }
 
 fn update(config: &ResolvedConfig, args: CvmUpdateArgs, json_output: bool) -> ExitStatus {
-    if let Err(message) = validate_uuid("CVM_ID", &args.cvm_id) {
+    let cvm_id = match resolve_cvm(
+        args.target.cvm_id.as_deref(),
+        args.target.cvm.as_deref(),
+        config,
+    ) {
+        Ok(value) => value,
+        Err(message) => {
+            style::eprintln_error(&message);
+            return ExitStatus::Usage;
+        }
+    };
+    if let Err(message) = validate_uuid("CVM_ID", &cvm_id) {
         style::eprintln_error(&message);
         return ExitStatus::Usage;
     }
@@ -430,14 +470,14 @@ fn update(config: &ResolvedConfig, args: CvmUpdateArgs, json_output: bool) -> Ex
             return status;
         }
     };
-    let (_, etag) = match fetch_cvm_with_etag(console_url, &session, &args.cvm_id) {
+    let (_, etag) = match fetch_cvm_with_etag(console_url, &session, &cvm_id) {
         Ok(value) => value,
         Err((status, message)) => {
             style::eprintln_error(&message);
             return status;
         }
     };
-    let op = match submit_update(console_url, &session.access_token, &args.cvm_id, &etag) {
+    let op = match submit_update(console_url, &session.access_token, &cvm_id, &etag) {
         Ok(value) => value,
         Err((status, message)) => {
             style::eprintln_error(&message);
@@ -488,7 +528,15 @@ fn update(config: &ResolvedConfig, args: CvmUpdateArgs, json_output: bool) -> Ex
 }
 
 fn terminate(config: &ResolvedConfig, args: CvmTerminateArgs, json_output: bool) -> ExitStatus {
-    if let Err(message) = validate_uuid("CVM_ID", &args.cvm_id) {
+    let cvm_id =
+        match resolve_cvm_explicit(args.target.cvm_id.as_deref(), args.target.cvm.as_deref()) {
+            Ok(value) => value,
+            Err(message) => {
+                style::eprintln_error(&message);
+                return ExitStatus::Usage;
+            }
+        };
+    if let Err(message) = validate_uuid("CVM_ID", &cvm_id) {
         style::eprintln_error(&message);
         return ExitStatus::Usage;
     }
@@ -499,14 +547,14 @@ fn terminate(config: &ResolvedConfig, args: CvmTerminateArgs, json_output: bool)
             return status;
         }
     };
-    let (_, etag) = match fetch_cvm_with_etag(console_url, &session, &args.cvm_id) {
+    let (_, etag) = match fetch_cvm_with_etag(console_url, &session, &cvm_id) {
         Ok(value) => value,
         Err((status, message)) => {
             style::eprintln_error(&message);
             return status;
         }
     };
-    let op = match submit_terminate(console_url, &session.access_token, &args.cvm_id, &etag) {
+    let op = match submit_terminate(console_url, &session.access_token, &cvm_id, &etag) {
         Ok(value) => value,
         Err((status, message)) => {
             style::eprintln_error(&message);

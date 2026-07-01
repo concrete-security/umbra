@@ -34,7 +34,6 @@ struct ConfigFile {
 pub struct ConfigOverrides {
     pub config_dir: Option<PathBuf>,
     pub console_url: Option<String>,
-    pub cvm: Option<String>,
     pub profile: Vec<String>,
     pub atls_policy: Option<PathBuf>,
     pub insecure_skip_atls_policy: bool,
@@ -145,11 +144,14 @@ impl ResolvedConfig {
         };
         let console_url = console_url.map(|value| value.trim_end_matches('/').to_string());
 
-        let (default_cvm, default_cvm_source) = if let Some(value) = overrides.cvm {
-            (Some(value), ConfigSource::Flag)
-        } else if let Some(value) = env::var("CONCRETE_DEFAULT_CVM")
-            .ok()
-            .filter(|value| !value.is_empty())
+        // `--cvm` is no longer a global override folded in here; it is a per-verb
+        // target flag resolved at the command layer (see commands::resolve_cvm),
+        // which sits above this default. So `default_cvm` only carries the env var
+        // and config-file layers.
+        let (default_cvm, default_cvm_source) = if let Some(value) =
+            env::var("CONCRETE_DEFAULT_CVM")
+                .ok()
+                .filter(|value| !value.is_empty())
         {
             (Some(value), ConfigSource::Env)
         } else if let Some(value) = file.default_cvm {

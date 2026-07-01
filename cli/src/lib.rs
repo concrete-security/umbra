@@ -43,7 +43,6 @@ pub fn run() -> ExitCode {
     let config = config::ResolvedConfig::resolve(config::ConfigOverrides {
         config_dir: args.config.clone(),
         console_url: args.console_url.clone(),
-        cvm: args.cvm.clone(),
         profile: args.profile.clone(),
         atls_policy: args.atls_policy.clone(),
         insecure_skip_atls_policy: args.insecure_skip_atls_policy,

@@ -31,10 +31,6 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub console_url: Option<String>,
 
-    /// Override the target Dev CVM for session verbs.
-    #[arg(long, global = true)]
-    pub cvm: Option<String>,
-
     /// Override the default profile for this invocation. Repeat for commands that accept multiple profiles.
     #[arg(long, global = true)]
     pub profile: Vec<String>,
@@ -352,26 +348,26 @@ pub enum CvmCommand {
 
     /// Attach a profile to a Dev CVM.
     Attach {
-        /// Dev CVM UUID.
-        cvm_id: String,
+        #[command(flatten)]
+        target: CvmTarget,
     },
 
     /// Detach a profile from a Dev CVM.
     Detach {
-        /// Dev CVM UUID.
-        cvm_id: String,
+        #[command(flatten)]
+        target: CvmTarget,
     },
 
     /// Start a stopped Dev CVM.
     Start {
-        /// Dev CVM UUID.
-        cvm_id: String,
+        #[command(flatten)]
+        target: CvmTarget,
     },
 
-    /// Stop a running Dev CVM.
+    /// Stop a running Dev CVM. Requires an explicit id (positional or --cvm).
     Stop {
-        /// Dev CVM UUID.
-        cvm_id: String,
+        #[command(flatten)]
+        target: CvmTarget,
     },
 
     /// Update an existing Dev CVM in place.
@@ -450,8 +446,8 @@ pub struct CvmLaunchArgs {
 
 #[derive(clap::Args, Debug)]
 pub struct CvmTerminateArgs {
-    /// Dev CVM UUID.
-    pub cvm_id: String,
+    #[command(flatten)]
+    pub target: CvmTarget,
 
     /// Submit the terminate request and return the operation handle without polling.
     #[arg(long)]
@@ -464,8 +460,8 @@ pub struct CvmTerminateArgs {
 
 #[derive(clap::Args, Debug)]
 pub struct CvmUpdateArgs {
-    /// Dev CVM UUID.
-    pub cvm_id: String,
+    #[command(flatten)]
+    pub target: CvmTarget,
 
     /// Submit the update request and return the operation handle without polling.
     #[arg(long)]
@@ -476,10 +472,23 @@ pub struct CvmUpdateArgs {
     pub wait_timeout_seconds: u32,
 }
 
+/// The Dev CVM a verb acts on. Resolution order: positional `<CVM_ID>` -> `--cvm`
+/// -> `CONCRETE_DEFAULT_CVM` -> `default_cvm`. Flattened into every verb that targets
+/// a single CVM so `<id>` and `--cvm` mean the same thing everywhere they appear.
 #[derive(clap::Args, Debug)]
-pub struct SshArgs {
+pub struct CvmTarget {
     /// Dev CVM UUID. Defaults to --cvm, CONCRETE_DEFAULT_CVM, or default_cvm.
     pub cvm_id: Option<String>,
+
+    /// Target Dev CVM UUID. Alternative to the positional; the positional wins if both are given.
+    #[arg(long)]
+    pub cvm: Option<String>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct SshArgs {
+    #[command(flatten)]
+    pub target: CvmTarget,
 
     /// Start or attach the named dtach session.
     #[arg(long)]
@@ -496,8 +505,8 @@ pub struct SshArgs {
 
 #[derive(clap::Args, Debug)]
 pub struct AgentSessionArgs {
-    /// Dev CVM UUID. Defaults to --cvm, CONCRETE_DEFAULT_CVM, or default_cvm.
-    pub cvm_id: Option<String>,
+    #[command(flatten)]
+    pub target: CvmTarget,
 
     /// Start or attach the named dtach session.
     #[arg(long)]
@@ -514,6 +523,9 @@ pub struct AgentSessionArgs {
 
 #[derive(clap::Args, Debug)]
 pub struct CodeArgs {
+    #[command(flatten)]
+    pub target: CvmTarget,
+
     /// VS Code binary to invoke. Defaults to code on PATH.
     #[arg(long)]
     pub code_bin: Option<PathBuf>,
@@ -529,6 +541,9 @@ pub struct CodeArgs {
 
 #[derive(clap::Args, Debug)]
 pub struct CursorArgs {
+    #[command(flatten)]
+    pub target: CvmTarget,
+
     /// Cursor binary to invoke. Defaults to cursor on PATH.
     #[arg(long)]
     pub cursor_bin: Option<PathBuf>,
@@ -544,6 +559,10 @@ pub struct CursorArgs {
 
 #[derive(clap::Args, Debug)]
 pub struct SessionListArgs {
+    /// Target Dev CVM UUID. Defaults to CONCRETE_DEFAULT_CVM or default_cvm.
+    #[arg(long)]
+    pub cvm: Option<String>,
+
     /// Private SSH key to pass to ssh(1).
     #[arg(long)]
     pub identity_file: Option<PathBuf>,
@@ -553,6 +572,10 @@ pub struct SessionListArgs {
 pub struct SessionTargetArgs {
     /// dtach session name or client-side alias.
     pub target: String,
+
+    /// Target Dev CVM UUID. Defaults to CONCRETE_DEFAULT_CVM or default_cvm.
+    #[arg(long)]
+    pub cvm: Option<String>,
 
     /// Private SSH key to pass to ssh(1).
     #[arg(long)]
@@ -566,6 +589,10 @@ pub struct AliasArgs {
 
     /// Client-side alias to assign.
     pub alias: String,
+
+    /// Target Dev CVM UUID. Defaults to CONCRETE_DEFAULT_CVM or default_cvm.
+    #[arg(long)]
+    pub cvm: Option<String>,
 
     /// Private SSH key to pass to ssh(1) while checking remote session names.
     #[arg(long)]
@@ -953,4 +980,104 @@ pub enum AuthCommand {
 
     /// Print the current access token.
     Token,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::{CommandFactory, Parser};
+
+    #[test]
+    fn command_tree_is_valid() {
+        // Validates the whole arg tree (duplicate ids, flatten conflicts, ...).
+        // Guards against a global --cvm ever colliding with a local --cvm again.
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn session_verbs_accept_positional_and_flag_target() {
+        let ssh = match Cli::try_parse_from(["concrete", "ssh", "cvm-1"])
+            .unwrap()
+            .command
+        {
+            Command::Ssh(args) => args,
+            other => panic!("expected ssh, got {other:?}"),
+        };
+        assert_eq!(ssh.target.cvm_id.as_deref(), Some("cvm-1"));
+        assert_eq!(ssh.target.cvm.as_deref(), None);
+
+        let ssh = match Cli::try_parse_from(["concrete", "ssh", "--cvm", "cvm-2"])
+            .unwrap()
+            .command
+        {
+            Command::Ssh(args) => args,
+            other => panic!("expected ssh, got {other:?}"),
+        };
+        assert_eq!(ssh.target.cvm_id.as_deref(), None);
+        assert_eq!(ssh.target.cvm.as_deref(), Some("cvm-2"));
+    }
+
+    #[test]
+    fn code_verb_gained_positional_target() {
+        let code = match Cli::try_parse_from(["concrete", "code", "cvm-1"])
+            .unwrap()
+            .command
+        {
+            Command::Code(args) => args,
+            other => panic!("expected code, got {other:?}"),
+        };
+        assert_eq!(code.target.cvm_id.as_deref(), Some("cvm-1"));
+    }
+
+    #[test]
+    fn cvm_lifecycle_verbs_take_optional_positional() {
+        match Cli::try_parse_from(["concrete", "cvm", "start", "cvm-1"])
+            .unwrap()
+            .command
+        {
+            Command::Cvm(CvmCommand::Start { target }) => {
+                assert_eq!(target.cvm_id.as_deref(), Some("cvm-1"));
+            }
+            other => panic!("expected cvm start, got {other:?}"),
+        }
+        // A destructive verb still parses with no id; the explicit-id requirement
+        // is enforced at run time by resolve_cvm_explicit, not by the parser.
+        match Cli::try_parse_from(["concrete", "cvm", "stop"])
+            .unwrap()
+            .command
+        {
+            Command::Cvm(CvmCommand::Stop { target }) => {
+                assert_eq!(target.cvm_id, None);
+                assert_eq!(target.cvm, None);
+            }
+            other => panic!("expected cvm stop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn traffic_logs_keeps_independent_cvm_filters() {
+        match Cli::try_parse_from([
+            "concrete",
+            "traffic-logs",
+            "--cvm",
+            "cvm-1",
+            "--security-cvm",
+            "sc-1",
+        ])
+        .unwrap()
+        .command
+        {
+            Command::TrafficLogs(args) => {
+                assert_eq!(args.cvm.as_deref(), Some("cvm-1"));
+                assert_eq!(args.security_cvm.as_deref(), Some("sc-1"));
+            }
+            other => panic!("expected traffic-logs, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cvm_flag_is_not_global() {
+        // --cvm is scoped to CVM-targeting verbs, so a non-targeting command rejects it.
+        assert!(Cli::try_parse_from(["concrete", "status", "--cvm", "cvm-1"]).is_err());
+    }
 }

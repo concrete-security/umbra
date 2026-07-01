@@ -21,6 +21,7 @@ use crate::{
         AgentSessionArgs, AliasArgs, CodeArgs, CursorArgs, SessionListArgs, SessionTargetArgs,
         SshArgs,
     },
+    commands::resolve_cvm,
     config::ResolvedConfig,
     console::console_session,
     exit::ExitStatus,
@@ -60,7 +61,7 @@ struct Cvm {
 }
 
 struct SshInvocation<'a> {
-    cvm_id: Option<&'a str>,
+    cvm_id: &'a str,
     identity_file: Option<&'a Path>,
     remote_command: String,
     allocate_tty: bool,
@@ -93,9 +94,20 @@ pub fn run(args: SshArgs, config: &ResolvedConfig) -> ExitStatus {
             return ExitStatus::Usage;
         }
     };
+    let cvm_id = match resolve_cvm(
+        args.target.cvm_id.as_deref(),
+        args.target.cvm.as_deref(),
+        config,
+    ) {
+        Ok(value) => value,
+        Err(message) => {
+            crate::style::eprintln_error(&message);
+            return ExitStatus::Usage;
+        }
+    };
     run_ssh(
         SshInvocation {
-            cvm_id: args.cvm_id.as_deref(),
+            cvm_id: &cvm_id,
             identity_file: args.identity_file.as_deref(),
             remote_command,
             allocate_tty: args.command.is_none(),
@@ -123,7 +135,11 @@ pub fn run_agent(
             return ExitStatus::Usage;
         }
     }
-    let cvm_id = match selected_cvm_id(args.cvm_id.as_deref(), config) {
+    let cvm_id = match resolve_cvm(
+        args.target.cvm_id.as_deref(),
+        args.target.cvm.as_deref(),
+        config,
+    ) {
         Ok(value) => value,
         Err(message) => {
             crate::style::eprintln_error(&message);
@@ -141,7 +157,7 @@ pub fn run_agent(
     };
     run_ssh(
         SshInvocation {
-            cvm_id: Some(&cvm_id),
+            cvm_id: &cvm_id,
             identity_file: args.identity_file.as_deref(),
             remote_command: dtach_remote_command(&session_name, &program_command),
             allocate_tty: true,
@@ -151,9 +167,21 @@ pub fn run_agent(
 }
 
 pub fn run_code(args: CodeArgs, config: &ResolvedConfig) -> ExitStatus {
+    let cvm_id = match resolve_cvm(
+        args.target.cvm_id.as_deref(),
+        args.target.cvm.as_deref(),
+        config,
+    ) {
+        Ok(value) => value,
+        Err(message) => {
+            crate::style::eprintln_error(&message);
+            return ExitStatus::Usage;
+        }
+    };
     let bin = args.code_bin.unwrap_or_else(|| PathBuf::from("code"));
     run_editor(
         &bin,
+        &cvm_id,
         args.workspace.as_deref(),
         args.identity_file.as_deref(),
         config,
@@ -161,9 +189,21 @@ pub fn run_code(args: CodeArgs, config: &ResolvedConfig) -> ExitStatus {
 }
 
 pub fn run_cursor(args: CursorArgs, config: &ResolvedConfig) -> ExitStatus {
+    let cvm_id = match resolve_cvm(
+        args.target.cvm_id.as_deref(),
+        args.target.cvm.as_deref(),
+        config,
+    ) {
+        Ok(value) => value,
+        Err(message) => {
+            crate::style::eprintln_error(&message);
+            return ExitStatus::Usage;
+        }
+    };
     let bin = args.cursor_bin.unwrap_or_else(|| PathBuf::from("cursor"));
     run_editor(
         &bin,
+        &cvm_id,
         args.workspace.as_deref(),
         args.identity_file.as_deref(),
         config,
@@ -171,7 +211,7 @@ pub fn run_cursor(args: CursorArgs, config: &ResolvedConfig) -> ExitStatus {
 }
 
 pub fn run_ps(args: SessionListArgs, config: &ResolvedConfig, json_output: bool) -> ExitStatus {
-    let cvm_id = match selected_cvm_id(None, config) {
+    let cvm_id = match resolve_cvm(None, args.cvm.as_deref(), config) {
         Ok(value) => value,
         Err(message) => {
             crate::style::eprintln_error(&message);
@@ -187,7 +227,7 @@ pub fn run_ps(args: SessionListArgs, config: &ResolvedConfig, json_output: bool)
     };
     let output = match run_ssh_capture(
         SshInvocation {
-            cvm_id: Some(&cvm_id),
+            cvm_id: &cvm_id,
             identity_file: args.identity_file.as_deref(),
             remote_command: ps_remote_command(),
             allocate_tty: false,
@@ -212,7 +252,7 @@ pub fn run_ps(args: SessionListArgs, config: &ResolvedConfig, json_output: bool)
 }
 
 pub fn run_attach(args: SessionTargetArgs, config: &ResolvedConfig) -> ExitStatus {
-    let cvm_id = match selected_cvm_id(None, config) {
+    let cvm_id = match resolve_cvm(None, args.cvm.as_deref(), config) {
         Ok(value) => value,
         Err(message) => {
             crate::style::eprintln_error(&message);
@@ -228,7 +268,7 @@ pub fn run_attach(args: SessionTargetArgs, config: &ResolvedConfig) -> ExitStatu
     };
     run_ssh(
         SshInvocation {
-            cvm_id: Some(&cvm_id),
+            cvm_id: &cvm_id,
             identity_file: args.identity_file.as_deref(),
             remote_command: attach_remote_command(&session_name),
             allocate_tty: true,
@@ -238,7 +278,7 @@ pub fn run_attach(args: SessionTargetArgs, config: &ResolvedConfig) -> ExitStatu
 }
 
 pub fn run_kill(args: SessionTargetArgs, config: &ResolvedConfig, json_output: bool) -> ExitStatus {
-    let cvm_id = match selected_cvm_id(None, config) {
+    let cvm_id = match resolve_cvm(None, args.cvm.as_deref(), config) {
         Ok(value) => value,
         Err(message) => {
             crate::style::eprintln_error(&message);
@@ -254,7 +294,7 @@ pub fn run_kill(args: SessionTargetArgs, config: &ResolvedConfig, json_output: b
     };
     match run_ssh_capture(
         SshInvocation {
-            cvm_id: Some(&cvm_id),
+            cvm_id: &cvm_id,
             identity_file: args.identity_file.as_deref(),
             remote_command: kill_remote_command(&session_name),
             allocate_tty: false,
@@ -290,7 +330,7 @@ pub fn run_kill(args: SessionTargetArgs, config: &ResolvedConfig, json_output: b
 }
 
 pub fn run_alias(args: AliasArgs, config: &ResolvedConfig, json_output: bool) -> ExitStatus {
-    let cvm_id = match selected_cvm_id(None, config) {
+    let cvm_id = match resolve_cvm(None, args.cvm.as_deref(), config) {
         Ok(value) => value,
         Err(message) => {
             crate::style::eprintln_error(&message);
@@ -307,7 +347,7 @@ pub fn run_alias(args: AliasArgs, config: &ResolvedConfig, json_output: bool) ->
     }
     let output = match run_ssh_capture(
         SshInvocation {
-            cvm_id: Some(&cvm_id),
+            cvm_id: &cvm_id,
             identity_file: args.identity_file.as_deref(),
             remote_command: ps_remote_command(),
             allocate_tty: false,
@@ -395,6 +435,7 @@ fn run_ssh(invocation: SshInvocation<'_>, config: &ResolvedConfig) -> ExitStatus
 
 fn run_editor(
     editor_bin: &Path,
+    cvm_id: &str,
     workspace_arg: Option<&str>,
     identity_file: Option<&Path>,
     config: &ResolvedConfig,
@@ -405,7 +446,7 @@ fn run_editor(
             return ExitStatus::Usage;
         }
     }
-    let prepared = match prepare_ssh(None, identity_file, config) {
+    let prepared = match prepare_ssh(cvm_id, identity_file, config) {
         Ok(value) => value,
         Err((status, message)) => {
             crate::style::eprintln_error(&message);
@@ -473,16 +514,11 @@ fn run_ssh_capture(
 }
 
 fn prepare_ssh(
-    cvm_id_arg: Option<&str>,
+    cvm_id: &str,
     explicit_identity: Option<&Path>,
     config: &ResolvedConfig,
 ) -> Result<PreparedSsh, (ExitStatus, String)> {
-    let cvm_id = match selected_cvm_id(cvm_id_arg, config) {
-        Ok(value) => value,
-        Err(message) => {
-            return Err((ExitStatus::Usage, message));
-        }
-    };
+    let cvm_id = cvm_id.to_string();
     let (console_url, session) = match console_session(config) {
         Ok(value) => value,
         Err((status, message)) => {
@@ -600,16 +636,6 @@ fn base_ssh_command(prepared: &PreparedSsh, allocate_tty: bool) -> Command {
     }
     ssh.arg(format!("dev@{}", prepared.fqdn));
     ssh
-}
-
-fn selected_cvm_id(arg: Option<&str>, config: &ResolvedConfig) -> Result<String, String> {
-    arg.map(ToString::to_string)
-        .or_else(|| config.default_cvm.clone())
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            "[usage] missing CVM id; pass <CVM_ID> or set --cvm, CONCRETE_DEFAULT_CVM, or default_cvm"
-                .to_string()
-        })
 }
 
 fn fetch_cvm(
