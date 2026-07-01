@@ -384,6 +384,7 @@ def cvm_resource(row: Any) -> dict[str, Any]:
         "state": row["state"],
         "instance_type": row["instance_type"],
         "region": row["region"],
+        "disk_size_gb": row["disk_size_gb"],
         "ssh_keys": [{"id": str(key["id"]), "label": key["label"]} for key in ssh_keys],
         "fqdn": row["fqdn"],
         "expected_image_measurement": row["expected_image_measurement"],

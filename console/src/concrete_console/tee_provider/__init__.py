@@ -45,6 +45,7 @@ class CvmProvider:
         env: dict[str, str],
         instance_type: str | None = None,
         region: str | None = None,
+        disk_size_gb: int | None = None,
     ) -> CvmProviderDeploymentResult:
         return self._result(
             await self._call(
@@ -54,6 +55,7 @@ class CvmProvider:
                 env=env,
                 instance_type=instance_type,
                 region=region,
+                disk_size_gb=disk_size_gb,
             )
         )
 

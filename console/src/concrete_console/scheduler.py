@@ -1917,6 +1917,7 @@ async def execute_cvm_launch_phala_deploy_operation(operation_id: Any) -> None:
             env=env,
             instance_type=_row_value(snapshot, "instance_type"),
             region=_row_value(snapshot, "region"),
+            disk_size_gb=_row_value(snapshot, "disk_size_gb"),
         )
     except ShadeError as exc:
         log.warning("shade_adapter_failed", operation_id=str(operation_id), **shade_error_log_fields(exc))
@@ -3212,6 +3213,7 @@ async def fetch_cvm_launch_snapshot(conn: Any, operation_id: Any) -> Any | None:
             c.fqdn,
             c.instance_type,
             c.region,
+            c.disk_size_gb,
             c.metadata,
             c.compose_config,
             c.txt_dns_record_id,

@@ -156,17 +156,21 @@ DEFAULT_SANDBOX_ENV_VALUE_DENYLIST = (
     r"^AKIA[0-9A-Z]{16}$",
     r"^ASIA[0-9A-Z]{16}$",
 )
-ENTITY_QUOTA_RESOURCES = ("dev_cvms", "ssh_keys", "users", "profiles")
-USER_QUOTA_RESOURCES = ("dev_cvms", "ssh_keys")
+ENTITY_QUOTA_RESOURCES = ("dev_cvms", "ssh_keys", "users", "profiles", "disk_gb_per_cvm", "disk_gb_total")
+USER_QUOTA_RESOURCES = ("dev_cvms", "ssh_keys", "disk_gb_per_cvm", "disk_gb_total")
 DEFAULT_ENTITY_QUOTAS = {
     "dev_cvms": ("DEFAULT_QUOTA_DEV_CVMS_PER_ENTITY", 50),
     "ssh_keys": ("DEFAULT_QUOTA_SSH_KEYS_PER_ENTITY", 1000),
     "users": ("DEFAULT_QUOTA_USERS_PER_ENTITY", 1000),
     "profiles": ("DEFAULT_QUOTA_PROFILES_PER_ENTITY", 50),
+    "disk_gb_per_cvm": ("DEFAULT_QUOTA_DISK_GB_PER_CVM_PER_ENTITY", 500),
+    "disk_gb_total": ("DEFAULT_QUOTA_DISK_GB_TOTAL_PER_ENTITY", 10000),
 }
 DEFAULT_USER_QUOTAS = {
     "dev_cvms": ("DEFAULT_QUOTA_DEV_CVMS_PER_USER", 5),
     "ssh_keys": ("DEFAULT_QUOTA_SSH_KEYS_PER_USER", 10),
+    "disk_gb_per_cvm": ("DEFAULT_QUOTA_DISK_GB_PER_CVM_PER_USER", 200),
+    "disk_gb_total": ("DEFAULT_QUOTA_DISK_GB_TOTAL_PER_USER", 1000),
 }
 CREATE_ENTITY_ROUTE = "POST /api/v1/entities"
 CREATE_SSH_KEY_ROUTE = "POST /api/v1/me/keys"
@@ -400,6 +404,9 @@ class CVMCreate(BaseModel):
         max_length=64,
         pattern=r"^[A-Za-z0-9._-]+$",
     )
+    # Structural sanity bounds only; the real min/max and quota caps are
+    # enforced server-side in resolve_cvm_launch_config / enforce_disk_quotas.
+    disk_size_gb: int | None = Field(default=None, ge=1, le=1_048_576)
 
     @field_validator("profile_ids", "ssh_key_ids")
     @classmethod
@@ -1057,7 +1064,54 @@ def default_quota_limit(resource: str, *, scope: str) -> int:
     return int(load_settings().raw.get(env_name, fallback))
 
 
-def resolve_cvm_launch_config(body: CVMCreate) -> dict[str, str]:
+def resolve_dev_cvm_disk_gb(requested: int | None, raw: Any) -> int:
+    """Resolve the Dev CVM disk size (GB).
+
+    Uses the request value when supplied, otherwise the Console default
+    (``DEV_CVM_DEFAULT_DISK_GB``, matching Phala's own ``40GB`` default). The
+    result is bounded by ``DEV_CVM_MIN_DISK_GB`` / ``DEV_CVM_MAX_DISK_GB``: an
+    out-of-range *request* is a 422 (client error); an out-of-range or
+    unparseable *default/bound* is a 503 (misconfiguration).
+    """
+    try:
+        min_gb = int(raw.get("DEV_CVM_MIN_DISK_GB", 40))
+        max_gb = int(raw.get("DEV_CVM_MAX_DISK_GB", 2000))
+    except (TypeError, ValueError):
+        raise api_error(
+            503,
+            "SERVICE_UNAVAILABLE",
+            "Dev CVM disk size bounds are invalid",
+            {"component": "dev_cvm_disk_bounds"},
+        )
+    if requested is not None:
+        if not (min_gb <= requested <= max_gb):
+            raise api_error(
+                422,
+                "VALIDATION_ERROR",
+                f"Dev CVM disk size must be between {min_gb} and {max_gb} GB",
+                {"errors": [{"field": "disk_size_gb", "type": "out_of_range", "min": min_gb, "max": max_gb}]},
+            )
+        return requested
+    try:
+        default_gb = int(raw.get("DEV_CVM_DEFAULT_DISK_GB", 40))
+    except (TypeError, ValueError):
+        raise api_error(
+            503,
+            "SERVICE_UNAVAILABLE",
+            "Dev CVM default disk size is invalid",
+            {"component": "dev_cvm_default_disk_gb"},
+        )
+    if not (min_gb <= default_gb <= max_gb):
+        raise api_error(
+            503,
+            "SERVICE_UNAVAILABLE",
+            "Dev CVM default disk size is out of range",
+            {"component": "dev_cvm_default_disk_gb"},
+        )
+    return default_gb
+
+
+def resolve_cvm_launch_config(body: CVMCreate) -> dict[str, object]:
     raw = load_settings().raw
     instance_type = (body.instance_type or raw.get("DEV_CVM_DEFAULT_INSTANCE_TYPE", "tdx.small")).strip()
     if not instance_type:
@@ -1122,16 +1176,18 @@ def resolve_cvm_launch_config(body: CVMCreate) -> dict[str, str]:
         component="cloudflare_base_domain",
         message="Dev CVM base domain is invalid",
     )
+    disk_size_gb = resolve_dev_cvm_disk_gb(body.disk_size_gb, raw)
     return {
         "instance_type": instance_type,
         "region": region,
         "image": image,
         "expected_image_measurement": expected_image_measurement.lower(),
         "base_domain": base_domain,
+        "disk_size_gb": disk_size_gb,
     }
 
 
-def render_dev_cvm_compose_config(resolved: dict[str, str]) -> str:
+def render_dev_cvm_compose_config(resolved: dict[str, object]) -> str:
     image = json.dumps(resolved["image"])
     return "\n".join(
         [
@@ -1465,6 +1521,21 @@ async def entity_quota_usage(conn: asyncpg.Connection, entity_id: UUID, resource
             """,
             entity_id,
         )
+    if resource in ("disk_gb_total", "disk_gb_per_cvm"):
+        # disk_gb_total: sum of provisioned disk across the entity's live CVMs.
+        # disk_gb_per_cvm: the largest single live CVM (a cap, not a running
+        # total) — reported only so `quota get` shows headroom vs the cap.
+        agg = "SUM" if resource == "disk_gb_total" else "MAX"
+        return await conn.fetchval(
+            f"""
+            SELECT COALESCE({agg}(disk_size_gb), 0)
+            FROM cvms
+            WHERE entity_id = $1
+              AND deleted_at IS NULL
+              AND state <> 'TERMINATED'
+            """,
+            entity_id,
+        )
     return 0
 
 
@@ -1478,6 +1549,18 @@ async def user_quota_usage(conn: asyncpg.Connection, user_id: UUID, resource: st
         return await conn.fetchval(
             """
             SELECT count(*)
+            FROM cvms
+            WHERE owner_id = $1
+              AND deleted_at IS NULL
+              AND state <> 'TERMINATED'
+            """,
+            user_id,
+        )
+    if resource in ("disk_gb_total", "disk_gb_per_cvm"):
+        agg = "SUM" if resource == "disk_gb_total" else "MAX"
+        return await conn.fetchval(
+            f"""
+            SELECT COALESCE({agg}(disk_size_gb), 0)
             FROM cvms
             WHERE owner_id = $1
               AND deleted_at IS NULL
@@ -1535,6 +1618,51 @@ async def enforce_user_quota(conn: asyncpg.Connection, user_id: UUID, resource: 
             "QUOTA_EXCEEDED",
             "user quota exceeded",
             {"resource": resource, "scope": "user", "limit": limit, "current_usage": current_usage},
+        )
+
+
+async def enforce_disk_quotas(conn: asyncpg.Connection, user_id: UUID, entity_id: UUID, requested_gb: int) -> None:
+    """Enforce disk-size quotas for a Dev CVM launch of ``requested_gb`` GB.
+
+    Two independent limits, both overridable per-user/per-entity:
+
+    * ``disk_gb_per_cvm`` — a cap on this single CVM. Uses the effective limit
+      for the acting user (a user override cascades from the entity default via
+      ``user_quota_limit``), so a request larger than the cap is rejected.
+    * ``disk_gb_total`` — the summed provisioned disk across live CVMs must stay
+      within both the entity and the user budgets (mirrors the ``dev_cvms``
+      dual-scope check, but sums GB instead of counting rows).
+    """
+    cap, cap_source, _, _ = await user_quota_limit(conn, user_id, "disk_gb_per_cvm")
+    if requested_gb > cap:
+        raise api_error(
+            403,
+            "QUOTA_EXCEEDED",
+            "disk size per CVM quota exceeded",
+            {
+                "resource": "disk_gb_per_cvm",
+                "scope": "user" if cap_source == "user_override" else "entity",
+                "limit": cap,
+                "current_usage": requested_gb,
+            },
+        )
+    entity_limit, _, _, _ = await entity_quota_limit(conn, entity_id, "disk_gb_total")
+    entity_usage = await entity_quota_usage(conn, entity_id, "disk_gb_total")
+    if entity_usage + requested_gb > entity_limit:
+        raise api_error(
+            403,
+            "QUOTA_EXCEEDED",
+            "entity disk total quota exceeded",
+            {"resource": "disk_gb_total", "scope": "entity", "limit": entity_limit, "current_usage": entity_usage},
+        )
+    user_limit, _, _, _ = await user_quota_limit(conn, user_id, "disk_gb_total")
+    user_usage = await user_quota_usage(conn, user_id, "disk_gb_total")
+    if user_usage + requested_gb > user_limit:
+        raise api_error(
+            403,
+            "QUOTA_EXCEEDED",
+            "user disk total quota exceeded",
+            {"resource": "disk_gb_total", "scope": "user", "limit": user_limit, "current_usage": user_usage},
         )
 
 
@@ -3981,6 +4109,9 @@ async def create_cvm(
             security_cvm_id = await fetch_live_security_cvm_id(conn, current_user.entity_id)
             await enforce_user_quota(conn, current_user.id, "dev_cvms")
             await enforce_entity_quota(conn, current_user.entity_id, "dev_cvms")
+            await enforce_disk_quotas(
+                conn, current_user.id, current_user.entity_id, int(resolved["disk_size_gb"])
+            )
             fqdn = generated_cvm_fqdn(DEV_CVM_FQDN_PREFIX, resolved["base_domain"])
             compose_config = render_dev_cvm_compose_config(resolved)
             await conn.execute(
@@ -3995,9 +4126,10 @@ async def create_cvm(
                     compose_config,
                     expected_image_measurement,
                     owner_id,
-                    security_cvm_id
+                    security_cvm_id,
+                    disk_size_gb
                 )
-                VALUES ($1, $2, 'PROVISIONING', $3, $4, $5, $6, $7, $8, $9)
+                VALUES ($1, $2, 'PROVISIONING', $3, $4, $5, $6, $7, $8, $9, $10)
                 """,
                 cvm_id,
                 current_user.entity_id,
@@ -4008,6 +4140,7 @@ async def create_cvm(
                 resolved["expected_image_measurement"],
                 current_user.id,
                 security_cvm_id,
+                int(resolved["disk_size_gb"]),
             )
             await conn.executemany(
                 """
@@ -5014,6 +5147,7 @@ async def fetch_cvm_rows_from_conn(
             c.state::text AS state,
             c.instance_type,
             c.region,
+            c.disk_size_gb,
             c.fqdn,
             c.expected_image_measurement,
             c.image_measurement,

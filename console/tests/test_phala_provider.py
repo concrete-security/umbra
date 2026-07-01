@@ -173,6 +173,59 @@ def test_deploy_stages_files_with_private_modes_and_cleans(tmp_path) -> None:
     assert not Path(seen["env"]).exists()
 
 
+def test_deploy_appends_disk_size_with_unit(tmp_path) -> None:
+    # `phala deploy --disk-size` wants a size *with unit* (e.g. "50G"), not a
+    # bare integer.
+    cli = write_fake_cli(
+        tmp_path,
+        """
+        import json
+        import sys
+
+        assert sys.argv[sys.argv.index("--disk-size") + 1] == "50G"
+        print(json.dumps({"app_id": "app-123", "gateway_host": "gateway.example.com", "status": "running"}))
+        """,
+    )
+    client = PhalaClient(cli_path=str(cli), api_token="phala-token", timeout_seconds=TEST_CLI_TIMEOUT_SECONDS)
+
+    result = run(
+        client.deploy(
+            name="concrete-v0-cvm-smoke",
+            compose_yaml="services: {}\n",
+            env={},
+            instance_type="tdx.small",
+            region="FR-PARIS-1",
+            disk_size_gb=50,
+        )
+    )
+
+    assert result.app_id == "app-123"
+
+
+def test_deploy_omits_disk_size_when_absent(tmp_path) -> None:
+    cli = write_fake_cli(
+        tmp_path,
+        """
+        import json
+        import sys
+
+        assert "--disk-size" not in sys.argv
+        print(json.dumps({"app_id": "app-123", "gateway_host": "gateway.example.com", "status": "running"}))
+        """,
+    )
+    client = PhalaClient(cli_path=str(cli), api_token="phala-token", timeout_seconds=TEST_CLI_TIMEOUT_SECONDS)
+
+    result = run(
+        client.deploy(
+            name="concrete-v0-cvm-smoke",
+            compose_yaml="services: {}\n",
+            env={},
+        )
+    )
+
+    assert result.app_id == "app-123"
+
+
 def test_deploy_falls_back_to_cvms_get_when_cli_stdout_is_empty(tmp_path) -> None:
     marker = tmp_path / "argv.json"
     cli = write_fake_cli(

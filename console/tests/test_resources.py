@@ -310,6 +310,7 @@ def test_cvm_resource_formats_nested_profiles_and_keys() -> None:
             "state": "RUNNING",
             "instance_type": "tdx.small",
             "region": "us",
+            "disk_size_gb": 80,
             "ssh_keys": '[{"id":"00000000-0000-4000-8000-000000000061","label":"laptop"}]',
             "fqdn": "cvm.example.test",
             "expected_image_measurement": "a" * 96,

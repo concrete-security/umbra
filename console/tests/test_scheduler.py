@@ -618,6 +618,7 @@ def launch_snapshot(**overrides):
         "fqdn": "cvm-abc.dev.example.com",
         "instance_type": "tdx.small",
         "region": "FR-PARIS-1",
+        "disk_size_gb": 40,
         "compose_config": "services:\n  user-sandbox:\n    image: example/dev@sha256:abc\n",
         "expected_image_measurement": "a" * 96,
         "security_cvm_fqdn": "sc-abc.sc.example.com",
@@ -649,6 +650,7 @@ def cvm_resource_row(**overrides):
         "state": "RUNNING",
         "instance_type": "tdx.small",
         "region": "FR-PARIS-1",
+        "disk_size_gb": 40,
         "fqdn": "cvm-abc.dev.example.com",
         "expected_image_measurement": "a" * 96,
         "image_measurement": "a" * 96,
@@ -1098,7 +1100,7 @@ def test_execute_security_cvm_phala_deploy_materializes_env_and_metadata(monkeyp
         def from_settings(cls):
             return cls()
 
-        async def deploy(self, *, name, compose_yaml, env, instance_type=None, region=None):
+        async def deploy(self, *, name, compose_yaml, env, instance_type=None, region=None, disk_size_gb=None):
             captured["name"] = name
             captured["compose_yaml"] = compose_yaml
             captured["env"] = dict(env)
@@ -1208,12 +1210,13 @@ def test_execute_cvm_launch_phala_deploy_persists_hash_only(monkeypatch) -> None
         def from_settings(cls):
             return cls()
 
-        async def deploy(self, *, name, compose_yaml, env, instance_type=None, region=None):
+        async def deploy(self, *, name, compose_yaml, env, instance_type=None, region=None, disk_size_gb=None):
             captured["name"] = name
             captured["compose_yaml"] = compose_yaml
             captured["env"] = dict(env)
             captured["instance_type"] = instance_type
             captured["region"] = region
+            captured["disk_size_gb"] = disk_size_gb
             return SimpleNamespace(app_id="app-123", gateway_host="gateway.example.com", status="RUNNING")
 
     monkeypatch.setattr(scheduler, "get_pool", fake_get_pool)
@@ -1227,6 +1230,7 @@ def test_execute_cvm_launch_phala_deploy_persists_hash_only(monkeypatch) -> None
     assert captured["name"] == "concrete-v0-cvm-0000000000004000"
     assert captured["instance_type"] == "tdx.small"
     assert captured["region"] == "FR-PARIS-1"
+    assert captured["disk_size_gb"] == 40
     assert env["SECURITY_CVM_PROXY_TOKEN"]
     assert env["DEV_CVM_CONTROL_TOKEN"]
     proxy_token_hash = hashlib.sha256(env["SECURITY_CVM_PROXY_TOKEN"].encode("utf-8")).hexdigest()

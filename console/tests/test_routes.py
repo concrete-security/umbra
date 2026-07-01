@@ -29,6 +29,7 @@ from concrete_console.routes import (
     user_list_status_clauses,
     cvm_provider_app_id,
     deprovision_security_cvm_dns_records,
+    enforce_disk_quotas,
     entity_quota_usage,
     erased_user_email,
     ensure_no_sandbox_env_conflict,
@@ -44,6 +45,7 @@ from concrete_console.routes import (
     render_dev_cvm_compose_config,
     render_security_cvm_compose_config,
     resolve_cvm_launch_config,
+    resolve_dev_cvm_disk_gb,
     resolve_security_cvm_provision_config,
     security_cvm_provider_app_id,
     ssh_key_fingerprint,
@@ -494,6 +496,34 @@ def test_resolve_cvm_launch_config_uses_defaults(monkeypatch) -> None:
     assert resolved["region"] == "FR-PARIS-1"
     assert resolved["expected_image_measurement"] == "a" * 96
     assert resolved["base_domain"] == "dev.example.com"
+    assert resolved["disk_size_gb"] == 40
+
+
+def test_resolve_dev_cvm_disk_gb_uses_default_when_omitted() -> None:
+    assert resolve_dev_cvm_disk_gb(None, {}) == 40
+
+
+def test_resolve_dev_cvm_disk_gb_accepts_in_range_request() -> None:
+    assert resolve_dev_cvm_disk_gb(100, {"DEV_CVM_MIN_DISK_GB": "40", "DEV_CVM_MAX_DISK_GB": "2000"}) == 100
+
+
+def test_resolve_dev_cvm_disk_gb_rejects_out_of_range_request() -> None:
+    with pytest.raises(HTTPException) as exc:
+        resolve_dev_cvm_disk_gb(5, {"DEV_CVM_MIN_DISK_GB": "40", "DEV_CVM_MAX_DISK_GB": "2000"})
+
+    assert exc.value.status_code == 422
+    err = exc.value.detail["error"]["details"]["errors"][0]
+    assert err["field"] == "disk_size_gb"
+    assert err["type"] == "out_of_range"
+
+
+def test_resolve_dev_cvm_disk_gb_rejects_out_of_range_default() -> None:
+    # A misconfigured server default is an operator fault, not a client fault.
+    with pytest.raises(HTTPException) as exc:
+        resolve_dev_cvm_disk_gb(None, {"DEV_CVM_DEFAULT_DISK_GB": "5", "DEV_CVM_MIN_DISK_GB": "40"})
+
+    assert exc.value.status_code == 503
+    assert exc.value.detail["error"]["details"]["component"] == "dev_cvm_default_disk_gb"
 
 
 def test_resolve_cvm_launch_config_falls_back_to_phala_region(monkeypatch) -> None:
@@ -1103,6 +1133,95 @@ def test_dev_cvm_quota_usage_counts_non_terminated_rows() -> None:
     assert user_usage == 2
     assert "state <> 'TERMINATED'" in entity_conn.queries[0]
     assert "state <> 'TERMINATED'" in user_conn.queries[0]
+
+
+def test_disk_quota_usage_sums_total_and_maxes_per_cvm() -> None:
+    total_conn = FakeFetchValConn(120)
+    per_cvm_conn = FakeFetchValConn(80)
+
+    total_usage = asyncio.run(
+        entity_quota_usage(total_conn, UUID("00000000-0000-4000-8000-000000000001"), "disk_gb_total")
+    )
+    per_cvm_usage = asyncio.run(
+        user_quota_usage(per_cvm_conn, UUID("00000000-0000-4000-8000-000000000002"), "disk_gb_per_cvm")
+    )
+
+    assert total_usage == 120
+    assert per_cvm_usage == 80
+    assert "SUM(disk_size_gb)" in total_conn.queries[0]
+    assert "MAX(disk_size_gb)" in per_cvm_conn.queries[0]
+    assert "state <> 'TERMINATED'" in total_conn.queries[0]
+
+
+class FakeQuotaConn:
+    """Serves quota-limit lookups (``fetchrow``) and usage sums (``fetchval``).
+
+    A ``fetchrow`` returning a row models a stored override for that resource; a
+    ``None`` lets the code fall back to the config default (entity-scoped, via
+    the user→entity cascade in ``user_quota_limit``).
+    """
+
+    def __init__(self, *, per_cvm_override=None, total_override=None, total_usage=0):
+        self.per_cvm_override = per_cvm_override
+        self.total_override = total_override
+        self.total_usage = total_usage
+
+    async def fetchrow(self, query, *args):
+        resource = args[-1]
+        if resource == "disk_gb_per_cvm" and self.per_cvm_override is not None:
+            return {"limit_value": self.per_cvm_override, "set_by": None, "set_at": None}
+        if resource == "disk_gb_total" and self.total_override is not None:
+            return {"limit_value": self.total_override, "set_by": None, "set_at": None}
+        return None
+
+    async def fetchval(self, query, *args):
+        if "FROM users" in query:
+            return UUID("00000000-0000-4000-8000-0000000000ee")
+        if "SUM(disk_size_gb)" in query:
+            return self.total_usage
+        return 0
+
+
+_DISK_USER = UUID("00000000-0000-4000-8000-000000000002")
+_DISK_ENTITY = UUID("00000000-0000-4000-8000-0000000000ee")
+
+
+def test_enforce_disk_quotas_rejects_over_per_cvm_cap() -> None:
+    conn = FakeQuotaConn(per_cvm_override=100)
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(enforce_disk_quotas(conn, _DISK_USER, _DISK_ENTITY, 200))
+
+    assert exc.value.status_code == 403
+    details = exc.value.detail["error"]["details"]
+    assert details["resource"] == "disk_gb_per_cvm"
+    assert details["scope"] == "user"
+    assert details["limit"] == 100
+    assert details["current_usage"] == 200
+
+
+def test_enforce_disk_quotas_rejects_over_total_budget() -> None:
+    # Existing summed disk (450) + requested (100) exceeds the 500 total budget.
+    conn = FakeQuotaConn(total_override=500, total_usage=450)
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(enforce_disk_quotas(conn, _DISK_USER, _DISK_ENTITY, 100))
+
+    assert exc.value.status_code == 403
+    assert exc.value.detail["error"]["details"]["resource"] == "disk_gb_total"
+
+
+def test_enforce_disk_quotas_allows_within_budget(monkeypatch) -> None:
+    for name in (
+        "DEFAULT_QUOTA_DISK_GB_PER_CVM_PER_ENTITY",
+        "DEFAULT_QUOTA_DISK_GB_TOTAL_PER_ENTITY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    conn = FakeQuotaConn(total_usage=100)
+
+    # No overrides: per-CVM cap 500 and total budget 10000 (entity defaults) both
+    # comfortably admit a 100 GB launch on top of 100 GB already provisioned.
+    asyncio.run(enforce_disk_quotas(conn, _DISK_USER, _DISK_ENTITY, 100))
 
 
 def test_fetch_live_security_cvm_id_requires_running_security_cvm() -> None:

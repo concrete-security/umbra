@@ -160,6 +160,7 @@ class PhalaClient:
         env: dict[str, str],
         instance_type: str | None = None,
         region: str | None = None,
+        disk_size_gb: int | None = None,
     ) -> PhalaDeployResult:
         validate_concrete_cvm_name(name)
         async with staged_compose_and_env(compose_yaml=compose_yaml, env=env) as staged:
@@ -175,6 +176,11 @@ class PhalaClient:
             ]
             append_optional_arg(args, "--instance-type", instance_type)
             append_optional_arg(args, "--region", region)
+            # `phala deploy --disk-size` expects a size *with unit* (e.g. "50G");
+            # a bare integer is not accepted. Omitting it uses Phala's own 40GB
+            # default (matching DEV_CVM_DEFAULT_DISK_GB).
+            if disk_size_gb:
+                append_optional_arg(args, "--disk-size", f"{disk_size_gb}G")
             args.extend(["--wait", "--json"])
             stdout = await self._run_text(args)
         return await self._deploy_result_from_stdout(stdout, fallback_lookup=name)
