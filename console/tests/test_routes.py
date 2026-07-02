@@ -28,9 +28,11 @@ from concrete_console.routes import (
     user_list_assigned_clauses,
     user_list_status_clauses,
     cvm_provider_app_id,
+    default_quota_limit,
     deprovision_security_cvm_dns_records,
     enforce_disk_quotas,
     entity_quota_usage,
+    user_quota_limit,
     erased_user_email,
     ensure_no_sandbox_env_conflict,
     fetch_live_security_cvm_id,
@@ -1159,8 +1161,9 @@ class FakeQuotaConn:
     """Serves quota-limit lookups (``fetchrow``) and usage sums (``fetchval``).
 
     A ``fetchrow`` returning a row models a stored override for that resource; a
-    ``None`` lets the code fall back to the config default (entity-scoped, via
-    the user→entity cascade in ``user_quota_limit``).
+    ``None`` lets the code fall back to the resolved default — the per-user
+    default for a user-scope read, the per-entity default for an entity-scope
+    read (``user_quota_limit`` / ``entity_quota_limit``).
     """
 
     def __init__(self, *, per_cvm_override=None, total_override=None, total_usage=0):
@@ -1221,9 +1224,61 @@ def test_enforce_disk_quotas_allows_within_budget(monkeypatch) -> None:
         monkeypatch.delenv(name, raising=False)
     conn = FakeQuotaConn(total_usage=100)
 
-    # No overrides: per-CVM cap 500 and total budget 10000 (entity defaults) both
-    # comfortably admit a 100 GB launch on top of 100 GB already provisioned.
+    # No overrides: the per-user caps (disk_gb_per_cvm 200, disk_gb_total 1000)
+    # and the per-entity caps both comfortably admit a 100 GB launch on top of
+    # 100 GB already provisioned.
     asyncio.run(enforce_disk_quotas(conn, _DISK_USER, _DISK_ENTITY, 100))
+
+
+class FakeQuotaResolutionConn:
+    """Serves the three reads in ``user_quota_limit``: the ``user_quotas`` lookup,
+    the ``SELECT entity_id FROM users`` hop, and the ``entity_quotas`` lookup. A
+    ``None`` row models "no override at that scope"."""
+
+    def __init__(self, *, user_row=None, entity_row=None):
+        self.user_row = user_row
+        self.entity_row = entity_row
+
+    async def fetchrow(self, query, *args):
+        if "FROM user_quotas" in query:
+            return self.user_row
+        if "FROM entity_quotas" in query:
+            return self.entity_row
+        return None
+
+    async def fetchval(self, query, *args):
+        # SELECT entity_id FROM users WHERE id = $1
+        return _DISK_ENTITY
+
+
+def test_user_quota_limit_uses_per_user_default_not_entity(monkeypatch) -> None:
+    # Deterministic fallbacks: with no env overrides the per-user and per-entity
+    # defaults differ, so we can prove the resolver picked the per-user one.
+    for name in (
+        "DEFAULT_QUOTA_DEV_CVMS_PER_USER",
+        "DEFAULT_QUOTA_DEV_CVMS_PER_ENTITY",
+        "DEFAULT_QUOTA_SSH_KEYS_PER_USER",
+        "DEFAULT_QUOTA_SSH_KEYS_PER_ENTITY",
+        "DEFAULT_QUOTA_DISK_GB_PER_CVM_PER_USER",
+        "DEFAULT_QUOTA_DISK_GB_PER_CVM_PER_ENTITY",
+        "DEFAULT_QUOTA_DISK_GB_TOTAL_PER_USER",
+        "DEFAULT_QUOTA_DISK_GB_TOTAL_PER_ENTITY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    conn = FakeQuotaResolutionConn()  # no user override, no entity override
+    for resource in ("dev_cvms", "ssh_keys", "disk_gb_per_cvm", "disk_gb_total"):
+        limit, source, set_by, set_at = asyncio.run(user_quota_limit(conn, _DISK_USER, resource))
+        assert source == "default"
+        assert (set_by, set_at) == (None, None)
+        # The per-user default applies — NOT the (larger) per-entity default.
+        assert limit == default_quota_limit(resource, scope="user")
+        assert limit != default_quota_limit(resource, scope="entity")
+
+
+def test_user_quota_limit_entity_override_supersedes_user_default() -> None:
+    conn = FakeQuotaResolutionConn(entity_row={"limit_value": 42, "set_by": None, "set_at": None})
+    limit, source, _, _ = asyncio.run(user_quota_limit(conn, _DISK_USER, "dev_cvms"))
+    assert (limit, source) == (42, "entity_override")
 
 
 def test_fetch_live_security_cvm_id_requires_running_security_cvm() -> None:

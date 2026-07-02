@@ -1484,8 +1484,14 @@ async def user_quota_limit(conn: asyncpg.Connection, user_id: UUID, resource: st
         return row["limit_value"], "user_override", row["set_by"], row["set_at"]
     entity_id = await conn.fetchval("SELECT entity_id FROM users WHERE id = $1", user_id)
     limit, entity_source, set_by, set_at = await entity_quota_limit(conn, entity_id, resource)
-    source = "entity_override" if entity_source == "override" else "default"
-    return limit, source, set_by, set_at
+    if entity_source == "override":
+        # An entity override binds the user too (cascade: user → entity → default).
+        return limit, "entity_override", set_by, set_at
+    # No user or entity override: fall back to the per-USER default, NOT the
+    # per-entity default resolved above. Otherwise DEFAULT_QUOTA_*_PER_USER
+    # (dev_cvms=5, disk 200/1000, §12) would be dead and a default user would
+    # inherit the far larger per-entity caps (spec §3.13 / §7.4b).
+    return default_quota_limit(resource, scope="user"), "default", None, None
 
 
 async def entity_quota_usage(conn: asyncpg.Connection, entity_id: UUID, resource: str) -> int:
