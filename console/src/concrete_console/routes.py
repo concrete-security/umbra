@@ -1512,13 +1512,18 @@ async def entity_quota_usage(conn: asyncpg.Connection, entity_id: UUID, resource
             entity_id,
         )
     if resource == "dev_cvms":
+        # "Live" = not soft-deleted and not in a terminal state. FAILED launches
+        # never became usable, so they are excluded alongside TERMINATED —
+        # otherwise a failed launch keeps consuming quota and self-inflicts a
+        # QUOTA_EXCEEDED denial until the row is explicitly terminated. Same
+        # predicate is used for the disk sums below and in user_quota_usage.
         return await conn.fetchval(
             """
             SELECT count(*)
             FROM cvms
             WHERE entity_id = $1
               AND deleted_at IS NULL
-              AND state <> 'TERMINATED'
+              AND state NOT IN ('TERMINATED', 'FAILED')
             """,
             entity_id,
         )
@@ -1533,7 +1538,7 @@ async def entity_quota_usage(conn: asyncpg.Connection, entity_id: UUID, resource
             FROM cvms
             WHERE entity_id = $1
               AND deleted_at IS NULL
-              AND state <> 'TERMINATED'
+              AND state NOT IN ('TERMINATED', 'FAILED')
             """,
             entity_id,
         )
@@ -1553,7 +1558,7 @@ async def user_quota_usage(conn: asyncpg.Connection, user_id: UUID, resource: st
             FROM cvms
             WHERE owner_id = $1
               AND deleted_at IS NULL
-              AND state <> 'TERMINATED'
+              AND state NOT IN ('TERMINATED', 'FAILED')
             """,
             user_id,
         )
@@ -1565,7 +1570,7 @@ async def user_quota_usage(conn: asyncpg.Connection, user_id: UUID, resource: st
             FROM cvms
             WHERE owner_id = $1
               AND deleted_at IS NULL
-              AND state <> 'TERMINATED'
+              AND state NOT IN ('TERMINATED', 'FAILED')
             """,
             user_id,
         )

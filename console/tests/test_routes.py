@@ -1118,7 +1118,7 @@ class FakeFetchValConn:
         return self.value
 
 
-def test_dev_cvm_quota_usage_counts_non_terminated_rows() -> None:
+def test_dev_cvm_quota_usage_counts_live_rows_excluding_terminated_and_failed() -> None:
     entity_conn = FakeFetchValConn(3)
     user_conn = FakeFetchValConn(2)
 
@@ -1131,8 +1131,9 @@ def test_dev_cvm_quota_usage_counts_non_terminated_rows() -> None:
 
     assert entity_usage == 3
     assert user_usage == 2
-    assert "state <> 'TERMINATED'" in entity_conn.queries[0]
-    assert "state <> 'TERMINATED'" in user_conn.queries[0]
+    # FAILED launches must not count (self-inflicted quota denial otherwise).
+    assert "state NOT IN ('TERMINATED', 'FAILED')" in entity_conn.queries[0]
+    assert "state NOT IN ('TERMINATED', 'FAILED')" in user_conn.queries[0]
 
 
 def test_disk_quota_usage_sums_total_and_maxes_per_cvm() -> None:
@@ -1150,7 +1151,8 @@ def test_disk_quota_usage_sums_total_and_maxes_per_cvm() -> None:
     assert per_cvm_usage == 80
     assert "SUM(disk_size_gb)" in total_conn.queries[0]
     assert "MAX(disk_size_gb)" in per_cvm_conn.queries[0]
-    assert "state <> 'TERMINATED'" in total_conn.queries[0]
+    assert "state NOT IN ('TERMINATED', 'FAILED')" in total_conn.queries[0]
+    assert "state NOT IN ('TERMINATED', 'FAILED')" in per_cvm_conn.queries[0]
 
 
 class FakeQuotaConn:
