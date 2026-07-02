@@ -258,8 +258,8 @@
     @apply flex items-center gap-2 rounded-input px-3 py-1.5 text-sm font-medium text-mute transition-colors hover:bg-elev hover:text-ink;
   }
   .nav-item.active {
-    @apply bg-accent/10 text-ink;
-    box-shadow: inset 2px 0 0 #6aa0f6;
+    @apply bg-elev text-ink;
+    box-shadow: none;
   }
   .nav-item svg {
     @apply h-4 w-4 shrink-0 text-mute;
@@ -268,7 +268,7 @@
     @apply text-ink;
   }
   .nav-item.active svg {
-    @apply text-accent;
+    @apply text-ink-dim;
   }
 
   .filter-chip {

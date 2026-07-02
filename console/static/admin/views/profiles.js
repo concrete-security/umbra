@@ -315,7 +315,7 @@
     const listHtml = items
       .map(
         (p) => `
-          <button type="button" class="block w-full text-left px-3 py-2.5 border-b border-line/60 transition-colors ${p.id === A.selectedProfileId ? "bg-accent/10 text-ink border-l-2 border-l-accent" : "hover:bg-elev text-ink"}" data-pid="${UI.escapeHtml(p.id)}">
+          <button type="button" class="block w-full text-left px-3 py-2.5 border-b border-line/60 transition-colors ${p.id === A.selectedProfileId ? "bg-elev text-ink" : "hover:bg-elev text-ink"}" data-pid="${UI.escapeHtml(p.id)}">
             <div class="flex items-center justify-between gap-2">
               <span class="text-sm font-medium truncate">${UI.escapeHtml(p.name)}</span>
               ${p.assigned ? `<span class="chip chip-accent">member</span>` : ""}

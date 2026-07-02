@@ -114,7 +114,7 @@
     pageHeader(title, desc, opts) {
       opts = opts || {};
       const actions = opts.actions ? `<div class="flex items-center gap-2">${opts.actions}</div>` : "";
-      const icon = opts.icon ? `<span class="flex h-9 w-9 items-center justify-center rounded-input bg-accent/10 text-accent">${UI.icon(opts.icon, "h-5 w-5")}</span>` : "";
+      const icon = opts.icon ? `<span class="flex h-9 w-9 items-center justify-center rounded-input border border-line bg-elev text-ink-dim">${UI.icon(opts.icon, "h-5 w-5")}</span>` : "";
       return `
         <header class="mb-6 flex items-start justify-between gap-4 flex-wrap">
           <div class="flex items-start gap-3 min-w-0">
@@ -139,11 +139,7 @@
         : tone === "warn" ? "text-warn"
         : tone === "err" ? "text-err"
         : "text-ink";
-      const iconBg =
-        tone === "ok" ? "bg-ok/10 text-ok"
-        : tone === "warn" ? "bg-warn/10 text-warn"
-        : tone === "err" ? "bg-err/10 text-err"
-        : "bg-accent/10 text-accent";
+      const iconBg = "border border-line bg-elev text-ink-dim";
       const click = onClickAttr || (href ? ` data-href="${UI.escapeHtml(href)}"` : "");
       const tag = href || onClickAttr ? "button" : "div";
       const interactive = href || onClickAttr ? ' type="button" class="stat-tile card-hover text-left w-full"' : ' class="stat-tile"';
@@ -221,7 +217,8 @@
         .join("");
       const cls = `data-table${opts.onRowClick ? " clickable" : ""}`;
       const tallCls = opts.tall ? "max-h-[640px]" : "max-h-[520px]";
-      return `<div class="overflow-auto rounded-card border border-line ${tallCls}"><table class="${cls}"><thead>${head}</thead><tbody>${body}</tbody></table></div>`;
+      const scrollAttr = opts.scrollKey ? ` data-scroll-key="${UI.escapeHtml(opts.scrollKey)}"` : "";
+      return `<div class="overflow-auto rounded-card border border-line ${tallCls}"${scrollAttr}><table class="${cls}"><thead>${head}</thead><tbody>${body}</tbody></table></div>`;
     },
 
     skeletonTable(cols, rows) {

@@ -98,6 +98,24 @@
     });
   }
 
+  function captureNestedScroll(container) {
+    const positions = {};
+    container?.querySelectorAll("[data-scroll-key]").forEach((el) => {
+      positions[el.dataset.scrollKey] = { top: el.scrollTop, left: el.scrollLeft };
+    });
+    return positions;
+  }
+
+  function restoreNestedScroll(container, positions) {
+    if (!positions) return;
+    container?.querySelectorAll("[data-scroll-key]").forEach((el) => {
+      const pos = positions[el.dataset.scrollKey];
+      if (!pos) return;
+      el.scrollTop = pos.top;
+      el.scrollLeft = pos.left;
+    });
+  }
+
   async function refreshActivePanel(opts = {}) {
     if (A.refreshInFlight || Date.now() < A.pollBackoffUntil) return;
     if (opts.poll && hasOpenExpansion()) {
@@ -110,6 +128,8 @@
     // position so a background refresh never yanks the page back to the top.
     const scrollEl = document.querySelector("main[data-active-panel]");
     const savedScroll = opts.poll && scrollEl ? scrollEl.scrollTop : null;
+    const activePanel = A.el("panel-" + A.activeTab);
+    const nestedScroll = opts.poll ? captureNestedScroll(activePanel) : null;
     A.refreshInFlight = true;
     try {
       A.pollSnapshot = {};
@@ -150,6 +170,7 @@
     } finally {
       A.refreshInFlight = false;
       if (savedScroll != null && scrollEl) scrollEl.scrollTop = savedScroll;
+      restoreNestedScroll(activePanel, nestedScroll);
     }
   }
 

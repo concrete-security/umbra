@@ -42,7 +42,7 @@
     ).join("");
 
     const listHtml = filtered.map((u) => `
-      <button type="button" class="block w-full text-left px-3 py-2.5 border-b border-line/60 transition-colors ${u.id === selectedUserId ? "bg-accent/10 text-ink border-l-2 border-l-accent" : "hover:bg-elev text-ink"}" data-uid="${UI.escapeHtml(u.id)}">
+      <button type="button" class="block w-full text-left px-3 py-2.5 border-b border-line/60 transition-colors ${u.id === selectedUserId ? "bg-elev text-ink" : "hover:bg-elev text-ink"}" data-uid="${UI.escapeHtml(u.id)}">
         <div class="flex items-center justify-between gap-2">
           <span class="text-sm font-medium truncate">${UI.escapeHtml(u.email)}</span>
           ${UI.badge(u.state)}

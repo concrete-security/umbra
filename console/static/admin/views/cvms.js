@@ -235,6 +235,7 @@
           onRowClick: true,
           rowAttr: (c) => `data-cvm-id="${UI.escapeHtml(c.id)}"`,
           rowAction: (c) => renderRowKebab(c, st),
+          scrollKey: "cvms-table",
           tall: true,
         })
       : UI.emptyV2({

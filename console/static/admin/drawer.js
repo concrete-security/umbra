@@ -200,7 +200,7 @@
       if (A.drawerTab === "egress" && A.has(A.P.TRAFFIC)) {
         html += await Drawer.renderEgressPanel(cvm.id, false);
       } else if (A.drawerTab === "summary") {
-        html += Drawer.renderCvmSummary(cvm);
+        html += await Drawer.renderCvmSummary(cvm);
       } else if (A.drawerTab === "audit" && A.has(A.P.AUDIT)) {
         html += await Drawer.renderCvmAudit(cvm.id);
       } else if (A.drawerTab === "actions") {
@@ -213,7 +213,7 @@
       Drawer.bindCvmBody(body, cvm);
     },
 
-    renderCvmSummary(cvm) {
+    async renderCvmSummary(cvm) {
       const canManage = A.canActOnCvms() && A.has(A.P.CVM_MANAGE);
       const canSeeUsers = A.has(A.P.USER_MANAGE) || A.has(A.P.PERM_MANAGE);
       const canSeeProfiles = A.has(A.P.USER_MANAGE) || (A.ctx?.me?.profiles || []).length > 0;
@@ -225,17 +225,18 @@
           ? '<button type="button" class="link-inline" data-open-user="' + UI.escapeHtml(ownerId) + '">' + UI.escapeHtml(ownerEmail) + "</button>"
           : UI.escapeHtml(ownerEmail);
 
-      const profiles = (cvm.profiles || [])
+      const profileItems = cvm.profiles || [];
+      const profiles = profileItems
         .map((p) =>
           canSeeProfiles
             ? '<button type="button" class="chip link-chip" data-open-profile="' + UI.escapeHtml(p.id) + '">' + UI.escapeHtml(p.name) + "</button>"
             : '<span class="chip">' + UI.escapeHtml(p.name) + "</span>"
         )
         .join("");
-
+      const state = String(cvm.state || "").toLowerCase();
       let actionHtml = "";
-      if (canManage && cvm.state === "running") actionHtml = '<button type="button" class="btn" id="cvm-summary-stop">Stop</button>';
-      else if (canManage && cvm.state === "stopped") actionHtml = '<button type="button" class="btn" id="cvm-summary-start">Start</button>';
+      if (canManage && state === "running") actionHtml = '<button type="button" class="btn" id="cvm-summary-stop">Stop</button>';
+      else if (canManage && state === "stopped") actionHtml = '<button type="button" class="btn" id="cvm-summary-start">Start</button>';
 
       let html =
         '<div class="card"><h3>Instance</h3>' +
@@ -256,6 +257,50 @@
         "<h3>Profiles</h3><div class=\"chips\">" +
         (profiles || '<span class="muted">none</span>') +
         "</div></div>";
+      if (canManage && state !== "terminated") {
+        const profRes = await A.api("/api/v1/entities/" + A.viewEntityId() + "/profiles");
+        const allProfiles = profRes.ok ? (await profRes.json()).items || [] : [];
+        const attached = new Set(profileItems.map((p) => p.id));
+        const available = allProfiles.filter((p) => !attached.has(p.id));
+        const currentHtml = profileItems.length
+          ? profileItems
+              .map(
+                (p) =>
+                  '<span class="chip chip-accent">' +
+                  UI.escapeHtml(p.name) +
+                  ' <button type="button" class="chip-x" data-detach="' +
+                  UI.escapeHtml(p.id) +
+                  '" aria-label="Detach ' +
+                  UI.escapeHtml(p.name) +
+                  '">x</button></span>'
+              )
+              .join("")
+          : '<span class="text-sm text-mute">No profile attached</span>';
+        html +=
+          '<div class="card card-pad">' +
+          '<div class="flex items-start justify-between gap-4 flex-wrap mb-4">' +
+          '<div><h3 class="section-title mb-1">Profile attachment</h3>' +
+          '<p class="text-sm text-mute">Change the policy profiles bound to this CVM.</p></div>' +
+          '<button type="button" class="btn btn-xs" id="cvm-summary-refresh">' +
+          UI.icon("refresh", "h-3.5 w-3.5") +
+          " Refresh</button></div>" +
+          '<div class="mb-4"><div class="field-label">Attached profiles</div><div class="chips">' +
+          currentHtml +
+          "</div></div>" +
+          '<div class="profile-attach-grid">' +
+          '<label><span class="field-label">Attach another profile</span><select class="input" id="attach-profile">' +
+          '<option value="">' +
+          (available.length ? "Select profile" : "No profiles available") +
+          "</option>" +
+          available
+            .map((p) => '<option value="' + UI.escapeHtml(p.id) + '">' + UI.escapeHtml(p.name) + "</option>")
+            .join("") +
+          '</select></label><button type="button" class="btn btn-primary" id="cvm-attach" ' +
+          (available.length ? "" : "disabled") +
+          ">" +
+          UI.icon("plus", "h-4 w-4") +
+          " Attach</button></div></div>";
+      }
       html += measurementCard(measurementRecordFromAttestation(cvm, null), "Measurements");
       if (needsSecurityCvmRebind(cvm)) {
         html +=
@@ -459,6 +504,10 @@
       });
       body.querySelector("#cvm-update")?.addEventListener("click", () => Drawer.cvmAsyncAction("update"));
       body.querySelector("#cvm-summary-update")?.addEventListener("click", () => Drawer.cvmAsyncAction("update"));
+      body.querySelector("#cvm-summary-refresh")?.addEventListener("click", async () => {
+        A.selectedCvm = await A.fetchCvmDetail(cvm.id);
+        await Drawer.renderCvmBody();
+      });
       body.querySelector("#cvm-terminate")?.addEventListener("click", () => Drawer.cvmAsyncAction("terminate"));
       body.querySelector("#cvm-attach")?.addEventListener("click", () => Drawer.attachProfile(cvm));
       body.querySelectorAll("[data-detach]").forEach((btn) => {
