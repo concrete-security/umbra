@@ -553,6 +553,7 @@ async def admin_list_cvms(
             c.state::text AS state,
             c.instance_type,
             c.region,
+            c.disk_size_gb,
             c.fqdn,
             c.expected_image_measurement,
             c.image_measurement,
