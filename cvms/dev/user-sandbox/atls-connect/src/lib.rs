@@ -2,18 +2,9 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
-use atlas_rs::{AsyncByteStream, AtlsVerificationError, AtlsVerifier, Policy, Report};
-use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::client::WebPkiServerVerifier;
-use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
-use rustls::{
-    ClientConfig, DigitallySignedStruct, Error as RustlsError, RootCertStore, SignatureScheme,
-};
+use atlas_rs::Policy;
 use serde::{Deserialize, Serialize};
-use tokio_rustls::client::TlsStream;
-use tokio_rustls::TlsConnector;
 
 #[derive(Debug)]
 pub struct HelperError {
@@ -42,7 +33,6 @@ pub type Result<T> = std::result::Result<T, HelperError>;
 #[serde(deny_unknown_fields)]
 pub struct ConnectRequest {
     pub fqdn: String,
-    pub connect_host: Option<String>,
     pub port: u16,
     pub policy_path: PathBuf,
     pub ca_cert_path: PathBuf,
@@ -67,16 +57,6 @@ pub fn validate_request(request: &ConnectRequest) -> Result<()> {
     }
     if request.fqdn.chars().any(|character| character.is_control()) {
         return Err(HelperError::new("fqdn must not contain control characters"));
-    }
-    if let Some(connect_host) = request.connect_host.as_deref() {
-        if connect_host.trim().is_empty() {
-            return Err(HelperError::new("connect_host must not be empty"));
-        }
-        if connect_host.chars().any(|character| character.is_control()) {
-            return Err(HelperError::new(
-                "connect_host must not contain control characters",
-            ));
-        }
     }
     if request.port == 0 {
         return Err(HelperError::new("port must be in 1..=65535"));
@@ -158,119 +138,6 @@ pub fn ensure_nonempty_file(path: &Path, field_name: &str) -> Result<()> {
     Ok(())
 }
 
-pub async fn atls_connect_with_route_sni<S>(
-    stream: S,
-    server_name: &str,
-    route_server_name: &str,
-    policy: Policy,
-) -> std::result::Result<(TlsStream<S>, Report), AtlsVerificationError>
-where
-    S: AsyncByteStream + 'static,
-{
-    let (mut tls_stream, peer_cert, session_ekm) =
-        tls_handshake_with_cert_name(stream, route_server_name, server_name).await?;
-    let verifier = policy.into_verifier()?;
-    let report = verifier
-        .verify(&mut tls_stream, &peer_cert, &session_ekm, server_name)
-        .await?;
-    Ok((tls_stream, report))
-}
-
-async fn tls_handshake_with_cert_name<S>(
-    stream: S,
-    route_server_name: &str,
-    cert_server_name: &str,
-) -> std::result::Result<(TlsStream<S>, Vec<u8>, Vec<u8>), AtlsVerificationError>
-where
-    S: AsyncByteStream + 'static,
-{
-    let mut root_store = RootCertStore::empty();
-    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-
-    let cert_name = ServerName::try_from(cert_server_name.to_owned())
-        .map_err(|error| AtlsVerificationError::InvalidServerName(error.to_string()))?;
-    let verifier = WebPkiServerVerifier::builder(Arc::new(root_store))
-        .build()
-        .map_err(|error| {
-            AtlsVerificationError::TlsHandshake(format!(
-                "failed to build certificate verifier: {error}"
-            ))
-        })?;
-    let config = ClientConfig::builder()
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(CertificateNameVerifier {
-            inner: verifier,
-            cert_name,
-        }))
-        .with_no_client_auth();
-    let route_name = ServerName::try_from(route_server_name.to_owned())
-        .map_err(|error| AtlsVerificationError::InvalidServerName(error.to_string()))?;
-    let tls_stream = TlsConnector::from(Arc::new(config))
-        .connect(route_name, stream)
-        .await
-        .map_err(|error| AtlsVerificationError::TlsHandshake(error.to_string()))?;
-    let (_, connection) = tls_stream.get_ref();
-    let peer_cert = connection
-        .peer_certificates()
-        .and_then(|certificates| certificates.first())
-        .map(|certificate| certificate.as_ref().to_vec())
-        .ok_or(AtlsVerificationError::MissingCertificate)?;
-    let mut session_ekm = vec![0_u8; 32];
-    connection
-        .export_keying_material(&mut session_ekm, b"EXPORTER-Channel-Binding", None)
-        .map_err(|error| {
-            AtlsVerificationError::TlsHandshake(format!("failed to extract session EKM: {error}"))
-        })?;
-    Ok((tls_stream, peer_cert, session_ekm))
-}
-
-#[derive(Debug)]
-struct CertificateNameVerifier {
-    inner: Arc<dyn ServerCertVerifier>,
-    cert_name: ServerName<'static>,
-}
-
-impl ServerCertVerifier for CertificateNameVerifier {
-    fn verify_server_cert(
-        &self,
-        end_entity: &CertificateDer<'_>,
-        intermediates: &[CertificateDer<'_>],
-        _server_name: &ServerName<'_>,
-        ocsp_response: &[u8],
-        now: UnixTime,
-    ) -> std::result::Result<ServerCertVerified, RustlsError> {
-        self.inner.verify_server_cert(
-            end_entity,
-            intermediates,
-            &self.cert_name,
-            ocsp_response,
-            now,
-        )
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &DigitallySignedStruct,
-    ) -> std::result::Result<HandshakeSignatureValid, RustlsError> {
-        self.inner.verify_tls12_signature(message, cert, dss)
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &DigitallySignedStruct,
-    ) -> std::result::Result<HandshakeSignatureValid, RustlsError> {
-        self.inner.verify_tls13_signature(message, cert, dss)
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        self.inner.supported_verify_schemes()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -307,7 +174,7 @@ mod tests {
 
         let request = parse_request(
             format!(
-                r#"{{"fqdn":"sc.example.com","connect_host":"app-443s.dstack.example.com","port":443,"policy_path":{},"ca_cert_path":{}}}"#,
+                r#"{{"fqdn":"sc.example.com","port":443,"policy_path":{},"ca_cert_path":{}}}"#,
                 serde_json::to_string(policy_path.to_str().unwrap()).unwrap(),
                 serde_json::to_string(ca_path.to_str().unwrap()).unwrap()
             )
@@ -316,10 +183,6 @@ mod tests {
         .unwrap();
 
         assert_eq!(request.fqdn, "sc.example.com");
-        assert_eq!(
-            request.connect_host.as_deref(),
-            Some("app-443s.dstack.example.com")
-        );
         assert_eq!(request.port, 443);
         assert!(load_policy(&request.policy_path).is_ok());
     }
@@ -370,7 +233,6 @@ mod tests {
     fn rejects_zero_port() {
         let request = ConnectRequest {
             fqdn: "sc.example.com".to_string(),
-            connect_host: None,
             port: 0,
             policy_path: PathBuf::from("/tmp/policy.json"),
             ca_cert_path: PathBuf::from("/tmp/ca.pem"),
@@ -379,20 +241,5 @@ mod tests {
         let error = validate_request(&request).unwrap_err();
 
         assert!(error.to_string().contains("port must be"));
-    }
-
-    #[test]
-    fn rejects_invalid_connect_host() {
-        let request = ConnectRequest {
-            fqdn: "sc.example.com".to_string(),
-            connect_host: Some("bad\nhost".to_string()),
-            port: 443,
-            policy_path: PathBuf::from("/tmp/policy.json"),
-            ca_cert_path: PathBuf::from("/tmp/ca.pem"),
-        };
-
-        let error = validate_request(&request).unwrap_err();
-
-        assert!(error.to_string().contains("connect_host must not contain"));
     }
 }

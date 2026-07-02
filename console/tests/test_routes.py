@@ -590,7 +590,7 @@ def test_render_dev_cvm_compose_config_keeps_runtime_values_as_placeholders() ->
     assert "${SECURITY_CVM_ATLS_POLICY_B64}" in forwarder_section
     assert "${DEV_CVM_CONTROL_TOKEN}" in forwarder_section
     assert "${CONSOLE_URL:-}" in forwarder_section
-    assert "${SECURITY_CVM_CONNECT_HOST:-}" in compose
+    assert "${SECURITY_CVM_CONNECT_HOST:-}" not in compose
     assert "${AUTHORIZED_SSH_KEYS_B64}" in compose
     assert "  dev-egress-forwarder:" in compose
     assert "entrypoint: [\"concrete-dev-egress-forwarder\"]" in compose
@@ -752,7 +752,6 @@ def test_dev_control_security_cvm_atls_policy_requires_verified_sc() -> None:
             "security_cvm_fqdn": "sc.example.com",
             "ca_cert_pem": "-----BEGIN CERTIFICATE-----\nMIIB\n",
             "metadata": {
-                "passthrough_host": "app-443s.dstack.example.com",
                 "atls_policy": {
                     "type": "dstack_tdx",
                     "expected_bootchain": {"mrtd": "a" * 96},
@@ -784,7 +783,7 @@ def test_dev_control_security_cvm_atls_policy_requires_verified_sc() -> None:
         UUID("00000000-0000-4000-8000-000000000001"),
     )
     assert result["security_cvm_fqdn"] == "sc.example.com"
-    assert result["connect_host"] == "app-443s.dstack.example.com"
+    assert "connect_host" not in result
     assert result["ca_cert_sha256"] == "6ed8689d60a419e4b9785827a35338b06c974ac432960f7a9b397eba64c1c574"
     assert result["atls_policy"]["type"] == "dstack_tdx"
 
@@ -957,7 +956,7 @@ def security_cvm_attestation_row(**overrides):
         "entity_id": UUID("00000000-0000-4000-8000-000000000001"),
         "state": "RUNNING",
         "fqdn": "sc.example.com",
-        "metadata": {"provider": "phala", "passthrough_host": "sc-app-443s.dstack.example.com"},
+        "metadata": {"provider": "phala"},
         "compose_config": "services: {}\n",
         "expected_image_measurement": "a" * 96,
         "image_measurement": None,
@@ -1000,9 +999,20 @@ def test_run_security_cvm_attestation_probe_persists_success(monkeypatch) -> Non
     async def fake_insert_audit_event(_conn, **kwargs):
         conn.audit_calls.append(kwargs)
 
+    async def fake_materialize(_snapshot):
+        return {
+            "app_compose": {"runner": "docker-compose", "docker_compose_file": "services: {}\n"},
+            "expected_bootchain": {"mrtd": "e" * 96},
+            "os_image_hash": "f" * 64,
+        }
+
     monkeypatch.setenv("CONSOLE_URL", "https://console.example.com")
     monkeypatch.setattr(attestation.AtlasVerifierClient, "from_settings", classmethod(lambda cls: FakeVerifier()))
     monkeypatch.setattr(routes_module, "insert_audit_event", fake_insert_audit_event)
+    monkeypatch.setattr(
+        "concrete_console.scheduler.materialize_security_cvm_shade_policy_for_attestation",
+        fake_materialize,
+    )
 
     result = asyncio.run(
         routes_module.run_security_cvm_attestation_probe(
@@ -1013,8 +1023,11 @@ def test_run_security_cvm_attestation_probe_persists_success(monkeypatch) -> Non
     )
 
     assert captured_request["kind"] == "security_cvm"
-    assert captured_request["connect_host"] == "sc-app-443s.dstack.example.com"
+    assert "connect_host" not in captured_request
     assert captured_request["policy"]["rtmr3_binding"]["ingest_token_sha256"] == "b" * 64
+    # Full runtime verification (never dev()): shade-derived fields present in the probe policy.
+    assert captured_request["policy"]["expected_bootchain"] == {"mrtd": "e" * 96}
+    assert captured_request["policy"]["os_image_hash"] == "f" * 64
     assert result["verdict"]["verified"] is True
     security_cvm_updates = [args for query, args in conn.execute_calls if "UPDATE security_cvms" in query]
     assert security_cvm_updates[0][:3] == (
@@ -1036,8 +1049,19 @@ def test_run_security_cvm_attestation_probe_reports_drift_without_update(monkeyp
     async def fake_insert_audit_event(_conn, **kwargs):
         conn.audit_calls.append(kwargs)
 
+    async def fake_materialize(_snapshot):
+        return {
+            "app_compose": {"runner": "docker-compose", "docker_compose_file": "services: {}\n"},
+            "expected_bootchain": {"mrtd": "e" * 96},
+            "os_image_hash": "f" * 64,
+        }
+
     monkeypatch.setattr(attestation.AtlasVerifierClient, "from_settings", classmethod(lambda cls: FakeVerifier()))
     monkeypatch.setattr(routes_module, "insert_audit_event", fake_insert_audit_event)
+    monkeypatch.setattr(
+        "concrete_console.scheduler.materialize_security_cvm_shade_policy_for_attestation",
+        fake_materialize,
+    )
 
     with pytest.raises(HTTPException) as exc:
         asyncio.run(
@@ -2122,3 +2146,80 @@ def test_ssh_key_fingerprint_rejects_malformed_public_key() -> None:
 
     assert exc.value.status_code == 422
     assert exc.value.detail["error"]["details"]["errors"][0]["type"] == "malformed_public_key"
+
+
+def test_operation_result_for_read_discloses_once_then_scrubs_db(monkeypatch) -> None:
+    """The CA-export token is handed to the initiating actor on the single first read,
+    and the plaintext is scrubbed from the stored operations.result at that moment so it
+    does not linger at rest (security hardening — operation_resource_for_read)."""
+    import json
+
+    from concrete_console.auth import CurrentUser
+
+    actor_id = UUID("00000000-0000-4000-8000-000000000051")
+    entity_id = UUID("00000000-0000-4000-8000-000000000001")
+    op_id = UUID("00000000-0000-4000-8000-000000000052")
+    now = datetime(2026, 6, 29, tzinfo=timezone.utc)
+    locked_row = {
+        "id": op_id,
+        "kind": "security_cvm.provision",
+        "status": "succeeded",
+        "actor_id": actor_id,
+        "actor_entity_id": entity_id,
+        "target_type": "security_cvm",
+        "target_id": UUID("00000000-0000-4000-8000-000000000041"),
+        "result": {"security_cvm": {"id": "sc"}, "ca_export_token": "super-secret-plaintext"},
+        "error": None,
+        "progress_step": None,
+        "progress_percent": None,
+        "created_at": now,
+        "updated_at": now,
+        "expires_at": None,
+        "result_disclosed_at": None,
+    }
+
+    class DiscloseConn:
+        def __init__(self) -> None:
+            self.execute_calls: list[tuple[str, tuple]] = []
+
+        def transaction(self):
+            return AsyncContext()
+
+        async def fetchrow(self, query, *args):
+            return dict(locked_row)
+
+        async def execute(self, query, *args):
+            self.execute_calls.append((query, args))
+            return "UPDATE 1"
+
+    conn = DiscloseConn()
+
+    async def fake_insert_audit_event(_conn, **kwargs):
+        return None
+
+    monkeypatch.setattr(routes_module, "insert_audit_event", fake_insert_audit_event)
+
+    current_user = CurrentUser(
+        id=actor_id,
+        email="op@example.com",
+        name="Op",
+        entity_id=entity_id,
+        entity_name="Entity",
+        permissions=frozenset(),
+    )
+
+    resource = asyncio.run(
+        routes_module.operation_resource_for_read(FakePool(conn), dict(locked_row), current_user)
+    )
+
+    # 1) The initiator receives the full plaintext token on the one-time first read.
+    assert resource["result"]["ca_export_token"] == "super-secret-plaintext"
+
+    # 2) The stored result is scrubbed in the same transaction (not just the response).
+    scrub_updates = [
+        args for query, args in conn.execute_calls
+        if "UPDATE operations" in query and "result = $2" in query
+    ]
+    assert scrub_updates, "disclosure must rewrite operations.result with the redacted payload"
+    written = json.loads(scrub_updates[0][1])
+    assert written["ca_export_token"] == SECURITY_CVM_PROVISION_REDACTION

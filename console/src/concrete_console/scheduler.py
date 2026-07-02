@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import secrets
+import socket
 import time
 from typing import Any
 from uuid import UUID
@@ -121,6 +122,42 @@ class ReconciliationSummary:
     orphans_cleaned: list[str]
 
 
+@dataclass(frozen=True)
+class CvmKind:
+    """The Dev-vs-Security-CVM axis the reconciler and attestation writers vary over,
+    captured once so each shared helper takes a single descriptor instead of a fistful of
+    parallel string kwargs. This is type metadata, NOT instance data: there are exactly two
+    frozen values (``DEV_CVM`` / ``SECURITY_CVM``); a CVM's own fields live in its DB ``row``.
+    Every field is an internal literal — ``table``/``alias`` are interpolated into SQL, never
+    user input. Add a field here when a new structural difference appears, and the two
+    constants below force you to define it for both families."""
+
+    slug: str  # structlog event namespace: "dev_cvm" / "security_cvm"
+    table: str  # "cvms" / "security_cvms"
+    alias: str  # short SELECT alias: "c" / "sc"
+    audit_target: str  # audit target_type: "cvm" / "security_cvm"
+    audit_prefix: str  # audit action prefix: "CVM" / "SECURITY_CVM"
+    log_id_key: str  # structlog id field: "cvm_id" / "security_cvm_id"
+
+
+DEV_CVM = CvmKind(
+    slug="dev_cvm",
+    table="cvms",
+    alias="c",
+    audit_target="cvm",
+    audit_prefix="CVM",
+    log_id_key="cvm_id",
+)
+SECURITY_CVM = CvmKind(
+    slug="security_cvm",
+    table="security_cvms",
+    alias="sc",
+    audit_target="security_cvm",
+    audit_prefix="SECURITY_CVM",
+    log_id_key="security_cvm_id",
+)
+
+
 def provider_error_log_fields(exc: Any) -> dict[str, Any]:
     fields: dict[str, Any] = {
         "adapter": "cvm_provider",
@@ -146,6 +183,24 @@ def shade_error_log_fields(exc: Any) -> dict[str, Any]:
     if isinstance(output, str) and output:
         fields["shade_output"] = output[:PROVIDER_ERROR_OUTPUT_LOG_LIMIT]
         fields["shade_output_truncated"] = len(output) > PROVIDER_ERROR_OUTPUT_LOG_LIMIT
+    return fields
+
+
+def phala_error_log_fields(exc: Any) -> dict[str, Any]:
+    # Surface the Phala CLI's real stderr/stdout (already api_token-scrubbed by the adapter)
+    # instead of collapsing every failure to a bare PHALA_DEPLOY_FAILED code. Mirrors
+    # shade_error_log_fields so provision failures stop being silent.
+    fields: dict[str, Any] = {
+        "adapter": "phala",
+        "reason": getattr(exc, "code", "unknown"),
+    }
+    field = getattr(exc, "field", None)
+    if isinstance(field, str) and field:
+        fields["field"] = field
+    output = getattr(exc, "output", "")
+    if isinstance(output, str) and output:
+        fields["phala_output"] = output[:PROVIDER_ERROR_OUTPUT_LOG_LIMIT]
+        fields["phala_output_truncated"] = len(output) > PROVIDER_ERROR_OUTPUT_LOG_LIMIT
     return fields
 
 
@@ -238,6 +293,17 @@ def security_cvm_attestation_timeout_seconds() -> int:
     return timeout
 
 
+def security_cvm_fqdn_resolve_timeout_seconds() -> int:
+    raw = load_settings().raw.get("SECURITY_CVM_FQDN_RESOLVE_TIMEOUT_SECONDS", "120").strip() or "120"
+    try:
+        timeout = int(raw)
+    except ValueError as exc:
+        raise RuntimeError("SECURITY_CVM_FQDN_RESOLVE_TIMEOUT_SECONDS must be an integer") from exc
+    if timeout < 10 or timeout > 600:
+        raise RuntimeError("SECURITY_CVM_FQDN_RESOLVE_TIMEOUT_SECONDS must be between 10 and 600")
+    return timeout
+
+
 def reconciler_attestation_interval_seconds() -> int:
     raw = load_settings().raw.get("RECONCILER_ATTESTATION_INTERVAL_SECONDS", "21600").strip() or "21600"
     try:
@@ -247,6 +313,18 @@ def reconciler_attestation_interval_seconds() -> int:
     if interval < 3600 or interval > 86400:
         raise RuntimeError("RECONCILER_ATTESTATION_INTERVAL_SECONDS must be between 3600 and 86400")
     return interval
+
+
+def keep_failed_cvm_resources() -> bool:
+    """Debug aid: when truthy, a failed Dev CVM launch is NOT torn down.
+
+    Default false (production behavior: compensate/destroy on failure). Set
+    CONCRETE_KEEP_FAILED_CVM=1 to leave the Phala app and DNS records in place so the
+    in-CVM logs (e.g. nginx-cert-manager / ACME cert issuance) survive for inspection.
+    Re-enable teardown by unsetting the flag.
+    """
+    raw = load_settings().raw.get("CONCRETE_KEEP_FAILED_CVM", "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
 
 
 def start_operation_scheduler() -> asyncio.Task[None]:
@@ -929,10 +1007,16 @@ async def execute_security_cvm_phala_deploy_operation(operation_id: Any) -> None
         )
         return
     except PhalaError as exc:
+        log.warning(
+            "phala_adapter_failed",
+            operation_id=str(operation_id),
+            step="phala_deploy",
+            **phala_error_log_fields(exc),
+        )
         await mark_security_cvm_provision_failed(
             operation_id,
             code="PHALA_DEPLOY_FAILED",
-            details={"adapter": "phala", "reason": exc.code},
+            details=phala_error_log_fields(exc),
         )
         return
     finally:
@@ -1044,6 +1128,26 @@ async def execute_security_cvm_await_phala_running_operation(operation_id: Any) 
     )
 
 
+async def resolve_fqdn_ip(fqdn: str, *, timeout_seconds: int, interval_seconds: float = 2.0) -> str | None:
+    """Resolve ``fqdn`` to an IP, retrying past the transient NXDOMAIN a freshly-created
+    gateway CNAME returns from the Console's own resolver (127.0.0.11 -> GCP) for the first
+    minutes while a negative-cache entry ages out. Returns the resolved IP, or None on
+    timeout. Callers connect to this pinned address (TLS SNI / HTTP Host stay the FQDN) so
+    the single-shot connect never re-resolves and cannot hit one of those gaps."""
+    loop = asyncio.get_running_loop()
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        try:
+            infos = await loop.getaddrinfo(fqdn, 443, type=socket.SOCK_STREAM)
+            if infos:
+                return infos[0][4][0]
+        except OSError:
+            pass
+        if time.monotonic() + interval_seconds > deadline:
+            return None
+        await asyncio.sleep(interval_seconds)
+
+
 async def execute_security_cvm_attestation_gate_operation(operation_id: Any) -> None:
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -1125,6 +1229,13 @@ async def run_security_cvm_provision_attestation_verifier(operation_id: Any, sna
         )
         return True
     except AttestationVerifierError as exc:
+        log.warning(
+            "security_cvm_attestation_failed",
+            operation_id=str(operation_id),
+            security_cvm_id=str(_row_value(snapshot, "id")),
+            code=exc.code,
+            **{k: v for k, v in exc.details.items() if k != "message"},
+        )
         await compensate_security_cvm_provision_resources(snapshot)
         await mark_security_cvm_provision_failed(operation_id, code=exc.code, details=exc.details)
         return True
@@ -1144,7 +1255,7 @@ async def run_security_cvm_provision_attestation_verifier(operation_id: Any, sna
     async with pool.acquire() as conn:
         async with conn.transaction():
             verified_at = datetime.now(timezone.utc)
-            await conn.execute(
+            result = await conn.execute(
                 """
                 UPDATE security_cvms
                 SET image_measurement = $2,
@@ -1162,6 +1273,17 @@ async def run_security_cvm_provision_attestation_verifier(operation_id: Any, sna
                 verified_at,
                 json.dumps(metadata_with_atls_policy(_row_value(snapshot, "metadata"), shade_policy)),
             )
+            if result != "UPDATE 1":
+                # State changed concurrently (terminated/failed) — the snapshot was fetched
+                # without FOR UPDATE. Don't write a misleading "verified" audit or advance the
+                # saga; return False so the caller re-evaluates on the next tick.
+                log.warning(
+                    "security_cvm_provision_attestation_persist_skipped",
+                    operation_id=str(operation_id),
+                    security_cvm_id=str(_row_value(snapshot, "id")),
+                    result=result,
+                )
+                return False
             await insert_audit_event(
                 conn,
                 entity_id=_row_value(snapshot, "entity_id"),
@@ -1196,19 +1318,51 @@ async def execute_security_cvm_fetch_ca_operation(operation_id: Any) -> None:
         await advance_security_cvm_provision_step(operation_id, "finalise")
         return
     if not security_cvm_ca_export_stash_available(snapshot):
+        await compensate_security_cvm_provision_resources(snapshot)
         await mark_security_cvm_provision_failed(operation_id, code="CA_EXPORT_TTL_EXPIRED", details={})
         return
-    try:
-        ca_pem = await fetch_security_cvm_ca_pem(
-            fqdn=_row_value(snapshot, "fqdn"),
-            connect_host=provider_passthrough_host(_row_value(snapshot, "metadata")),
-            ca_export_token=_row_value(snapshot, "ca_export_token_plaintext"),
+    fqdn = _row_value(snapshot, "fqdn")
+    # Pin a freshly-resolved IP for the connect: the gateway CNAME's resolution flaps for
+    # minutes, so re-resolving inside open_connection can hit an NXDOMAIN gap and tear the
+    # whole provision down (CA_FETCH_FAILED). Resolve once here (retrying past the gaps),
+    # then connect by IP.
+    connect_host = await resolve_fqdn_ip(fqdn, timeout_seconds=security_cvm_fqdn_resolve_timeout_seconds())
+    if connect_host is None:
+        log.warning(
+            "security_cvm_ca_fetch_failed",
+            operation_id=str(operation_id),
+            security_cvm_id=str(_row_value(snapshot, "id")),
+            fqdn=fqdn,
+            http_status=0,
+            reason="fqdn_unresolvable",
         )
-    except SecurityCVMCAFetchError as exc:
+        await compensate_security_cvm_provision_resources(snapshot)
         await mark_security_cvm_provision_failed(
             operation_id,
             code="CA_FETCH_FAILED",
-            details={"http_status": exc.http_status},
+            details={"http_status": 0, "reason": "fqdn_unresolvable"},
+        )
+        return
+    try:
+        ca_pem = await fetch_security_cvm_ca_pem(
+            fqdn=fqdn,
+            ca_export_token=_row_value(snapshot, "ca_export_token_plaintext"),
+            connect_host=connect_host,
+        )
+    except SecurityCVMCAFetchError as exc:
+        log.warning(
+            "security_cvm_ca_fetch_failed",
+            operation_id=str(operation_id),
+            security_cvm_id=str(_row_value(snapshot, "id")),
+            fqdn=fqdn,
+            http_status=exc.http_status,
+            reason=exc.reason,
+        )
+        await compensate_security_cvm_provision_resources(snapshot)
+        await mark_security_cvm_provision_failed(
+            operation_id,
+            code="CA_FETCH_FAILED",
+            details={"http_status": exc.http_status, "reason": exc.reason},
         )
         return
     await persist_security_cvm_ca_pem(operation_id, security_cvm_id=_row_value(snapshot, "id"), ca_pem=ca_pem)
@@ -1222,9 +1376,11 @@ async def execute_security_cvm_finalise_operation(operation_id: Any) -> None:
         await mark_security_cvm_provision_failed(operation_id, code="SECURITY_CVM_NOT_FOUND", details={"state": "missing_target"})
         return
     if not _row_value(snapshot, "ca_cert_pem"):
+        await compensate_security_cvm_provision_resources(snapshot)
         await mark_security_cvm_provision_failed(operation_id, code="CA_FETCH_FAILED", details={"state": "missing_ca_cert"})
         return
     if not security_cvm_ca_export_stash_available(snapshot):
+        await compensate_security_cvm_provision_resources(snapshot)
         await mark_security_cvm_provision_failed(operation_id, code="CA_EXPORT_TTL_EXPIRED", details={})
         return
     result_ca_export_token = _row_value(snapshot, "ca_export_token_plaintext")
@@ -1530,7 +1686,7 @@ async def run_security_cvm_update_attestation_verifier(operation_id: Any, snapsh
     async with pool.acquire() as conn:
         async with conn.transaction():
             verified_at = datetime.now(timezone.utc)
-            await conn.execute(
+            result = await conn.execute(
                 """
                 UPDATE security_cvms
                 SET image_measurement = $2,
@@ -1548,6 +1704,16 @@ async def run_security_cvm_update_attestation_verifier(operation_id: Any, snapsh
                 verified_at,
                 json.dumps(metadata_with_atls_policy(_row_value(snapshot, "metadata"), shade_policy)),
             )
+            if result != "UPDATE 1":
+                # State changed concurrently — don't write a misleading "verified" audit or
+                # advance the saga; return False so the caller re-evaluates on the next tick.
+                log.warning(
+                    "security_cvm_update_attestation_persist_skipped",
+                    operation_id=str(operation_id),
+                    security_cvm_id=str(_row_value(snapshot, "id")),
+                    result=result,
+                )
+                return False
             await insert_audit_event(
                 conn,
                 entity_id=_row_value(snapshot, "entity_id"),
@@ -1584,14 +1750,22 @@ async def execute_security_cvm_update_fetch_ca_operation(operation_id: Any) -> N
     try:
         ca_pem = await fetch_security_cvm_ca_pem(
             fqdn=_row_value(snapshot, "fqdn"),
-            connect_host=provider_passthrough_host(_row_value(snapshot, "metadata")),
             ca_export_token=_row_value(snapshot, "ca_export_token_plaintext"),
         )
     except SecurityCVMCAFetchError as exc:
+        log.warning(
+            "security_cvm_ca_fetch_failed",
+            operation_id=str(operation_id),
+            security_cvm_id=str(_row_value(snapshot, "id")),
+            fqdn=_row_value(snapshot, "fqdn"),
+            http_status=exc.http_status,
+            reason=exc.reason,
+            phase="update",
+        )
         await mark_security_cvm_update_failed(
             operation_id,
             code="CA_FETCH_FAILED",
-            details={"http_status": exc.http_status},
+            details={"http_status": exc.http_status, "reason": exc.reason},
         )
         return
     await persist_security_cvm_update_ca_pem(operation_id, security_cvm_id=_row_value(snapshot, "id"), ca_pem=ca_pem)
@@ -1753,10 +1927,16 @@ async def execute_cvm_launch_phala_deploy_operation(operation_id: Any) -> None:
         )
         return
     except PhalaError as exc:
+        log.warning(
+            "phala_adapter_failed",
+            operation_id=str(operation_id),
+            step="phala_deploy",
+            **phala_error_log_fields(exc),
+        )
         await mark_cvm_launch_failed(
             operation_id,
             code="PHALA_DEPLOY_FAILED",
-            details={"adapter": "phala", "reason": exc.code},
+            details=phala_error_log_fields(exc),
         )
         return
     finally:
@@ -1775,7 +1955,6 @@ async def execute_cvm_launch_phala_deploy_operation(operation_id: Any) -> None:
             snapshot,
             rtmr3_binding=binding,
             deploy_compose_yaml=shade_result.compose_yaml,
-            connect_host=phala_passthrough_host(deploy_result.app_id, deploy_result.gateway_host),
         ),
     )
     await persist_cvm_launch_phala_result(
@@ -1958,7 +2137,7 @@ async def run_cvm_launch_attestation_verifier(operation_id: Any, snapshot: Any) 
     async with pool.acquire() as conn:
         async with conn.transaction():
             verified_at = datetime.now(timezone.utc)
-            await conn.execute(
+            result = await conn.execute(
                 """
                 UPDATE cvms
                 SET image_measurement = $2,
@@ -1975,6 +2154,17 @@ async def run_cvm_launch_attestation_verifier(operation_id: Any, snapshot: Any) 
                 verified_at,
                 json.dumps(metadata),
             )
+            if result != "UPDATE 1":
+                # State changed concurrently (terminated/failed) — the snapshot was fetched
+                # without FOR UPDATE. Don't write a misleading "verified" audit or advance the
+                # saga; return False so the caller re-evaluates on the next tick.
+                log.warning(
+                    "cvm_launch_attestation_persist_skipped",
+                    operation_id=str(operation_id),
+                    cvm_id=str(_row_value(snapshot, "cvm_id")),
+                    result=result,
+                )
+                return False
             await insert_audit_event(
                 conn,
                 entity_id=_row_value(snapshot, "entity_id"),
@@ -2007,6 +2197,7 @@ async def execute_cvm_launch_await_sc_pull_operation(operation_id: Any) -> None:
         return
     proxy_token_created_at = _row_value(snapshot, "proxy_token_created_at")
     if proxy_token_created_at is None:
+        await compensate_cvm_launch_resources(snapshot)
         await mark_cvm_launch_failed(
             operation_id,
             code="PROXY_AUTH_MISSING",
@@ -2044,6 +2235,7 @@ async def execute_cvm_launch_await_sc_pull_operation(operation_id: Any) -> None:
         elapsed_seconds=int(elapsed.total_seconds()),
         timeout_seconds=int(timeout.total_seconds()),
     )
+    await compensate_cvm_launch_resources(snapshot)
     await mark_cvm_launch_failed(
         operation_id,
         code="SC_PULL_TIMEOUT",
@@ -2098,6 +2290,7 @@ async def execute_cvm_launch_finalise_operation(operation_id: Any) -> None:
         return
     metadata = json_payload(_row_value(snapshot, "metadata") or {})
     if not isinstance(metadata, dict) or not isinstance(metadata.get("policy_bundle"), dict):
+        await compensate_cvm_launch_resources(snapshot)
         await mark_cvm_launch_failed(
             operation_id,
             code="POLICY_BUNDLE_MISSING",
@@ -2253,7 +2446,6 @@ async def execute_cvm_update_phala_operation(operation_id: Any) -> None:
             compose_yaml=shade_result.compose_yaml,
             env=env,
         )
-        connect_host = phala_passthrough_host(deploy_result.deployment_id, deploy_result.gateway_host)
     except ShadeError as exc:
         log.warning("shade_adapter_failed", operation_id=str(operation_id), **shade_error_log_fields(exc))
         await mark_cvm_update_failed(
@@ -2287,7 +2479,6 @@ async def execute_cvm_update_phala_operation(operation_id: Any) -> None:
         policy_snapshot,
         rtmr3_binding=binding,
         deploy_compose_yaml=shade_result.compose_yaml,
-        connect_host=connect_host,
     )
     metadata = cvm_update_metadata(
         _row_value(snapshot, "metadata"),
@@ -2488,7 +2679,7 @@ async def run_cvm_update_attestation_verifier(operation_id: Any, snapshot: Any) 
     async with pool.acquire() as conn:
         async with conn.transaction():
             verified_at = datetime.now(timezone.utc)
-            await conn.execute(
+            result = await conn.execute(
                 """
                 UPDATE cvms
                 SET image_measurement = $2,
@@ -2506,6 +2697,16 @@ async def run_cvm_update_attestation_verifier(operation_id: Any, snapshot: Any) 
                 verified_at,
                 json.dumps(updated_metadata),
             )
+            if result != "UPDATE 1":
+                # State changed concurrently — don't write a misleading "verified" audit or
+                # advance the saga; return False so the caller re-evaluates on the next tick.
+                log.warning(
+                    "cvm_update_attestation_persist_skipped",
+                    operation_id=str(operation_id),
+                    cvm_id=str(_row_value(snapshot, "cvm_id")),
+                    result=result,
+                )
+                return False
             await insert_audit_event(
                 conn,
                 entity_id=_row_value(snapshot, "entity_id"),
@@ -2713,10 +2914,16 @@ async def execute_cvm_terminate_operation(operation_id: Any) -> None:
         try:
             await PhalaClient.from_settings().delete(app_id)
         except PhalaError as exc:
+            log.warning(
+                "phala_adapter_failed",
+                operation_id=str(operation_id),
+                step="phala_terminate",
+                **phala_error_log_fields(exc),
+            )
             await mark_operation_failed(
                 operation_id,
                 code="PHALA_TERMINATE_FAILED",
-                details={"adapter": "phala", "reason": exc.code},
+                details=phala_error_log_fields(exc),
             )
             return
 
@@ -2938,9 +3145,12 @@ async def fetch_security_cvm_resource_for_scheduler(conn: Any, security_cvm_id: 
     return security_cvm_resource(row)
 
 
-async def fetch_security_cvm_provision_snapshot(conn: Any, operation_id: Any) -> Any | None:
-    return await conn.fetchrow(
-        """
+def _security_cvm_snapshot_query(*, kind: str, include_previous_ca: bool = False) -> str:
+    """Build the SC provision/update snapshot SELECT. ``kind`` is an internal literal
+    (never user input). ``include_previous_ca`` projects ``ca_cert_pem`` a second time as
+    ``previous_ca_cert_pem`` for the update flow (it must diff old vs new CA after a bump)."""
+    previous_ca_col = "sc.ca_cert_pem AS previous_ca_cert_pem,\n            " if include_previous_ca else ""
+    return f"""
         SELECT
             sc.id,
             o.id AS operation_id,
@@ -2958,7 +3168,7 @@ async def fetch_security_cvm_provision_snapshot(conn: Any, operation_id: Any) ->
             sc.cname_dns_record_id,
             sc.proxy_port,
             sc.ca_cert_pem,
-            sc.ca_export_token_plaintext,
+            {previous_ca_col}sc.ca_export_token_plaintext,
             sc.ca_export_token_stashed_at,
             sc.expected_image_measurement,
             sc.image_measurement,
@@ -2968,49 +3178,22 @@ async def fetch_security_cvm_provision_snapshot(conn: Any, operation_id: Any) ->
         FROM operations o
         JOIN security_cvms sc ON sc.id = o.target_id
         WHERE o.id = $1
-          AND o.kind = 'security_cvm.provision'
+          AND o.kind = '{kind}'
           AND o.status = 'running'
           AND sc.deleted_at IS NULL
-        """,
+        """
+
+
+async def fetch_security_cvm_provision_snapshot(conn: Any, operation_id: Any) -> Any | None:
+    return await conn.fetchrow(
+        _security_cvm_snapshot_query(kind="security_cvm.provision"),
         operation_id,
     )
 
 
 async def fetch_security_cvm_update_snapshot(conn: Any, operation_id: Any) -> Any | None:
     return await conn.fetchrow(
-        """
-        SELECT
-            sc.id,
-            o.id AS operation_id,
-            o.actor_id,
-            o.actor_email,
-            o.updated_at AS operation_updated_at,
-            sc.entity_id,
-            sc.state::text AS state,
-            sc.fqdn,
-            sc.instance_type,
-            sc.region,
-            sc.metadata,
-            sc.compose_config,
-            sc.txt_dns_record_id,
-            sc.cname_dns_record_id,
-            sc.proxy_port,
-            sc.ca_cert_pem,
-            sc.ca_cert_pem AS previous_ca_cert_pem,
-            sc.ca_export_token_plaintext,
-            sc.ca_export_token_stashed_at,
-            sc.expected_image_measurement,
-            sc.image_measurement,
-            sc.rtmr3_digest,
-            sc.attestation_verified_at,
-            sc.policy_version
-        FROM operations o
-        JOIN security_cvms sc ON sc.id = o.target_id
-        WHERE o.id = $1
-          AND o.kind = 'security_cvm.update'
-          AND o.status = 'running'
-          AND sc.deleted_at IS NULL
-        """,
+        _security_cvm_snapshot_query(kind="security_cvm.update", include_previous_ca=True),
         operation_id,
     )
 
@@ -3217,10 +3400,6 @@ def build_cvm_launch_env(
         "SANDBOX_ENV_PLACEHOLDERS_B64": b64_text(sandbox_env),
         "CONSOLE_URL": console_url,
     }
-    security_cvm_connect_host = provider_passthrough_host(_row_value(snapshot, "security_cvm_metadata"))
-    if security_cvm_connect_host:
-        env["SECURITY_CVM_CONNECT_HOST"] = security_cvm_connect_host
-    env.update(shade_acme_dns01_env())
     env.update(dstack_docker_pull_env())
     return env, binding
 
@@ -3286,6 +3465,12 @@ def render_dev_cvm_shade_config(snapshot: Any, *, name: str) -> str:
 
 
 def render_security_cvm_shade_config(snapshot: Any, *, name: str) -> str:
+    # The SC leaf cert MUST be Let's Encrypt PRODUCTION (publicly trusted): the attestation
+    # verifier's aTLS client (atlas-rs connect.rs) validates the TLS handshake against the
+    # webpki public roots before binding the leaf to the quote, so an LE *staging* ("Fake LE")
+    # cert fails the handshake → ATTESTATION_FETCH_FAILED. We therefore do NOT emit a cvm.tls
+    # block (shade defaults letsencrypt_staging=false = production). Cold-start LE rate-limit is
+    # handled in shade's cert-manager (FQDN-resolution pre-check before calling LE), not here.
     return "\n".join(
         [
             "app:",
@@ -3337,21 +3522,8 @@ def build_security_cvm_provision_env(snapshot: Any, *, ingest_token: str, ca_exp
         "CONSOLE_INGEST_TOKEN": ingest_token,
         "CA_EXPORT_TOKEN": ca_export_token,
     }
-    env.update(shade_acme_dns01_env(raw))
     env.update(dstack_docker_pull_env(raw))
     return env
-
-
-def shade_acme_dns01_env(raw: dict[str, str] | None = None) -> dict[str, str]:
-    raw = load_settings().raw if raw is None else raw
-    token = raw.get("SHADE_CLOUDFLARE_API_TOKEN", "").strip() or raw.get("CLOUDFLARE_API_TOKEN", "").strip()
-    if not token:
-        return {}
-    propagation_seconds = raw.get("CLOUDFLARE_PROPAGATION_SECONDS", "").strip() or "60"
-    return {
-        "CLOUDFLARE_API_TOKEN": token,
-        "CLOUDFLARE_PROPAGATION_SECONDS": propagation_seconds,
-    }
 
 
 def dstack_docker_pull_env(raw: dict[str, str] | None = None) -> dict[str, str]:
@@ -3374,35 +3546,6 @@ def phala_docker_registry_value(registry: str) -> str:
         # Docker login still authenticates pulls for ghcr.io when the registry is passed with a scheme.
         return "https://ghcr.io"
     return registry
-
-
-def phala_passthrough_host(app_id: str, gateway_host: str) -> str:
-    return f"{app_id}-443s.{gateway_host}"
-
-
-def provider_passthrough_host(metadata: Any) -> str | None:
-    current = json_payload(metadata or {})
-    if not isinstance(current, dict):
-        return None
-    value = current.get("passthrough_host") or current.get("connect_host")
-    if isinstance(value, str) and value.strip():
-        return value.strip()
-    policy_bundle = current.get("policy_bundle")
-    if isinstance(policy_bundle, dict):
-        value = policy_bundle.get("connect_host")
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    app_id = current.get("app_id")
-    gateway_host = current.get("gateway_host")
-    if (
-        current.get("provider") == "phala"
-        and isinstance(app_id, str)
-        and app_id
-        and isinstance(gateway_host, str)
-        and gateway_host
-    ):
-        return phala_passthrough_host(app_id, gateway_host)
-    return None
 
 
 def provider_deployment_id(metadata: Any) -> str | None:
@@ -3430,15 +3573,12 @@ def security_cvm_provision_metadata(
     deploy_compose_yaml: str,
     atls_policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    passthrough_host = phala_passthrough_host(app_id, gateway_host)
     metadata: dict[str, Any] = {
         "provider": "phala",
         "name": name,
         "deployment_id": app_id,
-        "connect_host": passthrough_host,
         "app_id": app_id,
         "gateway_host": gateway_host,
-        "passthrough_host": passthrough_host,
         "status": status,
         "deploy_compose_yaml": deploy_compose_yaml,
     }
@@ -3459,17 +3599,14 @@ def security_cvm_update_metadata(
     current = json_payload(metadata or {})
     if not isinstance(current, dict):
         current = {}
-    passthrough_host = phala_passthrough_host(deployment_id, gateway_host)
     updated = dict(current)
     updated.update(
         {
             "provider": current.get("provider", "phala"),
             "name": name,
             "deployment_id": deployment_id,
-            "connect_host": passthrough_host,
             "app_id": deployment_id,
             "gateway_host": gateway_host,
-            "passthrough_host": passthrough_host,
             "status": status,
             "deploy_compose_yaml": deploy_compose_yaml,
         }
@@ -3531,7 +3668,6 @@ async def generate_policy_with_connect_retries(
     *,
     domain: str,
     deploy_compose_yaml: str,
-    connect_host: str | None,
     timeout_seconds: int,
     retry_seconds: float = 10.0,
 ) -> Any:
@@ -3545,7 +3681,6 @@ async def generate_policy_with_connect_retries(
             return await shade.generate_policy(
                 domain=domain,
                 deploy_compose_yaml=deploy_compose_yaml,
-                connect_host=connect_host,
             )
         except ShadeError as exc:
             last_error = exc
@@ -3557,7 +3692,6 @@ async def generate_policy_with_connect_retries(
             log.info(
                 "shade_policy_connect_waiting",
                 domain=domain,
-                connect_host=connect_host,
                 reason=exc.code,
             )
             await asyncio.sleep(min(retry_delay, remaining))
@@ -3582,16 +3716,10 @@ async def materialize_cvm_policy_bundle_for_attestation(snapshot: Any, *, bundle
     if "app_compose" in policy_bundle or "app_compose_json" in policy_bundle:
         return dict(policy_bundle)
 
-    connect_host = provider_passthrough_host(metadata)
-    if connect_host is None:
-        value = policy_bundle.get("connect_host")
-        if isinstance(value, str) and value.strip():
-            connect_host = value.strip()
     policy_result = await generate_policy_with_connect_retries(
         ShadeClient.from_settings(),
         domain=_row_value(snapshot, "fqdn"),
         deploy_compose_yaml=deploy_compose_yaml,
-        connect_host=connect_host,
         timeout_seconds=dev_cvm_attestation_timeout_seconds(),
     )
     return build_cvm_policy_bundle(
@@ -3599,7 +3727,6 @@ async def materialize_cvm_policy_bundle_for_attestation(snapshot: Any, *, bundle
         shade_policy=policy_result.policy,
         rtmr3_binding=rtmr3_binding,
         deploy_compose_yaml=deploy_compose_yaml,
-        connect_host=connect_host,
     )
 
 
@@ -3640,7 +3767,6 @@ async def materialize_security_cvm_shade_policy_for_attestation(snapshot: Any) -
         ShadeClient.from_settings(),
         domain=_row_value(snapshot, "fqdn"),
         deploy_compose_yaml=deploy_compose_yaml,
-        connect_host=provider_passthrough_host(metadata),
         timeout_seconds=security_cvm_attestation_timeout_seconds(),
     )
     return dict(policy_result.policy)
@@ -3652,7 +3778,6 @@ def build_cvm_policy_bundle(
     rtmr3_binding: dict[str, Any],
     deploy_compose_yaml: str,
     shade_policy: dict[str, Any] | None = None,
-    connect_host: str | None = None,
 ) -> dict[str, Any]:
     shade_policy = shade_policy or {}
     app_compose = json_payload(shade_policy.get("app_compose", {}))
@@ -3673,8 +3798,6 @@ def build_cvm_policy_bundle(
     if app_compose:
         bundle["app_compose"] = app_compose
         bundle["app_compose_json"] = json.dumps(app_compose, separators=(",", ":"))
-    if connect_host:
-        bundle["connect_host"] = connect_host
     if expected_bootchain:
         bundle["expected_bootchain"] = expected_bootchain
     if isinstance(shade_policy.get("os_image_hash"), str):
@@ -3690,15 +3813,12 @@ def cvm_launch_metadata(
     status: str,
     policy_bundle: dict[str, Any],
 ) -> dict[str, Any]:
-    passthrough_host = phala_passthrough_host(app_id, gateway_host)
     return {
         "provider": "phala",
         "name": name,
         "deployment_id": app_id,
-        "connect_host": passthrough_host,
         "app_id": app_id,
         "gateway_host": gateway_host,
-        "passthrough_host": passthrough_host,
         "status": status,
         "policy_bundle": policy_bundle,
     }
@@ -3715,16 +3835,13 @@ def cvm_update_metadata(
     current = json_payload(metadata or {})
     if not isinstance(current, dict):
         current = {}
-    passthrough_host = phala_passthrough_host(deployment_id, gateway_host)
     updated = dict(current)
     updated.update(
         {
             "provider": current.get("provider", "phala"),
             "deployment_id": deployment_id,
-            "connect_host": passthrough_host,
             "app_id": deployment_id,
             "gateway_host": gateway_host,
-            "passthrough_host": passthrough_host,
             "status": status,
             "provider_update_submitted_at": timestamp(datetime.now(timezone.utc)),
             "pending_policy_bundle": pending_policy_bundle,
@@ -3808,7 +3925,6 @@ async def persist_security_cvm_phala_result(operation_id: Any, snapshot: Any, *,
                 after={
                     "provider": metadata.get("provider", "unknown"),
                     "deployment_recorded": True,
-                    "connect_host_recorded": bool(metadata.get("connect_host") or metadata.get("passthrough_host")),
                 },
             )
             await advance_security_cvm_provision_step_with_conn(conn, operation_id, "cf_txt_create")
@@ -4032,20 +4148,40 @@ async def advance_security_cvm_provision_step(operation_id: Any, next_step: str)
         await advance_security_cvm_provision_step_with_conn(conn, operation_id, next_step)
 
 
-async def advance_security_cvm_provision_step_with_conn(conn: Any, operation_id: Any, next_step: str) -> None:
+_ADVANCEABLE_OPERATION_KINDS = frozenset(
+    {"cvm.launch", "cvm.update", "security_cvm.provision", "security_cvm.update"}
+)
+
+
+async def _advance_operation_step_with_conn(
+    conn: Any, operation_id: Any, next_step: str, *, kind: str, progress: dict[str, int]
+) -> None:
+    """Advance a running operation's progress step. ``kind`` is an internal operation-kind
+    literal (never user input) interpolated into the SQL; ``progress`` is its step→percent
+    map. The whitelist assert guards this 4-caller chokepoint against any future caller
+    passing an unvetted ``kind`` into the f-string."""
+    if kind not in _ADVANCEABLE_OPERATION_KINDS:
+        raise ValueError(f"unsupported operation kind: {kind!r}")
     await conn.execute(
-        """
+        f"""
         UPDATE operations
         SET progress_step = $2,
             progress_percent = GREATEST(progress_percent, $3),
             updated_at = now()
         WHERE id = $1
-          AND kind = 'security_cvm.provision'
+          AND kind = '{kind}'
           AND status = 'running'
         """,
         operation_id,
         next_step,
-        SECURITY_CVM_PROVISION_PROGRESS[next_step],
+        progress[next_step],
+    )
+
+
+async def advance_security_cvm_provision_step_with_conn(conn: Any, operation_id: Any, next_step: str) -> None:
+    await _advance_operation_step_with_conn(
+        conn, operation_id, next_step,
+        kind="security_cvm.provision", progress=SECURITY_CVM_PROVISION_PROGRESS,
     )
 
 
@@ -4056,19 +4192,9 @@ async def advance_security_cvm_update_step(operation_id: Any, next_step: str) ->
 
 
 async def advance_security_cvm_update_step_with_conn(conn: Any, operation_id: Any, next_step: str) -> None:
-    await conn.execute(
-        """
-        UPDATE operations
-        SET progress_step = $2,
-            progress_percent = GREATEST(progress_percent, $3),
-            updated_at = now()
-        WHERE id = $1
-          AND kind = 'security_cvm.update'
-          AND status = 'running'
-        """,
-        operation_id,
-        next_step,
-        SECURITY_CVM_UPDATE_PROGRESS[next_step],
+    await _advance_operation_step_with_conn(
+        conn, operation_id, next_step,
+        kind="security_cvm.update", progress=SECURITY_CVM_UPDATE_PROGRESS,
     )
 
 
@@ -4445,19 +4571,9 @@ async def advance_cvm_launch_step(operation_id: Any, next_step: str) -> None:
 
 
 async def advance_cvm_launch_step_with_conn(conn: Any, operation_id: Any, next_step: str) -> None:
-    await conn.execute(
-        """
-        UPDATE operations
-        SET progress_step = $2,
-            progress_percent = GREATEST(progress_percent, $3),
-            updated_at = now()
-        WHERE id = $1
-          AND kind = 'cvm.launch'
-          AND status = 'running'
-        """,
-        operation_id,
-        next_step,
-        CVM_LAUNCH_PROGRESS[next_step],
+    await _advance_operation_step_with_conn(
+        conn, operation_id, next_step,
+        kind="cvm.launch", progress=CVM_LAUNCH_PROGRESS,
     )
 
 
@@ -4468,19 +4584,9 @@ async def advance_cvm_update_step(operation_id: Any, next_step: str) -> None:
 
 
 async def advance_cvm_update_step_with_conn(conn: Any, operation_id: Any, next_step: str) -> None:
-    await conn.execute(
-        """
-        UPDATE operations
-        SET progress_step = $2,
-            progress_percent = GREATEST(progress_percent, $3),
-            updated_at = now()
-        WHERE id = $1
-          AND kind = 'cvm.update'
-          AND status = 'running'
-        """,
-        operation_id,
-        next_step,
-        CVM_UPDATE_PROGRESS[next_step],
+    await _advance_operation_step_with_conn(
+        conn, operation_id, next_step,
+        kind="cvm.update", progress=CVM_UPDATE_PROGRESS,
     )
 
 
@@ -4610,6 +4716,19 @@ async def compensate_cvm_launch_resources(snapshot: Any) -> None:
     from concrete_console.dns_provider.cloudflare import CloudflareClient, CloudflareError
     from concrete_console.tee_provider.phala import PhalaClient, PhalaError
 
+    if keep_failed_cvm_resources():
+        # Debug-only log line: derive everything from `metadata` (guaranteed present —
+        # used unconditionally just below). Never reference snapshot keys that may be
+        # absent: `_row_value` is a hard subscript and a KeyError here would crash the
+        # saga step inside its except handler and trigger an infinite retry loop.
+        metadata = _row_value(snapshot, "metadata")
+        log.warning(
+            "cvm_launch_compensation_skipped",
+            reason="CONCRETE_KEEP_FAILED_CVM",
+            app_id=provider_app_id(metadata),
+        )
+        return
+
     with suppress(CloudflareError):
         cloudflare = CloudflareClient.from_settings()
         for field in ("cname_dns_record_id", "txt_dns_record_id"):
@@ -4623,14 +4742,20 @@ async def compensate_cvm_launch_resources(snapshot: Any) -> None:
 
 
 class SecurityCVMCAFetchError(RuntimeError):
-    def __init__(self, *, http_status: int):
-        super().__init__("ca_fetch_failed")
+    def __init__(self, *, http_status: int, reason: str = ""):
+        super().__init__(f"ca_fetch_failed: {reason or http_status}")
         self.http_status = http_status
+        # `http_status == 0` covers several distinct connection-level failures (TLS, connect,
+        # no/garbled response); `reason` disambiguates them so the failure is not opaque.
+        self.reason = reason
 
 
 async def fetch_security_cvm_ca_pem(*, fqdn: str, ca_export_token: str, connect_host: str | None = None) -> str:
     import ssl
 
+    # Connect to a pre-resolved IP when supplied so the freshly-created gateway CNAME's
+    # intermittent NXDOMAIN cannot fail this single-shot connect; TLS SNI and HTTP Host
+    # stay the FQDN (the leaf cert and gateway routing key remain the FQDN).
     target_host = connect_host or fqdn
     request = (
         "GET /ca.pem HTTP/1.1\r\n"
@@ -4641,63 +4766,31 @@ async def fetch_security_cvm_ca_pem(*, fqdn: str, ca_export_token: str, connect_
     )
     try:
         context = ssl.create_default_context()
-        if connect_host:
-            context.check_hostname = False
         reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(target_host, 443, ssl=context, server_hostname=target_host),
+            asyncio.open_connection(target_host, 443, ssl=context, server_hostname=fqdn),
             timeout=15.0,
         )
-        if connect_host:
-            ssl_object = writer.get_extra_info("ssl_object")
-            if ssl_object is None:
-                raise SecurityCVMCAFetchError(http_status=0)
-            verify_peer_certificate_hostname(ssl_object.getpeercert(), fqdn)
         writer.write(request.encode("utf-8"))
         await writer.drain()
         raw_response = await asyncio.wait_for(reader.read(), timeout=15.0)
         writer.close()
         await writer.wait_closed()
     except (OSError, TimeoutError, ssl.SSLError) as exc:
-        raise SecurityCVMCAFetchError(http_status=0) from exc
+        raise SecurityCVMCAFetchError(http_status=0, reason=f"{type(exc).__name__}: {exc}") from exc
     header_bytes, separator, body_bytes = raw_response.partition(b"\r\n\r\n")
     if not separator:
-        raise SecurityCVMCAFetchError(http_status=0)
+        raise SecurityCVMCAFetchError(http_status=0, reason="no_http_separator")
     status_line = header_bytes.splitlines()[0].decode("iso-8859-1", errors="replace")
     try:
         status_code = int(status_line.split()[1])
     except (IndexError, ValueError) as exc:
-        raise SecurityCVMCAFetchError(http_status=0) from exc
+        raise SecurityCVMCAFetchError(http_status=0, reason="bad_status_line") from exc
     if status_code != 200:
-        raise SecurityCVMCAFetchError(http_status=status_code)
+        raise SecurityCVMCAFetchError(http_status=status_code, reason="non_200")
     body = body_bytes.decode("utf-8", errors="replace")
     if "-----BEGIN CERTIFICATE-----" not in body or "-----END CERTIFICATE-----" not in body:
-        raise SecurityCVMCAFetchError(http_status=200)
+        raise SecurityCVMCAFetchError(http_status=200, reason="no_certificate_in_body")
     return body
-
-
-def verify_peer_certificate_hostname(peer_cert: dict[str, Any], hostname: str) -> None:
-    hostname = hostname.rstrip(".").lower()
-    names: list[str] = []
-    for key, value in peer_cert.get("subjectAltName", ()):
-        if key == "DNS" and isinstance(value, str):
-            names.append(value)
-    if not names:
-        for subject in peer_cert.get("subject", ()):
-            for key, value in subject:
-                if key == "commonName" and isinstance(value, str):
-                    names.append(value)
-    if not any(dns_name_matches(pattern, hostname) for pattern in names):
-        raise SecurityCVMCAFetchError(http_status=0)
-
-
-def dns_name_matches(pattern: str, hostname: str) -> bool:
-    pattern = pattern.rstrip(".").lower()
-    if pattern == hostname:
-        return True
-    if not pattern.startswith("*."):
-        return False
-    suffix = pattern[1:]
-    return hostname.endswith(suffix) and hostname.count(".") == pattern.count(".")
 
 
 def security_cvm_ca_export_stash_available(snapshot: Any) -> bool:
@@ -4956,8 +5049,15 @@ async def reconcile_security_cvm_await_phala(conn: Any) -> list[str]:
                 )
             failed_since = first_failed or now
             if (now - failed_since).total_seconds() > 300:
+                operation_id = _row_value(row, "operation_id")
+                # The reconciler candidate row carries only id/entity_id/metadata; fetch the
+                # full provision snapshot (DNS record ids + metadata) so compensation can tear
+                # down the dangling Phala app + Cloudflare records, not just mark FAILED.
+                snapshot = await fetch_security_cvm_provision_snapshot(conn, operation_id)
+                if snapshot is not None:
+                    await compensate_security_cvm_provision_resources(snapshot)
                 await mark_security_cvm_provision_failed(
-                    _row_value(row, "operation_id"),
+                    operation_id,
                     code="PHALA_NEVER_RUNNING",
                     details={"elapsed_seconds": int((now - failed_since).total_seconds())},
                 )
@@ -5076,17 +5176,26 @@ async def run_reconciliation_pass(*, include_orphans: bool = True) -> Reconcilia
     )
 
 
-async def reconcile_dev_cvm_provider_drift(conn: Any) -> list[str]:
+async def _reconcile_cvm_provider_drift(
+    conn: Any,
+    kind: CvmKind,
+    *,
+    fetch_candidates: Any,
+    persist_drift: Any,
+) -> list[str]:
+    """Shared provider-drift reconciler loop for Dev CVMs and Security CVMs: poll the Phala
+    status of each RUNNING candidate and persist FAILED/STOPPED drift. ``kind`` namespaces the
+    structlog events and the id field they carry."""
     from concrete_console.tee_provider.phala import PhalaClient, PhalaError
 
     try:
         client = PhalaClient.from_settings(timeout_seconds=30.0)
     except PhalaError as exc:
-        log.warning("dev_cvm_provider_drift_skipped", reason=exc.code)
+        log.warning(f"{kind.slug}_provider_drift_skipped", reason=exc.code)
         return []
 
     advanced: list[str] = []
-    rows = await fetch_dev_cvm_provider_drift_candidates(conn)
+    rows = await fetch_candidates(conn)
     for row in rows:
         app_id = provider_app_id(_row_value(row, "metadata"))
         if app_id is None:
@@ -5095,118 +5204,139 @@ async def reconcile_dev_cvm_provider_drift(conn: Any) -> list[str]:
             provider_status = await client.status(app_id)
         except PhalaError as exc:
             log.warning(
-                "dev_cvm_provider_drift_status_failed",
-                cvm_id=str(_row_value(row, "id")),
+                f"{kind.slug}_provider_drift_status_failed",
                 reason=exc.code,
+                **{kind.log_id_key: str(_row_value(row, "id"))},
             )
             continue
         target_state = provider_drift_target_state(provider_status)
         if target_state is None:
             continue
-        if await persist_dev_cvm_provider_drift(conn, row, provider_status=provider_status, target_state=target_state):
+        if await persist_drift(conn, row, provider_status=provider_status, target_state=target_state):
             advanced.append(str(_row_value(row, "id")))
     return advanced
+
+
+async def reconcile_dev_cvm_provider_drift(conn: Any) -> list[str]:
+    return await _reconcile_cvm_provider_drift(
+        conn,
+        DEV_CVM,
+        fetch_candidates=fetch_dev_cvm_provider_drift_candidates,
+        persist_drift=persist_dev_cvm_provider_drift,
+    )
 
 
 async def reconcile_security_cvm_provider_drift(conn: Any) -> list[str]:
-    from concrete_console.tee_provider.phala import PhalaClient, PhalaError
+    return await _reconcile_cvm_provider_drift(
+        conn,
+        SECURITY_CVM,
+        fetch_candidates=fetch_security_cvm_provider_drift_candidates,
+        persist_drift=persist_security_cvm_provider_drift,
+    )
 
-    try:
-        client = PhalaClient.from_settings(timeout_seconds=30.0)
-    except PhalaError as exc:
-        log.warning("security_cvm_provider_drift_skipped", reason=exc.code)
-        return []
 
-    advanced: list[str] = []
-    rows = await fetch_security_cvm_provider_drift_candidates(conn)
-    for row in rows:
-        app_id = provider_app_id(_row_value(row, "metadata"))
-        if app_id is None:
-            continue
-        try:
-            provider_status = await client.status(app_id)
-        except PhalaError as exc:
-            log.warning(
-                "security_cvm_provider_drift_status_failed",
-                security_cvm_id=str(_row_value(row, "id")),
-                reason=exc.code,
-            )
-            continue
-        target_state = provider_drift_target_state(provider_status)
-        if target_state is None:
-            continue
-        if await persist_security_cvm_provider_drift(
-            conn,
-            row,
-            provider_status=provider_status,
-            target_state=target_state,
-        ):
-            advanced.append(str(_row_value(row, "id")))
-    return advanced
+def _provider_drift_candidates_query(kind: CvmKind) -> str:
+    """RUNNING CVMs with a provider app_id and no in-flight operation — the reconciler's
+    provider-drift candidate set."""
+    return f"""
+        SELECT
+            {kind.alias}.id,
+            {kind.alias}.entity_id,
+            {kind.alias}.state::text AS state,
+            {kind.alias}.metadata,
+            {kind.alias}.error_reason
+        FROM {kind.table} {kind.alias}
+        WHERE {kind.alias}.state = 'RUNNING'
+          AND {kind.alias}.deleted_at IS NULL
+          AND {kind.alias}.metadata ? 'app_id'
+          AND NOT EXISTS (
+            SELECT 1
+            FROM operations o
+            WHERE o.target_id = {kind.alias}.id
+              AND o.status IN ('pending', 'running')
+          )
+        ORDER BY {kind.alias}.created_at
+        LIMIT 10
+        FOR UPDATE SKIP LOCKED
+        """
 
 
 async def fetch_dev_cvm_provider_drift_candidates(conn: Any) -> list[Any]:
     async with conn.transaction():
-        return list(
-            await conn.fetch(
-                """
-                SELECT
-                    c.id,
-                    c.entity_id,
-                    c.state::text AS state,
-                    c.metadata,
-                    c.error_reason
-                FROM cvms c
-                WHERE c.state = 'RUNNING'
-                  AND c.deleted_at IS NULL
-                  AND c.metadata ? 'app_id'
-                  AND NOT EXISTS (
-                    SELECT 1
-                    FROM operations o
-                    WHERE o.target_id = c.id
-                      AND o.status IN ('pending', 'running')
-                  )
-                ORDER BY c.created_at
-                LIMIT 10
-                FOR UPDATE SKIP LOCKED
-                """
-            )
-        )
+        return list(await conn.fetch(_provider_drift_candidates_query(DEV_CVM)))
 
 
 async def fetch_security_cvm_provider_drift_candidates(conn: Any) -> list[Any]:
     async with conn.transaction():
-        return list(
-            await conn.fetch(
-                """
-                SELECT
-                    sc.id,
-                    sc.entity_id,
-                    sc.state::text AS state,
-                    sc.metadata,
-                    sc.error_reason
-                FROM security_cvms sc
-                WHERE sc.state = 'RUNNING'
-                  AND sc.deleted_at IS NULL
-                  AND sc.metadata ? 'app_id'
-                  AND NOT EXISTS (
-                    SELECT 1
-                    FROM operations o
-                    WHERE o.target_id = sc.id
-                      AND o.status IN ('pending', 'running')
-                  )
-                ORDER BY sc.created_at
-                LIMIT 10
-                FOR UPDATE SKIP LOCKED
-                """
-            )
-        )
+        return list(await conn.fetch(_provider_drift_candidates_query(SECURITY_CVM)))
 
 
 def provider_drift_target_state(provider_status: str) -> str | None:
     if provider_status in {"FAILED", "STOPPED"}:
         return provider_status
     return None
+
+
+async def _persist_cvm_provider_drift(
+    conn: Any,
+    row: Any,
+    kind: CvmKind,
+    *,
+    provider_status: str,
+    target_state: str,
+) -> bool:
+    """Shared reconciler drift writer for Dev CVMs and Security CVMs."""
+    if target_state not in {"FAILED", "STOPPED"}:
+        raise ValueError("unsupported provider drift state")
+    error_reason = "PHALA_OBSERVED_FAILED" if target_state == "FAILED" else None
+    action = (
+        f"{kind.audit_prefix}_FAILED" if target_state == "FAILED" else f"{kind.audit_prefix}_STOPPED"
+    )
+    async with conn.transaction():
+        result = await conn.execute(
+            f"""
+            UPDATE {kind.table}
+            SET state = $2::cvm_state,
+                error_reason = $3,
+                updated_at = now()
+            WHERE id = $1
+              AND state = 'RUNNING'
+              AND deleted_at IS NULL
+              AND NOT EXISTS (
+                SELECT 1
+                FROM operations o
+                WHERE o.target_id = {kind.table}.id
+                  AND o.status IN ('pending', 'running')
+              )
+            """,
+            _row_value(row, "id"),
+            target_state,
+            error_reason,
+        )
+        if result != "UPDATE 1":
+            return False
+        after: dict[str, Any] = {
+            "state": target_state,
+            "provider_status": provider_status,
+            "source": "reconciler",
+        }
+        if error_reason is not None:
+            after["error_reason"] = error_reason
+        await insert_audit_event(
+            conn,
+            entity_id=_row_value(row, "entity_id"),
+            actor_id=None,
+            actor_email="reconciler@concrete.system",
+            action=action,
+            target_type=kind.audit_target,
+            target_id=_row_value(row, "id"),
+            before={
+                "state": _row_value(row, "state"),
+                "error_reason": _row_value(row, "error_reason"),
+            },
+            after=after,
+        )
+    return True
 
 
 async def persist_dev_cvm_provider_drift(
@@ -5216,55 +5346,9 @@ async def persist_dev_cvm_provider_drift(
     provider_status: str,
     target_state: str,
 ) -> bool:
-    if target_state not in {"FAILED", "STOPPED"}:
-        raise ValueError("unsupported provider drift state")
-    error_reason = "PHALA_OBSERVED_FAILED" if target_state == "FAILED" else None
-    action = "CVM_FAILED" if target_state == "FAILED" else "CVM_STOPPED"
-    async with conn.transaction():
-        result = await conn.execute(
-            """
-            UPDATE cvms
-            SET state = $2::cvm_state,
-                error_reason = $3,
-                updated_at = now()
-            WHERE id = $1
-              AND state = 'RUNNING'
-              AND deleted_at IS NULL
-              AND NOT EXISTS (
-                SELECT 1
-                FROM operations o
-                WHERE o.target_id = cvms.id
-                  AND o.status IN ('pending', 'running')
-              )
-            """,
-            _row_value(row, "id"),
-            target_state,
-            error_reason,
-        )
-        if result != "UPDATE 1":
-            return False
-        after: dict[str, Any] = {
-            "state": target_state,
-            "provider_status": provider_status,
-            "source": "reconciler",
-        }
-        if error_reason is not None:
-            after["error_reason"] = error_reason
-        await insert_audit_event(
-            conn,
-            entity_id=_row_value(row, "entity_id"),
-            actor_id=None,
-            actor_email="reconciler@concrete.system",
-            action=action,
-            target_type="cvm",
-            target_id=_row_value(row, "id"),
-            before={
-                "state": _row_value(row, "state"),
-                "error_reason": _row_value(row, "error_reason"),
-            },
-            after=after,
-        )
-    return True
+    return await _persist_cvm_provider_drift(
+        conn, row, DEV_CVM, provider_status=provider_status, target_state=target_state
+    )
 
 
 async def persist_security_cvm_provider_drift(
@@ -5274,55 +5358,9 @@ async def persist_security_cvm_provider_drift(
     provider_status: str,
     target_state: str,
 ) -> bool:
-    if target_state not in {"FAILED", "STOPPED"}:
-        raise ValueError("unsupported provider drift state")
-    error_reason = "PHALA_OBSERVED_FAILED" if target_state == "FAILED" else None
-    action = "SECURITY_CVM_FAILED" if target_state == "FAILED" else "SECURITY_CVM_STOPPED"
-    async with conn.transaction():
-        result = await conn.execute(
-            """
-            UPDATE security_cvms
-            SET state = $2::cvm_state,
-                error_reason = $3,
-                updated_at = now()
-            WHERE id = $1
-              AND state = 'RUNNING'
-              AND deleted_at IS NULL
-              AND NOT EXISTS (
-                SELECT 1
-                FROM operations o
-                WHERE o.target_id = security_cvms.id
-                  AND o.status IN ('pending', 'running')
-              )
-            """,
-            _row_value(row, "id"),
-            target_state,
-            error_reason,
-        )
-        if result != "UPDATE 1":
-            return False
-        after: dict[str, Any] = {
-            "state": target_state,
-            "provider_status": provider_status,
-            "source": "reconciler",
-        }
-        if error_reason is not None:
-            after["error_reason"] = error_reason
-        await insert_audit_event(
-            conn,
-            entity_id=_row_value(row, "entity_id"),
-            actor_id=None,
-            actor_email="reconciler@concrete.system",
-            action=action,
-            target_type="security_cvm",
-            target_id=_row_value(row, "id"),
-            before={
-                "state": _row_value(row, "state"),
-                "error_reason": _row_value(row, "error_reason"),
-            },
-            after=after,
-        )
-    return True
+    return await _persist_cvm_provider_drift(
+        conn, row, SECURITY_CVM, provider_status=provider_status, target_state=target_state
+    )
 
 
 async def prune_expired_reconciler_rows(conn: Any) -> list[str]:
@@ -5511,6 +5549,7 @@ async def reconcile_security_cvm_attestations(conn: Any) -> list[str]:
         AttestationVerifierUnavailable,
         build_security_cvm_attestation_request,
     )
+    from concrete_console.shade_provider.shade import ShadeError
 
     try:
         verifier = AtlasVerifierClient.from_settings()
@@ -5518,6 +5557,11 @@ async def reconcile_security_cvm_attestations(conn: Any) -> list[str]:
         return []
     interval = reconciler_attestation_interval_seconds()
     advanced: list[str] = []
+    # Claim candidates in a SHORT transaction, then release the FOR UPDATE locks and the
+    # in-transaction connection BEFORE running the shade + verifier subprocesses: a reconciler
+    # step never holds a transaction across an external call (console.md §13.1) — otherwise a
+    # slow/cold shade or verify pins the pool connection and locks up to 10 SC rows for the
+    # whole window. Each persist then re-opens its own short, state-guarded transaction.
     async with conn.transaction():
         rows = await conn.fetch(
             """
@@ -5551,34 +5595,50 @@ async def reconcile_security_cvm_attestations(conn: Any) -> list[str]:
             """,
             interval,
         )
-        for row in rows:
-            token_hashes = await fetch_security_cvm_token_hashes(conn, _row_value(row, "id"))
-            try:
-                request = build_security_cvm_attestation_request(
-                    row,
-                    token_hashes=token_hashes,
-                    console_url=load_settings().raw.get("CONSOLE_URL", "http://localhost:8000"),
-                )
-                report = await verifier.verify(request, timeout_seconds=30)
-            except AttestationVerifierError as exc:
-                log.warning(
-                    "security_cvm_attestation_refresh_failed",
-                    security_cvm_id=str(_row_value(row, "id")),
-                    code=exc.code,
-                )
-                continue
-
-            drift_kind = attestation_drift_kind(
-                expected_image_measurement=_row_value(row, "expected_image_measurement"),
-                persisted_image_measurement=_row_value(row, "image_measurement"),
-                persisted_rtmr3_digest=_row_value(row, "rtmr3_digest"),
-                reported_image_measurement=report.image_measurement,
-                reported_rtmr3_digest=report.rtmr3_digest,
+        candidates = [dict(row) for row in rows]
+    for row in candidates:
+        token_hashes = await fetch_security_cvm_token_hashes(conn, _row_value(row, "id"))
+        try:
+            # Full runtime re-verification (never dev()): regenerate the shade policy from
+            # the deployed compose so drift detection actually exercises compose-hash +
+            # bootchain + RTMR3 against the live quote (T-30 runtime-config tampering, §9.2),
+            # not just the shared MRTD.
+            shade_policy = await materialize_security_cvm_shade_policy_for_attestation(row)
+            request = build_security_cvm_attestation_request(
+                row,
+                token_hashes=token_hashes,
+                console_url=load_settings().raw.get("CONSOLE_URL", "http://localhost:8000"),
+                shade_policy=shade_policy,
             )
+            report = await verifier.verify(request, timeout_seconds=30)
+        except ShadeError as exc:
+            log.warning(
+                "security_cvm_attestation_refresh_shade_failed",
+                security_cvm_id=str(_row_value(row, "id")),
+                **shade_error_log_fields(exc),
+            )
+            continue
+        except AttestationVerifierError as exc:
+            log.warning(
+                "security_cvm_attestation_refresh_failed",
+                security_cvm_id=str(_row_value(row, "id")),
+                code=exc.code,
+            )
+            continue
+
+        drift_kind = attestation_drift_kind(
+            expected_image_measurement=_row_value(row, "expected_image_measurement"),
+            persisted_image_measurement=_row_value(row, "image_measurement"),
+            persisted_rtmr3_digest=_row_value(row, "rtmr3_digest"),
+            reported_image_measurement=report.image_measurement,
+            reported_rtmr3_digest=report.rtmr3_digest,
+        )
+        async with conn.transaction():
             if drift_kind is None:
-                await persist_security_cvm_attestation_refresh(conn, row, report)
+                persisted = await persist_security_cvm_attestation_refresh(conn, row, report)
             else:
-                await record_security_cvm_attestation_refresh_drift(conn, row, report, drift_kind=drift_kind)
+                persisted = await record_security_cvm_attestation_refresh_drift(conn, row, report, drift_kind=drift_kind)
+        if persisted:
             advanced.append(str(_row_value(row, "id")))
     return advanced
 
@@ -5597,11 +5657,14 @@ async def reconcile_dev_cvm_attestations(conn: Any) -> list[str]:
         return []
     interval = reconciler_attestation_interval_seconds()
     advanced: list[str] = []
+    # Claim candidates in a SHORT transaction, then release the FOR UPDATE locks before the
+    # verifier subprocess: a reconciler step never holds a transaction across an external call
+    # (console.md §13.1). Each persist then re-opens its own short, state-guarded transaction.
     async with conn.transaction():
         rows = await conn.fetch(
             """
             SELECT
-                c.id AS cvm_id,
+                c.id,
                 c.entity_id,
                 c.fqdn,
                 c.metadata,
@@ -5629,30 +5692,33 @@ async def reconcile_dev_cvm_attestations(conn: Any) -> list[str]:
             """,
             interval,
         )
-        for row in rows:
-            try:
-                request = build_dev_cvm_attestation_request(row)
-                report = await verifier.verify(request, timeout_seconds=30)
-            except AttestationVerifierError as exc:
-                log.warning(
-                    "dev_cvm_attestation_refresh_failed",
-                    cvm_id=str(_row_value(row, "cvm_id")),
-                    code=exc.code,
-                )
-                continue
-
-            drift_kind = attestation_drift_kind(
-                expected_image_measurement=_row_value(row, "expected_image_measurement"),
-                persisted_image_measurement=_row_value(row, "image_measurement"),
-                persisted_rtmr3_digest=_row_value(row, "rtmr3_digest"),
-                reported_image_measurement=report.image_measurement,
-                reported_rtmr3_digest=report.rtmr3_digest,
+        candidates = [dict(row) for row in rows]
+    for row in candidates:
+        try:
+            request = build_dev_cvm_attestation_request(row)
+            report = await verifier.verify(request, timeout_seconds=30)
+        except AttestationVerifierError as exc:
+            log.warning(
+                "dev_cvm_attestation_refresh_failed",
+                cvm_id=str(_row_value(row, "id")),
+                code=exc.code,
             )
+            continue
+
+        drift_kind = attestation_drift_kind(
+            expected_image_measurement=_row_value(row, "expected_image_measurement"),
+            persisted_image_measurement=_row_value(row, "image_measurement"),
+            persisted_rtmr3_digest=_row_value(row, "rtmr3_digest"),
+            reported_image_measurement=report.image_measurement,
+            reported_rtmr3_digest=report.rtmr3_digest,
+        )
+        async with conn.transaction():
             if drift_kind is None:
-                await persist_dev_cvm_attestation_refresh(conn, row, report)
+                persisted = await persist_dev_cvm_attestation_refresh(conn, row, report)
             else:
-                await record_dev_cvm_attestation_refresh_drift(conn, row, report, drift_kind=drift_kind)
-            advanced.append(str(_row_value(row, "cvm_id")))
+                persisted = await record_dev_cvm_attestation_refresh_drift(conn, row, report, drift_kind=drift_kind)
+        if persisted:
+            advanced.append(str(_row_value(row, "id")))
     return advanced
 
 
@@ -5697,11 +5763,16 @@ def attestation_drift_kind(
     return None
 
 
-async def persist_security_cvm_attestation_refresh(conn: Any, row: Any, report: Any) -> None:
+async def _persist_cvm_attestation_refresh(conn: Any, row: Any, report: Any, kind: CvmKind) -> bool:
+    """Shared reconciler attestation-refresh writer for Dev CVMs and Security CVMs. Returns
+    True iff the row was still RUNNING and persisted. The reconciler claims candidates then
+    releases the row lock before the (slow) verify, so the CVM may have been terminated/failed
+    concurrently — if the state-guarded UPDATE matches 0 rows, skip the (otherwise misleading)
+    audit event and report no progress, mirroring the per-operation verifier guard."""
     verified_at = datetime.now(timezone.utc)
-    await conn.execute(
-        """
-        UPDATE security_cvms
+    result = await conn.execute(
+        f"""
+        UPDATE {kind.table}
         SET image_measurement = $2,
             rtmr3_digest = $3,
             attestation_verified_at = $4,
@@ -5716,13 +5787,20 @@ async def persist_security_cvm_attestation_refresh(conn: Any, row: Any, report: 
         report.rtmr3_digest,
         verified_at,
     )
+    if result != "UPDATE 1":
+        log.warning(
+            f"{kind.slug}_attestation_refresh_skipped",
+            **{kind.log_id_key: str(_row_value(row, "id"))},
+            result=result,
+        )
+        return False
     await insert_audit_event(
         conn,
         entity_id=_row_value(row, "entity_id"),
         actor_id=None,
         actor_email="reconciler@concrete.system",
-        action="SECURITY_CVM_ATTESTATION_VERIFIED",
-        target_type="security_cvm",
+        action=f"{kind.audit_prefix}_ATTESTATION_VERIFIED",
+        target_type=kind.audit_target,
         target_id=_row_value(row, "id"),
         before={
             "image_measurement": _row_value(row, "image_measurement"),
@@ -5735,12 +5813,17 @@ async def persist_security_cvm_attestation_refresh(conn: Any, row: Any, report: 
             "source": "reconciler",
         },
     )
+    return True
 
 
-async def record_security_cvm_attestation_refresh_drift(conn: Any, row: Any, report: Any, *, drift_kind: str) -> None:
-    await conn.execute(
-        """
-        UPDATE security_cvms
+async def _record_cvm_attestation_refresh_drift(
+    conn: Any, row: Any, report: Any, kind: CvmKind, *, drift_kind: str
+) -> bool:
+    """Returns True iff the still-RUNNING row was marked drifted. See
+    _persist_cvm_attestation_refresh for why the rowcount is guarded."""
+    result = await conn.execute(
+        f"""
+        UPDATE {kind.table}
         SET error_reason = 'ATTESTATION_DRIFT',
             updated_at = now()
         WHERE id = $1
@@ -5749,13 +5832,20 @@ async def record_security_cvm_attestation_refresh_drift(conn: Any, row: Any, rep
         """,
         _row_value(row, "id"),
     )
+    if result != "UPDATE 1":
+        log.warning(
+            f"{kind.slug}_attestation_drift_skipped",
+            **{kind.log_id_key: str(_row_value(row, "id"))},
+            result=result,
+        )
+        return False
     await insert_audit_event(
         conn,
         entity_id=_row_value(row, "entity_id"),
         actor_id=None,
         actor_email="reconciler@concrete.system",
-        action="SECURITY_CVM_ATTESTATION_DRIFT",
-        target_type="security_cvm",
+        action=f"{kind.audit_prefix}_ATTESTATION_DRIFT",
+        target_type=kind.audit_target,
         target_id=_row_value(row, "id"),
         before={
             "image_measurement": _row_value(row, "image_measurement"),
@@ -5768,79 +5858,23 @@ async def record_security_cvm_attestation_refresh_drift(conn: Any, row: Any, rep
             "source": "reconciler",
         },
     )
+    return True
 
 
-async def persist_dev_cvm_attestation_refresh(conn: Any, row: Any, report: Any) -> None:
-    verified_at = datetime.now(timezone.utc)
-    await conn.execute(
-        """
-        UPDATE cvms
-        SET image_measurement = $2,
-            rtmr3_digest = $3,
-            attestation_verified_at = $4,
-            error_reason = NULL,
-            updated_at = now()
-        WHERE id = $1
-          AND state = 'RUNNING'
-          AND deleted_at IS NULL
-        """,
-        _row_value(row, "cvm_id"),
-        report.image_measurement,
-        report.rtmr3_digest,
-        verified_at,
-    )
-    await insert_audit_event(
-        conn,
-        entity_id=_row_value(row, "entity_id"),
-        actor_id=None,
-        actor_email="reconciler@concrete.system",
-        action="CVM_ATTESTATION_VERIFIED",
-        target_type="cvm",
-        target_id=_row_value(row, "cvm_id"),
-        before={
-            "image_measurement": _row_value(row, "image_measurement"),
-            "rtmr3_digest": _row_value(row, "rtmr3_digest"),
-        },
-        after={
-            "image_measurement": report.image_measurement,
-            "rtmr3_digest": report.rtmr3_digest,
-            "attestation_verified_at": verified_at.isoformat().replace("+00:00", "Z"),
-            "source": "reconciler",
-        },
-    )
+async def persist_security_cvm_attestation_refresh(conn: Any, row: Any, report: Any) -> bool:
+    return await _persist_cvm_attestation_refresh(conn, row, report, SECURITY_CVM)
 
 
-async def record_dev_cvm_attestation_refresh_drift(conn: Any, row: Any, report: Any, *, drift_kind: str) -> None:
-    await conn.execute(
-        """
-        UPDATE cvms
-        SET error_reason = 'ATTESTATION_DRIFT',
-            updated_at = now()
-        WHERE id = $1
-          AND state = 'RUNNING'
-          AND deleted_at IS NULL
-        """,
-        _row_value(row, "cvm_id"),
-    )
-    await insert_audit_event(
-        conn,
-        entity_id=_row_value(row, "entity_id"),
-        actor_id=None,
-        actor_email="reconciler@concrete.system",
-        action="CVM_ATTESTATION_DRIFT",
-        target_type="cvm",
-        target_id=_row_value(row, "cvm_id"),
-        before={
-            "image_measurement": _row_value(row, "image_measurement"),
-            "rtmr3_digest": _row_value(row, "rtmr3_digest"),
-        },
-        after={
-            "image_measurement": report.image_measurement,
-            "rtmr3_digest": report.rtmr3_digest,
-            "drift_kind": drift_kind,
-            "source": "reconciler",
-        },
-    )
+async def record_security_cvm_attestation_refresh_drift(conn: Any, row: Any, report: Any, *, drift_kind: str) -> bool:
+    return await _record_cvm_attestation_refresh_drift(conn, row, report, SECURITY_CVM, drift_kind=drift_kind)
+
+
+async def persist_dev_cvm_attestation_refresh(conn: Any, row: Any, report: Any) -> bool:
+    return await _persist_cvm_attestation_refresh(conn, row, report, DEV_CVM)
+
+
+async def record_dev_cvm_attestation_refresh_drift(conn: Any, row: Any, report: Any, *, drift_kind: str) -> bool:
+    return await _record_cvm_attestation_refresh_drift(conn, row, report, DEV_CVM, drift_kind=drift_kind)
 
 
 def mark_scheduler_tick_success(*, now: float | None = None) -> None:

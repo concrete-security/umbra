@@ -312,18 +312,7 @@ fn validate_security_cvm_config_value(
     value: &str,
     max_len: usize,
 ) -> Result<(), String> {
-    if value.is_empty() || value.len() > max_len {
-        return Err(format!("[usage] {name} must be 1..{max_len} characters"));
-    }
-    if !value
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
-    {
-        return Err(format!(
-            "[usage] {name} may contain only letters, digits, '.', '_', and '-'"
-        ));
-    }
-    Ok(())
+    crate::console::validate_config_value(name, value, max_len)
 }
 
 fn print_security_cvm(security_cvm: &SecurityCvm, json_output: bool) {

@@ -215,6 +215,24 @@ pub(crate) fn validate_uuid(name: &str, value: &str) -> Result<(), String> {
         .map_err(|_| format!("[usage] {name} must be a UUID"))
 }
 
+/// Validates a CVM/Security-CVM config value: 1..=`max_len` chars, restricted to
+/// letters, digits, '.', '_', and '-'. Shared by the `cvm` and `security-cvm`
+/// command validators.
+pub(crate) fn validate_config_value(name: &str, value: &str, max_len: usize) -> Result<(), String> {
+    if value.is_empty() || value.len() > max_len {
+        return Err(format!("[usage] {name} must be 1..{max_len} characters"));
+    }
+    if !value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
+    {
+        return Err(format!(
+            "[usage] {name} may contain only letters, digits, '.', '_', and '-'"
+        ));
+    }
+    Ok(())
+}
+
 /// Adds one `key=value` pair to a URL query string (the `?state=running&...`
 /// part of the request), but only when the value exists; `None` is skipped.
 ///

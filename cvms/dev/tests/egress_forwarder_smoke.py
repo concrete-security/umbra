@@ -123,7 +123,6 @@ def write_fake_connect_helper(directory: Path, relay_port: int) -> Path:
                 "async def main():",
                 "    request = json.loads(sys.stdin.readline())",
                 "    assert request['fqdn'] == 'sc.example.com'",
-                "    assert request['connect_host'] == 'app-443s.dstack.example.com'",
                 "    assert request['port'] == 443",
                 "    assert request['policy_path']",
                 "    assert request['ca_cert_path']",
@@ -180,7 +179,6 @@ def write_refresh_only_fake_connect_helper(directory: Path, relay_port: int) -> 
                 "    if policy.get('refresh') is not True:",
                 "        print('primary policy rejected by fake helper', file=sys.stderr)",
                 "        return 1",
-                "    assert request['connect_host'] == 'new-app-443s.dstack.example.com'",
                 "    server = await asyncio.start_server(handle, '127.0.0.1', 0)",
                 "    port = server.sockets[0].getsockname()[1]",
                 "    print(json.dumps({'host': '127.0.0.1', 'port': port}), flush=True)",
@@ -201,7 +199,6 @@ def write_refresh_only_fake_connect_helper(directory: Path, relay_port: int) -> 
 
 def set_forwarder_env(helper: Path) -> None:
     os.environ["SECURITY_CVM_FQDN"] = "sc.example.com"
-    os.environ["SECURITY_CVM_CONNECT_HOST"] = "app-443s.dstack.example.com"
     os.environ["SECURITY_CVM_PROXY_PORT"] = "8080"
     os.environ["SECURITY_CVM_PROXY_TOKEN"] = "real-proxy-token"
     os.environ["DEV_CVM_CONTROL_TOKEN"] = "real-dev-control-token"
@@ -264,13 +261,8 @@ async def smoke():
                 refresh_policy_path.read_text(encoding="utf-8"),
                 encoding="utf-8",
             )
-            _config.atls_policy_refresh_metadata_path.write_text(
-                json.dumps({"connect_host": "new-app-443s.dstack.example.com"}),
-                encoding="utf-8",
-            )
             return forwarder.RefreshedAtlsPolicy(
                 policy_path=_config.atls_policy_refresh_path,
-                connect_host="new-app-443s.dstack.example.com",
             )
 
         forwarder.fetch_refreshed_atls_policy = fake_fetch_refreshed_atls_policy

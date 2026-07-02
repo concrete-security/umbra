@@ -1185,7 +1185,6 @@ def render_dev_cvm_compose_config(resolved: dict[str, str]) -> str:
             "      - no-new-privileges:true",
             "    environment:",
             "      SECURITY_CVM_FQDN: ${SECURITY_CVM_FQDN}",
-            "      SECURITY_CVM_CONNECT_HOST: ${SECURITY_CVM_CONNECT_HOST:-}",
             "      SECURITY_CVM_PROXY_PORT: ${SECURITY_CVM_PROXY_PORT}",
             "      SECURITY_CVM_ATLS_POLICY_B64: ${SECURITY_CVM_ATLS_POLICY_B64}",
             "      SECURITY_CVM_CA_CERT_B64: ${SECURITY_CVM_CA_CERT_B64}",
@@ -5530,14 +5529,32 @@ async def run_security_cvm_attestation_probe(conn: asyncpg.Connection, row: Any,
             {"adapter": "security_cvm", "attestation_error_code": exc.code, **exc.details},
         ) from exc
 
+    from concrete_console.scheduler import (
+        attestation_drift_kind,
+        fetch_security_cvm_token_hashes,
+        materialize_security_cvm_shade_policy_for_attestation,
+    )
+    from concrete_console.shade_provider.shade import ShadeError
+
     token_hashes = await fetch_security_cvm_token_hashes(conn, row_value(row, "id"))
     try:
+        # Full runtime verification (never dev()): regenerate the shade policy so the probe
+        # exercises compose-hash + bootchain + RTMR3 against the live quote, like provisioning.
+        shade_policy = await materialize_security_cvm_shade_policy_for_attestation(row)
         request = build_security_cvm_attestation_request(
             row,
             token_hashes=token_hashes,
             console_url=load_settings().raw.get("CONSOLE_URL", "http://localhost:8000"),
+            shade_policy=shade_policy,
         )
         report = await verifier.verify(request, timeout_seconds=30)
+    except ShadeError as exc:
+        raise api_error(
+            502,
+            "UPSTREAM_ERROR",
+            "security CVM attestation probe failed",
+            {"adapter": "shade", "reason": exc.code},
+        ) from exc
     except AttestationVerifierError as exc:
         raise api_error(
             502,
@@ -5546,7 +5563,13 @@ async def run_security_cvm_attestation_probe(conn: asyncpg.Connection, row: Any,
             {"adapter": "security_cvm", "attestation_error_code": exc.code, **exc.details},
         ) from exc
 
-    drift_kind = security_cvm_attestation_drift_kind(row, report)
+    drift_kind = attestation_drift_kind(
+        expected_image_measurement=row_value(row, "expected_image_measurement"),
+        persisted_image_measurement=row_value(row, "image_measurement"),
+        persisted_rtmr3_digest=row_value(row, "rtmr3_digest"),
+        reported_image_measurement=report.image_measurement,
+        reported_rtmr3_digest=report.rtmr3_digest,
+    )
     if drift_kind is not None:
         await record_security_cvm_attestation_drift(conn, row, report, drift_kind=drift_kind, current_user=current_user)
         raise api_error(
@@ -5566,44 +5589,8 @@ async def run_security_cvm_attestation_probe(conn: asyncpg.Connection, row: Any,
     return await persist_security_cvm_attestation_probe(conn, row, report, current_user=current_user)
 
 
-async def fetch_security_cvm_token_hashes(conn: asyncpg.Connection, security_cvm_id: UUID) -> dict[str, str]:
-    rows = await conn.fetch(
-        """
-        SELECT purpose::text AS purpose, token_hash
-        FROM service_principal_tokens
-        WHERE principal_type = 'security_cvm'
-          AND principal_id = $1
-          AND purpose IN ('INGEST', 'CA_EXPORT')
-          AND deleted_at IS NULL
-          AND (expires_at IS NULL OR expires_at > now())
-        ORDER BY purpose::text, expires_at NULLS FIRST, issued_at DESC
-        """,
-        security_cvm_id,
-    )
-    hashes: dict[str, str] = {}
-    for row in rows:
-        hashes.setdefault(row["purpose"], row["token_hash"])
-    return hashes
-
-
 def row_value(row: Any, key: str) -> Any:
     return row[key]
-
-
-def security_cvm_attestation_drift_kind(row: Any, report: Any) -> str | None:
-    image_drift = report.image_measurement != row_value(row, "expected_image_measurement")
-    persisted_image = row_value(row, "image_measurement")
-    if persisted_image is not None and persisted_image != report.image_measurement:
-        image_drift = True
-    persisted_rtmr3 = row_value(row, "rtmr3_digest")
-    rtmr3_drift = persisted_rtmr3 is not None and persisted_rtmr3 != report.rtmr3_digest
-    if image_drift and rtmr3_drift:
-        return "both"
-    if image_drift:
-        return "image"
-    if rtmr3_drift:
-        return "rtmr3"
-    return None
 
 
 async def record_security_cvm_attestation_drift(
@@ -5907,9 +5894,16 @@ async def operation_resource_for_read(pool: asyncpg.Pool, row: Any, current_user
                     raise api_error(404, "NOT_FOUND", "resource not found")
                 authorize_operation_read(locked, current_user)
                 if locked["actor_id"] == current_user.id and locked["result_disclosed_at"] is None:
+                    # One-time disclosure: hand the full result (incl. the CA-export
+                    # token) to the initiating actor, then scrub the plaintext secrets
+                    # from the STORED result so they don't linger at rest in the
+                    # operations table after this single read. Subsequent reads already
+                    # redact in the response (below); this also redacts in the DB.
+                    disclosed = operation_resource(locked)
                     await conn.execute(
-                        "UPDATE operations SET result_disclosed_at = now() WHERE id = $1",
+                        "UPDATE operations SET result_disclosed_at = now(), result = $2::jsonb WHERE id = $1",
                         locked["id"],
+                        json.dumps(redacted_security_cvm_provision_result(locked["result"])),
                     )
                     await insert_audit_event(
                         conn,
@@ -5921,7 +5915,7 @@ async def operation_resource_for_read(pool: asyncpg.Pool, row: Any, current_user
                         target_id=locked["id"],
                         after=operation_result_disclosed_audit_payload(locked),
                     )
-                    return operation_resource(locked)
+                    return disclosed
                 row = locked
     return operation_resource(operation_row_with_result(row, redacted_security_cvm_provision_result(row["result"])))
 

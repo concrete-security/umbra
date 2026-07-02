@@ -49,7 +49,7 @@ class TrafficLogIn(BaseModel):
     port: int = Field(ge=0, le=65535)
     method: str | None = Field(default=None, max_length=20)
     path: str | None = Field(default=None, max_length=2000)
-    response_code: int | None = None
+    response_code: int | None = Field(default=None, ge=0, le=599)
     bytes_transferred: int = Field(ge=0)
     attributes: dict[str, str] = Field(default_factory=dict)
 
@@ -240,17 +240,11 @@ async def get_dev_security_cvm_atls_policy(
             "Security CVM attestation is not currently verified",
             {"state": "security_cvm_attestation_unverified"},
         )
-    connect_host = None
-    if isinstance(metadata, dict):
-        value = metadata.get("passthrough_host") or metadata.get("connect_host")
-        if isinstance(value, str) and value.strip():
-            connect_host = value.strip()
     response.headers["Cache-Control"] = "no-store"
     return {
         "cvm_id": str(row["cvm_id"]),
         "security_cvm_id": str(row["security_cvm_id"]),
         "security_cvm_fqdn": row["security_cvm_fqdn"],
-        "connect_host": connect_host,
         "ca_cert_sha256": sha256_hex(ca_cert_pem),
         "atls_policy": policy,
         "image_measurement": actual,

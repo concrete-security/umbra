@@ -98,7 +98,6 @@ class ShadeClient:
         *,
         domain: str,
         deploy_compose_yaml: str,
-        connect_host: str | None = None,
         allowed_tcb_status: tuple[str, ...] = ("UpToDate",),
     ) -> ShadePolicyResult:
         validate_hostname(domain)
@@ -120,8 +119,6 @@ class ShadeClient:
             ]
             if allowed_tcb_status:
                 args.extend(["--allowed-tcb-status", ",".join(allowed_tcb_status)])
-            if connect_host:
-                args.extend(["--connect-host", connect_host])
             stdout = await self._run(args)
             policy = read_required_json_object(staged.policy_path)
         return ShadePolicyResult(policy=policy, stdout=stdout)
@@ -138,7 +135,6 @@ class ShadeClient:
         policy_result = await self.generate_policy(
             domain=domain,
             deploy_compose_yaml=build_result.compose_yaml,
-            connect_host=None,
             allowed_tcb_status=allowed_tcb_status,
         )
         return ShadeRenderResult(

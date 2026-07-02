@@ -56,7 +56,6 @@ def test_build_dev_cvm_attestation_request_uses_policy_bundle() -> None:
             "fqdn": "cvm.example.com",
             "expected_image_measurement": "a" * 96,
             "metadata": {
-                "passthrough_host": "app-443s.dstack.example.com",
                 "policy_bundle": {
                     "compose_template": "services: {}\n",
                     "expected_bootchain": {"mrtd": "b" * 96},
@@ -70,7 +69,6 @@ def test_build_dev_cvm_attestation_request_uses_policy_bundle() -> None:
     assert request == {
         "kind": "dev_cvm",
         "fqdn": "cvm.example.com",
-        "connect_host": "app-443s.dstack.example.com",
         "policy": {
             "type": "dstack_tdx",
             "expected_image_measurement": "a" * 96,
@@ -100,6 +98,8 @@ def test_build_dev_cvm_attestation_request_preserves_full_app_compose() -> None:
                         "features": ["wrong"],
                         "runner": "docker-compose",
                     },
+                    "expected_bootchain": {"mrtd": "b" * 96},
+                    "os_image_hash": "c" * 64,
                     "rtmr3_binding": {"cvm_id": str(UUID("00000000-0000-4000-8000-000000000031"))},
                 }
             },
@@ -114,28 +114,88 @@ def test_build_dev_cvm_attestation_request_preserves_full_app_compose() -> None:
     }
 
 
-def test_build_security_cvm_attestation_request_uses_token_hashes() -> None:
+@pytest.mark.parametrize(
+    "policy_bundle, reason",
+    [
+        (
+            {
+                "compose_template": "services: {}\n",
+                "os_image_hash": "c" * 64,
+                "rtmr3_binding": {"cvm_id": "00000000-0000-4000-8000-000000000031"},
+            },
+            "dev_cvm_expected_bootchain_missing",
+        ),
+        (
+            {
+                "compose_template": "services: {}\n",
+                "expected_bootchain": {"mrtd": "b" * 96},
+                "rtmr3_binding": {"cvm_id": "00000000-0000-4000-8000-000000000031"},
+            },
+            "dev_cvm_os_image_hash_missing",
+        ),
+    ],
+)
+def test_build_dev_cvm_attestation_request_rejects_incomplete_bundle(policy_bundle, reason) -> None:
+    # FULL runtime verification, symmetric with the SC: a Dev CVM bundle missing the bootchain or
+    # os_image_hash MUST fail closed, never fall through to an MRTD-only / dev() verification.
+    with pytest.raises(AttestationVerifierError) as excinfo:
+        build_dev_cvm_attestation_request(
+            {
+                "fqdn": "cvm.example.com",
+                "expected_image_measurement": "a" * 96,
+                "metadata": {"policy_bundle": policy_bundle},
+            }
+        )
+    assert excinfo.value.code == "ATTESTATION_QUOTE_INVALID"
+    assert excinfo.value.details["reason"] == reason
+
+
+_SC_SNAPSHOT = {
+    "id": UUID("00000000-0000-4000-8000-000000000041"),
+    "entity_id": UUID("00000000-0000-4000-8000-000000000001"),
+    "fqdn": "sc.example.com",
+    "expected_image_measurement": "a" * 96,
+    "compose_config": "services: {}\n",
+    "metadata": {"provider": "phala"},
+}
+_SC_SHADE_POLICY = {
+    "app_compose": {
+        "manifest_version": 2,
+        "runner": "docker-compose",
+        "docker_compose_file": "services: {}\n",
+        "kms_enabled": True,
+    },
+    "expected_bootchain": {"mrtd": "e" * 96, "rtmr0": "f" * 96},
+    "os_image_hash": "d" * 64,
+}
+
+
+def test_build_security_cvm_attestation_request_uses_full_runtime_policy() -> None:
+    # The SC is verified exactly like the Dev CVM — never dev()/disable_runtime_verification.
+    # The shade-generated policy carries the AUTHORITATIVE complete app_compose +
+    # expected_bootchain + os_image_hash, all of which MUST appear in the policy so the atlas
+    # verifier runs compose-hash + bootchain + os-image + RTMR replay (not just MRTD).
     request = build_security_cvm_attestation_request(
-        {
-            "id": UUID("00000000-0000-4000-8000-000000000041"),
-            "entity_id": UUID("00000000-0000-4000-8000-000000000001"),
-            "fqdn": "sc.example.com",
-            "expected_image_measurement": "a" * 96,
-            "compose_config": "services: {}\n",
-            "metadata": {"provider": "phala", "passthrough_host": "sc-app-443s.dstack.example.com"},
-        },
+        _SC_SNAPSHOT,
         token_hashes={"INGEST": "B" * 64, "CA_EXPORT": "C" * 64},
         console_url="https://console.example.com",
+        shade_policy=_SC_SHADE_POLICY,
     )
 
     assert request == {
         "kind": "security_cvm",
         "fqdn": "sc.example.com",
-        "connect_host": "sc-app-443s.dstack.example.com",
         "policy": {
             "type": "dstack_tdx",
             "expected_image_measurement": "a" * 96,
-            "app_compose": {"docker_compose_file": "services: {}\n"},
+            "app_compose": {
+                "manifest_version": 2,
+                "runner": "docker-compose",
+                "docker_compose_file": "services: {}\n",
+                "kms_enabled": True,
+            },
+            "expected_bootchain": {"mrtd": "e" * 96, "rtmr0": "f" * 96},
+            "os_image_hash": "d" * 64,
             "rtmr3_binding": {
                 "CONSOLE_URL": "https://console.example.com",
                 "entity_id": "00000000-0000-4000-8000-000000000001",
@@ -147,32 +207,53 @@ def test_build_security_cvm_attestation_request_uses_token_hashes() -> None:
     }
 
 
-def test_build_security_cvm_attestation_request_ignores_shade_policy_extras() -> None:
-    # Regression guard: folding the shade-derived os_image_hash / expected_bootchain
-    # into the SC verification policy (added in 8bf96c0) changed the app-compose.json
-    # the atlas verifier reconstructs and produced a spurious app_compose_hash_mismatch
-    # against the measured SC quote. The kwarg is accepted for call-site compatibility
-    # but MUST NOT appear in the policy.
+def test_build_security_cvm_attestation_request_prefers_authoritative_app_compose_json() -> None:
+    # When shade carries the compact app_compose_json (hash-sensitive key order), it wins over
+    # the round-tripped app_compose object so the compose-hash matches the measured quote.
     request = build_security_cvm_attestation_request(
-        {
-            "id": UUID("00000000-0000-4000-8000-000000000041"),
-            "entity_id": UUID("00000000-0000-4000-8000-000000000001"),
-            "fqdn": "sc.example.com",
-            "expected_image_measurement": "a" * 96,
-            "compose_config": "services: {}\n",
-            "metadata": {"provider": "phala"},
-        },
+        _SC_SNAPSHOT,
         token_hashes={"INGEST": "B" * 64, "CA_EXPORT": "C" * 64},
         console_url="https://console.example.com",
         shade_policy={
-            "os_image_hash": "d" * 64,
-            "expected_bootchain": {"mrtd": "e" * 96},
+            **_SC_SHADE_POLICY,
+            "app_compose": {"docker_compose_file": "stale", "runner": "wrong"},
+            "app_compose_json": (
+                '{"docker_compose_file":"services: {}\\n","kms_enabled":true,'
+                '"manifest_version":2,"runner":"docker-compose"}'
+            ),
         },
     )
 
-    assert "os_image_hash" not in request["policy"]
-    assert "expected_bootchain" not in request["policy"]
-    assert request["policy"]["app_compose"] == {"docker_compose_file": "services: {}\n"}
+    assert request["policy"]["app_compose"] == {
+        "docker_compose_file": "services: {}\n",
+        "kms_enabled": True,
+        "manifest_version": 2,
+        "runner": "docker-compose",
+    }
+
+
+@pytest.mark.parametrize(
+    "shade_policy, reason",
+    [
+        (None, "security_cvm_shade_policy_missing"),
+        ({"expected_bootchain": {"mrtd": "e" * 96}, "os_image_hash": "d" * 64}, "security_cvm_app_compose_missing"),
+        ({"app_compose": {"runner": "docker-compose"}, "os_image_hash": "d" * 64}, "security_cvm_expected_bootchain_missing"),
+        ({"app_compose": {"runner": "docker-compose"}, "expected_bootchain": {"mrtd": "e" * 96}}, "security_cvm_os_image_hash_missing"),
+    ],
+)
+def test_build_security_cvm_attestation_request_rejects_incomplete_shade_policy(shade_policy, reason) -> None:
+    # Never fall back to a dev()/disable_runtime_verification policy: an absent or incomplete
+    # shade policy MUST raise rather than emit a bare policy that the verifier would relax.
+    with pytest.raises(AttestationVerifierError) as exc:
+        build_security_cvm_attestation_request(
+            _SC_SNAPSHOT,
+            token_hashes={"INGEST": "B" * 64, "CA_EXPORT": "C" * 64},
+            console_url="https://console.example.com",
+            shade_policy=shade_policy,
+        )
+
+    assert exc.value.code == "ATTESTATION_QUOTE_INVALID"
+    assert exc.value.details["reason"] == reason
 
 
 def test_atlas_verifier_client_uses_stdin_stdout_contract(tmp_path) -> None:

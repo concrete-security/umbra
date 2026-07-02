@@ -60,7 +60,6 @@ AUTHORIZED_SSH_KEYS_B64="$(base64 -w0 "$TMPDIR/id_ed25519.pub")"
 export SANDBOX_ENV_PLACEHOLDERS_B64
 SANDBOX_ENV_PLACEHOLDERS_B64="$(base64 -w0 "$TMPDIR/placeholders")"
 export SECURITY_CVM_FQDN="sc.example.com"
-export SECURITY_CVM_CONNECT_HOST="app-443s.dstack.example.com"
 export SECURITY_CVM_PROXY_PORT="8080"
 export SECURITY_CVM_ATLS_POLICY_B64
 SECURITY_CVM_ATLS_POLICY_B64="$(base64 -w0 "$TMPDIR/policy.json")"

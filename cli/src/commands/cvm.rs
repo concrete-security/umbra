@@ -304,22 +304,14 @@ fn launch(config: &ResolvedConfig, args: CvmLaunchArgs, json_output: bool) -> Ex
         operation::print_operation(&op, json_output, false);
         return ExitStatus::Ok;
     }
-    let op = match operation::wait_for_operation(
+    let op = try_or_eprintln!(operation::wait_for_operation(
         console_url,
         &session.access_token,
         op,
         Duration::from_secs(u64::from(args.wait_timeout_seconds)),
         json_output,
         true,
-    ) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            if !message.is_empty() {
-                style::eprintln_error(&message);
-            }
-            return status;
-        }
-    };
+    ));
     let result: CvmLaunchResult = match operation::extract_operation_result(&op, "CVM launch") {
         Ok(value) => value,
         Err(message) => {
@@ -488,22 +480,14 @@ fn update(config: &ResolvedConfig, args: CvmUpdateArgs, json_output: bool) -> Ex
         operation::print_operation(&op, json_output, false);
         return ExitStatus::Ok;
     }
-    let op = match operation::wait_for_operation(
+    let op = try_or_eprintln!(operation::wait_for_operation(
         console_url,
         &session.access_token,
         op,
         Duration::from_secs(u64::from(args.wait_timeout_seconds)),
         json_output,
         true,
-    ) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            if !message.is_empty() {
-                style::eprintln_error(&message);
-            }
-            return status;
-        }
-    };
+    ));
     let result: CvmLaunchResult = match operation::extract_operation_result(&op, "CVM update") {
         Ok(value) => value,
         Err(message) => {
@@ -565,22 +549,14 @@ fn terminate(config: &ResolvedConfig, args: CvmTerminateArgs, json_output: bool)
         operation::print_operation(&op, json_output, false);
         return ExitStatus::Ok;
     }
-    let op = match operation::wait_for_operation(
+    let op = try_or_eprintln!(operation::wait_for_operation(
         console_url,
         &session.access_token,
         op,
         Duration::from_secs(u64::from(args.wait_timeout_seconds)),
         json_output,
         true,
-    ) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            if !message.is_empty() {
-                style::eprintln_error(&message);
-            }
-            return status;
-        }
-    };
+    ));
     let cvm: Cvm = match operation::extract_operation_result(&op, "CVM") {
         Ok(value) => value,
         Err(message) => {
@@ -1435,7 +1411,7 @@ fn policy_document(bundle: &PolicyBundle) -> Value {
     app_compose
         .entry("runner".to_string())
         .or_insert_with(|| Value::String("docker-compose".to_string()));
-    let mut policy = json!({
+    let policy = json!({
         "type": "dstack_tdx",
         "allowed_tcb_status": ["UpToDate"],
         "expected_bootchain": bundle.expected_bootchain.clone(),
@@ -1443,15 +1419,6 @@ fn policy_document(bundle: &PolicyBundle) -> Value {
         "app_compose": Value::Object(app_compose),
         "rtmr3_binding": bundle.rtmr3_binding.clone(),
     });
-    if let Some(connect_host) = bundle
-        .extra
-        .get("connect_host")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        policy["connect_host"] = Value::String(connect_host.to_string());
-    }
     policy
 }
 
@@ -1572,18 +1539,7 @@ fn print_terminate_result(cvm: &Cvm, json_output: bool) {
 }
 
 fn validate_cvm_config_value(name: &str, value: &str) -> Result<(), String> {
-    if value.is_empty() || value.len() > 64 {
-        return Err(format!("[usage] {name} must be 1..64 characters"));
-    }
-    if !value
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
-    {
-        return Err(format!(
-            "[usage] {name} may contain only letters, digits, '.', '_', and '-'"
-        ));
-    }
-    Ok(())
+    crate::console::validate_config_value(name, value, 64)
 }
 
 #[cfg(test)]
@@ -1634,18 +1590,12 @@ mod tests {
 
     #[test]
     fn policy_document_maps_policy_bundle_to_atls_policy() {
-        let bundle = test_policy_bundle(
-            "00000000-0000-4000-8000-000000000001",
-            "app-443s.dstack.example.com",
-        );
+        let bundle = test_policy_bundle("00000000-0000-4000-8000-000000000001", &"e".repeat(64));
 
         let policy = policy_document(&bundle);
 
         assert_eq!(policy["type"], "dstack_tdx");
-        assert_eq!(
-            policy["connect_host"],
-            Value::String("app-443s.dstack.example.com".to_string())
-        );
+        assert!(policy.get("connect_host").is_none());
         assert_eq!(
             policy["app_compose"]["docker_compose_file"],
             Value::String("services: {}".to_string())
@@ -1664,12 +1614,14 @@ mod tests {
     fn update_policy_refuses_to_overwrite_changed_local_trust_in_json_mode() {
         let dir = std::env::temp_dir().join(format!("concrete-cvm-policy-test-{}", Uuid::new_v4()));
         let cvm_id = "00000000-0000-4000-8000-000000000001";
-        write_policy_file(&dir, &test_policy_bundle(cvm_id, "old.example.com"), cvm_id)
+        let old_hash = "a".repeat(64);
+        let new_hash = "b".repeat(64);
+        write_policy_file(&dir, &test_policy_bundle(cvm_id, &old_hash), cvm_id)
             .expect("initial policy written");
 
         let err = write_policy_file_after_update(
             &dir,
-            &test_policy_bundle(cvm_id, "new.example.com"),
+            &test_policy_bundle(cvm_id, &new_hash),
             cvm_id,
             true,
         )
@@ -1678,7 +1630,7 @@ mod tests {
         let policy_path = dir.join("cvms").join(format!("{cvm_id}.atls-policy.json"));
         let policy: Value = serde_json::from_slice(&fs::read(policy_path).expect("policy read"))
             .expect("policy parses");
-        assert_eq!(policy["connect_host"], "old.example.com");
+        assert_eq!(policy["os_image_hash"], old_hash);
         assert!(err.contains("local aTLS policy file was not changed"));
         fs::remove_dir_all(dir).expect("temp dir removed");
     }
@@ -1706,7 +1658,7 @@ mod tests {
         fs::remove_dir_all(dir).expect("temp dir removed");
     }
 
-    fn test_policy_bundle(cvm_id: &str, connect_host: &str) -> PolicyBundle {
+    fn test_policy_bundle(cvm_id: &str, os_image_hash: &str) -> PolicyBundle {
         PolicyBundle {
             cvm_id: cvm_id.to_string(),
             compose_template: "services: {}".to_string(),
@@ -1716,7 +1668,7 @@ mod tests {
                 "rtmr1": "c".repeat(64),
                 "rtmr2": "d".repeat(64),
             }),
-            os_image_hash: "e".repeat(64),
+            os_image_hash: os_image_hash.to_string(),
             rtmr3_binding: json!({
                 "cvm_id": cvm_id,
                 "security_cvm_fqdn": "sc.example.com",
@@ -1727,10 +1679,6 @@ mod tests {
             }),
             extra: {
                 let mut extra = Map::new();
-                extra.insert(
-                    "connect_host".to_string(),
-                    Value::String(connect_host.to_string()),
-                );
                 extra.insert(
                     "app_compose".to_string(),
                     json!({

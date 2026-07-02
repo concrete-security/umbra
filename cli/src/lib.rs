@@ -8,7 +8,6 @@ use clap::{CommandFactory, Parser};
 #[macro_use]
 mod cli_macros;
 
-mod atls;
 mod cli;
 mod commands;
 mod config;
