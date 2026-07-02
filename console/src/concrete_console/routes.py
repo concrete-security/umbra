@@ -31,6 +31,7 @@ from concrete_console.db import get_pool
 from concrete_console.errors import api_error
 from concrete_console.idempotency import (
     acquire_idempotency_lock,
+    entity_launch_lock_key,
     lookup_idempotency_response,
     request_body_sha256,
     store_idempotency_response,
@@ -4107,6 +4108,16 @@ async def create_cvm(
             ensure_no_sandbox_env_conflict(profile_rows)
             await ensure_cvm_launch_ssh_keys(conn, body.ssh_key_ids, current_user)
             security_cvm_id = await fetch_live_security_cvm_id(conn, current_user.entity_id)
+            # Serialize launches within the entity so the quota read-then-insert
+            # below is atomic. The idempotency lock only serializes requests that
+            # share a key; two launches with distinct keys would otherwise both
+            # read the pre-insert totals and both commit, busting the dev_cvms
+            # count and disk_gb_total budgets (TOCTOU). Held until commit; the
+            # launch transaction does no external I/O, so the section is brief.
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock($1)",
+                entity_launch_lock_key(str(current_user.entity_id)),
+            )
             await enforce_user_quota(conn, current_user.id, "dev_cvms")
             await enforce_entity_quota(conn, current_user.entity_id, "dev_cvms")
             await enforce_disk_quotas(

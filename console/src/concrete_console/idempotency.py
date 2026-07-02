@@ -23,12 +23,32 @@ def request_body_sha256(body: bytes) -> str:
     return hashlib.sha256(body).hexdigest()
 
 
-def advisory_lock_key(*, credential_id: str, idempotency_key: str, route: str) -> int:
-    digest = hashlib.sha256(f"{credential_id}\0{idempotency_key}\0{route}".encode("utf-8")).digest()
+def _signed_bigint_from_digest(digest: bytes) -> int:
     value = int.from_bytes(digest[:8], byteorder="big", signed=False)
     if value >= 2**63:
         value -= 2**64
     return value
+
+
+def advisory_lock_key(*, credential_id: str, idempotency_key: str, route: str) -> int:
+    digest = hashlib.sha256(f"{credential_id}\0{idempotency_key}\0{route}".encode("utf-8")).digest()
+    return _signed_bigint_from_digest(digest)
+
+
+def entity_launch_lock_key(entity_id: str) -> int:
+    """Transaction-scoped advisory-lock id that serializes Dev CVM launches
+    within one entity.
+
+    Concurrent launches take *distinct* idempotency locks (keyed on their
+    idempotency keys), so the idempotency lock alone does not serialize the
+    quota read-then-insert in ``create_cvm``. Holding this per-entity lock for
+    the launch transaction makes that critical section atomic, closing the
+    TOCTOU on both the ``dev_cvms`` count and the ``disk_gb_total`` budgets.
+    The distinct ``cvm_launch`` namespace keeps it from colliding with an
+    idempotency key derived from the same UUID.
+    """
+    digest = hashlib.sha256(f"cvm_launch\0{entity_id}".encode("utf-8")).digest()
+    return _signed_bigint_from_digest(digest)
 
 
 async def acquire_idempotency_lock(
