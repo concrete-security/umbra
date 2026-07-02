@@ -36,7 +36,7 @@
     if (record?.failure_reason || mismatch) {
       return `<span class="chip chip-warn">${UI.icon("alert", "h-3 w-3")} Attestation drift</span>`;
     }
-    if (record?.verified === true || (expected && seen && verifiedAt)) {
+    if (record?.verified === true || (record?.verified !== false && expected && seen && verifiedAt)) {
       return `<span class="chip chip-ok">${UI.icon("check", "h-3 w-3")} Verified${verifiedAt ? " " + UI.escapeHtml(UI.relTime(verifiedAt)) : ""}</span>`;
     }
     if (expected && seen) {

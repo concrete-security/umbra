@@ -43,7 +43,7 @@
     if (measurement?.failure_reason || mismatch) {
       return `<span class="chip chip-warn">${UI.icon("alert", "h-3 w-3")} Attestation drift</span>`;
     }
-    if (measurement?.verified === true || (expected && seen && verifiedAt)) {
+    if (measurement?.verified === true || (measurement?.verified !== false && expected && seen && verifiedAt)) {
       return `<span class="chip chip-ok">${UI.icon("check", "h-3 w-3")} Verified${verifiedAt ? " " + UI.escapeHtml(UI.relTime(verifiedAt)) : ""}</span>`;
     }
     if (expected && seen) {
