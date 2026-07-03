@@ -98,22 +98,46 @@
     });
   }
 
-  function captureNestedScroll(container) {
-    const positions = {};
-    container?.querySelectorAll("[data-scroll-key]").forEach((el) => {
-      positions[el.dataset.scrollKey] = { top: el.scrollTop, left: el.scrollLeft };
+  function captureScrollState() {
+    const state = {
+      windowX: window.scrollX,
+      windowY: window.scrollY,
+      elements: [],
+      keyed: {},
+    };
+    const seen = new Set();
+    const add = (el) => {
+      if (!el || seen.has(el)) return;
+      seen.add(el);
+      state.elements.push({ el, top: el.scrollTop, left: el.scrollLeft });
+    };
+    add(document.scrollingElement || document.documentElement);
+    add(document.querySelector("main[data-active-panel]"));
+    ["drawer-body", "sc-drawer-body", "entity-drawer-body"].forEach((id) => add(A.el(id)));
+    document.querySelectorAll("[data-scroll-key]").forEach((el) => {
+      state.keyed[el.dataset.scrollKey] = { top: el.scrollTop, left: el.scrollLeft };
     });
-    return positions;
+    return state;
   }
 
-  function restoreNestedScroll(container, positions) {
-    if (!positions) return;
-    container?.querySelectorAll("[data-scroll-key]").forEach((el) => {
-      const pos = positions[el.dataset.scrollKey];
-      if (!pos) return;
-      el.scrollTop = pos.top;
-      el.scrollLeft = pos.left;
-    });
+  function restoreScrollState(state) {
+    if (!state) return;
+    const restore = () => {
+      state.elements.forEach(({ el, top, left }) => {
+        if (!el?.isConnected) return;
+        el.scrollTop = top;
+        el.scrollLeft = left;
+      });
+      document.querySelectorAll("[data-scroll-key]").forEach((el) => {
+        const pos = state.keyed[el.dataset.scrollKey];
+        if (!pos) return;
+        el.scrollTop = pos.top;
+        el.scrollLeft = pos.left;
+      });
+      window.scrollTo(state.windowX, state.windowY);
+    };
+    restore();
+    requestAnimationFrame(restore);
   }
 
   async function refreshActivePanel(opts = {}) {
@@ -124,12 +148,9 @@
       A.setConn("live", "live");
       return;
     }
-    // Passive polls re-render the active panel wholesale; preserve the scroll
-    // position so a background refresh never yanks the page back to the top.
-    const scrollEl = document.querySelector("main[data-active-panel]");
-    const savedScroll = opts.poll && scrollEl ? scrollEl.scrollTop : null;
-    const activePanel = A.el("panel-" + A.activeTab);
-    const nestedScroll = opts.poll ? captureNestedScroll(activePanel) : null;
+    // Passive polls re-render visible panels/drawers wholesale; preserve stable
+    // scroll containers so a background refresh never yanks the user to the top.
+    const scrollState = opts.poll ? captureScrollState() : null;
     A.refreshInFlight = true;
     try {
       A.pollSnapshot = {};
@@ -169,8 +190,7 @@
       A.setConn("err", "error");
     } finally {
       A.refreshInFlight = false;
-      if (savedScroll != null && scrollEl) scrollEl.scrollTop = savedScroll;
-      restoreNestedScroll(activePanel, nestedScroll);
+      restoreScrollState(scrollState);
     }
   }
 
