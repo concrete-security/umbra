@@ -43,13 +43,32 @@ printf 'VERIFY_PLACEHOLDER=compose-smoke\n' >"$TMPDIR/placeholders"
 # Most developer hosts do not have sysbox-runc registered. This local smoke keeps
 # production networking and service entrypoints, but swaps only the sandbox OCI
 # runtime so SSH/tunnel boot can be checked outside a dstack guest.
+# The production compose file must stay byte-identical (its shade app_compose
+# hash feeds CVM measurements), so the test-only listener healthchecks live
+# here: compose >= 2.40 fails `up --wait` for containers without a healthcheck,
+# and waiting on the listeners also keeps the probes below from racing boot.
 cat >"$TMPDIR/compose.override.yml" <<YAML
 services:
   user-sandbox:
     runtime: runc
+  dev-egress-forwarder:
+    healthcheck:
+      disable: false
+      test: ["CMD", "python3", "-c", "import socket; socket.create_connection(('127.0.0.1', 3128), 1).close()"]
+      interval: 500ms
+      timeout: 2s
+      start_period: 3s
+      retries: 10
   dev-tunnel:
     ports:
       - "127.0.0.1:${tunnel_port}:8090"
+    healthcheck:
+      disable: false
+      test: ["CMD", "python3", "-c", "import socket; socket.create_connection(('127.0.0.1', 8090), 1).close()"]
+      interval: 500ms
+      timeout: 2s
+      start_period: 3s
+      retries: 10
 YAML
 
 export DEV_CVM_IMAGE="$IMAGE_TAG"
