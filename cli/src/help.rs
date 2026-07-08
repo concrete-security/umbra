@@ -93,7 +93,15 @@ const GROUPS: &[(&str, &[&str])] = &[
     ("Observability", &["audit", "traffic-logs"]),
     (
         "Local tools",
-        &["alias", "config", "skill", "completions", "version", "help"],
+        &[
+            "alias",
+            "config",
+            "skill",
+            "completions",
+            "version",
+            "update",
+            "help",
+        ],
     ),
     ("Operator", &["admin", "reconcile"]),
 ];
@@ -158,6 +166,14 @@ const EXAMPLES: &[(&str, &[&str])] = &[
     (
         "completions",
         &["concrete completions bash", "concrete completions zsh"],
+    ),
+    (
+        "update",
+        &[
+            "concrete update",
+            "concrete update --check",
+            "concrete update --version 0.4.0",
+        ],
     ),
     // `cvm` group leaves.
     (
@@ -523,9 +539,12 @@ fn child_names(cmd: &Command) -> Vec<String> {
 }
 
 /// An argument that belongs to the command itself: not a propagated global flag,
-/// and not the auto help/version actions.
+/// not the auto help/version actions, and not `hide = true` (internal flags such
+/// as `update --refresh-cache` stay out of synopses and option lists, matching
+/// clap's own rendering of hidden args).
 fn is_own(arg: &Arg) -> bool {
     !arg.is_global_set()
+        && !arg.is_hide_set()
         && !matches!(
             arg.get_action(),
             ArgAction::Help | ArgAction::HelpShort | ArgAction::HelpLong | ArgAction::Version
@@ -1332,6 +1351,21 @@ mod tests {
         assert!(
             help.lines().any(|line| line.starts_with("Examples:")),
             "`security-cvm show --help` is missing an Examples section"
+        );
+    }
+
+    /// A `hide = true` arg (the internal `update --refresh-cache`) must stay out
+    /// of the synopsis and Options block, while its visible siblings render.
+    #[test]
+    fn test_help_level_3_hidden_args_stay_hidden_success() {
+        let help = helper_render_help(&["update"]);
+        assert!(
+            help.contains("--check"),
+            "`update --help` should document --check"
+        );
+        assert!(
+            !help.contains("--refresh-cache"),
+            "`update --help` must not leak the hidden --refresh-cache flag"
         );
     }
 }

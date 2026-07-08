@@ -132,6 +132,16 @@ fn config_entries(config: &ResolvedConfig) -> Vec<ConfigEntry> {
             Some(config.log_level.clone()),
             config.log_level_source,
         ),
+        string_entry(
+            "install_base_url",
+            Some(config.install_base_url.clone()),
+            config.install_base_url_source,
+        ),
+        bool_entry(
+            "no_update_check",
+            config.no_update_check,
+            config.no_update_check_source,
+        ),
     ]
 }
 

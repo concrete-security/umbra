@@ -69,6 +69,19 @@ pub fn run() -> ExitCode {
             && config.output != config::OutputFormat::Json
             && io::stdout().is_terminal(),
     );
+    // Passive new-version check: refresh the cached latest-version probe in a
+    // detached background process when stale (never blocks on the network),
+    // and print a one-line stderr notice after the command when the cache
+    // shows a newer release. `update` handles its own probe; `completions`
+    // output is eval'd by shell init and `tunnel` runs as an SSH
+    // ProxyCommand, so both stay notice-free.
+    let update_notice_eligible = !matches!(
+        args.command,
+        cli::Command::Update(_) | cli::Command::Completions { .. } | cli::Command::Tunnel { .. }
+    );
+    if update_notice_eligible {
+        commands::update::maybe_spawn_background_refresh(&config);
+    }
     let status = match args.command {
         cli::Command::Admin(command) => commands::admin::run(command, &config, json_output),
         cli::Command::Alias(command) => commands::alias::run(command, &config, json_output),
@@ -114,9 +127,15 @@ pub fn run() -> ExitCode {
             commands::traffic_logs::run(traffic_args, &config, json_output)
         }
         cli::Command::Tunnel { target } => commands::tunnel::run(&target, &config),
+        cli::Command::Update(update_args) => {
+            commands::update::run(update_args, &config, json_output)
+        }
         cli::Command::User(command) => commands::user::run(command, &config, json_output),
         cli::Command::Version => commands::version::run(json_output),
     };
+    if update_notice_eligible {
+        commands::update::maybe_print_update_notice(&config);
+    }
     ExitCode::from(status)
 }
 

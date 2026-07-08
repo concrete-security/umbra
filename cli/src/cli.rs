@@ -156,6 +156,10 @@ pub enum Command {
         target: String,
     },
 
+    /// Update the concrete binary to the latest published release.
+    #[command(visible_alias = "upgrade")]
+    Update(UpdateArgs),
+
     /// Manage users and user permissions.
     #[command(subcommand)]
     User(UserCommand),
@@ -940,6 +944,21 @@ pub enum SkillCommand {
 }
 
 #[derive(clap::Args, Debug)]
+pub struct UpdateArgs {
+    /// Check whether a newer release is published without installing it.
+    #[arg(long, conflicts_with = "version")]
+    pub check: bool,
+
+    /// Install this published version instead of the latest release.
+    #[arg(long, value_name = "VERSION")]
+    pub version: Option<String>,
+
+    /// Internal: refresh the cached latest-version probe and exit.
+    #[arg(long, hide = true, conflicts_with_all = ["check", "version"])]
+    pub refresh_cache: bool,
+}
+
+#[derive(clap::Args, Debug)]
 pub struct SkillInstallArgs {
     /// Agents to target, comma-separated (claude, codex). Default: all detected agents.
     #[arg(long)]
@@ -1212,5 +1231,35 @@ mod tests {
     fn cvm_flag_is_not_global() {
         // --cvm is scoped to CVM-targeting verbs, so a non-targeting command rejects it.
         assert!(Cli::try_parse_from(["concrete", "status", "--cvm", "cvm-1"]).is_err());
+    }
+
+    #[test]
+    fn update_verb_parses_flags_and_alias() {
+        match Cli::try_parse_from(["concrete", "update"]).unwrap().command {
+            Command::Update(args) => {
+                assert!(!args.check);
+                assert_eq!(args.version, None);
+                assert!(!args.refresh_cache);
+            }
+            other => panic!("expected update, got {other:?}"),
+        }
+        match Cli::try_parse_from(["concrete", "upgrade", "--check"])
+            .unwrap()
+            .command
+        {
+            Command::Update(args) => assert!(args.check),
+            other => panic!("expected update via upgrade alias, got {other:?}"),
+        }
+        match Cli::try_parse_from(["concrete", "update", "--version", "0.4.0"])
+            .unwrap()
+            .command
+        {
+            Command::Update(args) => assert_eq!(args.version.as_deref(), Some("0.4.0")),
+            other => panic!("expected update, got {other:?}"),
+        }
+        // --check asks about the latest release; a pinned --version conflicts.
+        assert!(
+            Cli::try_parse_from(["concrete", "update", "--check", "--version", "0.4.0"]).is_err()
+        );
     }
 }

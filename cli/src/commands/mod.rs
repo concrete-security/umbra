@@ -17,6 +17,7 @@ pub mod ssh;
 pub mod status;
 pub mod traffic_logs;
 pub mod tunnel;
+pub mod update;
 pub mod user;
 pub mod version;
 

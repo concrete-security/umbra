@@ -8,6 +8,11 @@ use serde::Deserialize;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
+/// Default base URL of the install service that hosts published CLI release
+/// artifacts (`/releases/concrete-cli/...`). Used by `concrete update` and the
+/// passive new-version check.
+pub const DEFAULT_INSTALL_BASE_URL: &str = "https://install.concrete-security.com";
+
 #[derive(Debug, Default, Deserialize)]
 struct ConfigFile {
     console_url: Option<String>,
@@ -26,6 +31,8 @@ struct ConfigFile {
     no_color: Option<bool>,
     log_level: Option<String>,
     skill_auto_install: Option<String>,
+    install_base_url: Option<String>,
+    no_update_check: Option<bool>,
 }
 
 #[derive(Debug, Default)]
@@ -80,6 +87,10 @@ pub struct ResolvedConfig {
     /// Whether `auth login` should install the agent skill: `Some(true)` opted
     /// in, `Some(false)` opted out (or `CONCRETE_NO_SKILL`), `None` not asked.
     pub skill_auto_install: Option<bool>,
+    pub install_base_url: String,
+    pub install_base_url_source: ConfigSource,
+    pub no_update_check: bool,
+    pub no_update_check_source: ConfigSource,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -330,6 +341,28 @@ impl ResolvedConfig {
             file.skill_auto_install.as_deref().and_then(parse_bool)
         };
 
+        let (install_base_url, install_base_url_source) = if let Some(value) =
+            env::var("CONCRETE_INSTALL_BASE_URL")
+                .ok()
+                .filter(|value| !value.is_empty())
+        {
+            (value, ConfigSource::Env)
+        } else if let Some(value) = file.install_base_url {
+            (value, ConfigSource::File)
+        } else {
+            (DEFAULT_INSTALL_BASE_URL.to_string(), ConfigSource::Default)
+        };
+        let install_base_url = install_base_url.trim_end_matches('/').to_string();
+
+        let (no_update_check, no_update_check_source) =
+            if let Some(value) = env_bool("CONCRETE_NO_UPDATE_CHECK") {
+                (value, ConfigSource::Env)
+            } else if let Some(value) = file.no_update_check {
+                (value, ConfigSource::File)
+            } else {
+                (false, ConfigSource::Default)
+            };
+
         Self {
             config_dir,
             config_dir_source,
@@ -365,6 +398,10 @@ impl ResolvedConfig {
             log_level,
             log_level_source,
             skill_auto_install,
+            install_base_url,
+            install_base_url_source,
+            no_update_check,
+            no_update_check_source,
         }
     }
 
