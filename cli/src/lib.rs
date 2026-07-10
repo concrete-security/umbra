@@ -103,6 +103,7 @@ pub fn run() -> ExitCode {
         cli::Command::Reconcile(reconcile_args) => {
             commands::reconcile::run(reconcile_args, &config, json_output)
         }
+        cli::Command::Secret(command) => commands::secret::run(command, &config, json_output),
         cli::Command::SecurityCvm(command) => {
             commands::security_cvm::run(command, &config, json_output)
         }

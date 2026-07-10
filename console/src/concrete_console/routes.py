@@ -31,6 +31,7 @@ from concrete_console.db import get_pool
 from concrete_console.errors import api_error
 from concrete_console.idempotency import (
     acquire_idempotency_lock,
+    advisory_lock_key,
     entity_launch_lock_key,
     lookup_idempotency_response,
     request_body_sha256,
@@ -44,7 +45,14 @@ from concrete_console.instance_types import (
 )
 from concrete_console.jwt_keys import get_jwt_manager
 from concrete_console.log_config import logger
-from concrete_console.profile_secrets import encrypt_profile_secret_value, split_profile_policy_secret_values
+from concrete_console.profile_secrets import (
+    encrypt_profile_secret_value,
+    encrypt_user_secret_value,
+    secret_hosts_cover,
+    split_profile_policy_secret_values,
+    user_secret_references,
+    valid_secret_host_pattern,
+)
 from concrete_console.resources import (
     audit_event_resource,
     cvm_resource,
@@ -60,6 +68,7 @@ from concrete_console.resources import (
     ssh_key_resource,
     timestamp,
     traffic_log_resource,
+    user_secret_resource,
     TRAFFIC_BLOCK_CODE,
     TRAFFIC_TIMESERIES_DEFAULT_BUCKETS,
     TRAFFIC_TIMESERIES_MAX_BUCKETS,
@@ -108,7 +117,7 @@ POLICY_DESTINATION_FIELDS = {
 POLICY_DESTINATION_EXTENSION_FIELDS = {"body_assertions", "websocket_assertions", "traffic_log_attributes"}
 POLICY_DESTINATION_MATCH_FIELDS = {"scheme", "host", "ports", "methods", "path_prefixes"}
 POLICY_SECRET_PATTERN_FIELDS = {"id", "name", "pattern", "scan_headers", "scan_body"}
-POLICY_SECRET_INJECTION_FIELDS = {"id", "match", "type", "header", "value", "value_template"}
+POLICY_SECRET_INJECTION_FIELDS = {"id", "match", "type", "header", "value", "value_from", "value_template"}
 POLICY_BODY_ASSERTION_KINDS = {"form", "json"}
 POLICY_BODY_ASSERTION_FIELDS = {"kind", "field", "allow_values"}
 POLICY_WEBSOCKET_ASSERTION_FIELDS = {"direction", "when", "require", "on_violation", "on_drop_emit"}
@@ -117,7 +126,6 @@ POLICY_WEBSOCKET_ON_VIOLATIONS = {"drop"}
 POLICY_EMIT_TEMPLATE_RE = re.compile(r"^\{(/[^{}]*)\}$")
 POLICY_TRAFFIC_LOG_ATTR_FIELDS = {"name", "kind", "field"}
 POLICY_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,100}$")
-POLICY_DNS_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 POLICY_HEADER_RE = re.compile(r"^[a-z][a-z0-9-]{0,126}$")
 POLICY_POINTER_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 POLICY_TRAFFIC_LOG_ATTR_NAME_RE = re.compile(r"^[a-z_]{1,32}$")
@@ -145,6 +153,10 @@ POLICY_MAX_POINTER_SEGMENTS_JSON = 4
 POLICY_MAX_ALLOW_VALUES = 256
 POLICY_MAX_ALLOW_VALUE_LEN = 256
 POLICY_MAX_SECRET_PATTERN_LEN = 4096
+POLICY_MAX_RENDERED_SECRET_LEN = 8192
+USER_SECRET_VALUE_MAX_LEN = 4096
+USER_SECRET_ALLOWED_HOSTS_MAX = 16
+USER_SECRET_MAX_COUNT = 64
 IDEMPOTENCY_KEY_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 CVM_CONFIG_VALUE_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 SECURITY_CVM_INSTANCE_TYPE_RE = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
@@ -442,6 +454,33 @@ class SSHKeyCreate(BaseModel):
         return value.strip()
 
 
+class UserSecretPut(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    value: str = Field(min_length=1, max_length=USER_SECRET_VALUE_MAX_LEN)
+    allowed_hosts: list[str] = Field(min_length=1, max_length=USER_SECRET_ALLOWED_HOSTS_MAX)
+
+    @field_validator("value")
+    @classmethod
+    def header_safe(cls, value: str) -> str:
+        # The value is injected verbatim as an HTTP header value by the SC.
+        if any(char in value for char in "\r\n\x00"):
+            raise ValueError("value must not contain CR, LF, or NUL")
+        return value
+
+    @field_validator("allowed_hosts")
+    @classmethod
+    def valid_host_patterns(cls, value: list[str]) -> list[str]:
+        seen: set[str] = set()
+        for host in value:
+            if not valid_secret_host_pattern(host):
+                raise ValueError("allowed_hosts entries must be a host, *.suffix wildcard, or *")
+            if host in seen:
+                raise ValueError("allowed_hosts entries must be unique")
+            seen.add(host)
+        return value
+
+
 def require_idempotency_key(value: str | None) -> str:
     if not value:
         raise api_error(
@@ -713,19 +752,7 @@ def _validate_path_prefixes(raw: Any, field: str, errors: list[dict[str, Any]]) 
 
 
 def _valid_policy_host(host: str) -> bool:
-    if host == "*":
-        return True
-    if host != host.lower() or host.endswith(".") or len(host) > 253:
-        return False
-    if host.startswith("*."):
-        suffix = host[2:]
-        return "." in suffix and _valid_dns_name(suffix)
-    return _valid_dns_name(host)
-
-
-def _valid_dns_name(host: str) -> bool:
-    labels = host.split(".")
-    return len(labels) >= 2 and all(POLICY_DNS_LABEL_RE.fullmatch(label) for label in labels)
+    return valid_secret_host_pattern(host)
 
 
 def _valid_policy_path(path: str) -> bool:
@@ -817,14 +844,31 @@ def _validate_secret_injections(raw: Any, errors: list[dict[str, Any]]) -> None:
             or header in POLICY_HOP_BY_HOP_HEADERS
         ):
             errors.append({"field": f"{field}.header", "type": "invalid_header"})
+        has_value = "value" in item
+        has_value_from = "value_from" in item
+        if has_value == has_value_from:
+            errors.append({"field": f"{field}.value", "type": "value_xor_value_from"})
         value = item.get("value")
-        if not isinstance(value, str):
+        if has_value and not isinstance(value, str):
             errors.append({"field": f"{field}.value", "type": "string_required"})
-            value = ""
+        if has_value_from:
+            value_from = item.get("value_from")
+            if (
+                not isinstance(value_from, dict)
+                or set(value_from) != {"user_secret"}
+                or not isinstance(value_from.get("user_secret"), str)
+                or not POLICY_ID_RE.fullmatch(value_from["user_secret"])
+            ):
+                errors.append({"field": f"{field}.value_from", "type": "invalid_value_from"})
         template = item.get("value_template")
         if not isinstance(template, str) or template.count("${secret}") != 1:
             errors.append({"field": f"{field}.value_template", "type": "invalid_template"})
-        elif len(template.replace("${secret}", value)) > 8192:
+        elif has_value_from:
+            # The user's value is bounded separately, so bound the template
+            # residual to keep every possible render within the SC's cap.
+            if len(template.replace("${secret}", "")) > POLICY_MAX_RENDERED_SECRET_LEN - USER_SECRET_VALUE_MAX_LEN:
+                errors.append({"field": f"{field}.value_template", "type": "rendered_value_too_long"})
+        elif len(template.replace("${secret}", value if isinstance(value, str) else "")) > POLICY_MAX_RENDERED_SECRET_LEN:
             errors.append({"field": f"{field}.value_template", "type": "rendered_value_too_long"})
 
 
@@ -1919,6 +1963,136 @@ async def delete_ssh_key(
                 target_type="ssh_key",
                 target_id=key_id,
                 before={"label": row["label"], "fingerprint": row["fingerprint"]},
+            )
+    return Response(status_code=204)
+
+
+USER_SECRET_LOCK_ROUTE = "PUT /me/secrets"
+
+
+@router.put("/me/secrets/{name}")
+async def put_user_secret(
+    name: str,
+    body: UserSecretPut,
+    current_user: CurrentUser = Depends(require_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> dict:
+    if not POLICY_ID_RE.fullmatch(name):
+        raise api_error(
+            422,
+            "VALIDATION_ERROR",
+            "invalid secret name",
+            {"errors": [{"field": "name", "type": "invalid_name"}]},
+        )
+    ciphertext = encrypt_user_secret_value(user_id=current_user.id, name=name, value=body.value)
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            # Serialize per-user writes so the count cap cannot be raced.
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock($1)",
+                advisory_lock_key(
+                    credential_id=str(current_user.id),
+                    idempotency_key="user-secrets",
+                    route=USER_SECRET_LOCK_ROUTE,
+                ),
+            )
+            exists = await conn.fetchval(
+                "SELECT 1 FROM user_secret_material WHERE user_id = $1 AND name = $2",
+                current_user.id,
+                name,
+            )
+            if exists is None:
+                current_count = await conn.fetchval(
+                    "SELECT count(*) FROM user_secret_material WHERE user_id = $1",
+                    current_user.id,
+                )
+                if current_count >= USER_SECRET_MAX_COUNT:
+                    raise api_error(
+                        403,
+                        "QUOTA_EXCEEDED",
+                        "user secret limit exceeded",
+                        {
+                            "resource": "user_secrets",
+                            "scope": "user",
+                            "limit": USER_SECRET_MAX_COUNT,
+                            "current_usage": current_count,
+                        },
+                    )
+            row = await conn.fetchrow(
+                """
+                INSERT INTO user_secret_material (user_id, name, ciphertext, allowed_hosts)
+                VALUES ($1, $2, $3, $4::jsonb)
+                ON CONFLICT (user_id, name) DO UPDATE
+                SET ciphertext = EXCLUDED.ciphertext,
+                    allowed_hosts = EXCLUDED.allowed_hosts,
+                    updated_at = now()
+                RETURNING name, allowed_hosts, created_at, updated_at
+                """,
+                current_user.id,
+                name,
+                ciphertext,
+                json.dumps(body.allowed_hosts),
+            )
+            await insert_audit_event(
+                conn,
+                entity_id=current_user.entity_id,
+                actor_id=current_user.id,
+                actor_email=current_user.email,
+                action="USER_SECRET_SET",
+                target_type="user_secret",
+                target_id=f"{current_user.id}:{name}",
+                after={"name": name, "allowed_hosts": body.allowed_hosts},
+            )
+            return user_secret_resource(row)
+
+
+@router.get("/me/secrets")
+async def list_user_secrets(
+    current_user: CurrentUser = Depends(require_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> dict:
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT name, allowed_hosts, created_at, updated_at
+            FROM user_secret_material
+            WHERE user_id = $1
+            ORDER BY name
+            """,
+            current_user.id,
+        )
+    return list_page([user_secret_resource(row) for row in rows])
+
+
+@router.delete("/me/secrets/{name}", status_code=204)
+async def delete_user_secret(
+    name: str,
+    current_user: CurrentUser = Depends(require_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> Response:
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """
+                DELETE FROM user_secret_material
+                WHERE user_id = $1
+                  AND name = $2
+                RETURNING name, allowed_hosts
+                """,
+                current_user.id,
+                name,
+            )
+            if row is None:
+                raise api_error(404, "NOT_FOUND", "resource not found")
+            await insert_audit_event(
+                conn,
+                entity_id=current_user.entity_id,
+                actor_id=current_user.id,
+                actor_email=current_user.email,
+                action="USER_SECRET_DELETED",
+                target_type="user_secret",
+                target_id=f"{current_user.id}:{name}",
+                before={"name": name, "allowed_hosts": json_payload(row["allowed_hosts"])},
             )
     return Response(status_code=204)
 
@@ -3434,6 +3608,7 @@ async def erase_user(
             )
             await conn.execute("DELETE FROM oauth_identities WHERE user_id = $1", user_id)
             await conn.execute("DELETE FROM ssh_keys WHERE user_id = $1", user_id)
+            await conn.execute("DELETE FROM user_secret_material WHERE user_id = $1", user_id)
             await conn.execute("DELETE FROM user_permissions WHERE user_id = $1", user_id)
             await conn.execute("DELETE FROM profile_users WHERE user_id = $1", user_id)
             await conn.execute("DELETE FROM refresh_tokens WHERE user_id = $1", user_id)
@@ -4196,6 +4371,12 @@ async def create_cvm(
             resolved = resolve_cvm_launch_config(body)
             profile_rows = await fetch_cvm_launch_profiles(conn, body.profile_ids, current_user)
             await ensure_cvm_launch_profile_memberships(conn, body.profile_ids, current_user)
+            await ensure_user_secret_references(
+                conn,
+                profile_rows=profile_rows,
+                user_id=current_user.id,
+                context="launcher",
+            )
             ensure_no_sandbox_env_conflict(profile_rows)
             await ensure_cvm_launch_ssh_keys(conn, body.ssh_key_ids, current_user)
             security_cvm_id = await fetch_live_security_cvm_id(conn, current_user.entity_id)
@@ -4709,6 +4890,9 @@ async def attach_cvm_profile(
             )
             if profile is None:
                 raise api_error(404, "NOT_FOUND", "resource not found")
+            # Membership is evaluated against the CVM owner, not the caller:
+            # the owner's identity is what the merged policy (and any
+            # value_from secret resolution) binds to.
             membership = await conn.fetchval(
                 """
                 SELECT 1
@@ -4718,15 +4902,26 @@ async def attach_cvm_profile(
                 LIMIT 1
                 """,
                 body.profile_id,
-                current_user.id,
+                cvm["owner_id"],
             )
             if membership is None:
                 raise api_error(
                     403,
                     "FORBIDDEN",
                     "profile membership is required",
-                    {"required": "profile_member", "profile_id": str(body.profile_id)},
+                    {
+                        "required": "profile_member",
+                        "profile_id": str(body.profile_id),
+                        "member": "cvm_owner",
+                        "owner_id": str(cvm["owner_id"]),
+                    },
                 )
+            await ensure_user_secret_references(
+                conn,
+                profile_rows=[profile],
+                user_id=cvm["owner_id"],
+                context="cvm_owner",
+            )
             existing_policies = await conn.fetch(
                 """
                 SELECT ep.id AS profile_id, ep.policy
@@ -4765,6 +4960,7 @@ async def attach_cvm_profile(
                         "profile_id": str(profile["profile_id"]),
                         "profile_name": profile["name"],
                         "policy_version": cvm["policy_version"] + 1,
+                        "owner_id": str(cvm["owner_id"]),
                     },
                 )
     return await fetch_visible_cvm_resource(pool, cvm_id=cvm_id, current_user=current_user, response=response)
@@ -4833,7 +5029,7 @@ async def lock_cvm_for_policy_mutation(
 ) -> asyncpg.Record:
     row = await conn.fetchrow(
         """
-        SELECT id, entity_id, state::text AS state, policy_version, updated_at
+        SELECT id, entity_id, owner_id, state::text AS state, policy_version, updated_at
         FROM cvms
         WHERE id = $1
           AND entity_id = $2
@@ -5155,6 +5351,65 @@ async def ensure_cvm_launch_profile_memberships(
                 "profile membership is required",
                 {"required": "profile_member", "profile_id": str(profile_id)},
             )
+
+
+async def ensure_user_secret_references(
+    conn: asyncpg.Connection,
+    *,
+    profile_rows: list[Any],
+    user_id: UUID,
+    context: str,
+) -> None:
+    """Require every `value_from` reference to resolve for ``user_id``.
+
+    ``context`` names whose secrets are in scope ("launcher" or "cvm_owner").
+    Error details carry identifiers only — never secret values, and never the
+    owner's allowed_hosts (callers should not learn another user's grants).
+    """
+    references: list[tuple[Any, dict[str, Any]]] = []
+    for row in profile_rows:
+        policy = json_payload(row["policy"])
+        for reference in user_secret_references(policy):
+            references.append((row["profile_id"], reference))
+    if not references:
+        return
+    names = sorted({reference["secret_name"] for _, reference in references})
+    rows = await conn.fetch(
+        """
+        SELECT name, allowed_hosts
+        FROM user_secret_material
+        WHERE user_id = $1
+          AND name = ANY($2::text[])
+        """,
+        user_id,
+        names,
+    )
+    secrets = {row["name"]: json_payload(row["allowed_hosts"]) for row in rows}
+    errors: list[dict[str, Any]] = []
+    for profile_id, reference in references:
+        base = {
+            "field": "policy.secret_injections",
+            "profile_id": str(profile_id),
+            "injection_id": reference["injection_id"],
+            "secret_name": reference["secret_name"],
+        }
+        if reference["secret_name"] not in secrets:
+            errors.append({**base, "type": "user_secret_missing"})
+            continue
+        if reference["match_scheme"] != "https":
+            errors.append(
+                {**base, "type": "user_secret_scheme_not_https", "match_scheme": reference["match_scheme"]}
+            )
+            continue
+        if not secret_hosts_cover(secrets[reference["secret_name"]], reference["match_host"]):
+            errors.append({**base, "type": "user_secret_host_not_allowed", "match_host": reference["match_host"]})
+    if errors:
+        raise api_error(
+            422,
+            "VALIDATION_ERROR",
+            "profiles reference user secrets that are missing or not host-authorized",
+            {"errors": errors, "member": context, "user_id": str(user_id)},
+        )
 
 
 async def ensure_cvm_launch_ssh_keys(

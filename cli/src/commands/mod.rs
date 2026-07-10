@@ -10,6 +10,7 @@ pub(crate) mod operation_debug;
 pub mod profile;
 pub mod quota;
 pub mod reconcile;
+pub mod secret;
 pub mod security_cvm;
 pub mod skill;
 pub mod ssh;

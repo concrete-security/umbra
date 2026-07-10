@@ -104,6 +104,16 @@ def ssh_key_resource(row: Any) -> dict[str, Any]:
     }
 
 
+def user_secret_resource(row: Any) -> dict[str, Any]:
+    row = dict(row)
+    return {
+        "name": row["name"],
+        "allowed_hosts": json_payload(row["allowed_hosts"]),
+        "created_at": timestamp(row["created_at"]),
+        "updated_at": timestamp(row["updated_at"]),
+    }
+
+
 def entity_quota_resource(row: Any) -> dict[str, Any]:
     row = dict(row)
     return {

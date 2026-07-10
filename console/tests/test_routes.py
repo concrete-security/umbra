@@ -1,4 +1,5 @@
 import asyncio
+import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from uuid import UUID
@@ -20,7 +21,11 @@ from concrete_console.routes import (
     CvmStateFilter,
     SECURITY_CVM_PROVISION_REDACTION,
     SecurityCVMCreate,
+    UserSecretPut,
     UserStatusFilter,
+    delete_user_secret,
+    list_user_secrets,
+    put_user_secret,
     apply_provider_cvm_lifecycle_action,
     cvm_etag,
     cvm_list_state_clauses,
@@ -60,7 +65,7 @@ from concrete_console.routes import (
     validate_reconcile_dependencies,
 )
 from concrete_console.dns_provider.cloudflare import CloudflareError
-from concrete_console.profile_secrets import encrypt_profile_secret_value
+from concrete_console.profile_secrets import encrypt_profile_secret_value, encrypt_user_secret_value
 from concrete_console.tee_provider.phala import PhalaError
 from concrete_console.routes_internal import (
     TrafficLogBatch,
@@ -1561,6 +1566,169 @@ def test_validate_profile_policy_rejects_duplicate_secret_injection_ids() -> Non
     assert any(error["field"] == "policy.secret_injections.1.id" and error["type"] == "duplicate_id" for error in errors)
 
 
+def _secret_injection_policy(**overrides):
+    injection = {
+        "id": "slack-bearer",
+        "match": {
+            "scheme": "https",
+            "host": "slack.com",
+            "ports": [443],
+            "methods": ["POST"],
+            "path_prefixes": ["/api/"],
+        },
+        "type": "request_header",
+        "header": "authorization",
+        "value_template": "Bearer ${secret}",
+    }
+    injection.update(overrides)
+    return {"secret_injections": [injection]}
+
+
+def _profile_policy_errors(policy) -> list[dict]:
+    with pytest.raises(HTTPException) as exc:
+        validate_profile_policy(policy)
+    return exc.value.detail["error"]["details"]["errors"]
+
+
+def test_validate_profile_policy_accepts_value_from_injection() -> None:
+    validate_profile_policy(_secret_injection_policy(value_from={"user_secret": "slack-user-token"}))
+
+
+def test_validate_profile_policy_rejects_value_and_value_from_together() -> None:
+    errors = _profile_policy_errors(
+        _secret_injection_policy(value="xoxb-real", value_from={"user_secret": "slack-user-token"})
+    )
+    assert any(
+        error["field"] == "policy.secret_injections.0.value" and error["type"] == "value_xor_value_from"
+        for error in errors
+    )
+
+
+def test_validate_profile_policy_rejects_injection_without_value_source() -> None:
+    errors = _profile_policy_errors(_secret_injection_policy())
+    assert any(
+        error["field"] == "policy.secret_injections.0.value" and error["type"] == "value_xor_value_from"
+        for error in errors
+    )
+
+
+@pytest.mark.parametrize(
+    "value_from",
+    [
+        "slack-user-token",
+        {},
+        {"user_secret": "slack-user-token", "extra": True},
+        {"user_secret": 7},
+        {"user_secret": "bad name!"},
+        {"user_secret": "x" * 101},
+    ],
+)
+def test_validate_profile_policy_rejects_malformed_value_from(value_from) -> None:
+    errors = _profile_policy_errors(_secret_injection_policy(value_from=value_from))
+    assert any(
+        error["field"] == "policy.secret_injections.0.value_from" and error["type"] == "invalid_value_from"
+        for error in errors
+    )
+
+
+def test_validate_profile_policy_bounds_value_from_template_residual() -> None:
+    from concrete_console.routes import POLICY_MAX_RENDERED_SECRET_LEN, USER_SECRET_VALUE_MAX_LEN
+
+    # Residual = the template with "${secret}" removed. For value_from entries the
+    # value is unknown at authoring time, so the residual is capped so that even a
+    # maximal user-secret value renders within the SC's cap. Derive the boundary
+    # from the constants so a value-cap change fails loudly here instead of
+    # silently letting a too-long render through.
+    residual_cap = POLICY_MAX_RENDERED_SECRET_LEN - USER_SECRET_VALUE_MAX_LEN
+    validate_profile_policy(
+        _secret_injection_policy(
+            value_from={"user_secret": "slack-user-token"},
+            value_template="${secret}" + "x" * residual_cap,
+        )
+    )
+    errors = _profile_policy_errors(
+        _secret_injection_policy(
+            value_from={"user_secret": "slack-user-token"},
+            value_template="${secret}" + "x" * (residual_cap + 1),
+        )
+    )
+    assert any(
+        error["field"] == "policy.secret_injections.0.value_template"
+        and error["type"] == "rendered_value_too_long"
+        for error in errors
+    )
+
+
+def test_value_from_render_caps_line_up_with_sc_rendered_cap(monkeypatch) -> None:
+    """The three-constant coupling flagged in review: the user-secret value cap
+    plus the value_from template-residual cap must equal the SC's rendered-header
+    cap (a literal 8192 in cvms/security/.../policy.py `_parse_secret_injections`).
+    If they drift, a secret that passed `secret set` and a profile that passed
+    validation could be silently omitted at materialization after a green launch,
+    or a policy could reach the SC that deny_alls the CVM. Pins the boundary as
+    *inclusive*: a maximal value + maximal residual renders to exactly the cap and
+    is NOT omitted."""
+    monkeypatch.setenv("SECRET_INJECTION_KEK_B64", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+    from concrete_console.profile_secrets import (
+        SECRET_INJECTION_RENDERED_MAX_LEN,
+        expand_policy_secret_values_for_owner,
+    )
+    from concrete_console.routes import POLICY_MAX_RENDERED_SECRET_LEN, USER_SECRET_VALUE_MAX_LEN
+
+    # The console validator cap and the materializer cap are the same number, and
+    # it is the SC's literal 8192. (The SC value is not importable here; if it ever
+    # changes, this literal must change with it.)
+    assert POLICY_MAX_RENDERED_SECRET_LEN == SECRET_INJECTION_RENDERED_MAX_LEN == 8192
+
+    residual_cap = POLICY_MAX_RENDERED_SECRET_LEN - USER_SECRET_VALUE_MAX_LEN
+    value = "z" * USER_SECRET_VALUE_MAX_LEN
+    template = "t" * residual_cap + "${secret}"
+    owner_secrets = {
+        "big": {
+            "ciphertext": encrypt_user_secret_value(user_id="user-a", name="big", value=value),
+            "allowed_hosts": ["api.example.com"],
+        }
+    }
+    omitted: list = []
+
+    expanded = expand_policy_secret_values_for_owner(
+        profile_id="p",
+        policy={
+            "secret_injections": [
+                {
+                    "id": "big",
+                    "match": {"scheme": "https", "host": "api.example.com"},
+                    "type": "request_header",
+                    "header": "authorization",
+                    "value_from": {"user_secret": "big"},
+                    "value_template": template,
+                }
+            ]
+        },
+        secret_material={},
+        owner_id="user-a",
+        owner_secrets=owner_secrets,
+        on_omit=lambda *args: omitted.append(args),
+    )
+
+    assert omitted == []
+    injections = expanded["secret_injections"]
+    assert len(injections) == 1
+    rendered = template.replace("${secret}", injections[0]["value"])
+    assert len(rendered) == POLICY_MAX_RENDERED_SECRET_LEN  # exactly at the cap, inclusive
+
+
+def test_validate_profile_policy_still_bounds_inline_rendered_value() -> None:
+    errors = _profile_policy_errors(
+        _secret_injection_policy(value="v" * 5000, value_template="${secret}" + "x" * 5000)
+    )
+    assert any(
+        error["field"] == "policy.secret_injections.0.value_template"
+        and error["type"] == "rendered_value_too_long"
+        for error in errors
+    )
+
+
 def test_replace_profile_secret_material_encrypts_values(monkeypatch) -> None:
     class FakeConn:
         def __init__(self) -> None:
@@ -2174,6 +2342,85 @@ def test_merge_profile_policies_field_typed(monkeypatch) -> None:
     }
 
 
+def _value_from_profile_rows():
+    return [
+        {
+            "profile_id": "profile-slack",
+            "policy": {
+                "secret_injections": [
+                    {
+                        "id": "slack-token",
+                        "match": {"scheme": "https", "host": "api.slack.com"},
+                        "type": "request_header",
+                        "header": "authorization",
+                        "value_from": {"user_secret": "slack-user-token"},
+                        "value_template": "Bearer ${secret}",
+                    }
+                ]
+            },
+        }
+    ]
+
+
+def _owner_secret_material(owner_id: str, value: str):
+    return {
+        "slack-user-token": {
+            "ciphertext": encrypt_user_secret_value(
+                user_id=owner_id, name="slack-user-token", value=value
+            ),
+            "allowed_hosts": ["api.slack.com"],
+        }
+    }
+
+
+def test_merge_profile_policies_resolves_value_from_per_owner(monkeypatch) -> None:
+    monkeypatch.setenv("SECRET_INJECTION_KEK_B64", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+
+    merged_alice = merge_profile_policies(
+        _value_from_profile_rows(),
+        owner_id="alice",
+        owner_secrets=_owner_secret_material("alice", "xoxp-alice"),
+        cvm_id="cvm-a",
+    )
+    merged_bob = merge_profile_policies(
+        _value_from_profile_rows(),
+        owner_id="bob",
+        owner_secrets=_owner_secret_material("bob", "xoxp-bob"),
+        cvm_id="cvm-b",
+    )
+
+    assert merged_alice["secret_injections"][0]["value"] == "xoxp-alice"
+    assert merged_bob["secret_injections"][0]["value"] == "xoxp-bob"
+    assert "value_from" not in merged_alice["secret_injections"][0]
+    assert "value_from" not in merged_bob["secret_injections"][0]
+    # Same profile rows, different owners: the SC control payload diverges, so
+    # the content ETag rotates per owner and secret updates propagate on poll.
+    assert sc_control_etag({"entries": [{"merged_policy": merged_alice}]}) != sc_control_etag(
+        {"entries": [{"merged_policy": merged_bob}]}
+    )
+
+
+def test_merge_profile_policies_omits_value_from_without_owner_context(monkeypatch) -> None:
+    monkeypatch.setenv("SECRET_INJECTION_KEK_B64", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+
+    merged = merge_profile_policies(_value_from_profile_rows())
+
+    assert merged["secret_injections"] == []
+
+
+def test_merge_profile_policies_omits_when_owner_missing_secret(monkeypatch) -> None:
+    monkeypatch.setenv("SECRET_INJECTION_KEK_B64", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+
+    merged = merge_profile_policies(
+        _value_from_profile_rows(),
+        owner_id="alice",
+        owner_secrets={},
+        cvm_id="cvm-a",
+    )
+
+    assert merged["secret_injections"] == []
+
+
 def test_merge_profile_policies_denies_intersect_with_missing_field() -> None:
     merged = merge_profile_policies(
         [
@@ -2554,3 +2801,518 @@ def test_get_instance_types_refresh_true_fetches_inline_and_degrades(monkeypatch
     # Inline refresh failed: the current cache is served, with its metadata.
     assert payload["catalog"]["source"] == "bootstrap_fallback"
     assert [entry["name"] for entry in payload["instance_types"]][0] == "tdx.small"
+
+
+class UserSecretConn:
+    def __init__(self, *, existing=None, count=0):
+        self.existing = existing or {}
+        self.count = count
+        self.executed = []
+        self.insert_args = None
+
+    def transaction(self):
+        return AsyncContext()
+
+    async def execute(self, sql, *args):
+        self.executed.append((sql, args))
+        return "OK"
+
+    async def fetchval(self, sql, *args):
+        if "SELECT 1 FROM user_secret_material" in sql:
+            return 1 if args[1] in self.existing else None
+        if "count(*)" in sql:
+            return self.count
+        raise AssertionError(f"unexpected fetchval: {sql}")
+
+    async def fetchrow(self, sql, *args):
+        if "INSERT INTO user_secret_material" in sql:
+            self.insert_args = args
+            return {
+                "name": args[1],
+                "allowed_hosts": args[3],
+                "created_at": datetime(2026, 7, 7, 12, 0, tzinfo=timezone.utc),
+                "updated_at": datetime(2026, 7, 7, 12, 0, tzinfo=timezone.utc),
+            }
+        if "DELETE FROM user_secret_material" in sql:
+            return self.existing.get(args[1])
+        raise AssertionError(f"unexpected fetchrow: {sql}")
+
+    async def fetch(self, sql, *args):
+        return list(self.existing.values())
+
+
+def _secret_user():
+    from concrete_console.auth import CurrentUser
+
+    return CurrentUser(
+        id=UUID("00000000-0000-4000-8000-000000000077"),
+        email="dev@example.com",
+        name="Dev",
+        entity_id=UUID("00000000-0000-4000-8000-000000000001"),
+        entity_name="Entity",
+        permissions=frozenset(),
+    )
+
+
+def _capture_audit(monkeypatch):
+    events = []
+
+    async def fake_insert_audit_event(_conn, **kwargs):
+        events.append(kwargs)
+
+    monkeypatch.setattr(routes_module, "insert_audit_event", fake_insert_audit_event)
+    return events
+
+
+def test_put_user_secret_rejects_invalid_name(monkeypatch) -> None:
+    monkeypatch.setenv("SECRET_INJECTION_KEK_B64", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            put_user_secret(
+                name="bad name!",
+                body=UserSecretPut(value="xoxp-token", allowed_hosts=["api.slack.com"]),
+                current_user=_secret_user(),
+                pool=FakePool(UserSecretConn()),
+            )
+        )
+
+    assert exc.value.status_code == 422
+    errors = exc.value.detail["error"]["details"]["errors"]
+    assert errors == [{"field": "name", "type": "invalid_name"}]
+
+
+def test_put_user_secret_enforces_count_cap(monkeypatch) -> None:
+    monkeypatch.setenv("SECRET_INJECTION_KEK_B64", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+    _capture_audit(monkeypatch)
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            put_user_secret(
+                name="slack-user-token",
+                body=UserSecretPut(value="xoxp-token", allowed_hosts=["api.slack.com"]),
+                current_user=_secret_user(),
+                pool=FakePool(UserSecretConn(count=64)),
+            )
+        )
+
+    assert exc.value.status_code == 403
+    details = exc.value.detail["error"]["details"]
+    assert details == {"resource": "user_secrets", "scope": "user", "limit": 64, "current_usage": 64}
+
+
+def test_put_user_secret_updates_existing_despite_cap(monkeypatch) -> None:
+    monkeypatch.setenv("SECRET_INJECTION_KEK_B64", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+    _capture_audit(monkeypatch)
+    conn = UserSecretConn(existing={"slack-user-token": {}}, count=64)
+
+    result = asyncio.run(
+        put_user_secret(
+            name="slack-user-token",
+            body=UserSecretPut(value="xoxp-rotated", allowed_hosts=["api.slack.com"]),
+            current_user=_secret_user(),
+            pool=FakePool(conn),
+        )
+    )
+
+    assert result["name"] == "slack-user-token"
+
+
+def test_put_user_secret_encrypts_and_never_returns_value(monkeypatch) -> None:
+    monkeypatch.setenv("SECRET_INJECTION_KEK_B64", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+    events = _capture_audit(monkeypatch)
+    conn = UserSecretConn()
+
+    result = asyncio.run(
+        put_user_secret(
+            name="slack-user-token",
+            body=UserSecretPut(value="xoxp-plaintext", allowed_hosts=["api.slack.com", "*.slack.com"]),
+            current_user=_secret_user(),
+            pool=FakePool(conn),
+        )
+    )
+
+    ciphertext = conn.insert_args[2]
+    assert ciphertext.startswith("v1:")
+    assert "xoxp-plaintext" not in ciphertext
+    assert set(result) == {"name", "allowed_hosts", "created_at", "updated_at"}
+    assert result["allowed_hosts"] == ["api.slack.com", "*.slack.com"]
+    assert "xoxp-plaintext" not in json.dumps(result)
+    assert len(events) == 1
+    assert events[0]["action"] == "USER_SECRET_SET"
+    assert "xoxp-plaintext" not in json.dumps(events[0]["after"])
+
+
+def test_list_user_secrets_returns_metadata_only(monkeypatch) -> None:
+    row = {
+        "name": "slack-user-token",
+        "allowed_hosts": '["api.slack.com"]',
+        "created_at": datetime(2026, 7, 7, 12, 0, tzinfo=timezone.utc),
+        "updated_at": datetime(2026, 7, 7, 12, 0, tzinfo=timezone.utc),
+    }
+    conn = UserSecretConn(existing={"slack-user-token": row})
+
+    result = asyncio.run(list_user_secrets(current_user=_secret_user(), pool=FakePool(conn)))
+
+    assert result["items"] == [
+        {
+            "name": "slack-user-token",
+            "allowed_hosts": ["api.slack.com"],
+            "created_at": "2026-07-07T12:00:00Z",
+            "updated_at": "2026-07-07T12:00:00Z",
+        }
+    ]
+
+
+def test_delete_user_secret_404_when_absent(monkeypatch) -> None:
+    _capture_audit(monkeypatch)
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            delete_user_secret(
+                name="absent",
+                current_user=_secret_user(),
+                pool=FakePool(UserSecretConn()),
+            )
+        )
+
+    assert exc.value.status_code == 404
+
+
+def test_delete_user_secret_deletes_and_audits(monkeypatch) -> None:
+    events = _capture_audit(monkeypatch)
+    conn = UserSecretConn(
+        existing={"slack-user-token": {"name": "slack-user-token", "allowed_hosts": '["api.slack.com"]'}}
+    )
+
+    response = asyncio.run(
+        delete_user_secret(name="slack-user-token", current_user=_secret_user(), pool=FakePool(conn))
+    )
+
+    assert response.status_code == 204
+    assert len(events) == 1
+    assert events[0]["action"] == "USER_SECRET_DELETED"
+    assert events[0]["before"] == {"name": "slack-user-token", "allowed_hosts": ["api.slack.com"]}
+
+
+def test_user_secret_put_model_rejects_bad_values() -> None:
+    with pytest.raises(ValidationError):
+        UserSecretPut(value="line\nbreak", allowed_hosts=["api.slack.com"])
+    with pytest.raises(ValidationError):
+        UserSecretPut(value="nul\x00byte", allowed_hosts=["api.slack.com"])
+    with pytest.raises(ValidationError):
+        UserSecretPut(value="x" * 4097, allowed_hosts=["api.slack.com"])
+    with pytest.raises(ValidationError):
+        UserSecretPut(value="ok", allowed_hosts=[])
+    with pytest.raises(ValidationError):
+        UserSecretPut(value="ok", allowed_hosts=["host.example"] + [f"h{i}.example.com" for i in range(16)])
+    with pytest.raises(ValidationError):
+        UserSecretPut(value="ok", allowed_hosts=["Upper.Case.Com"])
+    with pytest.raises(ValidationError):
+        UserSecretPut(value="ok", allowed_hosts=["api.slack.com", "api.slack.com"])
+    model = UserSecretPut(value="ok", allowed_hosts=["*", "*.slack.com", "api.slack.com"])
+    assert model.allowed_hosts == ["*", "*.slack.com", "api.slack.com"]
+
+
+class SecretReferenceConn:
+    def __init__(self, rows=None):
+        self.rows = rows or []
+        self.fetch_calls = 0
+
+    async def fetch(self, sql, *args):
+        self.fetch_calls += 1
+        assert "FROM user_secret_material" in sql
+        return self.rows
+
+
+def _slack_value_from_profile(profile_id="00000000-0000-4000-8000-000000000050", **match_overrides):
+    match = {"scheme": "https", "host": "api.slack.com"}
+    match.update(match_overrides)
+    return {
+        "profile_id": UUID(profile_id),
+        "policy": {
+            "secret_injections": [
+                {
+                    "id": "slack-token",
+                    "match": match,
+                    "type": "request_header",
+                    "header": "authorization",
+                    "value_from": {"user_secret": "slack-user-token"},
+                    "value_template": "Bearer ${secret}",
+                }
+            ]
+        },
+    }
+
+
+def test_ensure_user_secret_references_skips_query_without_references() -> None:
+    conn = SecretReferenceConn()
+    profile = {"profile_id": UUID("00000000-0000-4000-8000-000000000050"), "policy": {"sandbox_env": {}}}
+
+    asyncio.run(
+        routes_module.ensure_user_secret_references(
+            conn,
+            profile_rows=[profile],
+            user_id=UUID("00000000-0000-4000-8000-000000000077"),
+            context="launcher",
+        )
+    )
+
+    assert conn.fetch_calls == 0
+
+
+def test_ensure_user_secret_references_passes_when_satisfied() -> None:
+    conn = SecretReferenceConn(rows=[{"name": "slack-user-token", "allowed_hosts": '["api.slack.com"]'}])
+
+    asyncio.run(
+        routes_module.ensure_user_secret_references(
+            conn,
+            profile_rows=[_slack_value_from_profile()],
+            user_id=UUID("00000000-0000-4000-8000-000000000077"),
+            context="launcher",
+        )
+    )
+
+
+def test_ensure_user_secret_references_rejects_missing_secret() -> None:
+    conn = SecretReferenceConn(rows=[])
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            routes_module.ensure_user_secret_references(
+                conn,
+                profile_rows=[_slack_value_from_profile()],
+                user_id=UUID("00000000-0000-4000-8000-000000000077"),
+                context="launcher",
+            )
+        )
+
+    assert exc.value.status_code == 422
+    details = exc.value.detail["error"]["details"]
+    assert details["member"] == "launcher"
+    assert details["errors"] == [
+        {
+            "field": "policy.secret_injections",
+            "profile_id": "00000000-0000-4000-8000-000000000050",
+            "injection_id": "slack-token",
+            "secret_name": "slack-user-token",
+            "type": "user_secret_missing",
+        }
+    ]
+
+
+def test_ensure_user_secret_references_rejects_scheme_and_host_violations() -> None:
+    rows = [{"name": "slack-user-token", "allowed_hosts": '["api.slack.com"]'}]
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            routes_module.ensure_user_secret_references(
+                SecretReferenceConn(rows=rows),
+                profile_rows=[_slack_value_from_profile(scheme="http")],
+                user_id=UUID("00000000-0000-4000-8000-000000000077"),
+                context="launcher",
+            )
+        )
+    assert exc.value.detail["error"]["details"]["errors"][0]["type"] == "user_secret_scheme_not_https"
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            routes_module.ensure_user_secret_references(
+                SecretReferenceConn(rows=rows),
+                profile_rows=[_slack_value_from_profile(host="files.slack.com")],
+                user_id=UUID("00000000-0000-4000-8000-000000000077"),
+                context="launcher",
+            )
+        )
+    error = exc.value.detail["error"]["details"]["errors"][0]
+    assert error["type"] == "user_secret_host_not_allowed"
+    assert error["match_host"] == "files.slack.com"
+    assert "allowed_hosts" not in error
+
+
+ATTACH_OWNER_ID = UUID("00000000-0000-4000-8000-000000000088")
+ATTACH_CVM_ID = UUID("00000000-0000-4000-8000-000000000031")
+ATTACH_PROFILE_ID = UUID("00000000-0000-4000-8000-000000000050")
+
+
+class AttachProfileConn:
+    def __init__(self, *, owner_is_member: bool, owner_secret_rows=None):
+        self.owner_is_member = owner_is_member
+        self.owner_secret_rows = owner_secret_rows or []
+        self.membership_args = None
+        self.executed = []
+        self.cvm_row = {
+            "id": ATTACH_CVM_ID,
+            "entity_id": UUID("00000000-0000-4000-8000-000000000001"),
+            "owner_id": ATTACH_OWNER_ID,
+            "state": "RUNNING",
+            "policy_version": 3,
+            "updated_at": datetime(2026, 7, 7, 12, 0, tzinfo=timezone.utc),
+        }
+
+    def transaction(self):
+        return AsyncContext()
+
+    async def fetchrow(self, sql, *args):
+        if "FROM cvms" in sql:
+            return dict(self.cvm_row)
+        if "FROM entity_profiles" in sql:
+            return _slack_value_from_profile() | {"entity_id": args[1], "name": "slack"}
+        raise AssertionError(f"unexpected fetchrow: {sql}")
+
+    async def fetchval(self, sql, *args):
+        assert "FROM profile_users" in sql
+        self.membership_args = args
+        return 1 if (self.owner_is_member and args[1] == ATTACH_OWNER_ID) else None
+
+    async def fetch(self, sql, *args):
+        if "FROM user_secret_material" in sql:
+            return self.owner_secret_rows
+        if "FROM cvm_profiles" in sql:
+            return []
+        raise AssertionError(f"unexpected fetch: {sql}")
+
+    async def execute(self, sql, *args):
+        self.executed.append((sql, args))
+        return "INSERT 0 1" if "INSERT INTO cvm_profiles" in sql else "UPDATE 1"
+
+
+def _run_attach(conn, monkeypatch):
+    events = _capture_audit(monkeypatch)
+
+    async def fake_fetch_visible_cvm_resource(pool, *, cvm_id, current_user, response):
+        return {"id": str(cvm_id)}
+
+    monkeypatch.setattr(routes_module, "fetch_visible_cvm_resource", fake_fetch_visible_cvm_resource)
+    attacher = routes_module.CurrentUser(
+        id=UUID("00000000-0000-4000-8000-000000000099"),
+        email="admin@example.com",
+        name="Admin",
+        entity_id=UUID("00000000-0000-4000-8000-000000000001"),
+        entity_name="Entity",
+        permissions=frozenset({"CVM_MANAGE"}),
+    )
+    result = asyncio.run(
+        routes_module.attach_cvm_profile(
+            cvm_id=ATTACH_CVM_ID,
+            body=routes_module.CVMProfileAttach(profile_id=ATTACH_PROFILE_ID),
+            response=SimpleNamespace(headers={}),
+            if_match=cvm_etag(conn.cvm_row),
+            current_user=attacher,
+            pool=FakePool(conn),
+        )
+    )
+    return result, events
+
+
+def test_attach_cvm_profile_requires_owner_membership(monkeypatch) -> None:
+    monkeypatch.setenv("SECRET_INJECTION_KEK_B64", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+    conn = AttachProfileConn(owner_is_member=False)
+
+    with pytest.raises(HTTPException) as exc:
+        _run_attach(conn, monkeypatch)
+
+    assert exc.value.status_code == 403
+    details = exc.value.detail["error"]["details"]
+    assert details["member"] == "cvm_owner"
+    assert details["owner_id"] == str(ATTACH_OWNER_ID)
+    # The membership query must be bound to the CVM owner, not the attacher.
+    assert conn.membership_args == (ATTACH_PROFILE_ID, ATTACH_OWNER_ID)
+
+
+def test_attach_cvm_profile_checks_owner_user_secrets(monkeypatch) -> None:
+    monkeypatch.setenv("SECRET_INJECTION_KEK_B64", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+    conn = AttachProfileConn(owner_is_member=True, owner_secret_rows=[])
+
+    with pytest.raises(HTTPException) as exc:
+        _run_attach(conn, monkeypatch)
+
+    assert exc.value.status_code == 422
+    details = exc.value.detail["error"]["details"]
+    assert details["member"] == "cvm_owner"
+    assert details["user_id"] == str(ATTACH_OWNER_ID)
+    assert details["errors"][0]["type"] == "user_secret_missing"
+
+
+def test_attach_cvm_profile_attaches_for_entitled_owner(monkeypatch) -> None:
+    monkeypatch.setenv("SECRET_INJECTION_KEK_B64", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+    conn = AttachProfileConn(
+        owner_is_member=True,
+        owner_secret_rows=[{"name": "slack-user-token", "allowed_hosts": '["api.slack.com"]'}],
+    )
+
+    result, events = _run_attach(conn, monkeypatch)
+
+    assert result == {"id": str(ATTACH_CVM_ID)}
+    assert any("INSERT INTO cvm_profiles" in sql for sql, _ in conn.executed)
+    assert len(events) == 1
+    assert events[0]["action"] == "CVM_PROFILE_ATTACHED"
+    assert events[0]["after"]["owner_id"] == str(ATTACH_OWNER_ID)
+
+
+class SCControlConn:
+    def __init__(self, rows):
+        self.rows = rows
+
+    async def fetch(self, sql, *args):
+        assert "FROM cvms c" in sql and "owner_secret_material" in sql
+        return self.rows
+
+    async def execute(self, sql, *args):
+        return "UPDATE 1"
+
+
+def _sc_control_row(cvm_id, owner_id, token_hash):
+    return {
+        "id": UUID(cvm_id),
+        "fqdn": f"cvm-{cvm_id[-4:]}.example.com",
+        "policy_version": 1,
+        "updated_at": datetime(2026, 7, 7, 12, 0, tzinfo=timezone.utc),
+        "owner_id": owner_id,
+        "proxy_token_hash": token_hash,
+        "owner_secret_material": json.dumps(_owner_secret_material(owner_id, f"xoxp-{owner_id}")),
+        "profile_policies": json.dumps(_value_from_profile_rows()),
+    }
+
+
+def _scan_payload_for_key(value, key):
+    if isinstance(value, dict):
+        return key in value or any(_scan_payload_for_key(item, key) for item in value.values())
+    if isinstance(value, list):
+        return any(_scan_payload_for_key(item, key) for item in value)
+    return False
+
+
+def test_list_sc_control_cvms_emits_per_owner_hydrated_wire_shape(monkeypatch) -> None:
+    monkeypatch.setenv("SECRET_INJECTION_KEK_B64", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+    from concrete_console.routes_internal import list_sc_control_cvms
+
+    rows = [
+        _sc_control_row("00000000-0000-4000-8000-0000000000a1", "alice", "a" * 64),
+        _sc_control_row("00000000-0000-4000-8000-0000000000b2", "bob", "b" * 64),
+    ]
+    response = SimpleNamespace(headers={})
+    principal = SimpleNamespace(
+        principal_id=UUID("00000000-0000-4000-8000-000000000041"),
+        entity_id=UUID("00000000-0000-4000-8000-000000000001"),
+    )
+
+    body = asyncio.run(
+        list_sc_control_cvms(
+            response=response,
+            if_none_match=None,
+            current_principal=principal,
+            pool=FakePool(SCControlConn(rows)),
+        )
+    )
+
+    entries = body["entries"]
+    assert len(entries) == 2
+    # The wire shape is pinned: the SC's policy parser rejects unknown injection
+    # fields (deny_all), so no new keys may appear at either level.
+    assert set(entries[0]) == {"cvm_id", "fqdn", "proxy_token_hash", "merged_policy", "policy_version", "updated_at"}
+    injections = {entry["cvm_id"]: entry["merged_policy"]["secret_injections"] for entry in entries}
+    values = {cvm: [injection["value"] for injection in items] for cvm, items in injections.items()}
+    assert values["00000000-0000-4000-8000-0000000000a1"] == ["xoxp-alice"]
+    assert values["00000000-0000-4000-8000-0000000000b2"] == ["xoxp-bob"]
+    assert not _scan_payload_for_key(body, "value_from")
+    assert response.headers["ETag"].startswith('"')

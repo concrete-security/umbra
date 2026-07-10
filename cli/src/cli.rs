@@ -128,6 +128,10 @@ pub enum Command {
     /// Run one Console reconciliation pass.
     Reconcile(ReconcileArgs),
 
+    /// Manage your per-user secrets referenced by profile secret injections.
+    #[command(subcommand)]
+    Secret(SecretCommand),
+
     /// Inspect and manage the entity Security CVM.
     #[command(subcommand)]
     SecurityCvm(SecurityCvmCommand),
@@ -730,6 +734,37 @@ pub struct KeyAddArgs {
     /// Assign a local alias to the registered key (see `concrete alias`).
     #[arg(long)]
     pub alias: Option<String>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum SecretCommand {
+    /// Register or update a named secret. The value is read from stdin or
+    /// --value-file, never from arguments.
+    Set(SecretSetArgs),
+
+    /// List your secret names, host bindings, and timestamps (never values).
+    List,
+
+    /// Delete a named secret.
+    Remove {
+        /// Secret name from `concrete secret list`.
+        name: String,
+    },
+}
+
+#[derive(clap::Args, Debug)]
+pub struct SecretSetArgs {
+    /// Secret name referenced by profile policy as value_from.user_secret.
+    pub name: String,
+
+    /// Host binding the secret may be injected into: an exact host,
+    /// a *.suffix wildcard, or * to opt out of binding. Repeatable.
+    #[arg(long = "host", required = true)]
+    pub hosts: Vec<String>,
+
+    /// Read the secret value from this file instead of stdin.
+    #[arg(long)]
+    pub value_file: Option<PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]

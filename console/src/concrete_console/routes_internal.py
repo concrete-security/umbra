@@ -20,8 +20,11 @@ from concrete_console.internal_auth import (
     require_dev_cvm_control_principal,
     require_security_cvm_ingest_principal,
 )
-from concrete_console.profile_secrets import expand_profile_policy_secret_values
+from concrete_console.log_config import logger
+from concrete_console.profile_secrets import expand_policy_secret_values_for_owner
 from concrete_console.resources import json_payload, timestamp
+
+log = logger()
 
 router = APIRouter(prefix="/internal")
 
@@ -107,7 +110,22 @@ async def list_sc_control_cvms(
                 c.fqdn,
                 c.policy_version,
                 c.updated_at,
+                c.owner_id,
                 spt.token_hash AS proxy_token_hash,
+                COALESCE(
+                    (
+                        SELECT jsonb_object_agg(
+                                   usm.name,
+                                   jsonb_build_object(
+                                       'ciphertext', usm.ciphertext,
+                                       'allowed_hosts', usm.allowed_hosts
+                                   )
+                               )
+                        FROM user_secret_material usm
+                        WHERE usm.user_id = c.owner_id
+                    ),
+                    '{}'::jsonb
+                ) AS owner_secret_material,
                 COALESCE(
                     jsonb_agg(
                         jsonb_build_object(
@@ -141,7 +159,7 @@ async def list_sc_control_cvms(
             WHERE c.entity_id = $1
               AND c.deleted_at IS NULL
               AND c.state IN ('RUNNING', 'PROVISIONING')
-            GROUP BY c.id, c.fqdn, c.policy_version, c.updated_at, spt.token_hash
+            GROUP BY c.id, c.fqdn, c.policy_version, c.updated_at, c.owner_id, spt.token_hash
             ORDER BY c.updated_at, c.id
             """,
             current_principal.entity_id,
@@ -152,7 +170,12 @@ async def list_sc_control_cvms(
                 "cvm_id": str(row["id"]),
                 "fqdn": row["fqdn"],
                 "proxy_token_hash": row["proxy_token_hash"],
-                "merged_policy": merge_profile_policies(json_payload(row["profile_policies"])),
+                "merged_policy": merge_profile_policies(
+                    json_payload(row["profile_policies"]),
+                    owner_id=row["owner_id"],
+                    owner_secrets=json_payload(row["owner_secret_material"]),
+                    cvm_id=row["id"],
+                ),
                 "policy_version": row["policy_version"],
                 "updated_at": timestamp(row["updated_at"]),
             }
@@ -437,7 +460,13 @@ async def ingest_traffic_logs(
     return {"accepted": len(body.logs), "deduplicated": False}
 
 
-def merge_profile_policies(profile_rows: list[dict[str, Any]]) -> dict[str, Any]:
+def merge_profile_policies(
+    profile_rows: list[dict[str, Any]],
+    *,
+    owner_id: Any = None,
+    owner_secrets: dict[str, Any] | None = None,
+    cvm_id: Any = None,
+) -> dict[str, Any]:
     policies: list[dict[str, Any]] = []
     for row in profile_rows:
         policy = json_payload(row.get("policy", {}))
@@ -445,11 +474,27 @@ def merge_profile_policies(profile_rows: list[dict[str, Any]]) -> dict[str, Any]
             secret_material = json_payload(row.get("secret_material", {}))
             if not isinstance(secret_material, dict):
                 secret_material = {}
+            profile_id = row.get("profile_id", "")
+
+            def on_omit(reason: str, injection_id: str, secret_name: str, profile_id: Any = profile_id) -> None:
+                log.warning(
+                    "user_secret_injection_omitted",
+                    cvm_id=str(cvm_id) if cvm_id else None,
+                    owner_id=str(owner_id) if owner_id else None,
+                    profile_id=str(profile_id),
+                    injection_id=injection_id,
+                    secret_name=secret_name,
+                    reason=reason,
+                )
+
             policies.append(
-                expand_profile_policy_secret_values(
-                    profile_id=row.get("profile_id", ""),
+                expand_policy_secret_values_for_owner(
+                    profile_id=profile_id,
                     policy=policy,
                     secret_material=secret_material,
+                    owner_id=owner_id,
+                    owner_secrets=owner_secrets if isinstance(owner_secrets, dict) else None,
+                    on_omit=on_omit,
                 )
             )
     egress_boundary_policies = [policy for policy in policies if policy.get("egress_boundary") is True]

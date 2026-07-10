@@ -449,6 +449,35 @@ pub(crate) fn console_error_envelope(body: &str) -> Option<(String, Option<Strin
         ));
     }
 
+    // Special case for launch/attach refusals over per-user secret references:
+    // name the secrets so the fix is one `concrete secret set` away.
+    if let Some(errors) = details
+        .and_then(|details| details.get("errors"))
+        .and_then(|errors| errors.as_array())
+    {
+        let mut names: Vec<&str> = errors
+            .iter()
+            .filter(|error| {
+                error
+                    .get("type")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|value| value.starts_with("user_secret_"))
+            })
+            .filter_map(|error| error.get("secret_name").and_then(|value| value.as_str()))
+            .collect();
+        if !names.is_empty() {
+            names.sort_unstable();
+            names.dedup();
+            return Some((
+                format!(
+                    "{message} (user secrets: {}; run `concrete secret set <NAME> --host <HOST>` as the CVM owner)",
+                    names.join(", ")
+                ),
+                code,
+            ));
+        }
+    }
+
     let enriched = match (state, required, component, limit, validation_type) {
         (Some(state), _, _, _, _) => format!("{message} ({state})"),
         (_, Some(required), _, _, _) => format!("{message} ({required})"),
@@ -540,6 +569,17 @@ mod tests {
                 "bad type; run `concrete cvm instance-types` for more information"
             );
         }
+    }
+
+    #[test]
+    fn console_error_envelope_names_missing_user_secrets() {
+        let body = r#"{"error":{"code":"VALIDATION_ERROR","message":"profiles reference user secrets that are missing or not host-authorized","details":{"member":"launcher","errors":[{"type":"user_secret_missing","secret_name":"slack-user-token"},{"type":"user_secret_host_not_allowed","secret_name":"gh-token"},{"type":"user_secret_missing","secret_name":"slack-user-token"}]}}}"#;
+        let (message, code) = console_error_envelope(body).expect("envelope parses");
+        assert_eq!(
+            message,
+            "profiles reference user secrets that are missing or not host-authorized (user secrets: gh-token, slack-user-token; run `concrete secret set <NAME> --host <HOST>` as the CVM owner)"
+        );
+        assert_eq!(code.as_deref(), Some("VALIDATION_ERROR"));
     }
 
     #[test]
