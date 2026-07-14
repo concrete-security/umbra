@@ -17,6 +17,13 @@ SECRET_INJECTION_KEY_BYTES = 32
 SECRET_INJECTION_RENDERED_MAX_LEN = 8192
 PUBLIC_SECRET_INJECTION_FIELDS = {"id", "match", "type", "header", "value_from", "value_template"}
 SECRET_HOST_DNS_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+# `value_from` failure reasons that mean "a credential is expected at this
+# destination but the CVM owner's grant can't produce one" — as opposed to a
+# malformed injection definition. These become `unfulfilled_secret_injections`
+# markers so the SC fail-closes that destination with a legible reason; the rest
+# (`scheme`, `invalid_template`) are silently omitted (author-time-validated
+# shapes that should never reach the wire, and a non-https marker is inert).
+UNFULFILLED_REASONS = {"missing", "host_binding", "decrypt", "rendered_too_long"}
 
 
 def load_secret_injection_kek() -> bytes:
@@ -98,35 +105,62 @@ def expand_policy_secret_values_for_owner(
     secret_material: dict[str, Any],
     owner_id: Any = None,
     owner_secrets: dict[str, Any] | None = None,
-    on_omit: Callable[[str, str, str], None] | None = None,
+    on_unresolved: Callable[[str, str, str, str], None] | None = None,
 ) -> dict[str, Any]:
     """Hydrate secret injections for the Security CVM control payload.
 
     Inline (`value`) injections keep their historical behavior. `value_from`
-    injections resolve against the CVM owner's secret material and are OMITTED
-    on any failure (missing secret, non-https match, host binding not covering
-    the match, undecryptable material, oversized render): the SC rejects
-    unknown injection fields and fail-closes the whole CVM on a policy error,
-    so an unresolved reference must never reach the wire. `on_omit(reason,
-    injection_id, secret_name)` receives identifiers only, never values.
+    injections resolve against the CVM owner's secret material. When a
+    `value_from` injection cannot produce a usable credential, the outcome
+    depends on why (see `UNFULFILLED_REASONS`):
+
+    - **Grant unusable** (`missing` unminted/deleted secret, `host_binding`
+      the owner's binding no longer covers the match host, `decrypt`, or
+      `rendered_too_long`): the injection is emitted as an
+      `unfulfilled_secret_injections` marker (`{id, match, header}` — never a
+      `value` or `value_from`). The SC fail-closes *that destination* with
+      `secret_injection_unfulfilled`, so a missing/expired grant is legible at
+      the point of failure instead of the sandbox placeholder leaking to the
+      upstream as an opaque auth error (§8.5). This blocks one destination, not
+      the whole CVM.
+    - **Malformed definition** (`scheme` non-https, `invalid_template`): the
+      injection is silently OMITTED — these are author-time-validated shapes
+      that should never reach the wire even as a block, and a non-https marker
+      would be inert anyway.
+
+    A `value_from` key must never reach the wire (the SC rejects unknown
+    injection fields and fail-closes the whole CVM), so a leak guard drops any
+    that survive. `on_unresolved(reason, outcome, injection_id, secret_name)`
+    receives identifiers only, never values; `outcome` is one of
+    `"unfulfilled"` / `"omitted"`.
     """
     public_policy = redacted_profile_policy(policy)
     secret_injections = public_policy.get("secret_injections")
     if not isinstance(secret_injections, list):
         return public_policy
     expanded: list[dict[str, Any]] = []
+    unfulfilled: list[dict[str, Any]] = []
     for injection in secret_injections:
         if not isinstance(injection, dict):
             continue
         if "value_from" in injection:
-            resolved = _resolve_user_secret_injection(
+            hydrated, reason = _resolve_user_secret_injection(
                 injection,
                 owner_id=owner_id,
                 owner_secrets=owner_secrets,
-                on_omit=on_omit,
             )
-            if resolved is not None:
-                expanded.append(resolved)
+            if hydrated is not None:
+                expanded.append(hydrated)
+            else:
+                marker = _unfulfilled_marker(injection) if reason in UNFULFILLED_REASONS else None
+                if marker is not None:
+                    unfulfilled.append(marker)
+                _emit_unresolved(
+                    on_unresolved,
+                    reason or "missing",
+                    "unfulfilled" if marker is not None else "omitted",
+                    injection,
+                )
             continue
         injection_id = injection.get("id")
         if not isinstance(injection_id, str):
@@ -146,10 +180,12 @@ def expand_policy_secret_values_for_owner(
     guarded: list[dict[str, Any]] = []
     for injection in expanded:
         if isinstance(injection, dict) and "value_from" in injection:
-            _emit_omit(on_omit, "leak_guard", injection)
+            _emit_unresolved(on_unresolved, "leak_guard", "omitted", injection)
             continue
         guarded.append(injection)
     public_policy["secret_injections"] = guarded
+    if unfulfilled:
+        public_policy["unfulfilled_secret_injections"] = unfulfilled
     return public_policy
 
 
@@ -240,56 +276,71 @@ def _resolve_user_secret_injection(
     *,
     owner_id: Any,
     owner_secrets: dict[str, Any] | None,
-    on_omit: Callable[[str, str, str], None] | None,
-) -> dict[str, Any] | None:
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Resolve a `value_from` injection to a hydrated inline injection.
+
+    Returns `(hydrated, None)` on success or `(None, reason)` on failure, where
+    `reason` classifies why no credential could be produced. The caller decides
+    omit-vs-unfulfilled from the reason (see `UNFULFILLED_REASONS`).
+    """
     value_from = injection.get("value_from")
     name = value_from.get("user_secret") if isinstance(value_from, dict) else None
     if not isinstance(name, str) or owner_id is None or not isinstance(owner_secrets, dict):
-        _emit_omit(on_omit, "missing", injection)
-        return None
+        return None, "missing"
     entry = owner_secrets.get(name)
     ciphertext = entry.get("ciphertext") if isinstance(entry, dict) else None
     if not isinstance(ciphertext, str):
-        _emit_omit(on_omit, "missing", injection)
-        return None
+        return None, "missing"
     match = injection.get("match")
     match = match if isinstance(match, dict) else {}
     if match.get("scheme") != "https":
-        _emit_omit(on_omit, "scheme", injection)
-        return None
+        return None, "scheme"
     host = match.get("host")
     if not isinstance(host, str) or not secret_hosts_cover(entry.get("allowed_hosts"), host):
-        _emit_omit(on_omit, "host_binding", injection)
-        return None
+        return None, "host_binding"
     try:
         value = decrypt_user_secret_value(user_id=owner_id, name=name, ciphertext=ciphertext)
     except (ValueError, InvalidTag):
-        _emit_omit(on_omit, "decrypt", injection)
-        return None
+        return None, "decrypt"
     template = injection.get("value_template")
     if not isinstance(template, str) or template.count("${secret}") != 1:
-        _emit_omit(on_omit, "invalid_template", injection)
-        return None
+        return None, "invalid_template"
     if len(template.replace("${secret}", value)) > SECRET_INJECTION_RENDERED_MAX_LEN:
-        _emit_omit(on_omit, "rendered_too_long", injection)
-        return None
+        return None, "rendered_too_long"
     hydrated = {key: item for key, item in injection.items() if key != "value_from"}
     hydrated["value"] = value
-    return hydrated
+    return hydrated, None
 
 
-def _emit_omit(
-    on_omit: Callable[[str, str, str], None] | None,
+def _unfulfilled_marker(injection: dict[str, Any]) -> dict[str, Any] | None:
+    """Build the wire marker `{id, match, header}` for an expected-but-unmet
+    injection, or None when those fields are not well-formed — in which case the
+    caller falls back to omit, so a malformed marker never reaches the SC. (The
+    SC also parses these markers leniently, dropping bad ones, as defence in
+    depth: a marker can only ever add a per-destination block, never deny-all.)
+    """
+    injection_id = injection.get("id")
+    match = injection.get("match")
+    header = injection.get("header")
+    if not isinstance(injection_id, str) or not isinstance(match, dict) or not isinstance(header, str):
+        return None
+    return {"id": injection_id, "match": match, "header": header}
+
+
+def _emit_unresolved(
+    on_unresolved: Callable[[str, str, str, str], None] | None,
     reason: str,
+    outcome: str,
     injection: dict[str, Any],
 ) -> None:
-    if on_omit is None:
+    if on_unresolved is None:
         return
     injection_id = injection.get("id")
     value_from = injection.get("value_from")
     name = value_from.get("user_secret") if isinstance(value_from, dict) else None
-    on_omit(
+    on_unresolved(
         reason,
+        outcome,
         injection_id if isinstance(injection_id, str) else "",
         name if isinstance(name, str) else "",
     )

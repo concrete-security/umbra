@@ -420,6 +420,10 @@ def _blocked_body(result: EnforcementResult) -> bytes:
         "dlp_secret_detected": "Reason: profile DLP policy detected sensitive data.",
         "dlp_scan_timeout": "Reason: profile DLP scanning timed out.",
         "policy_secret_injection_conflict": "Reason: profile secret injection rules conflict.",
+        "secret_injection_unfulfilled": (
+            "Reason: a required secret injection has no usable credential for this CVM's owner "
+            "(the referenced per-user secret is unminted, expired, or not bound to this host)."
+        ),
     }
     body = "\n".join(
         [

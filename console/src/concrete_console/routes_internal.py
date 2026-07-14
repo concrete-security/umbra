@@ -476,15 +476,22 @@ def merge_profile_policies(
                 secret_material = {}
             profile_id = row.get("profile_id", "")
 
-            def on_omit(reason: str, injection_id: str, secret_name: str, profile_id: Any = profile_id) -> None:
+            def on_unresolved(
+                reason: str,
+                outcome: str,
+                injection_id: str,
+                secret_name: str,
+                profile_id: Any = profile_id,
+            ) -> None:
                 log.warning(
-                    "user_secret_injection_omitted",
+                    "user_secret_injection_unresolved",
                     cvm_id=str(cvm_id) if cvm_id else None,
                     owner_id=str(owner_id) if owner_id else None,
                     profile_id=str(profile_id),
                     injection_id=injection_id,
                     secret_name=secret_name,
                     reason=reason,
+                    outcome=outcome,
                 )
 
             policies.append(
@@ -494,7 +501,7 @@ def merge_profile_policies(
                     secret_material=secret_material,
                     owner_id=owner_id,
                     owner_secrets=owner_secrets if isinstance(owner_secrets, dict) else None,
-                    on_omit=on_omit,
+                    on_unresolved=on_unresolved,
                 )
             )
     egress_boundary_policies = [policy for policy in policies if policy.get("egress_boundary") is True]
@@ -506,6 +513,13 @@ def merge_profile_policies(
         "secret_injections": merge_union_lists(policies, "secret_injections"),
         "sandbox_env": merge_sandbox_env(policies),
     }
+    # Only surface the key when a marker exists: keeps merged_policy (and its
+    # content-derived ETag) byte-identical for the common case, and bounds the
+    # blast radius if an old SC image that predates the field is polled before
+    # it is upgraded (SC-image-before-Console rollout — see security-cvm spec).
+    unfulfilled = merge_union_lists(policies, "unfulfilled_secret_injections")
+    if unfulfilled:
+        merged["unfulfilled_secret_injections"] = unfulfilled
     return merged
 
 

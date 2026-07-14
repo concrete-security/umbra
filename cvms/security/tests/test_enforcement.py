@@ -569,3 +569,71 @@ def test_allowed_path_without_assertions_emits_empty_attributes() -> None:
     assert result.allowed is True
     assert result.traffic_log is not None
     assert result.traffic_log.attributes == {}
+
+
+def _unfulfilled_policy() -> dict[str, object]:
+    """Allow api.anthropic.com but mark the auth injection there UNFULFILLED
+    (owner grant unminted/expired/rebound), with no fulfilled injection to
+    satisfy the header."""
+    body = policy()
+    body["secret_injections"] = []
+    body["unfulfilled_secret_injections"] = [
+        {
+            "id": "anthropic-auth",
+            "match": {
+                "scheme": "https",
+                "host": "api.anthropic.com",
+                "ports": [443],
+                "methods": ["POST"],
+                "path_prefixes": ["/v1/"],
+            },
+            "header": "authorization",
+        }
+    ]
+    return body
+
+
+def test_unfulfilled_injection_fails_closed_with_signal() -> None:
+    result = enforce_request(request(), control_map(_unfulfilled_policy()))
+
+    # Blocked at the point of failure with a legible reason — not forwarded to
+    # the upstream as an opaque 401 carrying the sandbox placeholder.
+    assert result.allowed is False
+    assert result.response_code == 403
+    assert result.reason == "secret_injection_unfulfilled"
+    assert result.matched_policy_id == "anthropic-auth"
+    assert result.traffic_log is not None
+    assert result.traffic_log.response_code == 403
+
+
+def test_unfulfilled_injection_suppressed_by_fulfilled_injection() -> None:
+    # A fulfilled injection for the same header at the same destination (e.g.
+    # contributed by another attached profile) suppresses the block; the real
+    # credential is injected and the request proceeds.
+    body = _unfulfilled_policy()
+    body["secret_injections"] = policy()["secret_injections"]
+    result = enforce_request(request(), control_map(body))
+
+    assert result.allowed is True
+    assert result.reason == "allowed"
+    assert result.upstream_headers["authorization"] == "Bearer sk-ant-real"
+
+
+def test_unfulfilled_injection_does_not_block_unmatched_request() -> None:
+    # An unfulfilled marker only blocks requests its match selects; egress to
+    # other destinations is unaffected (the CVM stays up).
+    body = _unfulfilled_policy()
+    body["allowed_destinations"].append(
+        {
+            "id": "allow.other",
+            "scheme": "https",
+            "host": "api.other.com",
+            "ports": [443],
+            "methods": ["POST"],
+            "path_prefixes": ["/"],
+        }
+    )
+    result = enforce_request(request(host="api.other.com", path="/ping"), control_map(body))
+
+    assert result.allowed is True
+    assert result.reason == "allowed"

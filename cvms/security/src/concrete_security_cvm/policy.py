@@ -16,6 +16,7 @@ TOP_LEVEL_FIELDS = {
     "secret_patterns",
     "secret_injections",
     "sandbox_env",
+    "unfulfilled_secret_injections",
 }
 DESTINATION_FIELDS = {
     "id",
@@ -265,6 +266,18 @@ class SecretInjection:
 
 
 @dataclass(frozen=True)
+class UnfulfilledInjection:
+    # A secret injection the Console expected to fulfil but could not (the CVM
+    # owner's `value_from` grant is unminted / expired / rebound). Carries no
+    # secret material — only what the SC needs to fail-closed the destination
+    # and name the cause: the originating injection id, the destination match,
+    # and the header that would have been injected.
+    injection_id: str | None
+    match: DestinationRule
+    header: str
+
+
+@dataclass(frozen=True)
 class SandboxEnvPlaceholder:
     name: str
     value: str
@@ -285,6 +298,12 @@ class EffectivePolicy:
     secret_patterns: tuple[SecretPattern, ...]
     secret_injections: tuple[SecretInjection, ...]
     sandbox_env: tuple[SandboxEnvPlaceholder, ...]
+    # Console-generated markers for injections whose credential is expected at a
+    # destination but currently unavailable (unminted / expired / rebound owner
+    # grant). They carry no value and never widen egress; they only let the SC
+    # fail-closed that destination with a legible reason (see
+    # `unmet_secret_injection`). Defaulted so existing constructions stay valid.
+    unfulfilled_injections: tuple[UnfulfilledInjection, ...] = ()
 
     @classmethod
     def deny_all(cls) -> EffectivePolicy:
@@ -295,6 +314,37 @@ class EffectivePolicy:
             secret_injections=(),
             sandbox_env=(),
         )
+
+    def unmet_secret_injection(
+        self,
+        *,
+        scheme: str,
+        host: str,
+        port: int,
+        method: str,
+        path: str,
+        satisfied_headers: Any,
+    ) -> UnfulfilledInjection | None:
+        """First unfulfilled injection matching this request whose header is not
+        already provided by a fulfilled injection (`satisfied_headers`), else None.
+
+        A fulfilled injection for the same header — e.g. contributed by another
+        attached profile — suppresses the block, keeping the profile merge
+        additive (an added profile can only add a credential, never a block).
+        """
+        request = {
+            "scheme": scheme,
+            "host": host,
+            "port": port,
+            "method": method,
+            "path": path or "/",
+        }
+        for injection in self.unfulfilled_injections:
+            if injection.header in satisfied_headers:
+                continue
+            if injection.match.matches(**request):
+                return injection
+        return None
 
     def decide(
         self,
@@ -474,6 +524,8 @@ def parse_effective_policy(raw: Any) -> EffectivePolicy:
     patterns = _parse_secret_patterns(raw.get("secret_patterns", []), errors)
     injections = _parse_secret_injections(raw.get("secret_injections", []), errors)
     sandbox_env = _parse_sandbox_env(raw.get("sandbox_env", []), errors)
+    # Parsed WITHOUT `errors`: unfulfilled markers never fail the policy (below).
+    unfulfilled = _parse_unfulfilled_injections(raw.get("unfulfilled_secret_injections", []))
     if errors:
         raise PolicyValidationError(errors)
     return EffectivePolicy(
@@ -482,6 +534,7 @@ def parse_effective_policy(raw: Any) -> EffectivePolicy:
         secret_patterns=tuple(patterns),
         secret_injections=tuple(injections),
         sandbox_env=tuple(sandbox_env),
+        unfulfilled_injections=tuple(unfulfilled),
     )
 
 
@@ -973,6 +1026,50 @@ def _parse_secret_injections(raw: Any, errors: list[PolicyError]) -> list[Secret
         if match is not None:
             injections.append(SecretInjection(injection_id, match, header, value, template))
     return injections
+
+
+def _parse_unfulfilled_injections(raw: Any) -> list[UnfulfilledInjection]:
+    """Parse Console-generated `unfulfilled_secret_injections` markers.
+
+    Deliberately TOTAL and lenient: this never appends to `errors` and never
+    raises. A malformed marker is skipped, degrading to a lost signal (the same
+    opaque upstream failure as before this feature), NEVER a policy-parse
+    failure. That matters because a parse failure collapses the WHOLE CVM to
+    deny-all (`control.py`), and these markers exist precisely to avoid
+    whole-CVM surprises: they only ever ADD a per-destination fail-closed block
+    and never widen egress, so strict rejection would buy no safety while
+    risking a regression from a Console that emits a slightly-off marker.
+    """
+    if not isinstance(raw, list):
+        return []
+    parsed: list[UnfulfilledInjection] = []
+    for item in raw:
+        if not isinstance(item, dict) or set(item) - {"id", "match", "header"}:
+            continue
+        injection_id = item.get("id")
+        if injection_id is not None and (not isinstance(injection_id, str) or not ID_RE.fullmatch(injection_id)):
+            continue
+        header = item.get("header")
+        if not isinstance(header, str) or not HEADER_RE.fullmatch(header) or header in HOP_BY_HOP_HEADERS:
+            continue
+        local: list[PolicyError] = []
+        match = _parse_destination_rule(
+            item.get("match"),
+            "unfulfilled_secret_injections.match",
+            local,
+            require_id=False,
+            allow_extensions=False,
+        )
+        if match is None or local:
+            continue
+        parsed.append(
+            UnfulfilledInjection(
+                injection_id=injection_id if isinstance(injection_id, str) else None,
+                match=match,
+                header=header,
+            )
+        )
+    return parsed
 
 
 def _parse_sandbox_env(raw: Any, errors: list[PolicyError]) -> list[SandboxEnvPlaceholder]:

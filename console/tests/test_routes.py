@@ -1325,6 +1325,19 @@ def test_validate_profile_policy_rejects_unknown_top_level_field() -> None:
     assert errors == [{"field": "policy.opaque", "type": "unknown_field"}]
 
 
+def test_validate_profile_policy_rejects_author_supplied_unfulfilled_field() -> None:
+    # `unfulfilled_secret_injections` is Console-generated wire-only material
+    # (added at SC-control materialization when an owner grant is unusable). It
+    # is not part of the authoring surface, so a profile author cannot inject
+    # one to fail-close destinations for other members.
+    with pytest.raises(HTTPException) as exc:
+        validate_profile_policy({"unfulfilled_secret_injections": []})
+
+    assert exc.value.status_code == 422
+    errors = exc.value.detail["error"]["details"]["errors"]
+    assert errors == [{"field": "policy.unfulfilled_secret_injections", "type": "unknown_field"}]
+
+
 def test_validate_profile_policy_rejects_bad_sandbox_env() -> None:
     with pytest.raises(HTTPException) as exc:
         validate_profile_policy(
@@ -1708,7 +1721,7 @@ def test_value_from_render_caps_line_up_with_sc_rendered_cap(monkeypatch) -> Non
         secret_material={},
         owner_id="user-a",
         owner_secrets=owner_secrets,
-        on_omit=lambda *args: omitted.append(args),
+        on_unresolved=lambda *args: omitted.append(args),
     )
 
     assert omitted == []
@@ -2342,6 +2355,19 @@ def test_merge_profile_policies_field_typed(monkeypatch) -> None:
     }
 
 
+_SLACK_MATCH = {
+    "scheme": "https",
+    "host": "api.slack.com",
+    "ports": [443],
+    "methods": ["POST"],
+    "path_prefixes": ["/"],
+}
+
+
+def _slack_unfulfilled_marker():
+    return {"id": "slack-token", "match": _SLACK_MATCH, "header": "authorization"}
+
+
 def _value_from_profile_rows():
     return [
         {
@@ -2350,7 +2376,7 @@ def _value_from_profile_rows():
                 "secret_injections": [
                     {
                         "id": "slack-token",
-                        "match": {"scheme": "https", "host": "api.slack.com"},
+                        "match": dict(_SLACK_MATCH),
                         "type": "request_header",
                         "header": "authorization",
                         "value_from": {"user_secret": "slack-user-token"},
@@ -2400,15 +2426,18 @@ def test_merge_profile_policies_resolves_value_from_per_owner(monkeypatch) -> No
     )
 
 
-def test_merge_profile_policies_omits_value_from_without_owner_context(monkeypatch) -> None:
+def test_merge_profile_policies_marks_unfulfilled_without_owner_context(monkeypatch) -> None:
     monkeypatch.setenv("SECRET_INJECTION_KEK_B64", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
 
     merged = merge_profile_policies(_value_from_profile_rows())
 
+    # No owner context → the grant can't resolve → the SC gets a fail-closed
+    # marker for that destination, not a silent uncredentialed passthrough.
     assert merged["secret_injections"] == []
+    assert merged["unfulfilled_secret_injections"] == [_slack_unfulfilled_marker()]
 
 
-def test_merge_profile_policies_omits_when_owner_missing_secret(monkeypatch) -> None:
+def test_merge_profile_policies_marks_unfulfilled_when_owner_missing_secret(monkeypatch) -> None:
     monkeypatch.setenv("SECRET_INJECTION_KEK_B64", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
 
     merged = merge_profile_policies(
@@ -2419,6 +2448,24 @@ def test_merge_profile_policies_omits_when_owner_missing_secret(monkeypatch) -> 
     )
 
     assert merged["secret_injections"] == []
+    assert merged["unfulfilled_secret_injections"] == [_slack_unfulfilled_marker()]
+
+
+def test_merge_profile_policies_omits_unfulfilled_key_when_all_resolve(monkeypatch) -> None:
+    monkeypatch.setenv("SECRET_INJECTION_KEK_B64", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+
+    merged = merge_profile_policies(
+        _value_from_profile_rows(),
+        owner_id="alice",
+        owner_secrets=_owner_secret_material("alice", "xoxp-alice"),
+        cvm_id="cvm-a",
+    )
+
+    # Fulfilled → the credential is injected and the wire policy carries no
+    # unfulfilled key at all (keeps merged_policy/ETag unchanged for the common
+    # case and bounds old-SC exposure during an SC-before-Console rollout).
+    assert merged["secret_injections"][0]["value"] == "xoxp-alice"
+    assert "unfulfilled_secret_injections" not in merged
 
 
 def test_merge_profile_policies_denies_intersect_with_missing_field() -> None:

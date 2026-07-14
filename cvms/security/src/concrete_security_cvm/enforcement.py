@@ -147,6 +147,20 @@ def enforce_authenticated_request(
         )
     except PolicyValidationError:
         return _blocked_result(request, cvm, upstream_headers, "policy_secret_injection_conflict", None)
+    unmet = cvm.merged_policy.unmet_secret_injection(
+        scheme=request.scheme,
+        host=request.host,
+        port=request.port,
+        method=request.method,
+        path=request.path,
+        satisfied_headers=injection_headers.keys(),
+    )
+    if unmet is not None:
+        # A profile expected to inject a credential at this destination but the
+        # CVM owner's grant is unminted/expired/rebound. Fail closed with a
+        # legible reason instead of forwarding the sandbox placeholder to an
+        # opaque upstream 401 (docs/specs/security-cvm.md §5.3, console §8.5).
+        return _blocked_result(request, cvm, upstream_headers, "secret_injection_unfulfilled", unmet.injection_id)
     upstream_headers.update(injection_headers)
     attributes: dict[str, str] = {}
     if decision.matched_rule is not None:

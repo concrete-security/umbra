@@ -116,6 +116,10 @@ def _user_injection(**overrides):
     return injection
 
 
+def _full_match(*, host: str, scheme: str = "https") -> dict:
+    return {"scheme": scheme, "host": host, "ports": [443], "methods": ["POST"], "path_prefixes": ["/"]}
+
+
 def _owner_secrets(*, user_id="user-a", name="slack-user-token", value="xoxp-alice", allowed_hosts=None):
     return {
         name: {
@@ -231,7 +235,7 @@ def test_user_secret_references_extracts_and_tolerates_malformed() -> None:
 
 def test_expand_for_owner_hydrates_and_strips_value_from(monkeypatch) -> None:
     monkeypatch.setenv("SECRET_INJECTION_KEK_B64", TEST_KEK)
-    omitted: list[tuple[str, str, str]] = []
+    events: list[tuple[str, str, str, str]] = []
 
     expanded = expand_policy_secret_values_for_owner(
         profile_id="profile-a",
@@ -239,10 +243,11 @@ def test_expand_for_owner_hydrates_and_strips_value_from(monkeypatch) -> None:
         secret_material={},
         owner_id="user-a",
         owner_secrets=_owner_secrets(),
-        on_omit=lambda *args: omitted.append(args),
+        on_unresolved=lambda *args: events.append(args),
     )
 
-    assert omitted == []
+    assert events == []
+    assert "unfulfilled_secret_injections" not in expanded
     injection = expanded["secret_injections"][0]
     assert injection["value"] == "xoxp-alice"
     assert "value_from" not in injection
@@ -264,28 +269,34 @@ def test_expand_for_owner_wildcard_binding_covers_subdomains(monkeypatch) -> Non
 
 
 @pytest.mark.parametrize(
-    ("injection", "owner_secrets_kwargs", "reason"),
+    ("injection", "owner_secrets_kwargs", "reason", "outcome"),
     [
-        (_user_injection(value_from={"user_secret": "absent"}), {}, "missing"),
-        (_user_injection(match={"scheme": "http", "host": "api.slack.com"}), {}, "scheme"),
-        (_user_injection(match={"host": "api.slack.com"}), {}, "scheme"),
-        (_user_injection(match={"scheme": "https", "host": "evil.example.com"}), {}, "host_binding"),
+        # Grant unusable → fail-closed marker so the SC can block the destination
+        # with a legible reason (the point of this feature).
+        (_user_injection(value_from={"user_secret": "absent"}), {}, "missing", "unfulfilled"),
+        (_user_injection(match=_full_match(host="evil.example.com")), {}, "host_binding", "unfulfilled"),
         (
-            _user_injection(match={"scheme": "https", "host": "slack.com"}),
+            _user_injection(match=_full_match(host="slack.com")),
             {"allowed_hosts": ["*.slack.com"]},
             "host_binding",  # apex not covered by the wildcard binding
+            "unfulfilled",
         ),
-        (_user_injection(value_template="no placeholder"), {}, "invalid_template"),
         (
             _user_injection(value_template="Bearer ${secret}" + "x" * 8192),
             {},
             "rendered_too_long",
+            "unfulfilled",
         ),
+        # Malformed definition → silently omitted (author-time-validated shapes;
+        # a non-https marker would be inert anyway).
+        (_user_injection(match={"scheme": "http", "host": "api.slack.com"}), {}, "scheme", "omitted"),
+        (_user_injection(match={"host": "api.slack.com"}), {}, "scheme", "omitted"),
+        (_user_injection(value_template="no placeholder"), {}, "invalid_template", "omitted"),
     ],
 )
-def test_expand_for_owner_omits_unresolvable(monkeypatch, injection, owner_secrets_kwargs, reason) -> None:
+def test_expand_for_owner_unresolved_outcomes(monkeypatch, injection, owner_secrets_kwargs, reason, outcome) -> None:
     monkeypatch.setenv("SECRET_INJECTION_KEK_B64", TEST_KEK)
-    omitted: list[tuple[str, str, str]] = []
+    events: list[tuple[str, str, str, str]] = []
 
     expanded = expand_policy_secret_values_for_owner(
         profile_id="profile-a",
@@ -293,19 +304,29 @@ def test_expand_for_owner_omits_unresolvable(monkeypatch, injection, owner_secre
         secret_material={},
         owner_id="user-a",
         owner_secrets=_owner_secrets(**owner_secrets_kwargs),
-        on_omit=lambda *args: omitted.append(args),
+        on_unresolved=lambda *args: events.append(args),
     )
 
+    # The credential is never injected, whatever the outcome.
     assert expanded["secret_injections"] == []
-    assert len(omitted) == 1
-    assert omitted[0][0] == reason
-    assert omitted[0][1] == injection["id"]
-    assert "xoxp-alice" not in "".join(omitted[0])
+    assert len(events) == 1
+    assert events[0][0] == reason
+    assert events[0][1] == outcome
+    assert events[0][2] == injection["id"]
+    assert "xoxp-alice" not in "".join(events[0])
+
+    markers = expanded.get("unfulfilled_secret_injections", [])
+    if outcome == "unfulfilled":
+        # Identifiers only — never a value or value_from on the wire.
+        assert markers == [{"id": injection["id"], "match": injection["match"], "header": injection["header"]}]
+        assert "value" not in markers[0] and "value_from" not in markers[0]
+    else:
+        assert markers == []
 
 
-def test_expand_for_owner_omits_on_undecryptable_material(monkeypatch) -> None:
+def test_expand_for_owner_marks_unfulfilled_on_undecryptable_material(monkeypatch) -> None:
     monkeypatch.setenv("SECRET_INJECTION_KEK_B64", TEST_KEK)
-    omitted: list[tuple[str, str, str]] = []
+    events: list[tuple[str, str, str, str]] = []
     wrong_owner = _owner_secrets(user_id="user-b")
 
     expanded = expand_policy_secret_values_for_owner(
@@ -314,14 +335,17 @@ def test_expand_for_owner_omits_on_undecryptable_material(monkeypatch) -> None:
         secret_material={},
         owner_id="user-a",
         owner_secrets=wrong_owner,
-        on_omit=lambda *args: omitted.append(args),
+        on_unresolved=lambda *args: events.append(args),
     )
 
     assert expanded["secret_injections"] == []
-    assert omitted == [("decrypt", "slack-token", "slack-user-token")]
+    assert events == [("decrypt", "unfulfilled", "slack-token", "slack-user-token")]
+    assert expanded["unfulfilled_secret_injections"] == [
+        {"id": "slack-token", "match": _user_injection()["match"], "header": "authorization"}
+    ]
 
 
-def test_expand_without_owner_context_omits_value_from(monkeypatch) -> None:
+def test_expand_without_owner_context_marks_unfulfilled(monkeypatch) -> None:
     monkeypatch.setenv("SECRET_INJECTION_KEK_B64", TEST_KEK)
 
     expanded = expand_profile_policy_secret_values(
@@ -330,7 +354,12 @@ def test_expand_without_owner_context_omits_value_from(monkeypatch) -> None:
         secret_material={},
     )
 
+    # No owner context → grant can't resolve → fail-closed marker, never a
+    # value_from leak and never a silent uncredentialed passthrough.
     assert expanded["secret_injections"] == []
+    assert expanded["unfulfilled_secret_injections"] == [
+        {"id": "slack-token", "match": _user_injection()["match"], "header": "authorization"}
+    ]
 
 
 def test_expand_for_owner_never_emits_value_from_anywhere(monkeypatch) -> None:

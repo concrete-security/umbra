@@ -794,3 +794,71 @@ def test_first_allow_rule_must_match_or_fall_through() -> None:
     assert matched.allowed is True
     assert matched.matched_rule is not None
     assert matched.matched_rule.rule_id == "slack-read-broad"
+
+
+def _unfulfilled_marker(**overrides) -> dict[str, object]:
+    marker = {
+        "id": "anthropic-auth",
+        "match": {
+            "scheme": "https",
+            "host": "api.anthropic.com",
+            "ports": [443],
+            "methods": ["POST"],
+            "path_prefixes": ["/"],
+        },
+        "header": "authorization",
+    }
+    marker.update(overrides)
+    return marker
+
+
+def test_parse_unfulfilled_secret_injections() -> None:
+    policy = parse_effective_policy(
+        {"allowed_destinations": [], "unfulfilled_secret_injections": [_unfulfilled_marker()]}
+    )
+
+    assert len(policy.unfulfilled_injections) == 1
+    injection = policy.unfulfilled_injections[0]
+    assert injection.injection_id == "anthropic-auth"
+    assert injection.header == "authorization"
+    assert injection.match.host == "api.anthropic.com"
+
+
+def test_parse_unfulfilled_injections_is_total_never_deny_all() -> None:
+    # Malformed markers are skipped, never raising: a bad marker degrades to a
+    # lost signal, never collapsing the whole CVM to deny-all. Only valid ones
+    # survive.
+    policy = parse_effective_policy(
+        {
+            "unfulfilled_secret_injections": [
+                "not-a-dict",
+                {"id": "x", "header": "authorization"},  # missing match
+                {"id": "bad id!", "match": _unfulfilled_marker()["match"], "header": "authorization"},
+                {  # match missing methods/path_prefixes
+                    "id": "incomplete",
+                    "match": {"scheme": "https", "host": "no-methods.com", "ports": [443]},
+                    "header": "authorization",
+                },
+                {"id": "unknown-field", "match": _unfulfilled_marker()["match"], "header": "authorization", "x": 1},
+                _unfulfilled_marker(id="good"),
+            ]
+        }
+    )
+
+    assert [injection.injection_id for injection in policy.unfulfilled_injections] == ["good"]
+
+
+def test_unmet_secret_injection_matches_and_is_suppressed_by_satisfied_header() -> None:
+    policy = parse_effective_policy({"unfulfilled_secret_injections": [_unfulfilled_marker()]})
+    request = {"scheme": "https", "host": "api.anthropic.com", "port": 443, "method": "POST", "path": "/v1/messages"}
+
+    assert policy.unmet_secret_injection(**request, satisfied_headers=set()) is not None
+    # A fulfilled injection providing the same header suppresses the block.
+    assert policy.unmet_secret_injection(**request, satisfied_headers={"authorization"}) is None
+    # A non-matching request is unaffected.
+    assert (
+        policy.unmet_secret_injection(
+            scheme="https", host="other.com", port=443, method="POST", path="/", satisfied_headers=set()
+        )
+        is None
+    )
