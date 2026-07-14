@@ -35,6 +35,11 @@ class TrafficLogRecord:
     response_code: int | None
     bytes_transferred: int
     attributes: Mapping[str, str] = field(default_factory=dict)
+    # The enforcement decision that produced this record: "allowed", a block
+    # reason (e.g. "secret_injection_unfulfilled", "dlp_secret_detected"), or
+    # "websocket_frame_dropped". Lets a blocked request be diagnosed from the
+    # logs by reason without reproducing it (docs/specs/security-cvm.md §6.1).
+    decision: str | None = None
 
     def to_json(self) -> dict[str, Any]:
         timestamp = self.timestamp
@@ -51,6 +56,7 @@ class TrafficLogRecord:
             "method": self.method,
             "path": self.path[:2000] if self.path is not None else None,
             "response_code": self.response_code,
+            "decision": self.decision,
             "bytes_transferred": self.bytes_transferred,
         }
         if self.attributes:

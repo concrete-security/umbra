@@ -2203,6 +2203,16 @@ def test_validate_traffic_log_batch_shape_rejects_missing_cvm_id() -> None:
     assert exc.value.detail["error"]["details"]["errors"][0]["type"] == "missing_cvm_id"
 
 
+def test_traffic_log_in_accepts_decision_and_ignores_unknown_fields() -> None:
+    assert traffic_log().decision is None
+    assert traffic_log(decision="secret_injection_unfulfilled").decision == "secret_injection_unfulfilled"
+    # extra="ignore": a newer SC image may ship traffic fields this Console does
+    # not model yet; ingest tolerates (drops) them instead of 422-rejecting the
+    # whole batch during an SC-before-Console rollout.
+    tolerated = traffic_log(some_future_field="whatever")
+    assert not hasattr(tolerated, "some_future_field")
+
+
 def test_validate_traffic_log_batch_shape_rejects_invalid_key() -> None:
     with pytest.raises(HTTPException) as exc:
         validate_traffic_log_batch_shape(TrafficLogBatch(idempotency_key="bad key", logs=[traffic_log()]))

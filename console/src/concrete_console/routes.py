@@ -6286,6 +6286,7 @@ async def list_traffic_logs(
             tl.method,
             tl.path,
             tl.response_code,
+            tl.decision,
             tl.bytes_transferred,
             tl.attributes
         FROM traffic_logs tl

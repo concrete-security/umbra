@@ -46,6 +46,14 @@ def test_record_json_truncates_path_and_serializes_timestamp() -> None:
     assert len(payload["path"]) == 2000
 
 
+def test_record_json_includes_decision() -> None:
+    assert record().to_json()["decision"] is None
+    assert (
+        record(decision="secret_injection_unfulfilled").to_json()["decision"]
+        == "secret_injection_unfulfilled"
+    )
+
+
 def test_queue_drops_oldest_when_bound_is_exceeded() -> None:
     queue = TrafficLogQueue(max_entries=2, max_bytes=10_000)
 

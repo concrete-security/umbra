@@ -206,6 +206,7 @@ def traffic_log_resource(row: Any) -> dict[str, Any]:
         "method": row["method"],
         "path": row["path"],
         "response_code": row["response_code"],
+        "decision": row.get("decision"),
         "bytes_transferred": row["bytes_transferred"],
         "attributes": attributes,
     }

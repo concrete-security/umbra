@@ -299,6 +299,30 @@ def test_traffic_log_resource_formats_fields() -> None:
     assert resource["bytes_transferred"] == 1234
 
 
+def test_traffic_log_resource_includes_decision() -> None:
+    row = {
+        "id": UUID("00000000-0000-4000-8000-000000000040"),
+        "timestamp": datetime(2026, 5, 15, 20, 0, tzinfo=timezone.utc),
+        "security_cvm_id": UUID("00000000-0000-4000-8000-000000000041"),
+        "cvm_id": UUID("00000000-0000-4000-8000-000000000042"),
+        "source_ip": "10.0.0.2",
+        "destination_ip": "93.184.216.34",
+        "destination_host": "api.slack.com",
+        "protocol": "https",
+        "port": 443,
+        "method": "POST",
+        "path": "/api/chat.postMessage",
+        "response_code": 403,
+        "bytes_transferred": 0,
+    }
+    # Older rows / an older SC that predates the column → absent → None.
+    assert traffic_log_resource(row)["decision"] is None
+    assert (
+        traffic_log_resource({**row, "decision": "secret_injection_unfulfilled"})["decision"]
+        == "secret_injection_unfulfilled"
+    )
+
+
 def test_cvm_resource_formats_nested_profiles_and_keys() -> None:
     resource = cvm_resource(
         {

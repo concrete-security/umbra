@@ -171,7 +171,7 @@ def enforce_authenticated_request(
         reason="allowed",
         cvm=cvm,
         upstream_headers=upstream_headers,
-        traffic_log=traffic_log_record(request, cvm, response_code=None, attributes=attributes),
+        traffic_log=traffic_log_record(request, cvm, response_code=None, decision="allowed", attributes=attributes),
         matched_policy_id=decision.rule_id,
     )
 
@@ -214,7 +214,7 @@ def enforce_connect_request(request: ProxyRequest, control_map: ControlMap) -> E
         reason="allowed",
         cvm=cvm,
         upstream_headers=upstream_headers,
-        traffic_log=traffic_log_record(request, cvm, response_code=200),
+        traffic_log=traffic_log_record(request, cvm, response_code=200, decision="allowed"),
         matched_policy_id=decision.rule_id,
     )
 
@@ -243,7 +243,7 @@ def decide_inbound_websocket(
     return WebsocketFrameDecision(
         drop=True,
         ack_frame=verdict.ack_frame,
-        traffic_log=traffic_log_record(request, cvm, response_code=None),
+        traffic_log=traffic_log_record(request, cvm, response_code=None, decision="websocket_frame_dropped"),
         matched_policy_id=verdict.rule_id,
     )
 
@@ -333,6 +333,7 @@ def traffic_log_record(
     cvm: DevCVMControlEntry,
     *,
     response_code: int | None,
+    decision: str,
     bytes_transferred: int = 0,
     attributes: Mapping[str, str] | None = None,
 ) -> TrafficLogRecord:
@@ -349,6 +350,7 @@ def traffic_log_record(
         response_code=response_code,
         bytes_transferred=bytes_transferred,
         attributes=dict(attributes) if attributes else {},
+        decision=decision,
     )
 
 
@@ -365,7 +367,7 @@ def _blocked_result(
         reason=reason,
         cvm=cvm,
         upstream_headers=upstream_headers,
-        traffic_log=traffic_log_record(request, cvm, response_code=403),
+        traffic_log=traffic_log_record(request, cvm, response_code=403, decision=reason),
         matched_policy_id=matched_policy_id,
     )
 

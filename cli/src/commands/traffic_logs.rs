@@ -33,6 +33,7 @@ struct TrafficLog {
     method: Option<String>,
     path: Option<String>,
     response_code: Option<u16>,
+    decision: Option<String>,
     bytes_transferred: u64,
 
     #[serde(flatten, default, skip_serializing)]
@@ -120,6 +121,7 @@ fn print_traffic_logs(page: ListPage<TrafficLog>, json_output: bool, args: &Traf
             method: log.method.as_deref(),
             destination_host: log.destination_host.as_deref(),
             response_code: log.response_code,
+            decision: log.decision.as_deref(),
             bytes_transferred: log.bytes_transferred,
             path: log.path.as_deref(),
             extra: &log.extra,

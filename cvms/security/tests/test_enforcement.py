@@ -637,3 +637,15 @@ def test_unfulfilled_injection_does_not_block_unmatched_request() -> None:
 
     assert result.allowed is True
     assert result.reason == "allowed"
+
+
+def test_traffic_log_records_carry_the_decision() -> None:
+    allowed = enforce_request(request(), control_map())
+    assert allowed.allowed is True
+    assert allowed.traffic_log is not None
+    assert allowed.traffic_log.decision == "allowed"
+
+    blocked = enforce_request(request(path="/v1/files"), control_map())
+    assert blocked.allowed is False
+    assert blocked.traffic_log is not None
+    assert blocked.traffic_log.decision == "blocked_destination"

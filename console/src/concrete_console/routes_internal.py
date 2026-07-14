@@ -41,7 +41,11 @@ TRAFFIC_LOG_PATH_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 
 class TrafficLogIn(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    # `ignore` (not `forbid`) on this internal SC->Console producer/consumer
+    # contract: a newer SC image MAY ship traffic fields this Console does not
+    # model yet, and ingest must tolerate them rather than 422-rejecting whole
+    # batches during an SC-before-Console rollout. Unknown fields are dropped.
+    model_config = ConfigDict(extra="ignore")
 
     timestamp: datetime
     cvm_id: UUID | None = None
@@ -53,6 +57,9 @@ class TrafficLogIn(BaseModel):
     method: str | None = Field(default=None, max_length=20)
     path: str | None = Field(default=None, max_length=2000)
     response_code: int | None = Field(default=None, ge=0, le=599)
+    # SC enforcement decision ("allowed", a block reason, "websocket_frame_dropped").
+    # Optional so an older SC that predates it still ingests (decision stays NULL).
+    decision: str | None = Field(default=None, max_length=64)
     bytes_transferred: int = Field(ge=0)
     attributes: dict[str, str] = Field(default_factory=dict)
 
@@ -433,9 +440,10 @@ async def ingest_traffic_logs(
                     path,
                     response_code,
                     bytes_transferred,
-                    attributes
+                    attributes,
+                    decision
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb, $15)
                 """,
                 [
                     (
@@ -453,6 +461,7 @@ async def ingest_traffic_logs(
                         log.response_code,
                         log.bytes_transferred,
                         json.dumps(log.attributes, sort_keys=True),
+                        log.decision,
                     )
                     for log in body.logs
                 ],

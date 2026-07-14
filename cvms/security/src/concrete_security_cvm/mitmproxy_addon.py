@@ -205,7 +205,9 @@ class SecurityCVMProxyAddon:
                 # Lifecycle (hello/disconnect) frames are delivered unfiltered
                 # under the SC bound; emit a contents-free traffic log so the
                 # bounded telemetry channel is auditable (cf. dropped frames).
-                self.traffic_emitter.enqueue(_websocket_traffic_log_record(proxy_request, cvm.cvm_id))
+                self.traffic_emitter.enqueue(
+                    _websocket_traffic_log_record(proxy_request, cvm.cvm_id, decision="allowed")
+                )
             return
         self._drop_websocket_frame(
             flow,
@@ -234,7 +236,9 @@ class SecurityCVMProxyAddon:
     ) -> None:
         message.drop()
         if request is not None and cvm_id is not None:
-            self.traffic_emitter.enqueue(_websocket_traffic_log_record(request, cvm_id))
+            self.traffic_emitter.enqueue(
+                _websocket_traffic_log_record(request, cvm_id, decision="websocket_frame_dropped")
+            )
         if ack_frame is not None:
             self.websocket_injector(flow, False, ack_frame)
         logger.info(
@@ -360,7 +364,7 @@ def proxy_request_from_flow(flow: Any) -> ProxyRequest:
     )
 
 
-def _websocket_traffic_log_record(request: ProxyRequest, cvm_id: UUID) -> TrafficLogRecord:
+def _websocket_traffic_log_record(request: ProxyRequest, cvm_id: UUID, *, decision: str) -> TrafficLogRecord:
     return TrafficLogRecord(
         timestamp=request.timestamp or datetime.now(timezone.utc),
         cvm_id=cvm_id,
@@ -374,6 +378,7 @@ def _websocket_traffic_log_record(request: ProxyRequest, cvm_id: UUID) -> Traffi
         response_code=None,
         bytes_transferred=0,
         attributes={},
+        decision=decision,
     )
 
 
