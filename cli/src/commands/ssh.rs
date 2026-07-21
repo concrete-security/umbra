@@ -40,11 +40,6 @@ struct MeSshKey {
     fingerprint: String,
 }
 
-#[derive(Debug, Deserialize)]
-struct MeSshKeyListPage {
-    items: Vec<MeSshKey>,
-}
-
 #[derive(Debug)]
 struct InstalledSshKey {
     id: String,
@@ -224,39 +219,47 @@ fn ps_failure_to_propagate(explicit: bool, groups: &[PsGroup]) -> Option<&(ExitS
 }
 
 pub fn run_ps(args: SessionListArgs, config: &ResolvedConfig, json_output: bool) -> ExitStatus {
+    let (console_url, session) = match console_session(config) {
+        Ok(value) => value,
+        Err((status, message)) => {
+            crate::style::eprintln_error(&message);
+            return status;
+        }
+    };
     // No explicit target -> every RUNNING Dev CVM of the caller (owner-scoped by
     // the Console); `ps` deliberately does not fall back to `default_cvm`. An
-    // explicit positional/`--cvm` scopes to that one CVM.
-    let targets = match (args.target.cvm_id.as_deref(), args.target.cvm.as_deref()) {
-        (None, None) => {
-            let (console_url, session) = match console_session(config) {
-                Ok(value) => value,
-                Err((status, message)) => {
+    // explicit positional/`--cvm` scopes to that one CVM. Either way we keep the
+    // full `Cvm` records so the probe reuses them via `build_ssh` (no re-fetch).
+    let cvms: Vec<Cvm> = match (args.target.cvm_id.as_deref(), args.target.cvm.as_deref()) {
+        (None, None) => match fetch_json::<ListPage<Cvm>>(
+            console_url,
+            &session,
+            "/api/v1/cvms",
+            &[("state", "running".to_string())],
+            "list CVMs",
+        ) {
+            Ok(page) => page.items,
+            Err((status, message)) => {
+                crate::style::eprintln_error(&message);
+                return status;
+            }
+        },
+        (positional, flag) => {
+            let cvm_id = match resolve_cvm_explicit(positional, flag) {
+                Ok(id) => id,
+                Err(message) => {
                     crate::style::eprintln_error(&message);
-                    return status;
+                    return ExitStatus::Usage;
                 }
             };
-            match fetch_json::<ListPage<Cvm>>(
-                console_url,
-                &session,
-                "/api/v1/cvms",
-                &[("state", "running".to_string())],
-                "list CVMs",
-            ) {
-                Ok(page) => page.items.into_iter().map(|cvm| cvm.id).collect::<Vec<_>>(),
+            match fetch_cvm(console_url, &session, &cvm_id) {
+                Ok(cvm) => vec![cvm],
                 Err((status, message)) => {
                     crate::style::eprintln_error(&message);
                     return status;
                 }
             }
         }
-        (positional, flag) => match resolve_cvm_explicit(positional, flag) {
-            Ok(id) => vec![id],
-            Err(message) => {
-                crate::style::eprintln_error(&message);
-                return ExitStatus::Usage;
-            }
-        },
     };
 
     // Alias config is a single local file shared by all CVMs: validate it once,
@@ -280,20 +283,21 @@ pub fn run_ps(args: SessionListArgs, config: &ResolvedConfig, json_output: bool)
     // Probe each CVM independently: its sessions, or the error that stopped us
     // reading them. A probe failure is captured per CVM (with its exit status)
     // and never aborts the whole listing (`Result` is the sum type; no bespoke
-    // struct needed).
-    let groups: Vec<PsGroup> = targets
+    // struct needed). The `Cvm` records from the listing are reused via
+    // `build_ssh`, so a fleet `ps` fetches once, not 1 + N times.
+    let groups: Vec<PsGroup> = cvms
         .into_iter()
-        .map(|cvm_id| {
+        .map(|cvm| {
+            let cvm_id = cvm.id.clone();
             let aliases = aliases_by_session(&config.config_dir, &cvm_id).unwrap_or_default();
-            let sessions = run_ssh_capture(
-                SshInvocation {
-                    cvm_id: &cvm_id,
-                    identity_file: args.identity_file.as_deref(),
-                    remote_command: ps_remote_command(),
-                    allocate_tty: false,
-                },
+            let sessions = build_ssh(
+                console_url,
+                &session,
+                cvm,
+                args.identity_file.as_deref(),
                 config,
             )
+            .and_then(|prepared| capture_prepared(&prepared, ps_remote_command()))
             .and_then(|output| {
                 parse_session_rows(&output, &aliases)
                     .map_err(|message| (ExitStatus::Error, message))
@@ -549,8 +553,19 @@ fn run_ssh_capture(
     config: &ResolvedConfig,
 ) -> Result<String, (ExitStatus, String)> {
     let prepared = prepare_ssh(invocation.cvm_id, invocation.identity_file, config)?;
-    let mut ssh = base_ssh_command(&prepared, invocation.allocate_tty);
-    ssh.arg(invocation.remote_command);
+    capture_prepared(&prepared, invocation.remote_command)
+}
+
+/// Run a remote command over an already-prepared SSH connection and capture its
+/// stdout. Split from [`run_ssh_capture`] so `ps` can reuse a [`PreparedSsh`]
+/// built from a pre-fetched CVM ([`build_ssh`]) without re-preparing.
+fn capture_prepared(
+    prepared: &PreparedSsh,
+    remote_command: String,
+) -> Result<String, (ExitStatus, String)> {
+    // Capturing stdout never needs a TTY (the interactive path is `run_ssh`).
+    let mut ssh = base_ssh_command(prepared, false);
+    ssh.arg(remote_command);
     let output = ssh.output().map_err(|err| {
         (
             ExitStatus::Error,
@@ -577,29 +592,31 @@ fn run_ssh_capture(
     })
 }
 
-/// prepare_ssh:
-/// - Checks that the CVM is ready (running, no rebind, FQDN present)
-/// - Sets up the connection: aTLS tunnel + SSH key
-///
-/// Used by every SSH command: `ssh`, `code`, `cursor`, agent sessions, and `ps`.
+/// Fetch the Dev CVM, then build its SSH connection ([`build_ssh`]).
+/// Used by every SSH command that starts from just an id: `ssh`, `code`,
+/// `cursor`, agent sessions. (`ps` already holds the CVM from its fleet listing
+/// and calls [`build_ssh`] directly, avoiding a redundant fetch.)
 fn prepare_ssh(
     cvm_id: &str,
     explicit_identity: Option<&Path>,
     config: &ResolvedConfig,
 ) -> Result<PreparedSsh, (ExitStatus, String)> {
-    let cvm_id = cvm_id.to_string();
-    let (console_url, session) = match console_session(config) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            return Err((status, message));
-        }
-    };
-    let cvm = match fetch_cvm(console_url, &session, &cvm_id) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            return Err((status, message));
-        }
-    };
+    let (console_url, session) = console_session(config)?;
+    let cvm = fetch_cvm(console_url, &session, cvm_id)?;
+    build_ssh(console_url, &session, cvm, explicit_identity, config)
+}
+
+/// Build the SSH connection from an ALREADY-fetched Dev CVM: check
+/// running/rebind/FQDN, build the aTLS tunnel ProxyCommand, resolve the SSH key.
+/// Does no Console fetch of the CVM, so a caller holding it (e.g. `ps` enumerating
+/// the fleet) skips a redundant `GET /cvms/{id}`.
+fn build_ssh(
+    console_url: &str,
+    session: &Session,
+    cvm: Cvm,
+    explicit_identity: Option<&Path>,
+    config: &ResolvedConfig,
+) -> Result<PreparedSsh, (ExitStatus, String)> {
     if cvm.state != "RUNNING" {
         return Err((
             ExitStatus::Error,
@@ -627,7 +644,7 @@ fn prepare_ssh(
             ));
         }
     };
-    let policy_path = match resolve_policy_path(config, console_url, &session, &cvm.id) {
+    let policy_path = match resolve_policy_path(config, console_url, session, &cvm.id) {
         Ok(value) => value,
         Err((status, message)) => {
             return Err((status, message));
@@ -642,7 +659,7 @@ fn prepare_ssh(
     let identity_file = if let Some(path) = explicit_identity {
         Some(ssh_identity::resolve_explicit_identity(path)?)
     } else {
-        let installed_keys = match installed_keys(console_url, &session, &cvm) {
+        let installed_keys = match installed_keys(console_url, session, &cvm) {
             Ok(value) => value,
             Err((status, message)) => {
                 return Err((status, message));
@@ -743,7 +760,7 @@ fn installed_keys(
                 format!("[error] failed to list SSH keys: {err}"),
             )
         })?;
-    let page: MeSshKeyListPage = crate::console::read_json_response(response, "list SSH keys")?;
+    let page: ListPage<MeSshKey> = crate::console::read_json_response(response, "list SSH keys")?;
     let installed_ids = cvm
         .ssh_keys
         .iter()

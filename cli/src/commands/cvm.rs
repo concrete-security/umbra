@@ -23,19 +23,15 @@ use crate::{
     },
     commands::{resolve_cvm, resolve_cvm_explicit},
     config::{self, ResolvedConfig},
-    console::{fetch_json, push_query, read_json_response, read_with_etag, validate_uuid},
+    console::{
+        fetch_json, push_query, read_json_response, read_with_etag, validate_uuid, ListPage,
+    },
     exit::ExitStatus,
     operation::{self, Operation},
     session::Session,
     ssh_identity::{self, persistable_path},
     ssh_identity_store, style,
 };
-
-#[derive(Debug, Deserialize)]
-struct CvmListPage {
-    items: Vec<Cvm>,
-    next_cursor: Option<String>,
-}
 
 // Every Console-response struct carries an `extra` catch-all (per
 // `docs/specs/cli-style.md` §11.7): unknown fields are CAPTURED rather than
@@ -114,20 +110,10 @@ struct CatalogRefreshError {
 }
 
 #[derive(Debug, Deserialize)]
-struct ProfileListPage {
-    items: Vec<LaunchProfile>,
-}
-
-#[derive(Debug, Deserialize)]
 struct LaunchProfile {
     id: String,
     name: String,
     assigned: bool,
-}
-
-#[derive(Debug, Deserialize)]
-struct KeyListPage {
-    items: Vec<ConsoleSshKey>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -329,7 +315,7 @@ fn list(config: &ResolvedConfig, args: CvmListArgs, json_output: bool) -> ExitSt
     // global --profile. The Console does the filtering, not the CLI.
     let mut query = args.query_params();
     push_query(&mut query, "profile_id", &profile_id);
-    let page: CvmListPage =
+    let page: ListPage<Cvm> =
         match fetch_json(console_url, &session, "/api/v1/cvms", &query, "list CVMs") {
             Ok(value) => value,
             Err((status, message)) => {
@@ -981,7 +967,7 @@ fn resolve_launch_identity(config: &ResolvedConfig, keys: &[&ConsoleSshKey]) -> 
 fn fetch_launch_profiles(
     console_url: &str,
     session: &Session,
-) -> Result<ProfileListPage, (ExitStatus, String)> {
+) -> Result<ListPage<LaunchProfile>, (ExitStatus, String)> {
     let response = Client::new()
         .get(format!(
             "{console_url}/api/v1/entities/{}/profiles",
@@ -1001,7 +987,7 @@ fn fetch_launch_profiles(
 fn fetch_launch_keys(
     console_url: &str,
     session: &Session,
-) -> Result<KeyListPage, (ExitStatus, String)> {
+) -> Result<ListPage<ConsoleSshKey>, (ExitStatus, String)> {
     let response = Client::new()
         .get(format!("{console_url}/api/v1/me/keys"))
         .bearer_auth(&session.access_token)
@@ -1586,7 +1572,7 @@ fn policy_document(bundle: &PolicyBundle) -> Value {
 }
 
 fn print_cvm_list(
-    page: CvmListPage,
+    page: ListPage<Cvm>,
     json_output: bool,
     profile_filter: Option<&str>,
     state_filter: Option<&str>,

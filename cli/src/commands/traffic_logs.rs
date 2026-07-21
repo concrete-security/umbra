@@ -8,16 +8,10 @@ use serde_json::Value;
 use crate::{
     cli::TrafficLogsArgs,
     config::ResolvedConfig,
-    console::{console_session, push_query, read_json_response, validate_uuid},
+    console::{console_session, push_query, read_json_response, validate_uuid, ListPage},
     exit::ExitStatus,
     style,
 };
-
-#[derive(Debug, Deserialize, Serialize)]
-struct TrafficLogListPage {
-    items: Vec<TrafficLog>,
-    next_cursor: Option<String>,
-}
 
 #[derive(Debug, Deserialize, Serialize)]
 struct TrafficLogsOutput {
@@ -91,7 +85,7 @@ fn fetch_traffic_logs(
     console_url: &str,
     access_token: &str,
     args: &TrafficLogsArgs,
-) -> Result<TrafficLogListPage, (ExitStatus, String)> {
+) -> Result<ListPage<TrafficLog>, (ExitStatus, String)> {
     let mut query = vec![("limit", args.limit.to_string())];
     push_query(&mut query, "cvm_id", &args.cvm);
     push_query(&mut query, "security_cvm_id", &args.security_cvm);
@@ -112,7 +106,7 @@ fn fetch_traffic_logs(
     read_json_response(response, "query traffic logs")
 }
 
-fn print_traffic_logs(page: TrafficLogListPage, json_output: bool, args: &TrafficLogsArgs) {
+fn print_traffic_logs(page: ListPage<TrafficLog>, json_output: bool, args: &TrafficLogsArgs) {
     if json_output {
         println!(
             "{}",

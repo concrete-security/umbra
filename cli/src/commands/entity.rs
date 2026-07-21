@@ -8,16 +8,10 @@ use uuid::Uuid;
 use crate::{
     cli::{EntityAddArgs, EntityCommand, EntityListArgs},
     config::ResolvedConfig,
-    console::{console_session, read_json_response},
+    console::{console_session, read_json_response, ListPage},
     exit::ExitStatus,
     style,
 };
-
-#[derive(Debug, Deserialize)]
-struct EntityListPage {
-    items: Vec<Entity>,
-    next_cursor: Option<String>,
-}
 
 #[derive(Debug, Deserialize, Serialize)]
 struct Entity {
@@ -101,7 +95,7 @@ fn fetch_entities(
     console_url: &str,
     access_token: &str,
     args: &EntityListArgs,
-) -> Result<EntityListPage, (ExitStatus, String)> {
+) -> Result<ListPage<Entity>, (ExitStatus, String)> {
     let mut query = vec![("limit", args.limit.to_string())];
     if let Some(cursor) = &args.cursor {
         query.push(("cursor", cursor.clone()));
@@ -120,7 +114,7 @@ fn fetch_entities(
     read_json_response(response, "list entities")
 }
 
-fn print_entities(page: EntityListPage, json_output: bool) {
+fn print_entities(page: ListPage<Entity>, json_output: bool) {
     if json_output {
         println!(
             "{}",

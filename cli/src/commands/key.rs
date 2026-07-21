@@ -13,17 +13,11 @@ use uuid::Uuid;
 use crate::{
     cli::{KeyAddArgs, KeyCommand},
     config::ResolvedConfig,
-    console::{console_session, read_empty_response, read_json_response},
+    console::{console_session, read_empty_response, read_json_response, ListPage},
     exit::ExitStatus,
     ssh_identity::{self, persistable_path},
     ssh_identity_store, style,
 };
-
-#[derive(Debug, Deserialize)]
-struct KeyListPage {
-    items: Vec<ConsoleSshKey>,
-    next_cursor: Option<String>,
-}
 
 #[derive(Debug, Deserialize)]
 struct ConsoleSshKey {
@@ -298,7 +292,10 @@ fn remove(config: &ResolvedConfig, key_id: &str, json_output: bool) -> ExitStatu
     ExitStatus::Ok
 }
 
-fn fetch_keys(console_url: &str, access_token: &str) -> Result<KeyListPage, (ExitStatus, String)> {
+fn fetch_keys(
+    console_url: &str,
+    access_token: &str,
+) -> Result<ListPage<ConsoleSshKey>, (ExitStatus, String)> {
     let response = Client::new()
         .get(format!("{console_url}/api/v1/me/keys"))
         .bearer_auth(access_token)

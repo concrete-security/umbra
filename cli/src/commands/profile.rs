@@ -18,23 +18,12 @@ use crate::{
     config::ResolvedConfig,
     console::{
         self, console_session, fetch_json, read_empty_response, read_json_response, read_with_etag,
+        ListPage,
     },
     exit::ExitStatus,
     session::Session,
     style,
 };
-
-#[derive(Debug, Deserialize)]
-struct ProfileListPage {
-    items: Vec<Profile>,
-    next_cursor: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ProfileMemberListPage {
-    items: Vec<ProfileMember>,
-    next_cursor: Option<String>,
-}
 
 #[derive(Debug, Deserialize, Serialize)]
 struct Profile {
@@ -139,7 +128,7 @@ fn list(config: &ResolvedConfig, args: ProfileListArgs, json_output: bool) -> Ex
     // the filtering, not the CLI.
     let query = args.query_params();
     let path = format!("/api/v1/entities/{}/profiles", session.entity.id);
-    let page: ProfileListPage =
+    let page: ListPage<Profile> =
         match fetch_json(console_url, &session, &path, &query, "list profiles") {
             Ok(value) => value,
             Err((status, message)) => {
@@ -487,7 +476,7 @@ fn fetch_profile_members(
     console_url: &str,
     access_token: &str,
     profile_id: &str,
-) -> Result<ProfileMemberListPage, (ExitStatus, String)> {
+) -> Result<ListPage<ProfileMember>, (ExitStatus, String)> {
     let response = Client::new()
         .get(format!("{console_url}/api/v1/profiles/{profile_id}/users"))
         .bearer_auth(access_token)

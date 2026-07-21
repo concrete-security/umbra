@@ -256,6 +256,8 @@ pub(crate) fn push_query(
 #[derive(Debug, serde::Deserialize)]
 pub(crate) struct ListPage<T> {
     pub items: Vec<T>,
+    #[serde(default)]
+    pub next_cursor: Option<String>,
 }
 
 /// Authenticated Console `GET` with the session token and the given query
