@@ -250,6 +250,14 @@ pub(crate) fn push_query(
     }
 }
 
+/// A Console list-page envelope: `{ "items": [...], "next_cursor": ... }`.
+/// Deserialize `ListPage<T>` via [`fetch_json`] instead of each caller defining
+/// its own page struct.
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct ListPage<T> {
+    pub items: Vec<T>,
+}
+
 /// Authenticated Console `GET` with the session token and the given query
 /// filters, decoding the JSON body into `T`. Used for both list-page endpoints
 /// (`{items, next_cursor}`) and structured documents; `T` names the shape.

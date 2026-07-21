@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::{
     config::ResolvedConfig,
-    console::{console_session, read_json_response},
+    console::{console_session, read_json_response, ListPage},
     exit::ExitStatus,
     session::Session,
     style,
@@ -22,11 +22,6 @@ struct User {
     id: String,
     email: String,
     entity: Entity,
-}
-
-#[derive(Debug, Deserialize)]
-struct ListPage<T> {
-    items: Vec<T>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

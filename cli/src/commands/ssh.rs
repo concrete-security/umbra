@@ -11,7 +11,7 @@ use std::{
 use chrono::Utc;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -21,9 +21,9 @@ use crate::{
         AgentSessionArgs, AliasArgs, CodeArgs, CursorArgs, SessionListArgs, SessionTargetArgs,
         SshArgs,
     },
-    commands::resolve_cvm,
+    commands::{resolve_cvm, resolve_cvm_explicit},
     config::ResolvedConfig,
-    console::console_session,
+    console::{console_session, fetch_json, ListPage},
     exit::ExitStatus,
     session::Session,
     ssh_identity, ssh_identity_store, style,
@@ -210,44 +210,108 @@ pub fn run_cursor(args: CursorArgs, config: &ResolvedConfig) -> ExitStatus {
     )
 }
 
+/// One CVM's `ps` outcome: its sessions, or the exit status + message of the
+/// probe failure that stopped us reading them.
+type PsGroup = (String, Result<Vec<SessionRow>, (ExitStatus, String)>);
+
+/// The probe failure that aborts a `ps` run: only an explicit single target's
+/// failure propagates; fleet mode (or a healthy target) yields `None`.
+fn ps_failure_to_propagate(explicit: bool, groups: &[PsGroup]) -> Option<&(ExitStatus, String)> {
+    match groups {
+        [(_, Err(failure))] if explicit => Some(failure),
+        _ => None,
+    }
+}
+
 pub fn run_ps(args: SessionListArgs, config: &ResolvedConfig, json_output: bool) -> ExitStatus {
-    let cvm_id = match resolve_cvm(None, args.cvm.as_deref(), config) {
-        Ok(value) => value,
-        Err(message) => {
-            crate::style::eprintln_error(&message);
-            return ExitStatus::Usage;
+    // No explicit target -> every RUNNING Dev CVM of the caller (owner-scoped by
+    // the Console); `ps` deliberately does not fall back to `default_cvm`. An
+    // explicit positional/`--cvm` scopes to that one CVM.
+    let targets = match (args.target.cvm_id.as_deref(), args.target.cvm.as_deref()) {
+        (None, None) => {
+            let (console_url, session) = match console_session(config) {
+                Ok(value) => value,
+                Err((status, message)) => {
+                    crate::style::eprintln_error(&message);
+                    return status;
+                }
+            };
+            match fetch_json::<ListPage<Cvm>>(
+                console_url,
+                &session,
+                "/api/v1/cvms",
+                &[("state", "running".to_string())],
+                "list CVMs",
+            ) {
+                Ok(page) => page.items.into_iter().map(|cvm| cvm.id).collect::<Vec<_>>(),
+                Err((status, message)) => {
+                    crate::style::eprintln_error(&message);
+                    return status;
+                }
+            }
         }
-    };
-    let aliases = match aliases_by_session(&config.config_dir, &cvm_id) {
-        Ok(value) => value,
-        Err(message) => {
-            crate::style::eprintln_error(&message);
-            return ExitStatus::Error;
-        }
-    };
-    let output = match run_ssh_capture(
-        SshInvocation {
-            cvm_id: &cvm_id,
-            identity_file: args.identity_file.as_deref(),
-            remote_command: ps_remote_command(),
-            allocate_tty: false,
+        (positional, flag) => match resolve_cvm_explicit(positional, flag) {
+            Ok(id) => vec![id],
+            Err(message) => {
+                crate::style::eprintln_error(&message);
+                return ExitStatus::Usage;
+            }
         },
-        config,
-    ) {
-        Ok(value) => value,
-        Err((status, message)) => {
+    };
+
+    // Alias config is a single local file shared by all CVMs: validate it once,
+    // up front. A read/parse failure is a local config error, not a per-CVM
+    // probe failure, so surface it instead of silently rendering "no aliases".
+    if let Err(message) = load_alias_file(&config.config_dir) {
+        crate::style::eprintln_error(&message);
+        return ExitStatus::Error;
+    }
+
+    // `--identity-file` is a local, CVM-independent argument: a bad path fails
+    // identically for every CVM, so validate it once here (fail fast) instead
+    // of surfacing an identical probe error on each CVM while exiting 0.
+    if let Some(path) = args.identity_file.as_deref() {
+        if let Err((status, message)) = ssh_identity::resolve_explicit_identity(path) {
             crate::style::eprintln_error(&message);
             return status;
         }
-    };
-    let rows = match parse_session_rows(&output, &aliases) {
-        Ok(value) => value,
-        Err(message) => {
-            crate::style::eprintln_error(&message);
-            return ExitStatus::Error;
-        }
-    };
-    print_session_rows(&rows, json_output, &cvm_id);
+    }
+
+    // Probe each CVM independently: its sessions, or the error that stopped us
+    // reading them. A probe failure is captured per CVM (with its exit status)
+    // and never aborts the whole listing (`Result` is the sum type; no bespoke
+    // struct needed).
+    let groups: Vec<PsGroup> = targets
+        .into_iter()
+        .map(|cvm_id| {
+            let aliases = aliases_by_session(&config.config_dir, &cvm_id).unwrap_or_default();
+            let sessions = run_ssh_capture(
+                SshInvocation {
+                    cvm_id: &cvm_id,
+                    identity_file: args.identity_file.as_deref(),
+                    remote_command: ps_remote_command(),
+                    allocate_tty: false,
+                },
+                config,
+            )
+            .and_then(|output| {
+                parse_session_rows(&output, &aliases)
+                    .map_err(|message| (ExitStatus::Error, message))
+            });
+            (cvm_id, sessions)
+        })
+        .collect();
+
+    // Explicit single target: propagate its probe failure (non-zero exit, no
+    // stdout). In fleet mode a per-CVM failure stays in the payload and exit
+    // stays 0.
+    let explicit = args.target.cvm_id.is_some() || args.target.cvm.is_some();
+    if let Some((status, message)) = ps_failure_to_propagate(explicit, &groups) {
+        crate::style::eprintln_error(message);
+        return *status;
+    }
+
+    print_ps(&groups, json_output);
     ExitStatus::Ok
 }
 
@@ -513,6 +577,11 @@ fn run_ssh_capture(
     })
 }
 
+/// prepare_ssh:
+/// - Checks that the CVM is ready (running, no rebind, FQDN present)
+/// - Sets up the connection: aTLS tunnel + SSH key
+///
+/// Used by every SSH command: `ssh`, `code`, `cursor`, agent sessions, and `ps`.
 fn prepare_ssh(
     cvm_id: &str,
     explicit_identity: Option<&Path>,
@@ -1114,29 +1183,47 @@ fn parse_session_rows(
     Ok(rows)
 }
 
-fn print_session_rows(rows: &[SessionRow], json_output: bool, cvm_id: &str) {
+fn print_ps(groups: &[PsGroup], json_output: bool) {
     if json_output {
+        // Per-CVM objects so a failed/empty CVM still appears; each row already
+        // carries no CVM id, so the group provides it for unambiguous re-attach.
+        let payload: Vec<Value> = groups
+            .iter()
+            .map(|(cvm_id, result)| match result {
+                Ok(sessions) => {
+                    json!({ "cvm_id": cvm_id, "error": Value::Null, "sessions": sessions })
+                }
+                Err((_, message)) => json!({ "cvm_id": cvm_id, "error": message, "sessions": [] }),
+            })
+            .collect();
         println!(
             "{}",
-            serde_json::to_string_pretty(rows).expect("session rows serialize")
+            serde_json::to_string_pretty(&payload).expect("ps output serializes")
         );
         return;
     }
     let extra = std::collections::BTreeMap::new();
-    let views: Vec<style::PsSessionView<'_>> = rows
+    let view_groups: Vec<style::PsCvmGroup<'_>> = groups
         .iter()
-        .map(|row| style::PsSessionView {
-            name: &row.name,
-            attached: row.attached,
-            alias: row.alias.as_deref(),
-            created_at: &row.created_at,
-            extra: &extra,
+        .map(|(cvm_id, result)| style::PsCvmGroup {
+            cvm_id,
+            error: result.as_ref().err().map(|(_, message)| message.as_str()),
+            sessions: match result {
+                Ok(rows) => rows
+                    .iter()
+                    .map(|row| style::PsSessionView {
+                        name: &row.name,
+                        attached: row.attached,
+                        alias: row.alias.as_deref(),
+                        created_at: &row.created_at,
+                        extra: &extra,
+                    })
+                    .collect(),
+                Err(_) => Vec::new(),
+            },
         })
         .collect();
-    let filter = style::PsFilter {
-        cvm: cvm_id.to_string(),
-    };
-    println!("{}", style::ps_cards(&views, &filter));
+    println!("{}", style::ps_cards(&view_groups));
 }
 
 fn format_epoch(value: i64) -> String {
@@ -1290,6 +1377,7 @@ fn shell_quote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
     use std::{fs, process::Command};
 
     #[test]
@@ -1392,6 +1480,69 @@ mod tests {
 
         assert_eq!(resolved, private_key);
         fs::remove_dir_all(dir).expect("temp dir removed");
+    }
+
+    #[test]
+    fn load_alias_file_absent_success() {
+        // An absent alias file is a valid empty config, so `ps` still lists
+        // sessions (with no aliases) rather than failing.
+        let dir = std::env::temp_dir().join(format!("concrete-alias-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).expect("temp dir created");
+        assert!(load_alias_file(&dir)
+            .expect("absent file is an empty config")
+            .is_empty());
+        fs::remove_dir_all(dir).expect("temp dir removed");
+    }
+
+    #[test]
+    fn load_alias_file_malformed_failure() {
+        // Malformed alias TOML surfaces as an error so `ps` fails fast up front
+        // instead of silently rendering "no aliases".
+        let dir = std::env::temp_dir().join(format!("concrete-alias-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).expect("temp dir created");
+        fs::write(aliases_path(&dir), "not = = valid toml").expect("alias file written");
+        assert!(load_alias_file(&dir).is_err());
+        fs::remove_dir_all(dir).expect("temp dir removed");
+    }
+
+    #[test]
+    fn resolve_explicit_identity_missing_failure() {
+        // `ps --identity-file <path>` validates the key up front, so a missing
+        // path is a usage error rather than a per-CVM probe error that exits 0.
+        let (status, message) =
+            ssh_identity::resolve_explicit_identity(Path::new("/nonexistent/concrete-key"))
+                .expect_err("missing identity file is rejected");
+        assert!(matches!(status, ExitStatus::Usage));
+        assert!(message.contains("identity file"));
+    }
+
+    #[test]
+    fn test_concrete_ps_explicit_unreachable_failure() {
+        // An explicit single target whose probe failed propagates that probe's
+        // exit status (caller then prints the error and skips the listing).
+        let groups: Vec<PsGroup> = vec![(
+            "cvm-a".to_string(),
+            Err((ExitStatus::Error, "aTLS handshake failed".to_string())),
+        )];
+        let (status, message) =
+            ps_failure_to_propagate(true, &groups).expect("explicit failure propagates");
+        assert!(matches!(status, ExitStatus::Error));
+        assert_eq!(message, "aTLS handshake failed");
+    }
+
+    #[rstest]
+    // Fleet mode: a per-CVM probe failure stays in the payload, nothing aborts.
+    #[case::fleet_partial(false, vec![("cvm-a".into(), Ok(vec![])), ("cvm-b".into(), Err((ExitStatus::Error, "aTLS handshake failed".into())))])]
+    // Fleet mode with a single failed CVM still exits 0 (failure is the payload).
+    #[case::fleet_single_fail(false, vec![("cvm-a".into(), Err((ExitStatus::Error, "aTLS handshake failed".into())))])]
+    // Explicit target that succeeded: nothing to propagate.
+    #[case::explicit_ok(true, vec![("cvm-a".into(), Ok(vec![]))])]
+    fn test_concrete_ps_no_propagation_success(
+        #[case] explicit: bool,
+        #[case] groups: Vec<PsGroup>,
+    ) {
+        // These are the cases where `ps` prints the listing and exits 0.
+        assert!(ps_failure_to_propagate(explicit, &groups).is_none());
     }
 
     #[test]

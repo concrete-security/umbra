@@ -117,7 +117,7 @@ pub enum Command {
     #[command(subcommand)]
     Profile(ProfileCommand),
 
-    /// List active dtach sessions on a Dev CVM.
+    /// List active dtach sessions across your running Dev CVMs (or one, with a CVM id / --cvm).
     Ps(SessionListArgs),
 
     /// Manage entity and user quotas.
@@ -489,12 +489,14 @@ pub struct CvmUpdateArgs {
     pub wait_timeout_seconds: u32,
 }
 
-/// The Dev CVM a verb acts on. Resolution order: positional `<CVM_ID>` -> `--cvm`
-/// -> `CONCRETE_DEFAULT_CVM` -> `default_cvm`. Flattened into every verb that targets
-/// a single CVM so `<id>` and `--cvm` mean the same thing everywhere they appear.
+/// The Dev CVM a verb acts on: positional `<CVM_ID>` or `--cvm` (the positional
+/// wins). Flattened into every verb that targets a single CVM so `<id>` and `--cvm`
+/// mean the same thing everywhere. What "omitted" means is per-verb: most fall back
+/// to `CONCRETE_DEFAULT_CVM`/`default_cvm`, `stop`/`terminate` require an explicit
+/// id, and `ps` lists every running CVM.
 #[derive(clap::Args, Debug)]
 pub struct CvmTarget {
-    /// Dev CVM UUID. Defaults to --cvm, CONCRETE_DEFAULT_CVM, or default_cvm.
+    /// Dev CVM UUID (or use --cvm). When omitted, the command's default applies -- see its help.
     pub cvm_id: Option<String>,
 
     /// Target Dev CVM UUID. Alternative to the positional; the positional wins if both are given.
@@ -576,9 +578,8 @@ pub struct CursorArgs {
 
 #[derive(clap::Args, Debug)]
 pub struct SessionListArgs {
-    /// Target Dev CVM UUID. Defaults to CONCRETE_DEFAULT_CVM or default_cvm.
-    #[arg(long)]
-    pub cvm: Option<String>,
+    #[command(flatten)]
+    pub target: CvmTarget,
 
     /// Private SSH key to pass to ssh(1).
     #[arg(long)]
