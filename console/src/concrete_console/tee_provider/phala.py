@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterator
 from contextlib import suppress
 from dataclasses import dataclass
 import hashlib
@@ -15,12 +16,38 @@ import tempfile
 from typing import Any
 
 from concrete_console.config import load_settings
+from concrete_console.tee_provider import (
+    INSTANCE_TYPE_NAME_RE,
+    MAX_INSTANCE_TYPE_ENTRIES,
+    MAX_INSTANCE_TYPES_RESPONSE_BYTES,
+    PROVIDER_ERROR_INSTANCE_TYPES_SCHEMA_DRIFT,
+    PROVIDER_ERROR_NOT_CONFIGURED,
+    instance_type_hourly_rate,
+    instance_type_memory_gb,
+    instance_type_vcpu,
+)
 from concrete_console.readiness import DEFAULT_PHALA_CLI_PATH
 
 APP_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 CONCRETE_CVM_NAME_RE = re.compile(r"^concrete-v0-(?:cvm|sc)-[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$")
 DNS_HOST_RE = re.compile(r"^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$")
 ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+INSTANCE_TYPE_CURRENCY = "USD"
+# Authoring-time snapshot of `phala instance-types` in the adapter's normalized
+# shape. Seeds the Console catalog on a virgin database until the first live
+# fetch; provider-specific data stays behind the adapter boundary.
+BOOTSTRAP_INSTANCE_TYPES: tuple[dict[str, Any], ...] = (
+    {"name": "tdx.small", "family": "cpu", "vcpu": 1, "memory_gb": 2, "hourly_rate": 0.058, "currency": "USD"},
+    {"name": "tdx.medium", "family": "cpu", "vcpu": 2, "memory_gb": 4, "hourly_rate": 0.116, "currency": "USD"},
+    {"name": "tdx.large", "family": "cpu", "vcpu": 4, "memory_gb": 8, "hourly_rate": 0.232, "currency": "USD"},
+    {"name": "tdx.xlarge", "family": "cpu", "vcpu": 8, "memory_gb": 16, "hourly_rate": 0.464, "currency": "USD"},
+    {"name": "tdx.2xlarge", "family": "cpu", "vcpu": 16, "memory_gb": 32, "hourly_rate": 0.928, "currency": "USD"},
+    {"name": "tdx.4xlarge", "family": "cpu", "vcpu": 32, "memory_gb": 64, "hourly_rate": 1.856, "currency": "USD"},
+    {"name": "tdx.8xlarge", "family": "cpu", "vcpu": 64, "memory_gb": 128, "hourly_rate": 3.712, "currency": "USD"},
+    {"name": "h200.small", "family": "gpu", "vcpu": 24, "memory_gb": 192, "hourly_rate": 4.8, "currency": "USD"},
+    {"name": "h200.16xlarge", "family": "gpu", "vcpu": 64, "memory_gb": 256, "hourly_rate": 32.0, "currency": "USD"},
+    {"name": "h200.8x.large", "family": "gpu", "vcpu": 192, "memory_gb": 1536, "hourly_rate": 32.0, "currency": "USD"},
+)
 VM_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", re.IGNORECASE)
 SENSITIVE_OUTPUT_KEY_RE = re.compile(
     r"(authorization|bearer|token|secret|password|private_key|device_code|polling_secret|id_token|access_token|api_key)",
@@ -142,7 +169,7 @@ class PhalaClient:
         raw = load_settings().raw
         api_token = raw.get("PHALA_API_TOKEN", "").strip()
         if not api_token:
-            raise PhalaError("not_configured")
+            raise PhalaError(PROVIDER_ERROR_NOT_CONFIGURED)
         patterns = compile_redaction_patterns(raw.get("PHALA_OUTPUT_REDACTION_PATTERNS", ""))
         return cls(
             cli_path=raw.get("PHALA_CLI_PATH", DEFAULT_PHALA_CLI_PATH).strip() or DEFAULT_PHALA_CLI_PATH,
@@ -255,6 +282,14 @@ class PhalaClient:
             raise PhalaError("invalid_response", field="cvms")
         return [row for row in rows if isinstance(row, dict) and concrete_cvm_name(row)]
 
+    async def list_instance_types(self) -> list[dict[str, Any]]:
+        # Bound the decoded size: a real catalog is a few KB, so the generous cap
+        # only trips on a hostile/broken response and stops it before json.loads
+        # allocates a huge tree. (The subprocess stdout buffer itself is bounded by
+        # the fetch timeout; a fully streaming read is a separate hardening.)
+        payload = await self._run_json(["instance-types", "--json"], max_bytes=MAX_INSTANCE_TYPES_RESPONSE_BYTES)
+        return instance_types_from_payload(payload)
+
     async def _deploy_result_from_stdout(self, stdout: str, *, fallback_lookup: str) -> PhalaDeployResult:
         if stdout.strip():
             try:
@@ -276,11 +311,15 @@ class PhalaClient:
                 raise
         return await self.info(fallback_lookup)
 
-    async def _run_json(self, args: list[str]) -> Any:
+    async def _run_json(self, args: list[str], *, max_bytes: int | None = None) -> Any:
         stdout = await self._run_text(args)
+        if max_bytes is not None and len(stdout) > max_bytes:
+            raise PhalaError("invalid_json", output=f"response exceeded {max_bytes} bytes")
         try:
             return json.loads(stdout or "{}")
-        except json.JSONDecodeError as exc:
+        # RecursionError: a hostile deeply-nested payload must degrade like any
+        # other unparseable output, not escape as an unhandled exception.
+        except (json.JSONDecodeError, RecursionError) as exc:
             raise PhalaError("invalid_json", output=scrub_output(stdout, self.api_token, self.redaction_patterns)) from exc
 
     async def _run_text(self, args: list[str]) -> str:
@@ -290,13 +329,18 @@ class PhalaClient:
         return await self._run_command_text(self.node_path, args)
 
     async def _run_command_text(self, command: str, args: list[str]) -> str:
-        process = await asyncio.create_subprocess_exec(
-            command,
-            *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=phala_subprocess_env(self.api_token),
-        )
+        try:
+            process = await asyncio.create_subprocess_exec(
+                command,
+                *args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=phala_subprocess_env(self.api_token),
+            )
+        except OSError as exc:
+            # A missing/broken CLI binary must surface as a provider failure
+            # (callers catch PhalaError/CvmProviderError), not an unhandled 500.
+            raise PhalaError("cli_failed", output=str(exc)) from exc
         try:
             stdout_bytes, stderr_bytes = await asyncio.wait_for(process.communicate(), timeout=self.timeout_seconds)
         except asyncio.TimeoutError as exc:
@@ -360,6 +404,78 @@ def deploy_result_from_payload(payload: Any) -> PhalaDeployResult:
         status=normalize_status(raw_status),
         raw=payload,
     )
+
+
+def instance_types_from_payload(payload: Any) -> list[dict[str, Any]]:
+    """Tolerant parse of `phala instance-types --json`.
+
+    Only `result[].items[].id` is load-bearing: an unusable envelope or zero
+    parseable items raises `instance_types_schema_drift` (with `field` naming
+    the broken layer). Descriptive fields degrade to None when absent or
+    renamed; unknown fields are ignored.
+    """
+    if not isinstance(payload, dict):
+        raise PhalaError(PROVIDER_ERROR_INSTANCE_TYPES_SCHEMA_DRIFT, field="envelope")
+    if payload.get("success") is False:
+        raise PhalaError("cli_failed")
+    families = payload.get("result")
+    if not isinstance(families, list):
+        raise PhalaError(PROVIDER_ERROR_INSTANCE_TYPES_SCHEMA_DRIFT, field="result")
+
+    seen: set[str] = set()
+    parsed: list[dict[str, Any]] = []
+    for family in families:
+        for entry in parse_instance_type_family(family):
+            if entry["name"] in seen:
+                continue
+            seen.add(entry["name"])
+            parsed.append(entry)
+            if len(parsed) >= MAX_INSTANCE_TYPE_ENTRIES:
+                return parsed
+    if not parsed:
+        raise PhalaError(PROVIDER_ERROR_INSTANCE_TYPES_SCHEMA_DRIFT, field="items")
+    return parsed
+
+
+def parse_instance_type_family(family: Any) -> Iterator[dict[str, Any]]:
+    """One `result[]` entry -> its parseable items, in provider order. A generator
+    so the caller can bail at the entry cap without materializing a whole (possibly
+    hostile) family's item list."""
+    if not isinstance(family, dict) or not isinstance(family.get("items"), list):
+        return
+    family_name = family.get("name") if isinstance(family.get("name"), str) else None
+    for item in family["items"]:
+        entry = parse_instance_type_item(item, family_name)
+        if entry is not None:
+            yield entry
+
+
+def parse_instance_type_item(item: Any, family_name: str | None) -> dict[str, Any] | None:
+    """One `items[]` entry -> normalized dict, or None if the load-bearing `id` is unusable."""
+    if not isinstance(item, dict):
+        return None
+    name = item.get("id")
+    if not isinstance(name, str) or not INSTANCE_TYPE_NAME_RE.fullmatch(name):
+        return None
+    hourly_rate = instance_type_hourly_rate(item.get("hourly_rate"))
+    return {
+        "name": name,
+        "family": item.get("family") if isinstance(item.get("family"), str) else family_name,
+        "vcpu": instance_type_vcpu(item.get("vcpu")),
+        "memory_gb": normalize_memory_gb(item.get("memory_mb")),
+        "hourly_rate": hourly_rate,
+        "currency": INSTANCE_TYPE_CURRENCY if hourly_rate is not None else None,
+    }
+
+
+def normalize_memory_gb(memory_mb: Any) -> int | float | None:
+    """Provider-specific: Phala reports memory in MB, so convert to GB (rounded to 2
+    decimals for display) and hand the result to the shared GB contract validator.
+    Distinct from `instance_type_memory_gb`, which validates an already-GB value (the
+    canonical stored form, re-checked on DB reload) -- one converts, one validates."""
+    if isinstance(memory_mb, bool) or not isinstance(memory_mb, (int, float)):
+        return None
+    return instance_type_memory_gb(round(memory_mb / 1024, 2))
 
 
 def json_object_from_text(text: str) -> dict[str, Any]:

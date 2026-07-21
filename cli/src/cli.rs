@@ -343,6 +343,9 @@ pub enum CvmCommand {
     /// List Dev CVMs visible to the current user.
     List(CvmListArgs),
 
+    /// List the launchable instance types (vCPU, memory, hourly rate).
+    InstanceTypes(CvmInstanceTypesArgs),
+
     /// Launch a Dev CVM.
     Launch(CvmLaunchArgs),
 
@@ -387,6 +390,16 @@ pub struct CvmListArgs {
     pub state: Option<CvmStateFilter>,
 }
 
+/// Arguments for the `concrete cvm instance-types` subcommand. The normal read
+/// is served from the Console catalog cache; `--refresh` asks the Console to
+/// perform one explicit provider refresh (slower, may fail) before answering.
+#[derive(clap::Args, Debug)]
+pub struct CvmInstanceTypesArgs {
+    /// Ask the Console to refresh the catalog from the provider before listing it.
+    #[arg(long)]
+    pub refresh: bool,
+}
+
 /// The string clap accepts for a `--flag` enum value and the Console expects as
 /// its query parameter -- clap's own lowercase variant name.
 ///
@@ -427,7 +440,7 @@ pub struct CvmLaunchArgs {
     #[arg(long = "ssh-key")]
     pub ssh_keys: Vec<String>,
 
-    /// Phala instance type. Defaults to config or Console defaults.
+    /// Instance type (vCPU/RAM); run `concrete cvm instance-types` for the valid set. Defaults to config or Console defaults.
     #[arg(long)]
     pub instance_type: Option<String>,
 
@@ -770,7 +783,7 @@ pub enum SecurityCvmCommand {
 
 #[derive(clap::Args, Debug)]
 pub struct SecurityCvmLaunchArgs {
-    /// Phala instance type. Defaults to the Console Security CVM default.
+    /// Instance type (vCPU/RAM); run `concrete cvm instance-types` for the valid set. Defaults to the Console Security CVM default.
     #[arg(long)]
     pub instance_type: Option<String>,
 

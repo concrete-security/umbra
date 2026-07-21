@@ -17,6 +17,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from concrete_console.audit_anchor import publish_audit_anchor_now
 from concrete_console.config import load_settings
 from concrete_console.db import close_pool
+from concrete_console.instance_types import catalog_service
 from concrete_console.log_config import bind_request_context, clear_context, configure_logging, logger
 from concrete_console.metrics import monotonic_seconds, observe_request, prometheus_text
 from concrete_console.readiness import run_ready_checks, verify_configured_phala_cli
@@ -91,11 +92,15 @@ _rate_limit_events: dict[RateLimitKey, deque[float]] = {}
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     await verify_configured_phala_cli(fetch_timeout=5.0)
-    scheduler_task = start_operation_scheduler()
+    await catalog_service().initialize()
+    scheduler_task = None
     try:
+        scheduler_task = start_operation_scheduler()
         yield
     finally:
-        await stop_operation_scheduler(scheduler_task)
+        if scheduler_task is not None:
+            await stop_operation_scheduler(scheduler_task)
+        await catalog_service().shutdown()
         try:
             await publish_audit_anchor_now()
         except Exception as exc:  # noqa: BLE001

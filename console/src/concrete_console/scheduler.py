@@ -25,6 +25,7 @@ from concrete_console.audit_export import (
 )
 from concrete_console.config import load_settings
 from concrete_console.db import get_pool
+from concrete_console.instance_types import REASON_SCHEDULER, catalog_service
 from concrete_console.log_config import logger
 from concrete_console.resources import (
     cvm_resource,
@@ -5172,6 +5173,10 @@ async def run_reconciliation_pass(*, include_orphans: bool = True) -> Reconcilia
         security_cvms_advanced.extend(await reconcile_security_cvm_attestations(conn))
         cvms_advanced.extend(await reconcile_dev_cvm_attestations(conn))
         await publish_audit_anchor_if_due(conn)
+    # Non-blocking on purpose: the catalog fetch (provider subprocess, up to 60s)
+    # must never stall the tick that drives operation sagas. Living in this pass
+    # also gives POST /admin/reconcile the catalog refresh for free.
+    catalog_service().spawn_refresh_if_due(reason=REASON_SCHEDULER)
     return ReconciliationSummary(
         cvms_advanced=cvms_advanced,
         security_cvms_advanced=security_cvms_advanced,

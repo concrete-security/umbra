@@ -17,7 +17,7 @@ use crate::{
     },
     config::ResolvedConfig,
     console::{
-        self, console_session, fetch_list, read_empty_response, read_json_response, read_with_etag,
+        self, console_session, fetch_json, read_empty_response, read_json_response, read_with_etag,
     },
     exit::ExitStatus,
     session::Session,
@@ -140,7 +140,7 @@ fn list(config: &ResolvedConfig, args: ProfileListArgs, json_output: bool) -> Ex
     let query = args.query_params();
     let path = format!("/api/v1/entities/{}/profiles", session.entity.id);
     let page: ProfileListPage =
-        match fetch_list(console_url, &session, &path, &query, "list profiles") {
+        match fetch_json(console_url, &session, &path, &query, "list profiles") {
             Ok(value) => value,
             Err((status, message)) => {
                 crate::style::eprintln_error(&message);

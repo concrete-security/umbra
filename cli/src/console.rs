@@ -250,15 +250,15 @@ pub(crate) fn push_query(
     }
 }
 
-/// Calls a Console list endpoint (HTTP GET) with the session token and the
-/// given query filters, and returns the parsed JSON page. Returns an error
-/// if the request fails.
+/// Authenticated Console `GET` with the session token and the given query
+/// filters, decoding the JSON body into `T`. Used for both list-page endpoints
+/// (`{items, next_cursor}`) and structured documents; `T` names the shape.
 ///
 /// ```text
-/// fetch_list(.., "/api/v1/cvms", [("state", "running")])
-///   ->  GET /api/v1/cvms?state=running  ->  parsed list of CVMs
+/// fetch_json(.., "/api/v1/cvms", [("state", "running")])
+///   ->  GET /api/v1/cvms?state=running  ->  parsed CVM list page
 /// ```
-pub(crate) fn fetch_list<T: DeserializeOwned>(
+pub(crate) fn fetch_json<T: DeserializeOwned>(
     console_url: &str,
     session: &Session,
     path: &str,
@@ -406,7 +406,18 @@ pub(crate) fn console_error_envelope(body: &str) -> Option<(String, Option<Strin
         (_, Some(required), _, _, _) => format!("{message} ({required})"),
         (_, _, Some(component), _, _) => format!("{message} ({component})"),
         (_, _, _, Some(limit), _) => format!("{message} ({limit})"),
-        (_, _, _, _, Some(validation_type)) => format!("{message} ({validation_type})"),
+        (_, _, _, _, Some(validation_type)) => {
+            // For instance-type launch errors, point the user at the catalog listing
+            // instead of surfacing the bare error-type token.
+            if matches!(
+                validation_type,
+                "unknown_instance_type" | "instance_type_not_launchable"
+            ) {
+                format!("{message}; run `concrete cvm instance-types` for more information")
+            } else {
+                format!("{message} ({validation_type})")
+            }
+        }
         _ => message.to_string(),
     };
     Some((enriched, code))
@@ -465,6 +476,22 @@ mod tests {
         let (message, code) = console_error_envelope(body).expect("envelope parses");
         assert_eq!(message, "bad input (string_too_short)");
         assert_eq!(code.as_deref(), Some("VALIDATION_ERROR"));
+    }
+
+    #[test]
+    fn console_error_envelope_points_instance_type_errors_at_catalog() {
+        // Both instance-type validation errors replace the bare error-type token with
+        // a pointer to the catalog listing, so the launch error is actionable.
+        for validation_type in ["unknown_instance_type", "instance_type_not_launchable"] {
+            let body = format!(
+                r#"{{"error":{{"code":"VALIDATION_ERROR","message":"bad type","details":{{"errors":[{{"type":"{validation_type}"}}]}}}}}}"#
+            );
+            let (message, _code) = console_error_envelope(&body).expect("envelope parses");
+            assert_eq!(
+                message,
+                "bad type; run `concrete cvm instance-types` for more information"
+            );
+        }
     }
 
     #[test]

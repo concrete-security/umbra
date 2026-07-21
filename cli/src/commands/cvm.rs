@@ -17,10 +17,13 @@ use serde_json::{json, Map, Value};
 use uuid::Uuid;
 
 use crate::{
-    cli::{wire, CvmCommand, CvmLaunchArgs, CvmListArgs, CvmTerminateArgs, CvmUpdateArgs},
+    cli::{
+        wire, CvmCommand, CvmInstanceTypesArgs, CvmLaunchArgs, CvmListArgs, CvmTerminateArgs,
+        CvmUpdateArgs,
+    },
     commands::{resolve_cvm, resolve_cvm_explicit},
     config::{self, ResolvedConfig},
-    console::{fetch_list, push_query, read_json_response, read_with_etag, validate_uuid},
+    console::{fetch_json, push_query, read_json_response, read_with_etag, validate_uuid},
     exit::ExitStatus,
     operation::{self, Operation},
     session::Session,
@@ -32,6 +35,82 @@ use crate::{
 struct CvmListPage {
     items: Vec<Cvm>,
     next_cursor: Option<String>,
+}
+
+// Every Console-response struct carries an `extra` catch-all (per
+// `docs/specs/cli-style.md` §11.7): unknown fields are CAPTURED rather than
+// silently dropped, so `has_unknown_fields()` can flag a Console/CLI version
+// skew, while `skip_serializing` keeps `--json` a strict whitelist.
+#[derive(Debug, Deserialize, Serialize)]
+struct InstanceTypesResponse {
+    instance_types: Vec<InstanceTypeEntry>,
+    catalog: CatalogMetadata,
+    #[serde(flatten, default, skip_serializing)]
+    extra: BTreeMap<String, Value>,
+}
+
+impl InstanceTypesResponse {
+    /// True when the Console returned any field this CLI build does not model --
+    /// a signal the CLI may be out of date. Unknown fields are captured (not
+    /// dropped) so this can surface a drift note without leaking them to `--json`.
+    fn has_unknown_fields(&self) -> bool {
+        !self.extra.is_empty()
+            || !self.catalog.extra.is_empty()
+            || self
+                .catalog
+                .last_refresh_error
+                .as_ref()
+                .is_some_and(|e| !e.extra.is_empty())
+            || self.instance_types.iter().any(|e| !e.extra.is_empty())
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct InstanceTypeEntry {
+    name: String,
+    family: Option<String>,
+    vcpu: Option<u64>,
+    memory_gb: Option<f64>,
+    hourly_rate: Option<f64>,
+    currency: Option<String>,
+    #[serde(default)]
+    default: bool,
+    // Default true so a response from an older Console that predates this field
+    // renders as launchable rather than spuriously "not supported yet".
+    #[serde(default = "default_true")]
+    launchable: bool,
+    #[serde(flatten, default, skip_serializing)]
+    extra: BTreeMap<String, Value>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct CatalogMetadata {
+    source: String,
+    fetched_at: Option<String>,
+    stale: bool,
+    #[serde(default)]
+    refresh_in_progress: bool,
+    last_refresh_error: Option<CatalogRefreshError>,
+    // Console-side drift report, machine-readable: expected provider field -> how
+    // many entries failed to parse it. Empty == the provider schema still matches.
+    // The CLI renders the human sentence; the wire stays wording-free.
+    #[serde(default)]
+    field_miss_counts: BTreeMap<String, u64>,
+    #[serde(flatten, default, skip_serializing)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct CatalogRefreshError {
+    kind: String,
+    field: Option<String>,
+    at: Option<String>,
+    #[serde(flatten, default, skip_serializing)]
+    extra: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -188,6 +267,7 @@ impl LifecycleAction {
 pub fn run(command: CvmCommand, config: &ResolvedConfig, json: bool) -> ExitStatus {
     match command {
         CvmCommand::List(args) => list(config, args, json),
+        CvmCommand::InstanceTypes(args) => instance_types(config, args, json),
         CvmCommand::Launch(args) => launch(config, args, json),
         CvmCommand::Attach { target } => {
             match resolve_cvm(target.cvm_id.as_deref(), target.cvm.as_deref(), config) {
@@ -250,7 +330,7 @@ fn list(config: &ResolvedConfig, args: CvmListArgs, json_output: bool) -> ExitSt
     let mut query = args.query_params();
     push_query(&mut query, "profile_id", &profile_id);
     let page: CvmListPage =
-        match fetch_list(console_url, &session, "/api/v1/cvms", &query, "list CVMs") {
+        match fetch_json(console_url, &session, "/api/v1/cvms", &query, "list CVMs") {
             Ok(value) => value,
             Err((status, message)) => {
                 style::eprintln_error(&message);
@@ -277,6 +357,80 @@ impl CvmListArgs {
         }
         query
     }
+}
+
+fn instance_types(
+    config: &ResolvedConfig,
+    args: CvmInstanceTypesArgs,
+    json_output: bool,
+) -> ExitStatus {
+    let (console_url, session) = match crate::console::console_session(config) {
+        Ok(value) => value,
+        Err((status, message)) => {
+            style::eprintln_error(&message);
+            return status;
+        }
+    };
+    let mut query: Vec<(&'static str, String)> = Vec::new();
+    if args.refresh {
+        query.push(("refresh", "true".to_string()));
+    }
+    let response: InstanceTypesResponse = match fetch_json(
+        console_url,
+        &session,
+        "/api/v1/instance-types",
+        &query,
+        "get instance types",
+    ) {
+        Ok(value) => value,
+        Err((status, message)) => {
+            style::eprintln_error(&message);
+            return status;
+        }
+    };
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&response).expect("instance types output serializes")
+        );
+        return ExitStatus::Ok;
+    }
+    if response.has_unknown_fields() {
+        eprintln!("{}", style::unknown_fields_note());
+    }
+    let rows: Vec<style::InstanceTypeRow<'_>> = response
+        .instance_types
+        .iter()
+        .map(|entry| style::InstanceTypeRow {
+            name: &entry.name,
+            family: entry.family.as_deref(),
+            vcpu: entry.vcpu,
+            memory_gb: entry.memory_gb,
+            is_default: entry.default,
+            launchable: entry.launchable,
+        })
+        .collect();
+    println!("{}", style::instance_types_table(&rows));
+    let note = style::catalog_note(&style::CatalogNote {
+        source: &response.catalog.source,
+        fetched_at: response.catalog.fetched_at.as_deref(),
+        stale: response.catalog.stale,
+        refresh_in_progress: response.catalog.refresh_in_progress,
+        last_refresh_error_kind: response
+            .catalog
+            .last_refresh_error
+            .as_ref()
+            .map(|err| err.kind.as_str()),
+        refresh_requested: args.refresh,
+    });
+    if let Some(note) = note {
+        eprintln!("{note}");
+    }
+    let total = response.instance_types.len();
+    for (field, &count) in &response.catalog.field_miss_counts {
+        eprintln!("{}", style::field_miss_note(field, count, total));
+    }
+    ExitStatus::Ok
 }
 
 fn launch(config: &ResolvedConfig, args: CvmLaunchArgs, json_output: bool) -> ExitStatus {
@@ -1556,6 +1710,70 @@ fn validate_cvm_config_value(name: &str, value: &str) -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::cli::CvmStateFilter;
+
+    #[test]
+    fn instance_types_response_captures_unknown_fields_without_leaking_to_json() {
+        // A Console newer than this CLI: unknown fields at the top level, on an
+        // entry, and in the catalog. They must be captured (drift detectable)
+        // but excluded from `--json` (strict whitelist).
+        let body = r#"{
+            "instance_types": [
+                {"name": "tdx.small", "vcpu": 1, "brand_new_field": 42}
+            ],
+            "catalog": {"source": "provider", "stale": false, "future_meta": true},
+            "top_level_novelty": "x"
+        }"#;
+        let response: InstanceTypesResponse = serde_json::from_str(body).expect("deserializes");
+
+        assert!(response.has_unknown_fields());
+        let json = serde_json::to_string(&response).expect("serializes");
+        assert!(!json.contains("brand_new_field"), "json={json}");
+        assert!(!json.contains("future_meta"));
+        assert!(!json.contains("top_level_novelty"));
+        assert!(json.contains("tdx.small"));
+    }
+
+    #[test]
+    fn catalog_field_miss_counts_round_trips_through_json() {
+        // field_miss_counts is a real (non-skipped) field: it must survive --json
+        // so scripts/tests can assert `.catalog.field_miss_counts == {}`.
+        let body = r#"{
+            "instance_types": [{"name": "tdx.small"}],
+            "catalog": {"source": "provider", "stale": false, "field_miss_counts": {"memory_gb": 1}}
+        }"#;
+        let response: InstanceTypesResponse = serde_json::from_str(body).expect("deserializes");
+        assert_eq!(
+            response.catalog.field_miss_counts.get("memory_gb"),
+            Some(&1)
+        );
+        let json = serde_json::to_string(&response).expect("serializes");
+        assert!(json.contains("field_miss_counts"));
+        assert!(json.contains("memory_gb"));
+        // Absent field_miss_counts (older/clean Console) defaults to empty.
+        let clean = r#"{"instance_types": [], "catalog": {"source": "provider", "stale": false}}"#;
+        let clean: InstanceTypesResponse = serde_json::from_str(clean).expect("deserializes");
+        assert!(clean.catalog.field_miss_counts.is_empty());
+    }
+
+    #[test]
+    fn instance_types_response_reports_no_unknown_fields_for_a_known_shape() {
+        let body = r#"{
+            "instance_types": [
+                {"name": "tdx.small", "family": "cpu", "vcpu": 1, "memory_gb": 2,
+                 "hourly_rate": 0.058, "currency": "USD", "default": true, "launchable": true}
+            ],
+            "catalog": {"source": "provider", "fetched_at": null, "stale": false,
+                        "refresh_in_progress": false, "last_refresh_error": null}
+        }"#;
+        let response: InstanceTypesResponse = serde_json::from_str(body).expect("deserializes");
+
+        assert!(!response.has_unknown_fields());
+        // A missing `launchable` (older Console) defaults to launchable, not "not supported yet".
+        let older = r#"{"instance_types": [{"name": "tdx.small"}],
+                        "catalog": {"source": "provider", "stale": false}}"#;
+        let older: InstanceTypesResponse = serde_json::from_str(older).expect("deserializes");
+        assert!(older.instance_types[0].launchable);
+    }
 
     #[test]
     fn cvm_list_query_params_maps_state_flag() {

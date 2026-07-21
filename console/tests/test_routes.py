@@ -2399,3 +2399,158 @@ def test_operation_result_for_read_discloses_once_then_scrubs_db(monkeypatch) ->
     assert scrub_updates, "disclosure must rewrite operations.result with the redacted payload"
     written = json.loads(scrub_updates[0][1])
     assert written["ca_export_token"] == SECURITY_CVM_PROVISION_REDACTION
+
+
+# -- instance-type catalog: launch allowlist + endpoint --------------------------
+
+
+def dev_launch_env(monkeypatch) -> None:
+    monkeypatch.setenv("DEV_CVM_IMAGE", "ghcr.io/concrete-security/dev-cvm/user-sandbox@sha256:abc")
+    monkeypatch.setenv("DEV_CVM_IMAGE_MEASUREMENT", "A" * 96)
+    monkeypatch.setenv("CLOUDFLARE_BASE_DOMAIN", "dev.example.com")
+    monkeypatch.setenv("PHALA_REGION", "FR-PARIS-1")
+
+
+def test_launch_rejects_unknown_instance_type_with_valid_set_and_catalog(monkeypatch) -> None:
+    dev_launch_env(monkeypatch)
+
+    with pytest.raises(HTTPException) as exc:
+        resolve_cvm_launch_config(cvm_create(instance_type="tdx.big"))
+
+    assert exc.value.status_code == 422
+    error = exc.value.detail["error"]
+    assert error["code"] == "VALIDATION_ERROR"
+    # The message itself enumerates the valid set (readable before any CLI parsing).
+    assert "tdx.big" in error["message"] and "tdx.small" in error["message"]
+    details = error["details"]
+    error_item = details["errors"][0]
+    assert error_item["type"] == "unknown_instance_type"
+    assert error_item["requested"] == "tdx.big"
+    assert "tdx.small" in error_item["valid_instance_types"]
+    # GPU types are catalogued but NOT launchable, so they are absent from the valid set.
+    assert "h200.small" not in error_item["valid_instance_types"]
+    assert error_item["valid_instance_types"] == sorted(error_item["valid_instance_types"])
+    catalog = details["catalog"]
+    assert catalog["source"] == "bootstrap_fallback"
+    assert "stale" in catalog and "fetched_at" in catalog
+    assert "refresh_in_progress" in catalog and "last_refresh_error" in catalog
+    assert "concrete cvm instance-types" in details["hint"]
+
+
+def test_launch_accepts_a_cataloged_cpu_instance_type(monkeypatch) -> None:
+    dev_launch_env(monkeypatch)
+
+    resolved = resolve_cvm_launch_config(cvm_create(instance_type="tdx.xlarge"))
+
+    assert resolved["instance_type"] == "tdx.xlarge"
+
+
+def sc_launch_env(monkeypatch) -> None:
+    monkeypatch.setenv("SECURITY_CVM_IMAGE_REF", "ghcr.io/concrete-security/security-cvm/mitmproxy@sha256:abc")
+    monkeypatch.setenv("SECURITY_CVM_IMAGE_MEASUREMENT", "B" * 96)
+    monkeypatch.setenv("SECURITY_CVM_BASE_DOMAIN", "sc.example.com")
+    monkeypatch.setenv("PHALA_REGION", "FR-PARIS-1")
+
+
+# The 2x2 launch allowlist matrix: Dev CVM and Security CVM launches both reject an
+# unknown type (`unknown_instance_type`) and a catalogued GPU type
+# (`instance_type_not_launchable`). The full 422 envelope shape (catalog block,
+# hint, valid set) is asserted once in
+# test_launch_rejects_unknown_instance_type_with_valid_set_and_catalog.
+@pytest.mark.parametrize("path", ["dev", "sc"])
+@pytest.mark.parametrize(
+    ("requested", "expected_type"),
+    [
+        ("tdx.big", "unknown_instance_type"),
+        ("h200.small", "instance_type_not_launchable"),
+    ],
+)
+def test_launch_rejects_bad_instance_type(monkeypatch, path, requested, expected_type) -> None:
+    if path == "dev":
+        dev_launch_env(monkeypatch)
+    else:
+        sc_launch_env(monkeypatch)
+
+    with pytest.raises(HTTPException) as exc:
+        if path == "dev":
+            resolve_cvm_launch_config(cvm_create(instance_type=requested))
+        else:
+            resolve_security_cvm_provision_config(security_cvm_create(instance_type=requested))
+
+    assert exc.value.status_code == 422
+    error_item = exc.value.detail["error"]["details"]["errors"][0]
+    assert error_item["type"] == expected_type
+    assert error_item["requested"] == requested
+    assert requested not in error_item["valid_instance_types"]
+
+
+def test_launch_validation_never_calls_the_provider(monkeypatch) -> None:
+    dev_launch_env(monkeypatch)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("launch validation must not construct a provider client")
+
+    import concrete_console.instance_types as instance_types_module
+
+    monkeypatch.setattr(instance_types_module.CvmProvider, "from_settings", forbidden)
+
+    resolved = resolve_cvm_launch_config(cvm_create(instance_type="tdx.small"))
+
+    assert resolved["instance_type"] == "tdx.small"
+
+
+def test_get_instance_types_serves_cache_and_flags_default(monkeypatch) -> None:
+    import concrete_console.instance_types as instance_types_module
+
+    service = instance_types_module.InstanceTypeCatalogService()
+    monkeypatch.setattr(instance_types_module, "_service", service)
+    monkeypatch.setattr(service, "spawn_refresh_if_due", lambda *, reason: True)
+    monkeypatch.setenv("DEV_CVM_DEFAULT_INSTANCE_TYPE", "tdx.large")
+
+    payload = asyncio.run(routes_module.get_instance_types(refresh=False, current_user=None))
+
+    names = [entry["name"] for entry in payload["instance_types"]]
+    assert "tdx.small" in names and "h200.small" in names
+    defaults = [entry["name"] for entry in payload["instance_types"] if entry["default"]]
+    assert defaults == ["tdx.large"]
+    assert payload["catalog"]["source"] == "bootstrap_fallback"
+
+
+def test_get_instance_types_stale_read_spawns_a_single_background_refresh(monkeypatch) -> None:
+    import concrete_console.instance_types as instance_types_module
+
+    service = instance_types_module.InstanceTypeCatalogService()
+    monkeypatch.setattr(instance_types_module, "_service", service)
+
+    async def scenario():
+        await routes_module.get_instance_types(refresh=False, current_user=None)
+        assert len(service._background_tasks) == 1
+        # A refresh already pending counts as in-progress: no second spawn.
+        payload = await routes_module.get_instance_types(refresh=False, current_user=None)
+        assert len(service._background_tasks) == 1
+        assert payload["catalog"]["refresh_in_progress"] is True
+        for task in service._background_tasks:
+            task.cancel()
+
+    asyncio.run(scenario())
+
+
+def test_get_instance_types_refresh_true_fetches_inline_and_degrades(monkeypatch) -> None:
+    import concrete_console.instance_types as instance_types_module
+
+    service = instance_types_module.InstanceTypeCatalogService()
+    monkeypatch.setattr(instance_types_module, "_service", service)
+    calls = []
+
+    async def failing_refresh(*, reason, timeout_seconds=None):
+        calls.append((reason, timeout_seconds))
+        return False
+
+    monkeypatch.setattr(service, "refresh", failing_refresh)
+
+    payload = asyncio.run(routes_module.get_instance_types(refresh=True, current_user=None))
+
+    assert calls == [("manual", instance_types_module.INLINE_REFRESH_TIMEOUT_SECONDS)]
+    # Inline refresh failed: the current cache is served, with its metadata.
+    assert payload["catalog"]["source"] == "bootstrap_fallback"
+    assert [entry["name"] for entry in payload["instance_types"]][0] == "tdx.small"

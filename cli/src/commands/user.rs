@@ -12,7 +12,7 @@ use crate::{
     cli::{wire, UserAddArgs, UserCommand, UserListArgs, UserPermissionsCommand},
     config::ResolvedConfig,
     console::{
-        console_session, fetch_list, read_empty_response, read_etag_only, read_json_response,
+        console_session, fetch_json, read_empty_response, read_etag_only, read_json_response,
         read_with_etag, validate_uuid,
     },
     exit::ExitStatus,
@@ -201,7 +201,7 @@ fn list(config: &ResolvedConfig, args: UserListArgs, json_output: bool) -> ExitS
     // --assigned. The Console does the filtering, not the CLI.
     let query = args.query_params();
     let path = format!("/api/v1/entities/{}/users", session.entity.id);
-    let page: UserListPage = match fetch_list(console_url, &session, &path, &query, "list users") {
+    let page: UserListPage = match fetch_json(console_url, &session, &path, &query, "list users") {
         Ok(value) => value,
         Err((status, message)) => {
             crate::style::eprintln_error(&message);

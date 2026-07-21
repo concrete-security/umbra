@@ -1,0 +1,127 @@
+{
+  "success": true,
+  "result": [
+    {
+      "name": "cpu",
+      "items": [
+        {
+          "id": "tdx.small",
+          "name": "Small TDX Instance",
+          "description": "1 vCPU, 2GB RAM with TDX support",
+          "vcpu": 1,
+          "memory_mb": 2048,
+          "hourly_rate": "0.058000",
+          "requires_gpu": false,
+          "default_disk_size_gb": 20,
+          "family": "cpu"
+        },
+        {
+          "id": "tdx.medium",
+          "name": "Medium TDX Instance",
+          "description": "2 vCPU, 4GB RAM with TDX support",
+          "vcpu": 2,
+          "memory_mb": 4096,
+          "hourly_rate": "0.116000",
+          "requires_gpu": false,
+          "default_disk_size_gb": 20,
+          "family": "cpu"
+        },
+        {
+          "id": "tdx.large",
+          "name": "Large TDX Instance",
+          "description": "4 vCPU, 8GB RAM with TDX support",
+          "vcpu": 4,
+          "memory_mb": 8192,
+          "hourly_rate": "0.232000",
+          "requires_gpu": false,
+          "default_disk_size_gb": 20,
+          "family": "cpu"
+        },
+        {
+          "id": "tdx.xlarge",
+          "name": "XLarge TDX Instance",
+          "description": "8 vCPU, 16GB RAM with TDX support",
+          "vcpu": 8,
+          "memory_mb": 16384,
+          "hourly_rate": "0.464000",
+          "requires_gpu": false,
+          "default_disk_size_gb": 20,
+          "family": "cpu"
+        },
+        {
+          "id": "tdx.2xlarge",
+          "name": "2XLarge TDX Instance",
+          "description": "16 vCPU, 32GB RAM with TDX support",
+          "vcpu": 16,
+          "memory_mb": 32768,
+          "hourly_rate": "0.928000",
+          "requires_gpu": false,
+          "default_disk_size_gb": 20,
+          "family": "cpu"
+        },
+        {
+          "id": "tdx.4xlarge",
+          "name": "4XLarge TDX Instance",
+          "description": "32 vCPU, 64GB RAM with TDX support",
+          "vcpu": 32,
+          "memory_mb": 65536,
+          "hourly_rate": "1.856000",
+          "requires_gpu": false,
+          "default_disk_size_gb": 20,
+          "family": "cpu"
+        },
+        {
+          "id": "tdx.8xlarge",
+          "name": "8XLarge TDX Instance",
+          "description": "64 vCPU, 128GB RAM with TDX support",
+          "vcpu": 64,
+          "memory_mb": 131072,
+          "hourly_rate": "3.712000",
+          "requires_gpu": false,
+          "default_disk_size_gb": 20,
+          "family": "cpu"
+        }
+      ],
+      "total": 7
+    },
+    {
+      "name": "gpu",
+      "items": [
+        {
+          "id": "h200.small",
+          "name": "H200 SXM 141GB",
+          "description": "H200 SXM (141 GB VRAM), 24 vCPU, 256GB RAM with TDX support",
+          "vcpu": 24,
+          "memory_mb": 196608,
+          "hourly_rate": "4.800000",
+          "requires_gpu": true,
+          "default_disk_size_gb": 200,
+          "family": "gpu"
+        },
+        {
+          "id": "h200.16xlarge",
+          "name": "H200 SXM 141GB x 8",
+          "description": "8 x H200 SXM (141 GB VRAM), 24 vCPU, 128GB RAM with TDX support",
+          "vcpu": 64,
+          "memory_mb": 262144,
+          "hourly_rate": "32.000000",
+          "requires_gpu": true,
+          "default_disk_size_gb": 1024,
+          "family": "gpu"
+        },
+        {
+          "id": "h200.8x.large",
+          "name": "H200 SXM 141GB x 8",
+          "description": "8 x H200 SXM (141 GB VRAM), 24 vCPU, 128GB RAM with TDX support",
+          "vcpu": 192,
+          "memory_mb": 1572864,
+          "hourly_rate": "32.000000",
+          "requires_gpu": true,
+          "default_disk_size_gb": 1024,
+          "family": "gpu"
+        }
+      ],
+      "total": 3
+    }
+  ]
+}

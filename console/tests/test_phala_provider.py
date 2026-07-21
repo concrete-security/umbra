@@ -5,7 +5,11 @@ import textwrap
 
 import pytest
 
-from concrete_console.tee_provider import CvmProvider, CvmProviderError
+from concrete_console.tee_provider import (
+    MAX_INSTANCE_TYPES_RESPONSE_BYTES,
+    CvmProvider,
+    CvmProviderError,
+)
 from concrete_console.tee_provider.phala import (
     PHALA_COMPOSE_FILE_HASH_HELPER,
     PhalaClient,
@@ -472,3 +476,55 @@ def test_list_filters_to_concrete_v0_names(tmp_path) -> None:
     rows = run(client.list())
 
     assert [row["id"] for row in rows] == ["app-1", "app-3"]
+
+
+# -- instance-type adapter: PhalaClient subprocess error handling ---------------
+# The happy path runs the real `phala` binary in test_instance_types.py
+# (test_list_instance_types_contract[real]), where the parser also lives. These
+# cover the failure translations, none of which needs a fake binary.
+
+
+def test_run_command_translates_missing_binary_to_phala_error(tmp_path) -> None:
+    client = PhalaClient(
+        cli_path=str(tmp_path / "does-not-exist"), api_token="phala-token", timeout_seconds=TEST_CLI_TIMEOUT_SECONDS
+    )
+
+    with pytest.raises(PhalaError) as exc:
+        run(client.list_instance_types())
+
+    assert exc.value.code == "cli_failed"
+
+
+@pytest.mark.parametrize(
+    ("make_output", "kwargs"),
+    [
+        # Deeply-nested payload: json.loads raises RecursionError, which must be caught
+        # and degraded rather than escaping.
+        (lambda: "[" * 200000 + "]" * 200000, {}),
+        # Over-cap but VALID JSON: rejected on size before json.loads runs. It is valid
+        # JSON on purpose -- without the size guard _run_json would parse it and NOT
+        # raise, so this scenario actually pins the guard.
+        (
+            lambda: '"' + "a" * MAX_INSTANCE_TYPES_RESPONSE_BYTES + '"',
+            {"max_bytes": MAX_INSTANCE_TYPES_RESPONSE_BYTES},
+        ),
+    ],
+    ids=["deeply_nested", "oversize"],
+)
+def test_run_json_translates_hostile_output_to_invalid_json(make_output, kwargs, monkeypatch) -> None:
+    """_run_json degrades hostile output to a normal invalid_json error instead of
+    letting it escape or allocate an unbounded object: a deeply-nested payload (caught
+    RecursionError) and an over-cap response (rejected on size before json.loads) both
+    surface as invalid_json."""
+    client = PhalaClient(cli_path="phala", api_token="phala-token", timeout_seconds=TEST_CLI_TIMEOUT_SECONDS)
+
+    async def hostile(self, args):
+        return make_output()
+
+    # PhalaClient is a frozen dataclass, so patch the method on the class.
+    monkeypatch.setattr(PhalaClient, "_run_text", hostile)
+
+    with pytest.raises(PhalaError) as exc:
+        run(client._run_json(["instance-types", "--json"], **kwargs))
+
+    assert exc.value.code == "invalid_json"

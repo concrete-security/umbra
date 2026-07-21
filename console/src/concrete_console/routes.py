@@ -36,6 +36,12 @@ from concrete_console.idempotency import (
     request_body_sha256,
     store_idempotency_response,
 )
+from concrete_console.instance_types import (
+    INLINE_REFRESH_TIMEOUT_SECONDS,
+    REASON_MANUAL,
+    REASON_STALE_READ,
+    catalog_service,
+)
 from concrete_console.jwt_keys import get_jwt_manager
 from concrete_console.log_config import logger
 from concrete_console.profile_secrets import encrypt_profile_secret_value, split_profile_policy_secret_values
@@ -1112,9 +1118,56 @@ def resolve_dev_cvm_disk_gb(requested: int | None, raw: Any) -> int:
     return default_gb
 
 
+def dev_cvm_default_instance_type(raw: dict[str, str]) -> str:
+    return raw.get("DEV_CVM_DEFAULT_INSTANCE_TYPE", "tdx.small")
+
+
+def require_launchable_instance_type(instance_type: str) -> None:
+    """Launch-time allowlist check against the in-memory catalog; never calls the provider.
+
+    A type must be in the catalog AND launchable (the launchability rule is
+    single-sourced in `is_instance_type_launchable`). A catalogued-but-not-launchable
+    type gets a distinct `instance_type_not_launchable` reason, vs `unknown_instance_type`
+    for a name that isn't in the catalog at all.
+    """
+    service = catalog_service()
+    catalog = service.snapshot()
+    valid_names = sorted(catalog.launchable_names())
+    if instance_type not in catalog.names():
+        # Not known: absent from the catalog entirely.
+        error_type = "unknown_instance_type"
+        message = f"Unknown instance type '{instance_type}'; valid types: {', '.join(valid_names)}"
+    elif instance_type not in catalog.launchable_names():
+        # Known but not launchable yet (see is_instance_type_launchable).
+        error_type = "instance_type_not_launchable"
+        message = f"Instance type '{instance_type}' is not launchable yet; valid types: {', '.join(valid_names)}"
+    else:
+        return
+    raise api_error(
+        422,
+        "VALIDATION_ERROR",
+        message,
+        {
+            "errors": [
+                {
+                    "field": "instance_type",
+                    "type": error_type,
+                    "requested": instance_type,
+                    "valid_instance_types": valid_names,
+                }
+            ],
+            "catalog": catalog.catalog_metadata(
+                now=datetime.now(timezone.utc),
+                refresh_in_progress=service.refresh_in_progress(),
+            ),
+            "hint": "relaunch with a valid --instance-type; run `concrete cvm instance-types` for specs",
+        },
+    )
+
+
 def resolve_cvm_launch_config(body: CVMCreate) -> dict[str, object]:
     raw = load_settings().raw
-    instance_type = (body.instance_type or raw.get("DEV_CVM_DEFAULT_INSTANCE_TYPE", "tdx.small")).strip()
+    instance_type = (body.instance_type or dev_cvm_default_instance_type(raw)).strip()
     if not instance_type:
         raise api_error(
             422,
@@ -1129,6 +1182,7 @@ def resolve_cvm_launch_config(body: CVMCreate) -> dict[str, object]:
             "Dev CVM default instance type is invalid",
             {"component": "dev_cvm_default_instance_type"},
         )
+    require_launchable_instance_type(instance_type)
 
     default_region = raw.get("DEV_CVM_DEFAULT_REGION", "").strip()
     region = (body.region or default_region or raw.get("PHALA_REGION", "FR-PARIS-1")).strip()
@@ -1324,6 +1378,7 @@ def resolve_security_cvm_provision_config(body: SecurityCVMCreate) -> dict[str, 
             "Security CVM default instance type is invalid",
             {"component": "security_cvm_default_instance_type"},
         )
+    require_launchable_instance_type(instance_type)
 
     default_region = raw.get("SECURITY_CVM_DEFAULT_REGION", "").strip()
     region = (body.region or default_region or raw.get("PHALA_REGION", "FR-PARIS-1")).strip()
@@ -4046,6 +4101,31 @@ def user_list_assigned_clauses(assigned: AssignedFilter | None) -> list[str]:
     if assigned is AssignedFilter.yes:
         return [exists]
     return [f"NOT {exists}"]
+
+
+@router.get("/instance-types")
+async def get_instance_types(
+    refresh: bool = Query(default=False),
+    current_user: CurrentUser = Depends(require_current_user),
+) -> dict:
+    """Serve the instance-type catalog from memory (every entry tagged with a
+    `launchable` flag; GPU types are listed but not launchable). The normal read path
+    never waits on the provider. `?refresh=true` does one bounded inline fetch and
+    degrades to the current cache (with its error metadata) on failure; when a
+    background refresh is already in flight it serves the cache instead of
+    starting a second fetch (`catalog.refresh_in_progress` reports it)."""
+    service = catalog_service()
+    now = datetime.now(timezone.utc)
+    if refresh:
+        await service.refresh(reason=REASON_MANUAL, timeout_seconds=INLINE_REFRESH_TIMEOUT_SECONDS)
+    elif service.snapshot().is_stale(now):
+        service.spawn_refresh_if_due(reason=REASON_STALE_READ)
+    default_name = dev_cvm_default_instance_type(load_settings().raw).strip() or None
+    return service.snapshot().payload(
+        now=now,
+        refresh_in_progress=service.refresh_in_progress(),
+        default_name=default_name,
+    )
 
 
 @router.get("/cvms")
