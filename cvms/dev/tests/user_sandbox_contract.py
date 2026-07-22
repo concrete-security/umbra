@@ -16,6 +16,7 @@ def main() -> None:
     compose = (ROOT / "cvms" / "dev" / "docker-compose.yml").read_text()
     entrypoint = (SANDBOX / "entrypoint.sh").read_text()
     claude_wrapper = (SANDBOX / "concrete-agent-claude.sh").read_text()
+    codex_wrapper = (SANDBOX / "concrete-agent-codex.sh").read_text()
     update_agents = (SANDBOX / "concrete-update-agents.sh").read_text()
     profile = (SANDBOX / "concrete-env-profile.sh").read_text()
     sshd_config = (SANDBOX / "sshd_config").read_text().splitlines()
@@ -71,6 +72,10 @@ def main() -> None:
         "claude wrapper must repair empty volume-backed config",
     )
     require("concrete-agent-codex.sh" in dockerfile, "codex wrapper must be installed")
+    require(
+        codex_wrapper.count("--dangerously-bypass-approvals-and-sandbox") == 2,
+        "both updated and baked Codex launch paths must bypass Codex's inner sandbox",
+    )
     require("nodejs.org/dist" in dockerfile, "node must be installed from official tarball")
     require("gh auth git-credential" in dockerfile, "gh git credential helper must be configured")
     require(
