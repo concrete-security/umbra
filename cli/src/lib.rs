@@ -19,6 +19,8 @@ mod session;
 mod ssh_identity;
 mod ssh_identity_store;
 mod style;
+#[cfg(test)]
+mod test_support;
 
 pub use exit::ExitStatus;
 
@@ -59,7 +61,7 @@ pub fn run() -> ExitCode {
     );
     let status = match args.command {
         cli::Command::Admin(command) => commands::admin::run(command, &config, json_output),
-        cli::Command::Alias(args) => commands::ssh::run_alias(args, &config, json_output),
+        cli::Command::Alias(command) => commands::alias::run(command, &config, json_output),
         cli::Command::Attach(args) => commands::ssh::run_attach(args, &config),
         cli::Command::Audit(command) => commands::audit::run(command, &config, json_output),
         cli::Command::Auth(command) => commands::auth::run(command, &config, json_output),

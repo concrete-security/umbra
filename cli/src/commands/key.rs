@@ -97,6 +97,13 @@ fn list(config: &ResolvedConfig, json_output: bool) -> ExitStatus {
 }
 
 fn add(config: &ResolvedConfig, args: KeyAddArgs, json_output: bool) -> ExitStatus {
+    // Fail fast on a bad/taken alias before registering anything.
+    if let Some(nick) = args.alias.as_deref() {
+        if let Err((status, message)) = crate::commands::alias::check_new_alias(config, nick) {
+            crate::style::eprintln_error(&message);
+            return status;
+        }
+    }
     let public_key = match read_public_key(args.file.as_deref()) {
         Ok(value) => value,
         Err(message) => {
@@ -140,6 +147,18 @@ fn add(config: &ResolvedConfig, args: KeyAddArgs, json_output: bool) -> ExitStat
         }
     } else if let Some(message) = identity.warning.as_deref() {
         eprintln!("{}", style::info_line(message));
+    }
+    if let Some(nick) = args.alias.as_deref() {
+        if let Err(message) = crate::commands::alias::record_resource_alias(
+            config,
+            crate::commands::alias::AliasKind::SshKey,
+            &key.id,
+            nick,
+        ) {
+            crate::style::eprintln_warn(&format!(
+                "[warn] key added but alias not saved: {message}"
+            ));
+        }
     }
     let output = key_output(&key);
     if json_output {
@@ -279,6 +298,13 @@ fn remove(config: &ResolvedConfig, key_id: &str, json_output: bool) -> ExitStatu
         crate::style::eprintln_error(&message);
         return status;
     }
+    // The key is gone from the Console; drop any alias pointing at it.
+    crate::commands::alias::prune_and_save(config, |a| {
+        a.prune(crate::commands::alias::Prune::Resource(
+            crate::commands::alias::AliasKind::SshKey,
+            key_id,
+        ))
+    });
     if json_output {
         println!(
             "{}",
@@ -292,12 +318,49 @@ fn remove(config: &ResolvedConfig, key_id: &str, json_output: bool) -> ExitStatu
     ExitStatus::Ok
 }
 
+/// Whether the caller owns a registered SSH key with `key_id`. The Console has
+/// no single-key GET, so this lists the caller's keys and tests membership —
+/// used to fail-fast when aliasing a key that does not exist.
+pub(crate) fn key_exists(
+    console_url: &str,
+    access_token: &str,
+    key_id: &str,
+) -> Result<bool, (ExitStatus, String)> {
+    let page = fetch_keys(console_url, access_token)?;
+    Ok(page.items.iter().any(|key| key.id == key_id))
+}
+
+/// Ids of the caller's registered SSH keys, for `alias prune` to drop aliases
+/// whose key no longer exists.
+pub(crate) fn key_ids(
+    console_url: &str,
+    access_token: &str,
+) -> Result<Vec<String>, (ExitStatus, String)> {
+    Ok(fetch_keys(console_url, access_token)?
+        .items
+        .into_iter()
+        .map(|key| key.id)
+        .collect())
+}
+
+/// Path of the caller's registered-keys list, the one source of truth shared by
+/// the fetcher and the test mock (`MockConsole`) so the two never drift.
+pub(crate) fn keys_path() -> &'static str {
+    "/api/v1/me/keys"
+}
+
+/// Path of the single-key `DELETE`, the one source of truth shared by the
+/// remover and the test mock (`MockConsole`) so the two never drift.
+pub(crate) fn key_path(key_id: &str) -> String {
+    format!("{}/{key_id}", keys_path())
+}
+
 fn fetch_keys(
     console_url: &str,
     access_token: &str,
 ) -> Result<ListPage<ConsoleSshKey>, (ExitStatus, String)> {
     let response = Client::new()
-        .get(format!("{console_url}/api/v1/me/keys"))
+        .get(format!("{console_url}{}", keys_path()))
         .bearer_auth(access_token)
         .send()
         .map_err(|err| {
@@ -336,7 +399,7 @@ fn delete_key(
     key_id: &str,
 ) -> Result<(), (ExitStatus, String)> {
     let response = Client::new()
-        .delete(format!("{console_url}/api/v1/me/keys/{key_id}"))
+        .delete(format!("{console_url}{}", key_path(key_id)))
         .bearer_auth(access_token)
         .send()
         .map_err(|err| {
@@ -382,6 +445,8 @@ fn ssh_key_algorithm(public_key: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::alias;
+    use crate::test_support::{authenticated_config, MockConsole};
     use std::{fs, process::Command};
 
     #[test]
@@ -449,6 +514,82 @@ mod tests {
 
         assert!(matches!(err.0, ExitStatus::Usage));
         assert!(err.1.contains("does not match"));
+        fs::remove_dir_all(dir).expect("temp dir removed");
+    }
+
+    /// `key remove` (the real command) drops the alias pointing at the removed
+    /// SSH key from the on-disk store while leaving unrelated aliases — the
+    /// `Prune::Resource(SshKey, …)` auto-purge wiring, driven end-to-end against
+    /// a mock Console `204`.
+    #[test]
+    fn test_key_remove_prune_success() {
+        const KEY_ID: &str = "3c4c2b64-b059-41a6-b925-3e4816ffee60";
+        const CVM_ID: &str = "9a7f6b4a-1111-2222-3333-444444444444";
+
+        let console = MockConsole::start();
+        let config = authenticated_config(&console);
+        console.remove_key(KEY_ID);
+        let mut store = alias::Aliases::default();
+        store.ssh_key.insert("laptop".into(), KEY_ID.into());
+        store.cvm.insert("box".into(), CVM_ID.into());
+        alias::save(&config.config_dir, &store).expect("seed store");
+
+        let status = run(
+            KeyCommand::Remove {
+                key_id: KEY_ID.into(),
+            },
+            &config,
+            false,
+        );
+        assert!(matches!(status, ExitStatus::Ok));
+
+        let reloaded = alias::load(&config.config_dir).unwrap();
+        assert!(
+            reloaded.kind_of("laptop").is_none(),
+            "the ssh-key alias must be pruned"
+        );
+        assert!(
+            reloaded.kind_of("box").is_some(),
+            "unrelated aliases must survive"
+        );
+    }
+
+    /// `key add --alias` writes NO alias when the registration fails: the alias
+    /// is recorded only after the Console accepts the key, so a failed add (here
+    /// an empty mock Console that 404s the create call, with a real public key so
+    /// we get past local validation) must leave the store empty.
+    #[test]
+    fn test_key_add_alias_failure() {
+        let dir = std::env::temp_dir().join(format!("concrete-key-add-fail-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).expect("temp dir created");
+        let private_key = dir.join("id_ed25519");
+        Command::new("ssh-keygen")
+            .args(["-t", "ed25519", "-N", ""])
+            .arg("-f")
+            .arg(&private_key)
+            .output()
+            .expect("ssh-keygen succeeds");
+
+        let console = MockConsole::start();
+        let config = authenticated_config(&console);
+        let status = run(
+            KeyCommand::Add(KeyAddArgs {
+                label: "laptop".into(),
+                file: Some(private_key.with_extension("pub")),
+                identity_file: None,
+                alias: Some("nick".into()),
+            }),
+            &config,
+            false,
+        );
+        assert!(!matches!(status, ExitStatus::Ok));
+        assert!(
+            alias::load(&config.config_dir)
+                .unwrap()
+                .kind_of("nick")
+                .is_none(),
+            "a failed add must not write an orphan alias"
+        );
         fs::remove_dir_all(dir).expect("temp dir removed");
     }
 }

@@ -21,7 +21,7 @@ use crate::{
         wire, CvmCommand, CvmInstanceTypesArgs, CvmLaunchArgs, CvmListArgs, CvmTerminateArgs,
         CvmUpdateArgs,
     },
-    commands::{resolve_cvm, resolve_cvm_explicit},
+    commands::{alias, resolve_cvm, resolve_cvm_explicit},
     config::{self, ResolvedConfig},
     console::{
         fetch_json, push_query, read_json_response, read_with_etag, validate_uuid, ListPage,
@@ -283,7 +283,7 @@ pub fn run(command: CvmCommand, config: &ResolvedConfig, json: bool) -> ExitStat
             }
         }
         CvmCommand::Stop { target } => {
-            match resolve_cvm_explicit(target.cvm_id.as_deref(), target.cvm.as_deref()) {
+            match resolve_cvm_explicit(target.cvm_id.as_deref(), target.cvm.as_deref(), config) {
                 Ok(cvm_id) => lifecycle_action(config, &cvm_id, LifecycleAction::Stop, json),
                 Err(message) => {
                     style::eprintln_error(&message);
@@ -420,6 +420,19 @@ fn instance_types(
 }
 
 fn launch(config: &ResolvedConfig, args: CvmLaunchArgs, json_output: bool) -> ExitStatus {
+    if let Some(nick) = args.alias.as_deref() {
+        if args.no_wait {
+            style::eprintln_error(
+                "[usage] --alias cannot be combined with --no-wait; the CVM id is not known until launch completes",
+            );
+            return ExitStatus::Usage;
+        }
+        // Fail fast on a bad/taken alias before launching anything.
+        if let Err((status, message)) = alias::check_new_alias(config, nick) {
+            style::eprintln_error(&message);
+            return status;
+        }
+    }
     let (console_url, session) = match crate::console::console_session(config) {
         Ok(value) => value,
         Err((status, message)) => {
@@ -460,6 +473,17 @@ fn launch(config: &ResolvedConfig, args: CvmLaunchArgs, json_output: bool) -> Ex
             return ExitStatus::Error;
         }
     };
+    // Record the alias as soon as the CVM exists, so a later failure writing the
+    // policy file or defaults cannot silently lose it.
+    if let Some(nick) = args.alias.as_deref() {
+        if let Err(message) =
+            alias::record_resource_alias(config, alias::AliasKind::Cvm, &result.cvm.id, nick)
+        {
+            style::eprintln_warn(&format!(
+                "[warn] CVM launched but alias not saved: {message}"
+            ));
+        }
+    }
     let policy_file =
         match write_policy_file(&config.config_dir, &result.policy_bundle, &result.cvm.id) {
             Ok(value) => value,
@@ -477,7 +501,7 @@ fn launch(config: &ResolvedConfig, args: CvmLaunchArgs, json_output: bool) -> Ex
         style::eprintln_error(&message);
         return ExitStatus::Error;
     }
-    print_launch_result(result.cvm, policy_file, json_output);
+    print_launch_result(result.cvm, policy_file, args.alias.as_deref(), json_output);
     ExitStatus::Ok
 }
 
@@ -517,7 +541,7 @@ fn profile_mutation(
         &session.access_token,
         cvm_id,
         &etag,
-        profile_id,
+        &profile_id,
         mutation,
     ) {
         Ok((cvm, _)) => cvm,
@@ -576,6 +600,12 @@ fn lifecycle_action(
                 return status;
             }
         };
+    // Stopping a CVM kills its sessions (they live in the CVM's tmpfs `/run`);
+    // drop their now-stale aliases, but keep the CVM's own alias — it can be
+    // restarted. `start` leaves the store untouched.
+    if matches!(action, LifecycleAction::Stop) {
+        alias::prune_and_save(config, |a| a.prune(alias::Prune::CvmSessions(cvm_id)));
+    }
     print_lifecycle_result(action, &cvm, json_output);
     ExitStatus::Ok
 }
@@ -653,14 +683,17 @@ fn update(config: &ResolvedConfig, args: CvmUpdateArgs, json_output: bool) -> Ex
 }
 
 fn terminate(config: &ResolvedConfig, args: CvmTerminateArgs, json_output: bool) -> ExitStatus {
-    let cvm_id =
-        match resolve_cvm_explicit(args.target.cvm_id.as_deref(), args.target.cvm.as_deref()) {
-            Ok(value) => value,
-            Err(message) => {
-                style::eprintln_error(&message);
-                return ExitStatus::Usage;
-            }
-        };
+    let cvm_id = match resolve_cvm_explicit(
+        args.target.cvm_id.as_deref(),
+        args.target.cvm.as_deref(),
+        config,
+    ) {
+        Ok(value) => value,
+        Err(message) => {
+            style::eprintln_error(&message);
+            return ExitStatus::Usage;
+        }
+    };
     if let Err(message) = validate_uuid("CVM_ID", &cvm_id) {
         style::eprintln_error(&message);
         return ExitStatus::Usage;
@@ -687,6 +720,9 @@ fn terminate(config: &ResolvedConfig, args: CvmTerminateArgs, json_output: bool)
         }
     };
     if args.no_wait {
+        // The teardown is only submitted, not confirmed complete, so the alias
+        // is left in place — a later `alias prune` (or a waited terminate)
+        // reconciles it once the CVM is actually gone.
         operation::print_operation(&op, json_output, false);
         return ExitStatus::Ok;
     }
@@ -705,6 +741,9 @@ fn terminate(config: &ResolvedConfig, args: CvmTerminateArgs, json_output: bool)
             return ExitStatus::Error;
         }
     };
+    // The CVM is now confirmed terminated; drop its alias and any session
+    // aliases bound to it (best-effort, never fails the terminate).
+    alias::prune_and_save(config, |a| a.prune(alias::Prune::Cvm(&cvm_id)));
     print_terminate_result(&cvm, json_output);
     ExitStatus::Ok
 }
@@ -774,6 +813,13 @@ fn selected_launch_profiles(
     } else {
         config.profile_flags.clone()
     };
+    // Translate any profile aliases to UUIDs before validation. A raw UUID (or
+    // an auto-selected id) passes through without touching the alias store.
+    let profiles: Vec<String> = profiles
+        .into_iter()
+        .map(|profile| alias::resolve_or_passthrough(config, alias::AliasKind::Profile, &profile))
+        .collect::<Result<_, _>>()
+        .map_err(|message| (ExitStatus::Usage, message))?;
     if profiles.len() > 16 {
         return Err((
             ExitStatus::Usage,
@@ -836,7 +882,15 @@ fn selected_launch_ssh_keys(
     args: &CvmLaunchArgs,
 ) -> Result<(Vec<String>, Option<PathBuf>), (ExitStatus, String)> {
     if !args.ssh_keys.is_empty() {
-        for ssh_key_id in &args.ssh_keys {
+        // Translate any ssh-key aliases to UUIDs before validation. A raw UUID
+        // passes through without touching the alias store.
+        let ssh_keys: Vec<String> = args
+            .ssh_keys
+            .iter()
+            .map(|id| alias::resolve_or_passthrough(config, alias::AliasKind::SshKey, id))
+            .collect::<Result<_, _>>()
+            .map_err(|message| (ExitStatus::Usage, message))?;
+        for ssh_key_id in &ssh_keys {
             validate_uuid("--ssh-key", ssh_key_id)
                 .map_err(|message| (ExitStatus::Usage, message))?;
         }
@@ -844,7 +898,7 @@ fn selected_launch_ssh_keys(
         let selected = keys
             .items
             .iter()
-            .filter(|key| args.ssh_keys.iter().any(|id| id == &key.id))
+            .filter(|key| ssh_keys.iter().any(|id| id == &key.id))
             .collect::<Vec<_>>();
         let fingerprints = selected
             .iter()
@@ -852,7 +906,7 @@ fn selected_launch_ssh_keys(
             .collect::<Vec<_>>();
         let identity = resolve_launch_identity(config, &selected)
             .or_else(|| ssh_identity::discover_private_key_for_fingerprints(&fingerprints));
-        return Ok((args.ssh_keys.clone(), identity));
+        return Ok((ssh_keys, identity));
     }
     let keys = fetch_launch_keys(console_url, session)?;
     if !keys.items.is_empty() {
@@ -1182,20 +1236,71 @@ fn optional_profile_filter(config: &ResolvedConfig) -> Result<Option<String>, St
     if config.profile_flags.len() > 1 {
         return Err("[usage] expected at most one --profile for cvm list".to_string());
     }
-    if let Some(profile_id) = config.profile_flags.first() {
-        validate_uuid("--profile", profile_id)?;
-        Ok(Some(profile_id.clone()))
+    if let Some(raw) = config.profile_flags.first() {
+        let profile_id = alias::resolve_or_passthrough(config, alias::AliasKind::Profile, raw)?;
+        validate_uuid("--profile", &profile_id)?;
+        Ok(Some(profile_id))
     } else {
         Ok(None)
     }
 }
 
-fn selected_profile(config: &ResolvedConfig) -> Result<&str, (ExitStatus, String)> {
-    let profile_id = config
+fn selected_profile(config: &ResolvedConfig) -> Result<String, (ExitStatus, String)> {
+    let raw = config
         .require_profile()
         .map_err(|message| (ExitStatus::Usage, message))?;
-    validate_uuid("--profile", profile_id).map_err(|message| (ExitStatus::Usage, message))?;
+    let profile_id = alias::resolve_or_passthrough(config, alias::AliasKind::Profile, raw)
+        .map_err(|message| (ExitStatus::Usage, message))?;
+    validate_uuid("--profile", &profile_id).map_err(|message| (ExitStatus::Usage, message))?;
     Ok(profile_id)
+}
+
+/// State by id for the caller's non-terminated CVMs, so `alias prune` can tell
+/// a live/stopped CVM (keep its alias) from a terminated/absent one (stale).
+pub(crate) fn alive_cvm_states(
+    console_url: &str,
+    session: &Session,
+) -> Result<BTreeMap<String, String>, (ExitStatus, String)> {
+    let page: ListPage<Cvm> = fetch_json(
+        console_url,
+        session,
+        cvms_path(),
+        &[("state", "alive".to_string())],
+        "list CVMs",
+    )?;
+    Ok(page
+        .items
+        .into_iter()
+        .map(|cvm| (cvm.id, cvm.state))
+        .collect())
+}
+
+/// Whether a Dev CVM with `cvm_id` exists, for fail-fast alias creation. A 404
+/// surfaces as an error via the shared response mapping.
+pub(crate) fn cvm_exists(
+    console_url: &str,
+    session: &Session,
+    cvm_id: &str,
+) -> Result<(), (ExitStatus, String)> {
+    fetch_cvm_with_etag(console_url, session, cvm_id).map(|_| ())
+}
+
+/// Path of the CVM list, the one source of truth shared by the fetcher and the
+/// test mock (`MockConsole`) so the two never drift.
+pub(crate) fn cvms_path() -> &'static str {
+    "/api/v1/cvms"
+}
+
+/// Path of the single-CVM GET, the one source of truth shared by the fetcher
+/// and the test mock (`MockConsole`) so the two never drift.
+pub(crate) fn cvm_path(cvm_id: &str) -> String {
+    format!("/api/v1/cvms/{cvm_id}")
+}
+
+/// Path of a CVM lifecycle action (`stop`/`start`/`terminate`/`update`), built
+/// on top of [`cvm_path`] so the fetchers and the test mock share one source.
+pub(crate) fn cvm_action_path(cvm_id: &str, action: &str) -> String {
+    format!("{}/actions/{action}", cvm_path(cvm_id))
 }
 
 fn fetch_cvm_with_etag(
@@ -1204,7 +1309,7 @@ fn fetch_cvm_with_etag(
     cvm_id: &str,
 ) -> Result<(Cvm, String), (ExitStatus, String)> {
     let response = Client::new()
-        .get(format!("{console_url}/api/v1/cvms/{cvm_id}"))
+        .get(format!("{console_url}{}", cvm_path(cvm_id)))
         .bearer_auth(&session.access_token)
         .send()
         .map_err(|err| {
@@ -1306,8 +1411,8 @@ fn submit_lifecycle_action(
 ) -> Result<(Cvm, String), (ExitStatus, String)> {
     let response = Client::new()
         .post(format!(
-            "{console_url}/api/v1/cvms/{cvm_id}/actions/{}",
-            action.as_str()
+            "{console_url}{}",
+            cvm_action_path(cvm_id, action.as_str())
         ))
         .bearer_auth(access_token)
         .header(IF_MATCH, etag)
@@ -1329,7 +1434,10 @@ fn submit_update(
     etag: &str,
 ) -> Result<Operation, (ExitStatus, String)> {
     let response = Client::new()
-        .post(format!("{console_url}/api/v1/cvms/{cvm_id}/actions/update"))
+        .post(format!(
+            "{console_url}{}",
+            cvm_action_path(cvm_id, "update")
+        ))
         .bearer_auth(access_token)
         .header(IF_MATCH, etag)
         .header("Idempotency-Key", Uuid::new_v4().to_string())
@@ -1351,7 +1459,8 @@ fn submit_terminate(
 ) -> Result<Operation, (ExitStatus, String)> {
     let response = Client::new()
         .post(format!(
-            "{console_url}/api/v1/cvms/{cvm_id}/actions/terminate"
+            "{console_url}{}",
+            cvm_action_path(cvm_id, "terminate")
         ))
         .bearer_auth(access_token)
         .header(IF_MATCH, etag)
@@ -1613,7 +1722,7 @@ fn print_cvm_list(
     }
 }
 
-fn print_launch_result(cvm: Cvm, policy_file: PathBuf, json_output: bool) {
+fn print_launch_result(cvm: Cvm, policy_file: PathBuf, alias: Option<&str>, json_output: bool) {
     if json_output {
         let output = CvmLaunchOutput {
             cvm,
@@ -1626,11 +1735,15 @@ fn print_launch_result(cvm: Cvm, policy_file: PathBuf, json_output: bool) {
         );
     } else {
         let cvm_id = cvm.id.clone();
+        // The next step and every later verb accept the alias, so prefer it;
+        // the alias row shows "-" when the CVM was launched without one.
+        let target = alias.unwrap_or(&cvm_id);
         let confirm = style::ConfirmBlock::new("launched", "cvm", cvm_id.clone())
             .field("fqdn", cvm.fqdn.clone().unwrap_or_else(|| "-".to_string()))
             .field("state", cvm.state.clone())
+            .field("alias", alias.unwrap_or("-").to_string())
             .field("policy file", policy_file.display().to_string())
-            .next_step(format!("concrete ssh {cvm_id}"));
+            .next_step(format!("concrete ssh {target}"));
         println!("{}", style::render_confirm(&confirm));
     }
 }
@@ -1696,6 +1809,8 @@ fn validate_cvm_config_value(name: &str, value: &str) -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::cli::CvmStateFilter;
+    use crate::test_support::{authenticated_config, MockConsole, Presence};
+    use rstest::rstest;
 
     #[test]
     fn instance_types_response_captures_unknown_fields_without_leaking_to_json() {
@@ -1935,5 +2050,214 @@ mod tests {
             "ssh-ed25519 existing\n"
         );
         fs::remove_dir_all(dir).expect("temp dir removed");
+    }
+
+    // --- Lifecycle prune wiring: the real `cvm stop` / `cvm terminate` commands
+    // must call `prune_and_save` with the right `Prune` variant. These drive the
+    // whole command against a mock Console and read the alias store back off
+    // disk, so they cover the call-site wiring the pure `alias::prune` tests
+    // cannot (see alias.rs `test_prune_and_save_persists_success`).
+
+    const LIFECYCLE_CVM_ID: &str = "9a7f6b4a-1111-2222-3333-444444444444";
+    const OTHER_CVM_ID: &str = "5d5d5d5d-6666-7777-8888-999999999999";
+    const LIFECYCLE_PROFILE_ID: &str = "16286507-f87f-449e-a229-be04067fc23c";
+    const LIFECYCLE_KEY_ID: &str = "3c4c2b64-b059-41a6-b925-3e4816ffee60";
+
+    /// Seed the alias store in `config`'s dir spanning every kind: the target
+    /// CVM's own alias, two session aliases bound to it, one session on a
+    /// different CVM, plus an unrelated profile and ssh-key alias — so a prune
+    /// can be shown to touch ONLY the box being acted on and leave the rest.
+    fn seed_lifecycle_aliases(config: &ResolvedConfig) {
+        let mut aliases = alias::Aliases::default();
+        aliases.cvm.insert("box".into(), LIFECYCLE_CVM_ID.into());
+        aliases
+            .profile
+            .insert("prof".into(), LIFECYCLE_PROFILE_ID.into());
+        aliases
+            .ssh_key
+            .insert("key".into(), LIFECYCLE_KEY_ID.into());
+        for (name, session, cvm) in [
+            ("s1", "agent-1", LIFECYCLE_CVM_ID),
+            ("s2", "agent-2", LIFECYCLE_CVM_ID),
+            ("other", "agent-3", OTHER_CVM_ID),
+        ] {
+            aliases.session.insert(
+                name.into(),
+                alias::SessionAlias {
+                    session: session.into(),
+                    cvm: cvm.into(),
+                },
+            );
+        }
+        alias::save(&config.config_dir, &aliases).expect("seed alias store");
+    }
+
+    /// `cvm stop` (the real command) drops the stopped CVM's session aliases from
+    /// the on-disk store — they die with the box's tmpfs — while KEEPING the
+    /// CVM's own alias (it can be restarted) and another CVM's session. Proves
+    /// the `Prune::CvmSessions` wiring. Run with the target given both as the raw
+    /// UUID and as its alias `box`: the alias case also proves resolution through
+    /// the real on-disk store, since the mock only answers for the resolved UUID.
+    #[rstest]
+    #[case::by_id(LIFECYCLE_CVM_ID)]
+    #[case::by_alias("box")]
+    fn test_cvm_stop_prune_success(#[case] target: &str) {
+        let console = MockConsole::start();
+        let config = authenticated_config(&console);
+        console.get_cvm(LIFECYCLE_CVM_ID, Presence::Present);
+        console.cvm_lifecycle_action(LIFECYCLE_CVM_ID, "stop");
+        seed_lifecycle_aliases(&config);
+
+        let status = run(
+            CvmCommand::Stop {
+                target: crate::cli::CvmTarget {
+                    cvm_id: Some(target.into()),
+                    cvm: None,
+                },
+            },
+            &config,
+            false,
+        );
+        assert!(matches!(status, ExitStatus::Ok));
+
+        let reloaded = alias::load(&config.config_dir).unwrap();
+        assert!(reloaded.resolve_session("s1").is_none());
+        assert!(reloaded.resolve_session("s2").is_none());
+        assert_eq!(
+            reloaded.resolve_alias(alias::AliasKind::Cvm, "box"),
+            LIFECYCLE_CVM_ID
+        );
+        assert!(reloaded.resolve_session("other").is_some());
+        // Unrelated kinds are never touched by a stop.
+        assert!(reloaded.profile.contains_key("prof"));
+        assert!(reloaded.ssh_key.contains_key("key"));
+    }
+
+    /// `cvm terminate` (the real command, waited) drops the CVM's own alias AND
+    /// every session bound to it (cascade) only ONCE the operation has completed,
+    /// leaving another CVM's session — the `Prune::Cvm` wiring end-to-end. The
+    /// mock's operation is already `succeeded`, so the wait returns at once.
+    #[test]
+    fn test_cvm_terminate_prune_success() {
+        let console = MockConsole::start();
+        let config = authenticated_config(&console);
+        console.get_cvm(LIFECYCLE_CVM_ID, Presence::Present);
+        console.terminate_cvm(LIFECYCLE_CVM_ID);
+        seed_lifecycle_aliases(&config);
+
+        let status = run(
+            CvmCommand::Terminate(CvmTerminateArgs {
+                target: crate::cli::CvmTarget {
+                    cvm_id: Some(LIFECYCLE_CVM_ID.into()),
+                    cvm: None,
+                },
+                no_wait: false,
+                wait_timeout_seconds: 600,
+            }),
+            &config,
+            false,
+        );
+        assert!(matches!(status, ExitStatus::Ok));
+
+        let reloaded = alias::load(&config.config_dir).unwrap();
+        assert!(!reloaded.cvm.contains_key("box"));
+        assert!(reloaded.resolve_session("s1").is_none());
+        assert!(reloaded.resolve_session("s2").is_none());
+        assert!(reloaded.resolve_session("other").is_some());
+        // The cascade is scoped to the CVM: unrelated kinds survive.
+        assert!(reloaded.profile.contains_key("prof"));
+        assert!(reloaded.ssh_key.contains_key("key"));
+    }
+
+    /// `cvm terminate --no-wait` leaves the alias in place: the teardown is only
+    /// submitted, not confirmed, so the store must not be pruned yet (a later
+    /// `alias prune` reconciles it once the CVM is actually gone).
+    #[test]
+    fn test_cvm_terminate_no_wait_keeps_alias_success() {
+        let console = MockConsole::start();
+        let config = authenticated_config(&console);
+        console.get_cvm(LIFECYCLE_CVM_ID, Presence::Present);
+        console.terminate_cvm(LIFECYCLE_CVM_ID);
+        seed_lifecycle_aliases(&config);
+
+        let status = run(
+            CvmCommand::Terminate(CvmTerminateArgs {
+                target: crate::cli::CvmTarget {
+                    cvm_id: Some(LIFECYCLE_CVM_ID.into()),
+                    cvm: None,
+                },
+                no_wait: true,
+                wait_timeout_seconds: 600,
+            }),
+            &config,
+            false,
+        );
+        assert!(matches!(status, ExitStatus::Ok));
+
+        let reloaded = alias::load(&config.config_dir).unwrap();
+        assert!(
+            reloaded.cvm.contains_key("box"),
+            "alias kept until confirmed"
+        );
+        assert!(reloaded.resolve_session("s1").is_some());
+    }
+
+    /// `cvm launch --alias` writes NO alias when the launch fails: the alias is
+    /// recorded only after the CVM exists, so a failed launch (here an empty mock
+    /// Console that 404s the launch call) must leave the store empty. `no_wait`
+    /// is false so the launch proceeds past the up-front alias check.
+    #[test]
+    fn test_cvm_launch_alias_failure() {
+        let console = MockConsole::start();
+        let config = authenticated_config(&console);
+        let status = run(
+            CvmCommand::Launch(CvmLaunchArgs {
+                ssh_keys: vec![],
+                alias: Some("nick".into()),
+                instance_type: None,
+                region: None,
+                disk_size: None,
+                no_wait: false,
+                wait_timeout_seconds: 600,
+            }),
+            &config,
+            false,
+        );
+        assert!(!matches!(status, ExitStatus::Ok));
+        assert!(
+            alias::load(&config.config_dir)
+                .unwrap()
+                .kind_of("nick")
+                .is_none(),
+            "a failed launch must not write an orphan alias"
+        );
+    }
+
+    /// The global `--profile` accepts an alias, not just a UUID: with a profile
+    /// alias in the store, the `cvm list` filter and the single-profile selector
+    /// both resolve it to the underlying UUID.
+    #[test]
+    fn test_profile_flag_resolves_alias_success() {
+        const PROFILE_ID: &str = "16286507-f87f-449e-a229-be04067fc23c";
+        let dir = std::env::temp_dir().join(format!("concrete-profile-alias-{}", Uuid::new_v4()));
+        let config = ResolvedConfig::resolve(crate::config::ConfigOverrides {
+            config_dir: Some(dir),
+            profile: vec!["team-prod".into()],
+            ..Default::default()
+        });
+        let mut store = alias::Aliases::default();
+        store.profile.insert("team-prod".into(), PROFILE_ID.into());
+        alias::save(&config.config_dir, &store).expect("seed store");
+
+        assert_eq!(
+            optional_profile_filter(&config).unwrap(),
+            Some(PROFILE_ID.to_string()),
+            "the `cvm list` --profile filter must resolve the alias"
+        );
+        assert_eq!(
+            selected_profile(&config).unwrap(),
+            PROFILE_ID,
+            "the single-profile selector must resolve the alias"
+        );
     }
 }

@@ -85,6 +85,13 @@ fn create(config: &ResolvedConfig, args: ProfileCreateArgs, json_output: bool) -
         return ExitStatus::Usage;
     }
     let description = args.description.unwrap_or_default();
+    // Fail fast on a bad/taken alias before creating anything.
+    if let Some(nick) = args.alias.as_deref() {
+        if let Err((status, message)) = crate::commands::alias::check_new_alias(config, nick) {
+            crate::style::eprintln_error(&message);
+            return status;
+        }
+    }
     let (console_url, session) = match console_session(config) {
         Ok(value) => value,
         Err((status, message)) => {
@@ -99,6 +106,18 @@ fn create(config: &ResolvedConfig, args: ProfileCreateArgs, json_output: bool) -
             return status;
         }
     };
+    if let Some(nick) = args.alias.as_deref() {
+        if let Err(message) = crate::commands::alias::record_resource_alias(
+            config,
+            crate::commands::alias::AliasKind::Profile,
+            &profile.id,
+            nick,
+        ) {
+            crate::style::eprintln_warn(&format!(
+                "[warn] profile created but alias not saved: {message}"
+            ));
+        }
+    }
     if json_output {
         println!(
             "{}",
@@ -188,6 +207,7 @@ fn show(config: &ResolvedConfig, json_output: bool) -> ExitStatus {
             return status;
         }
     };
+    let profile_id = profile_id.as_str();
     let profile = match fetch_profile(console_url, &session.access_token, profile_id) {
         Ok(value) => value.profile,
         Err((status, message)) => {
@@ -207,6 +227,7 @@ fn configure(config: &ResolvedConfig, args: ProfileConfigureArgs, json_output: b
             return status;
         }
     };
+    let profile_id = profile_id.as_str();
     let policy = match read_policy(args.policy_file.as_deref()) {
         Ok(value) => value,
         Err((status, message)) => {
@@ -286,6 +307,7 @@ fn member_list(config: &ResolvedConfig, json_output: bool) -> ExitStatus {
             return status;
         }
     };
+    let profile_id = profile_id.as_str();
     let page = match fetch_profile_members(console_url, &session.access_token, profile_id) {
         Ok(value) => value,
         Err((status, message)) => {
@@ -341,6 +363,7 @@ fn member_add(config: &ResolvedConfig, user_id: &str, json_output: bool) -> Exit
             return status;
         }
     };
+    let profile_id = profile_id.as_str();
     let profile = match fetch_profile(console_url, &session.access_token, profile_id) {
         Ok(value) => value,
         Err((status, message)) => {
@@ -384,6 +407,7 @@ fn member_remove(config: &ResolvedConfig, user_id: &str, json_output: bool) -> E
             return status;
         }
     };
+    let profile_id = profile_id.as_str();
     let profile = match fetch_profile(console_url, &session.access_token, profile_id) {
         Ok(value) => value,
         Err((status, message)) => {
@@ -416,11 +440,17 @@ fn member_remove(config: &ResolvedConfig, user_id: &str, json_output: bool) -> E
 
 fn selected_profile_session(
     config: &ResolvedConfig,
-) -> Result<(&str, Session, &str), (ExitStatus, String)> {
-    let profile_id = config
+) -> Result<(&str, Session, String), (ExitStatus, String)> {
+    let raw = config
         .require_profile()
         .map_err(|message| (ExitStatus::Usage, message))?;
-    if Uuid::parse_str(profile_id).is_err() {
+    let profile_id = crate::commands::alias::resolve_or_passthrough(
+        config,
+        crate::commands::alias::AliasKind::Profile,
+        raw,
+    )
+    .map_err(|message| (ExitStatus::Usage, message))?;
+    if Uuid::parse_str(&profile_id).is_err() {
         return Err((
             ExitStatus::Usage,
             "[usage] profile must be a UUID".to_string(),
@@ -454,13 +484,45 @@ fn create_profile(
     read_profile_with_etag(response, "create profile")
 }
 
+/// Ids of the profiles visible to the caller, for `alias prune` to drop aliases
+/// whose profile no longer exists.
+pub(crate) fn profile_ids(
+    console_url: &str,
+    session: &Session,
+) -> Result<Vec<String>, (ExitStatus, String)> {
+    let path = profiles_path(&session.entity.id);
+    let page: ListPage<Profile> = fetch_json(console_url, session, &path, &[], "list profiles")?;
+    Ok(page.items.into_iter().map(|profile| profile.id).collect())
+}
+
+/// Path of the entity's profile list, the one source of truth shared by the
+/// fetcher and the test mock (`MockConsole`) so the two never drift.
+pub(crate) fn profiles_path(entity_id: &str) -> String {
+    format!("/api/v1/entities/{entity_id}/profiles")
+}
+
+/// Whether a profile with `profile_id` exists, for fail-fast alias creation.
+pub(crate) fn profile_exists(
+    console_url: &str,
+    access_token: &str,
+    profile_id: &str,
+) -> Result<(), (ExitStatus, String)> {
+    fetch_profile(console_url, access_token, profile_id).map(|_| ())
+}
+
+/// Path of the single-profile GET, the one source of truth shared by the
+/// fetcher and the test mock (`MockConsole`) so the two never drift.
+pub(crate) fn profile_path(profile_id: &str) -> String {
+    format!("/api/v1/profiles/{profile_id}")
+}
+
 fn fetch_profile(
     console_url: &str,
     access_token: &str,
     profile_id: &str,
 ) -> Result<ProfileWithEtag, (ExitStatus, String)> {
     let response = Client::new()
-        .get(format!("{console_url}/api/v1/profiles/{profile_id}"))
+        .get(format!("{console_url}{}", profile_path(profile_id)))
         .bearer_auth(access_token)
         .send()
         .map_err(|err| {
@@ -678,6 +740,8 @@ fn print_member_output(
 mod tests {
     use super::*;
     use crate::cli::Assigned;
+    use crate::commands::alias;
+    use crate::test_support::{authenticated_config, MockConsole};
 
     #[test]
     fn profile_list_query_params_maps_assigned_flag() {
@@ -702,5 +766,31 @@ mod tests {
         assert!(matches!(err.0, ExitStatus::Usage));
         assert!(err.1.contains("JSON object"));
         fs::remove_file(path).expect("test policy file removed");
+    }
+
+    /// `profile create --alias` writes NO alias when the create fails: the alias
+    /// is recorded only after the profile exists, so a failed create (here an
+    /// empty mock Console that 404s the create call) must leave the store empty.
+    #[test]
+    fn test_profile_create_alias_failure() {
+        let console = MockConsole::start();
+        let config = authenticated_config(&console);
+        let status = run(
+            ProfileCommand::Create(ProfileCreateArgs {
+                name: "prod".into(),
+                description: None,
+                alias: Some("nick".into()),
+            }),
+            &config,
+            false,
+        );
+        assert!(!matches!(status, ExitStatus::Ok));
+        assert!(
+            alias::load(&config.config_dir)
+                .unwrap()
+                .kind_of("nick")
+                .is_none(),
+            "a failed create must not write an orphan alias"
+        );
     }
 }

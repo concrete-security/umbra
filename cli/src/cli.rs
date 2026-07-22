@@ -61,8 +61,9 @@ pub enum Command {
     #[command(subcommand)]
     Admin(AdminCommand),
 
-    /// Assign a local alias to a remote dtach session.
-    Alias(AliasArgs),
+    /// Manage local aliases for CVMs, profiles, SSH keys, and sessions.
+    #[command(subcommand)]
+    Alias(AliasCommand),
 
     /// Authenticate and inspect the local Console session.
     #[command(subcommand)]
@@ -440,6 +441,10 @@ pub struct CvmLaunchArgs {
     #[arg(long = "ssh-key")]
     pub ssh_keys: Vec<String>,
 
+    /// Assign a local alias to the launched CVM (see `concrete alias`).
+    #[arg(long)]
+    pub alias: Option<String>,
+
     /// Instance type (vCPU/RAM); run `concrete cvm instance-types` for the valid set. Defaults to config or Console defaults.
     #[arg(long)]
     pub instance_type: Option<String>,
@@ -520,6 +525,10 @@ pub struct SshArgs {
     /// Remote command to execute directly instead of opening a dtach shell.
     #[arg(long)]
     pub command: Option<String>,
+
+    /// Assign a local alias to the started session (see `concrete alias`).
+    #[arg(long)]
+    pub alias: Option<String>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -538,6 +547,10 @@ pub struct AgentSessionArgs {
     /// Working directory for the agent on the Dev CVM, for example ~/workspaces/myrepo.
     #[arg(long)]
     pub workspace: Option<String>,
+
+    /// Assign a local alias to the started session (see `concrete alias`).
+    #[arg(long)]
+    pub alias: Option<String>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -600,19 +613,84 @@ pub struct SessionTargetArgs {
     pub identity_file: Option<PathBuf>,
 }
 
+/// `concrete alias <kind> ...` — give a short local name to a long identifier
+/// and use it anywhere the CLI expects that identifier.
+#[derive(clap::Subcommand, Debug)]
+pub enum AliasCommand {
+    /// Alias a Dev CVM UUID.
+    Cvm(AliasResourceArgs),
+
+    /// Alias a profile UUID.
+    Profile(AliasResourceArgs),
+
+    /// Alias a registered SSH key UUID.
+    #[command(name = "ssh-key")]
+    SshKey(AliasResourceArgs),
+
+    /// Alias a dtach session on a Dev CVM.
+    Session(AliasSessionArgs),
+
+    /// List every alias.
+    List,
+
+    /// Remove an alias by name.
+    Rm(AliasNameArgs),
+
+    /// Rename an existing alias, keeping what it points at.
+    Rename(AliasRenameArgs),
+
+    /// Remove aliases whose target no longer exists (reconcile against reality).
+    Prune(AliasPruneArgs),
+}
+
 #[derive(clap::Args, Debug)]
-pub struct AliasArgs {
+pub struct AliasResourceArgs {
+    /// Resource UUID to alias.
+    pub id: String,
+
+    /// Alias to assign.
+    pub alias: String,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct AliasSessionArgs {
     /// dtach session name as reported by concrete ps.
     pub name: String,
 
-    /// Client-side alias to assign.
+    /// Alias to assign.
     pub alias: String,
 
-    /// Target Dev CVM UUID. Defaults to CONCRETE_DEFAULT_CVM or default_cvm.
+    /// Target Dev CVM (UUID or alias). Defaults to CONCRETE_DEFAULT_CVM or default_cvm.
     #[arg(long)]
     pub cvm: Option<String>,
 
-    /// Private SSH key to pass to ssh(1) while checking remote session names.
+    /// Private SSH key to pass to ssh(1) while checking the session exists.
+    #[arg(long)]
+    pub identity_file: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct AliasNameArgs {
+    /// Alias name.
+    pub alias: String,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct AliasRenameArgs {
+    /// Existing alias name.
+    pub old: String,
+
+    /// New alias name.
+    pub new: String,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct AliasPruneArgs {
+    /// Show what would be removed without changing anything.
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Private SSH key to pass to ssh(1) while probing session aliases.
     #[arg(long)]
     pub identity_file: Option<PathBuf>,
 }
@@ -645,6 +723,10 @@ pub struct KeyAddArgs {
     /// Private SSH key file to remember locally for this registered public key.
     #[arg(long)]
     pub identity_file: Option<PathBuf>,
+
+    /// Assign a local alias to the registered key (see `concrete alias`).
+    #[arg(long)]
+    pub alias: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -685,6 +767,10 @@ pub struct ProfileCreateArgs {
     /// Free-text profile description.
     #[arg(long)]
     pub description: Option<String>,
+
+    /// Assign a local alias to the created profile (see `concrete alias`).
+    #[arg(long)]
+    pub alias: Option<String>,
 }
 
 #[derive(clap::Args, Debug)]

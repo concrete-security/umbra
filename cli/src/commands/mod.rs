@@ -1,4 +1,5 @@
 pub mod admin;
+pub mod alias;
 pub mod audit;
 pub mod auth;
 pub mod config;
@@ -29,7 +30,7 @@ pub(crate) fn resolve_cvm(
     flag: Option<&str>,
     config: &ResolvedConfig,
 ) -> Result<String, String> {
-    positional
+    let raw = positional
         .map(ToString::to_string)
         .or_else(|| flag.map(ToString::to_string))
         .or_else(|| config.default_cvm.clone())
@@ -37,7 +38,16 @@ pub(crate) fn resolve_cvm(
         .ok_or_else(|| {
             "[usage] missing CVM id; pass <CVM_ID> or set --cvm, CONCRETE_DEFAULT_CVM, or default_cvm"
                 .to_string()
-        })
+        })?;
+    resolve_cvm_alias(config, raw)
+}
+
+/// Translate a CVM alias to its UUID, leaving a raw id untouched. A raw UUID
+/// never reads the alias store (so a corrupt store can't block a command driven
+/// by a real id); only a non-UUID value consults it, surfacing a malformed
+/// store rather than silently ignoring it.
+fn resolve_cvm_alias(config: &ResolvedConfig, raw: String) -> Result<String, String> {
+    alias::resolve_or_passthrough(config, alias::AliasKind::Cvm, &raw)
 }
 
 /// Resolve the target Dev CVM for a destructive verb (`cvm stop`, `cvm terminate`).
@@ -48,15 +58,17 @@ pub(crate) fn resolve_cvm(
 pub(crate) fn resolve_cvm_explicit(
     positional: Option<&str>,
     flag: Option<&str>,
+    config: &ResolvedConfig,
 ) -> Result<String, String> {
-    positional
+    let raw = positional
         .map(ToString::to_string)
         .or_else(|| flag.map(ToString::to_string))
         .filter(|value| !value.is_empty())
         .ok_or_else(|| {
             "[usage] this command requires an explicit CVM id; pass <CVM_ID> or --cvm (it will not use CONCRETE_DEFAULT_CVM or default_cvm)"
                 .to_string()
-        })
+        })?;
+    resolve_cvm_alias(config, raw)
 }
 
 #[cfg(test)]
@@ -98,15 +110,20 @@ mod tests {
     #[test]
     fn resolve_cvm_explicit_ignores_configured_default() {
         // Only an explicit positional or --cvm satisfies a destructive verb.
+        // The throwaway config dir has no alias store, so ids pass through.
+        let config = config_with_default(Some("default-cvm"));
         assert_eq!(
-            resolve_cvm_explicit(Some("positional"), None).unwrap(),
+            resolve_cvm_explicit(Some("positional"), None, &config).unwrap(),
             "positional"
         );
-        assert_eq!(resolve_cvm_explicit(None, Some("flag")).unwrap(), "flag");
         assert_eq!(
-            resolve_cvm_explicit(Some("positional"), Some("flag")).unwrap(),
+            resolve_cvm_explicit(None, Some("flag"), &config).unwrap(),
+            "flag"
+        );
+        assert_eq!(
+            resolve_cvm_explicit(Some("positional"), Some("flag"), &config).unwrap(),
             "positional"
         );
-        assert!(resolve_cvm_explicit(None, None).is_err());
+        assert!(resolve_cvm_explicit(None, None, &config).is_err());
     }
 }

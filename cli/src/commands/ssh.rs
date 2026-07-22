@@ -17,11 +17,8 @@ use serde_json::{json, Value};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 use crate::{
-    cli::{
-        AgentSessionArgs, AliasArgs, CodeArgs, CursorArgs, SessionListArgs, SessionTargetArgs,
-        SshArgs,
-    },
-    commands::{resolve_cvm, resolve_cvm_explicit},
+    cli::{AgentSessionArgs, CodeArgs, CursorArgs, SessionListArgs, SessionTargetArgs, SshArgs},
+    commands::{alias, resolve_cvm, resolve_cvm_explicit},
     config::ResolvedConfig,
     console::{console_session, fetch_json, ListPage},
     exit::ExitStatus,
@@ -82,13 +79,12 @@ pub fn run(args: SshArgs, config: &ResolvedConfig) -> ExitStatus {
         crate::style::eprintln_error("[usage] --name cannot be combined with --command");
         return ExitStatus::Usage;
     }
-    let remote_command = match ssh_remote_command(&args) {
-        Ok(value) => value,
-        Err(message) => {
-            crate::style::eprintln_error(&message);
-            return ExitStatus::Usage;
-        }
-    };
+    if args.alias.is_some() && args.command.is_some() {
+        crate::style::eprintln_error(
+            "[usage] --alias cannot be combined with --command (no session is created)",
+        );
+        return ExitStatus::Usage;
+    }
     let cvm_id = match resolve_cvm(
         args.target.cvm_id.as_deref(),
         args.target.cvm.as_deref(),
@@ -100,7 +96,30 @@ pub fn run(args: SshArgs, config: &ResolvedConfig) -> ExitStatus {
             return ExitStatus::Usage;
         }
     };
-    run_ssh(
+    // A one-off `--command` has no dtach session; otherwise the session name is
+    // computed once here so it matches what we alias and what dtach opens.
+    let (remote_command, session_name) = match args.command.clone() {
+        Some(command) => (command, None),
+        None => match session_name(args.name.as_deref(), "ssh") {
+            Ok(name) => (dtach_remote_command(&name, "bash -l"), Some(name)),
+            Err(message) => {
+                crate::style::eprintln_error(&message);
+                return ExitStatus::Usage;
+            }
+        },
+    };
+    if let Some(name) = &session_name {
+        if let Some(status) = record_launch_alias(
+            config,
+            args.alias.as_deref(),
+            name,
+            &cvm_id,
+            args.identity_file.as_deref(),
+        ) {
+            return status;
+        }
+    }
+    let status = run_ssh(
         SshInvocation {
             cvm_id: &cvm_id,
             identity_file: args.identity_file.as_deref(),
@@ -108,7 +127,11 @@ pub fn run(args: SshArgs, config: &ResolvedConfig) -> ExitStatus {
             allocate_tty: args.command.is_none(),
         },
         config,
-    )
+    );
+    if !matches!(status, ExitStatus::Ok) {
+        drop_launch_alias(config, args.alias.as_deref());
+    }
+    status
 }
 
 pub fn run_agent(
@@ -150,7 +173,16 @@ pub fn run_agent(
             return ExitStatus::Usage;
         }
     };
-    run_ssh(
+    if let Some(status) = record_launch_alias(
+        config,
+        args.alias.as_deref(),
+        &session_name,
+        &cvm_id,
+        args.identity_file.as_deref(),
+    ) {
+        return status;
+    }
+    let status = run_ssh(
         SshInvocation {
             cvm_id: &cvm_id,
             identity_file: args.identity_file.as_deref(),
@@ -158,7 +190,65 @@ pub fn run_agent(
             allocate_tty: true,
         },
         config,
-    )
+    );
+    if !matches!(status, ExitStatus::Ok) {
+        drop_launch_alias(config, args.alias.as_deref());
+    }
+    status
+}
+
+/// Record a `--alias` for a session about to be started (name + CVM are already
+/// resolved). Returns `Some(status)` to abort the launch on a bad/taken alias,
+/// or `None` to proceed. A no-alias invocation is a no-op. The alias is written
+/// up front so it can be attached from another terminal while the session runs;
+/// [`drop_launch_alias`] undoes it if the launch never establishes.
+fn record_launch_alias(
+    config: &ResolvedConfig,
+    nickname: Option<&str>,
+    session_name: &str,
+    cvm_id: &str,
+    identity_file: Option<&Path>,
+) -> Option<ExitStatus> {
+    let nickname = nickname?;
+    if let Err((status, message)) = alias::check_new_alias(config, nickname) {
+        crate::style::eprintln_error(&message);
+        return Some(status);
+    }
+    // Resolution consults aliases first, so an alias that matches a live dtach
+    // session name would shadow that session (unreachable by name). Probe the
+    // CVM and reject the collision, as the direct `alias session` path does.
+    match list_session_names(cvm_id, identity_file, config) {
+        Ok(live) if live.iter().any(|name| name == nickname) => {
+            crate::style::eprintln_error(&format!(
+                "[error] alias {nickname} collides with an existing dtach session name on {cvm_id}"
+            ));
+            return Some(ExitStatus::Error);
+        }
+        Ok(_) => {}
+        Err((status, message)) => {
+            crate::style::eprintln_error(&message);
+            return Some(status);
+        }
+    }
+    if let Err(message) = alias::record_session_alias(config, session_name, cvm_id, nickname) {
+        crate::style::eprintln_error(&message);
+        return Some(ExitStatus::Error);
+    }
+    None
+}
+
+/// Undo the optimistic launch alias when the session never established (ssh
+/// failed): a failed launch must not leave a dangling alias that then blocks
+/// retrying the same name. A clean detach exits `Ok` and keeps the alias.
+fn drop_launch_alias(config: &ResolvedConfig, nickname: Option<&str>) {
+    let Some(nickname) = nickname else {
+        return;
+    };
+    if let Ok(mut aliases) = alias::load(&config.config_dir) {
+        if aliases.remove_alias(nickname) {
+            let _ = alias::save(&config.config_dir, &aliases);
+        }
+    }
 }
 
 pub fn run_code(args: CodeArgs, config: &ResolvedConfig) -> ExitStatus {
@@ -245,7 +335,7 @@ pub fn run_ps(args: SessionListArgs, config: &ResolvedConfig, json_output: bool)
             }
         },
         (positional, flag) => {
-            let cvm_id = match resolve_cvm_explicit(positional, flag) {
+            let cvm_id = match resolve_cvm_explicit(positional, flag, config) {
                 Ok(id) => id,
                 Err(message) => {
                     crate::style::eprintln_error(&message);
@@ -265,7 +355,7 @@ pub fn run_ps(args: SessionListArgs, config: &ResolvedConfig, json_output: bool)
     // Alias config is a single local file shared by all CVMs: validate it once,
     // up front. A read/parse failure is a local config error, not a per-CVM
     // probe failure, so surface it instead of silently rendering "no aliases".
-    if let Err(message) = load_alias_file(&config.config_dir) {
+    if let Err(message) = alias::load(&config.config_dir) {
         crate::style::eprintln_error(&message);
         return ExitStatus::Error;
     }
@@ -289,7 +379,9 @@ pub fn run_ps(args: SessionListArgs, config: &ResolvedConfig, json_output: bool)
         .into_iter()
         .map(|cvm| {
             let cvm_id = cvm.id.clone();
-            let aliases = aliases_by_session(&config.config_dir, &cvm_id).unwrap_or_default();
+            let aliases = alias::load(&config.config_dir)
+                .map(|aliases| aliases.session_names_on(&cvm_id))
+                .unwrap_or_default();
             let sessions = build_ssh(
                 console_url,
                 &session,
@@ -319,21 +411,56 @@ pub fn run_ps(args: SessionListArgs, config: &ResolvedConfig, json_output: bool)
     ExitStatus::Ok
 }
 
+/// Resolve a session target — an alias or a raw session name — into the
+/// concrete `(session_name, cvm_id)` to act on. A session alias carries its own
+/// CVM, so it works without `--cvm`; an explicit `--cvm` overrides it (with a
+/// warning), and a raw name resolves the CVM the usual way (`--cvm`/default,
+/// alias-aware via [`resolve_cvm`]).
+fn resolve_session_target(
+    target: &str,
+    cvm_flag: Option<&str>,
+    config: &ResolvedConfig,
+) -> Result<(String, String), (ExitStatus, String)> {
+    let aliases =
+        alias::load(&config.config_dir).map_err(|message| (ExitStatus::Error, message))?;
+    if let Some(entry) = aliases.resolve_session(target) {
+        let cvm_id = match cvm_flag {
+            Some(flag) => {
+                let overridden =
+                    resolve_cvm(None, Some(flag), config).map_err(|m| (ExitStatus::Usage, m))?;
+                if overridden != entry.cvm {
+                    // Show the stored CVM by its alias when it has one (readable).
+                    let stored = aliases
+                        .cvm
+                        .iter()
+                        .find(|(_, uuid)| uuid.as_str() == entry.cvm)
+                        .map(|(name, _)| name.as_str())
+                        .unwrap_or(entry.cvm.as_str());
+                    crate::style::eprintln_warn(&format!(
+                        "[warn] alias {target} targets CVM {stored}; --cvm forces {overridden}. See `concrete alias list`."
+                    ));
+                }
+                overridden
+            }
+            None => entry.cvm.clone(),
+        };
+        Ok((entry.session.clone(), cvm_id))
+    } else {
+        validate_session_name(target).map_err(|m| (ExitStatus::Usage, m))?;
+        let cvm_id = resolve_cvm(None, cvm_flag, config).map_err(|m| (ExitStatus::Usage, m))?;
+        Ok((target.to_string(), cvm_id))
+    }
+}
+
 pub fn run_attach(args: SessionTargetArgs, config: &ResolvedConfig) -> ExitStatus {
-    let cvm_id = match resolve_cvm(None, args.cvm.as_deref(), config) {
-        Ok(value) => value,
-        Err(message) => {
-            crate::style::eprintln_error(&message);
-            return ExitStatus::Usage;
-        }
-    };
-    let session_name = match resolve_target(&config.config_dir, &cvm_id, &args.target) {
-        Ok(value) => value,
-        Err(message) => {
-            crate::style::eprintln_error(&message);
-            return ExitStatus::Error;
-        }
-    };
+    let (session_name, cvm_id) =
+        match resolve_session_target(&args.target, args.cvm.as_deref(), config) {
+            Ok(value) => value,
+            Err((status, message)) => {
+                crate::style::eprintln_error(&message);
+                return status;
+            }
+        };
     run_ssh(
         SshInvocation {
             cvm_id: &cvm_id,
@@ -346,20 +473,14 @@ pub fn run_attach(args: SessionTargetArgs, config: &ResolvedConfig) -> ExitStatu
 }
 
 pub fn run_kill(args: SessionTargetArgs, config: &ResolvedConfig, json_output: bool) -> ExitStatus {
-    let cvm_id = match resolve_cvm(None, args.cvm.as_deref(), config) {
-        Ok(value) => value,
-        Err(message) => {
-            crate::style::eprintln_error(&message);
-            return ExitStatus::Usage;
-        }
-    };
-    let session_name = match resolve_target(&config.config_dir, &cvm_id, &args.target) {
-        Ok(value) => value,
-        Err(message) => {
-            crate::style::eprintln_error(&message);
-            return ExitStatus::Error;
-        }
-    };
+    let (session_name, cvm_id) =
+        match resolve_session_target(&args.target, args.cvm.as_deref(), config) {
+            Ok(value) => value,
+            Err((status, message)) => {
+                crate::style::eprintln_error(&message);
+                return status;
+            }
+        };
     match run_ssh_capture(
         SshInvocation {
             cvm_id: &cvm_id,
@@ -369,27 +490,7 @@ pub fn run_kill(args: SessionTargetArgs, config: &ResolvedConfig, json_output: b
         },
         config,
     ) {
-        Ok(_) => {
-            if json_output {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&json!({
-                        "cvm_id": cvm_id,
-                        "session_name": session_name,
-                    }))
-                    .expect("kill output serializes")
-                );
-            } else {
-                // Section 7.30: identifier is the session name (the entity
-                // being killed); detail row records the CVM the session was
-                // running on.
-                let confirm =
-                    crate::style::ConfirmBlock::new("killed", "session", session_name.clone())
-                        .field("cvm", cvm_id.clone());
-                println!("{}", crate::style::render_confirm(&confirm));
-            }
-            ExitStatus::Ok
-        }
+        Ok(_) => finish_kill(config, &session_name, &cvm_id, json_output),
         Err((status, message)) => {
             crate::style::eprintln_error(&message);
             status
@@ -397,81 +498,64 @@ pub fn run_kill(args: SessionTargetArgs, config: &ResolvedConfig, json_output: b
     }
 }
 
-pub fn run_alias(args: AliasArgs, config: &ResolvedConfig, json_output: bool) -> ExitStatus {
-    let cvm_id = match resolve_cvm(None, args.cvm.as_deref(), config) {
-        Ok(value) => value,
-        Err(message) => {
-            crate::style::eprintln_error(&message);
-            return ExitStatus::Usage;
-        }
-    };
-    if let Err(message) = validate_session_name(&args.name) {
-        crate::style::eprintln_error(&message);
-        return ExitStatus::Usage;
-    }
-    if let Err(message) = validate_session_name(&args.alias) {
-        crate::style::eprintln_error(&message);
-        return ExitStatus::Usage;
-    }
-    let output = match run_ssh_capture(
-        SshInvocation {
-            cvm_id: &cvm_id,
-            identity_file: args.identity_file.as_deref(),
-            remote_command: ps_remote_command(),
-            allocate_tty: false,
-        },
-        config,
-    ) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            crate::style::eprintln_error(&message);
-            return status;
-        }
-    };
-    let rows = match parse_session_rows(&output, &BTreeMap::new()) {
-        Ok(value) => value,
-        Err(message) => {
-            crate::style::eprintln_error(&message);
-            return ExitStatus::Error;
-        }
-    };
-    if rows.iter().any(|row| row.name == args.alias) {
-        crate::style::eprintln_error(&format!(
-            "[error] alias {} collides with an existing dtach session name",
-            args.alias
-        ));
-        return ExitStatus::Error;
-    }
-    if !rows.iter().any(|row| row.name == args.name) {
-        crate::style::eprintln_error(&format!(
-            "[error] session {} was not found on {}",
-            args.name, cvm_id
-        ));
-        return ExitStatus::Error;
-    }
-    if let Err(message) = write_alias(&config.config_dir, &cvm_id, &args.name, &args.alias) {
-        crate::style::eprintln_error(&message);
-        return ExitStatus::Error;
-    }
+/// Record a successful `kill` of `session_name` on `cvm_id`: drop any alias
+/// bound to that session and print the confirmation. Split from [`run_kill`] so
+/// the store-side auto-purge is testable without a live SSH session (the SSH
+/// capture itself needs a real CVM).
+fn finish_kill(
+    config: &ResolvedConfig,
+    session_name: &str,
+    cvm_id: &str,
+    json_output: bool,
+) -> ExitStatus {
+    // The session is gone; drop any alias that pointed at it.
+    alias::prune_and_save(config, |a| {
+        a.prune(alias::Prune::Session {
+            session: session_name,
+            cvm: cvm_id,
+        })
+    });
     if json_output {
         println!(
             "{}",
             serde_json::to_string_pretty(&json!({
                 "cvm_id": cvm_id,
-                "session_name": args.name,
-                "alias": args.alias,
+                "session_name": session_name,
             }))
-            .expect("alias output serializes")
+            .expect("kill output serializes")
         );
     } else {
-        // Section 7.31: identifier is the new alias; detail rows record the
-        // underlying session and the CVM the alias is scoped to.
-        let confirm = crate::style::ConfirmBlock::new("aliased", "session", args.alias.clone())
-            .field("session", args.name.clone())
-            .field("cvm", cvm_id.clone());
+        // Section 7.30: identifier is the session name (the entity being
+        // killed); detail row records the CVM the session was running on.
+        let confirm =
+            crate::style::ConfirmBlock::new("killed", "session", session_name.to_string())
+                .field("cvm", cvm_id.to_string());
         println!("{}", crate::style::render_confirm(&confirm));
     }
     ExitStatus::Ok
+}
+
+/// The live dtach session names on `cvm_id`. Used by `concrete alias session`
+/// to fail-fast before recording an alias — both to confirm the target session
+/// exists and to reject an alias that would shadow a real session name. Reuses
+/// the same SSH `ps` probe as [`run_ps`].
+pub(crate) fn list_session_names(
+    cvm_id: &str,
+    identity_file: Option<&Path>,
+    config: &ResolvedConfig,
+) -> Result<Vec<String>, (ExitStatus, String)> {
+    let output = run_ssh_capture(
+        SshInvocation {
+            cvm_id,
+            identity_file,
+            remote_command: ps_remote_command(),
+            allocate_tty: false,
+        },
+        config,
+    )?;
+    let rows = parse_session_rows(&output, &BTreeMap::new())
+        .map_err(|message| (ExitStatus::Error, message))?;
+    Ok(rows.into_iter().map(|row| row.name).collect())
 }
 
 fn run_ssh(invocation: SshInvocation<'_>, config: &ResolvedConfig) -> ExitStatus {
@@ -1062,14 +1146,6 @@ fn ssh_config_quoted_path(path: &Path) -> Result<String, String> {
     ))
 }
 
-fn ssh_remote_command(args: &SshArgs) -> Result<String, String> {
-    if let Some(command) = args.command.clone() {
-        return Ok(command);
-    }
-    let session_name = session_name(args.name.as_deref(), "ssh")?;
-    Ok(dtach_remote_command(&session_name, "bash -l"))
-}
-
 fn session_name(value: Option<&str>, prefix: &str) -> Result<String, String> {
     match value {
         Some(value) => Ok(validate_session_name(value)?.to_string()),
@@ -1249,90 +1325,6 @@ fn format_epoch(value: i64) -> String {
         .unwrap_or_else(|| value.to_string())
 }
 
-type AliasMap = BTreeMap<String, BTreeMap<String, String>>;
-
-fn aliases_path(config_dir: &Path) -> PathBuf {
-    config_dir.join("aliases.toml")
-}
-
-fn load_alias_file(config_dir: &Path) -> Result<AliasMap, String> {
-    let path = aliases_path(config_dir);
-    if !path.exists() {
-        return Ok(BTreeMap::new());
-    }
-    let data = fs::read_to_string(&path)
-        .map_err(|err| format!("[error] failed to read aliases file: {err}"))?;
-    toml::from_str(&data).map_err(|err| format!("[error] malformed aliases file: {err}"))
-}
-
-fn aliases_for_cvm(config_dir: &Path, cvm_id: &str) -> Result<BTreeMap<String, String>, String> {
-    Ok(load_alias_file(config_dir)?
-        .remove(cvm_id)
-        .unwrap_or_default())
-}
-
-fn aliases_by_session(config_dir: &Path, cvm_id: &str) -> Result<BTreeMap<String, String>, String> {
-    let mut by_session = BTreeMap::new();
-    for (alias, session_name) in aliases_for_cvm(config_dir, cvm_id)? {
-        by_session.entry(session_name).or_insert(alias);
-    }
-    Ok(by_session)
-}
-
-fn resolve_target(config_dir: &Path, cvm_id: &str, target: &str) -> Result<String, String> {
-    validate_session_name(target)?;
-    let aliases = aliases_for_cvm(config_dir, cvm_id)?;
-    Ok(aliases
-        .get(target)
-        .cloned()
-        .unwrap_or_else(|| target.to_string()))
-}
-
-fn write_alias(
-    config_dir: &Path,
-    cvm_id: &str,
-    session_name: &str,
-    alias: &str,
-) -> Result<(), String> {
-    let mut aliases = load_alias_file(config_dir)?;
-    aliases
-        .entry(cvm_id.to_string())
-        .or_default()
-        .insert(alias.to_string(), session_name.to_string());
-    fs::create_dir_all(config_dir)
-        .map_err(|err| format!("[error] failed to create config directory: {err}"))?;
-    #[cfg(unix)]
-    {
-        fs::set_permissions(config_dir, fs::Permissions::from_mode(0o700)).map_err(|err| {
-            format!("[error] failed to tighten config directory permissions: {err}")
-        })?;
-    }
-    let data = toml::to_string_pretty(&aliases)
-        .map_err(|err| format!("[error] failed to serialize aliases file: {err}"))?;
-    let target = aliases_path(config_dir);
-    let tmp = config_dir.join(format!(".aliases.{}.tmp", std::process::id()));
-    let mut options = OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-    }
-    let mut file = options
-        .open(&tmp)
-        .map_err(|err| format!("[error] failed to create temporary aliases file: {err}"))?;
-    file.write_all(data.as_bytes())
-        .and_then(|_| file.sync_all())
-        .map_err(|err| format!("[error] failed to write aliases file: {err}"))?;
-    fs::rename(&tmp, &target)
-        .map_err(|err| format!("[error] failed to install aliases file: {err}"))?;
-    #[cfg(unix)]
-    {
-        fs::set_permissions(&target, fs::Permissions::from_mode(0o600))
-            .map_err(|err| format!("[error] failed to tighten aliases file permissions: {err}"))?;
-    }
-    Ok(())
-}
-
 pub(crate) fn validate_workspace_path(value: &str) -> Result<&str, String> {
     if value.is_empty() {
         return Err("[usage] --workspace must not be empty".to_string());
@@ -1365,7 +1357,7 @@ pub(crate) fn validate_workspace_path(value: &str) -> Result<&str, String> {
     Ok(value)
 }
 
-fn validate_session_name(value: &str) -> Result<&str, String> {
+pub(crate) fn validate_session_name(value: &str) -> Result<&str, String> {
     if value.is_empty() {
         return Err("[usage] --name must not be empty".to_string());
     }
@@ -1394,6 +1386,7 @@ fn shell_quote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{authenticated_config, MockConsole, Presence};
     use rstest::rstest;
     use std::{fs, process::Command};
 
@@ -1496,29 +1489,6 @@ mod tests {
         .expect("stored identity resolved");
 
         assert_eq!(resolved, private_key);
-        fs::remove_dir_all(dir).expect("temp dir removed");
-    }
-
-    #[test]
-    fn load_alias_file_absent_success() {
-        // An absent alias file is a valid empty config, so `ps` still lists
-        // sessions (with no aliases) rather than failing.
-        let dir = std::env::temp_dir().join(format!("concrete-alias-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&dir).expect("temp dir created");
-        assert!(load_alias_file(&dir)
-            .expect("absent file is an empty config")
-            .is_empty());
-        fs::remove_dir_all(dir).expect("temp dir removed");
-    }
-
-    #[test]
-    fn load_alias_file_malformed_failure() {
-        // Malformed alias TOML surfaces as an error so `ps` fails fast up front
-        // instead of silently rendering "no aliases".
-        let dir = std::env::temp_dir().join(format!("concrete-alias-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&dir).expect("temp dir created");
-        fs::write(aliases_path(&dir), "not = = valid toml").expect("alias file written");
-        assert!(load_alias_file(&dir).is_err());
         fs::remove_dir_all(dir).expect("temp dir removed");
     }
 
@@ -1682,5 +1652,74 @@ mod tests {
         );
         assert_eq!(editor_remote_path(Some("/srv/x")), "/srv/x");
         assert_eq!(editor_remote_path(Some("repos/foo")), "/home/dev/repos/foo");
+    }
+
+    /// A successful `kill` drops the alias bound to the killed session (matching
+    /// on the dtach session name, not the alias name) and leaves the CVM's other
+    /// session — the `Prune::Session` auto-purge wiring. Driven through
+    /// `finish_kill`, the post-SSH half of `run_kill`; the SSH capture itself
+    /// needs a live CVM and is out of unit scope.
+    #[test]
+    fn test_kill_prune_success() {
+        const CVM_ID: &str = "9a7f6b4a-1111-2222-3333-444444444444";
+        let dir = std::env::temp_dir().join(format!("concrete-kill-test-{}", uuid::Uuid::new_v4()));
+        let config = ResolvedConfig::resolve(crate::config::ConfigOverrides {
+            config_dir: Some(dir),
+            ..Default::default()
+        });
+        let mut store = alias::Aliases::default();
+        for (nick, session) in [("killed-one", "agent-1"), ("kept-one", "agent-2")] {
+            store.session.insert(
+                nick.into(),
+                alias::SessionAlias {
+                    session: session.into(),
+                    cvm: CVM_ID.into(),
+                },
+            );
+        }
+        alias::save(&config.config_dir, &store).expect("seed store");
+
+        let status = finish_kill(&config, "agent-1", CVM_ID, false);
+        assert!(matches!(status, ExitStatus::Ok));
+
+        let reloaded = alias::load(&config.config_dir).unwrap();
+        assert!(
+            reloaded.resolve_session("killed-one").is_none(),
+            "the killed session's alias must be pruned"
+        );
+        assert!(
+            reloaded.resolve_session("kept-one").is_some(),
+            "the CVM's other session must survive"
+        );
+    }
+
+    /// A corrupt `aliases.toml` makes `ps` fail fast — it must surface the
+    /// malformed-file error, not silently render every session with `alias -`.
+    /// Guards the up-front `alias::load` check (a raw-UUID target is used so
+    /// resolution itself never touches the broken file).
+    #[test]
+    fn test_ps_malformed_aliases_failure() {
+        const CVM_ID: &str = "9a7f6b4a-1111-2222-3333-444444444444";
+        let console = MockConsole::start();
+        let config = authenticated_config(&console);
+        console.get_cvm(CVM_ID, Presence::Present);
+        fs::write(config.config_dir.join("aliases.toml"), "not = = valid toml")
+            .expect("corrupt store written");
+
+        let status = run_ps(
+            SessionListArgs {
+                target: crate::cli::CvmTarget {
+                    cvm_id: Some(CVM_ID.into()),
+                    cvm: None,
+                },
+                identity_file: None,
+            },
+            &config,
+            false,
+        );
+        assert!(
+            matches!(status, ExitStatus::Error),
+            "ps must fail fast on a malformed alias file, not render sessions"
+        );
     }
 }
