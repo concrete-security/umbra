@@ -14,8 +14,10 @@ use crate::{
 
 /// The user-facing skill shipped to AI coding agents, embedded at build time.
 /// This file is generated from `skills/concrete-cli/SKILL.md` by
-/// `ops/cli-release/render-skill.py` (run via `make skill`); edit that crib, not this copy.
-const SKILL_BODY: &str = include_str!("../../../dist/skills/concrete-cli/SKILL.md");
+/// `ops/cli-release/render-skill.py` (run via `make skill`); edit that crib, not
+/// the packaged asset. Keeping the asset inside `cli/` makes `cargo package`
+/// self-contained.
+const SKILL_BODY: &str = include_str!("../../assets/concrete-cli/SKILL.md");
 
 /// Folder name the skill is installed under in every agent's skills directory.
 const SKILL_NAME: &str = "concrete-cli";
