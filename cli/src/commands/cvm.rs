@@ -421,7 +421,7 @@ fn instance_types(
 
 fn launch(config: &ResolvedConfig, args: CvmLaunchArgs, json_output: bool) -> ExitStatus {
     if let Some(nick) = args.alias.as_deref() {
-        if args.no_wait {
+        if args.wait.no_wait {
             style::eprintln_error(
                 "[usage] --alias cannot be combined with --no-wait; the CVM id is not known until launch completes",
             );
@@ -454,7 +454,7 @@ fn launch(config: &ResolvedConfig, args: CvmLaunchArgs, json_output: bool) -> Ex
             return status;
         }
     };
-    if args.no_wait {
+    if args.wait.no_wait {
         operation::print_operation(&op, json_output, false);
         return ExitStatus::Ok;
     }
@@ -462,7 +462,7 @@ fn launch(config: &ResolvedConfig, args: CvmLaunchArgs, json_output: bool) -> Ex
         console_url,
         &session.access_token,
         op,
-        Duration::from_secs(u64::from(args.wait_timeout_seconds)),
+        Duration::from_secs(u64::from(args.wait.wait_timeout_seconds)),
         json_output,
         true,
     ));
@@ -647,7 +647,7 @@ fn update(config: &ResolvedConfig, args: CvmUpdateArgs, json_output: bool) -> Ex
             return status;
         }
     };
-    if args.no_wait {
+    if args.wait.no_wait {
         operation::print_operation(&op, json_output, false);
         return ExitStatus::Ok;
     }
@@ -655,7 +655,7 @@ fn update(config: &ResolvedConfig, args: CvmUpdateArgs, json_output: bool) -> Ex
         console_url,
         &session.access_token,
         op,
-        Duration::from_secs(u64::from(args.wait_timeout_seconds)),
+        Duration::from_secs(u64::from(args.wait.wait_timeout_seconds)),
         json_output,
         true,
     ));
@@ -719,7 +719,7 @@ fn terminate(config: &ResolvedConfig, args: CvmTerminateArgs, json_output: bool)
             return status;
         }
     };
-    if args.no_wait {
+    if args.wait.no_wait {
         // The teardown is only submitted, not confirmed complete, so the alias
         // is left in place — a later `alias prune` (or a waited terminate)
         // reconciles it once the CVM is actually gone.
@@ -730,7 +730,7 @@ fn terminate(config: &ResolvedConfig, args: CvmTerminateArgs, json_output: bool)
         console_url,
         &session.access_token,
         op,
-        Duration::from_secs(u64::from(args.wait_timeout_seconds)),
+        Duration::from_secs(u64::from(args.wait.wait_timeout_seconds)),
         json_output,
         true,
     ));
@@ -2151,8 +2151,10 @@ mod tests {
                     cvm_id: Some(LIFECYCLE_CVM_ID.into()),
                     cvm: None,
                 },
-                no_wait: false,
-                wait_timeout_seconds: 600,
+                wait: crate::cli::WaitArgs {
+                    no_wait: false,
+                    wait_timeout_seconds: 600,
+                },
             }),
             &config,
             false,
@@ -2186,8 +2188,10 @@ mod tests {
                     cvm_id: Some(LIFECYCLE_CVM_ID.into()),
                     cvm: None,
                 },
-                no_wait: true,
-                wait_timeout_seconds: 600,
+                wait: crate::cli::WaitArgs {
+                    no_wait: true,
+                    wait_timeout_seconds: 600,
+                },
             }),
             &config,
             false,
@@ -2217,8 +2221,10 @@ mod tests {
                 instance_type: None,
                 region: None,
                 disk_size: None,
-                no_wait: false,
-                wait_timeout_seconds: 600,
+                wait: crate::cli::WaitArgs {
+                    no_wait: false,
+                    wait_timeout_seconds: 600,
+                },
             }),
             &config,
             false,

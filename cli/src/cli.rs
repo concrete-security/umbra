@@ -11,44 +11,44 @@ use clap::{Parser, Subcommand, ValueEnum};
     arg_required_else_help = true
 )]
 pub struct Cli {
-    /// Increase log verbosity (-v INFO, -vv DEBUG, -vvv TRACE; default WARN).
-    #[arg(short, long, action = clap::ArgAction::Count, global = true)]
+    /// Increase diagnostic logging on stderr (-v INFO, -vv DEBUG, -vvv TRACE; default WARN).
+    #[arg(short, long, action = clap::ArgAction::Count, global = true, hide = true)]
     pub verbose: u8,
 
-    /// Disable ANSI color in stdout and stderr.
-    #[arg(long, global = true)]
+    /// Disable color output.
+    #[arg(long, global = true, hide = true)]
     pub no_color: bool,
 
-    /// Emit JSON output for commands that emit a structured payload.
-    #[arg(long, global = true)]
+    /// Output JSON when supported by the command.
+    #[arg(long, global = true, hide = true)]
     pub json: bool,
 
-    /// Override the Concrete config directory for this invocation.
-    #[arg(long, global = true)]
+    /// Use a different Concrete config directory.
+    #[arg(long, global = true, hide = true)]
     pub config: Option<PathBuf>,
 
-    /// Override the Console base URL for this invocation.
-    #[arg(long, global = true)]
+    /// Use a different Console base URL.
+    #[arg(long, global = true, hide = true)]
     pub console_url: Option<String>,
 
-    /// Override the default profile for this invocation. Repeat for commands that accept multiple profiles.
-    #[arg(long, global = true)]
+    /// Use a different profile for this command. Repeat for commands that accept many profiles.
+    #[arg(long, global = true, hide = true, value_name = "PROFILE_ID|alias")]
     pub profile: Vec<String>,
 
-    /// Override the request id sent on Console calls.
-    #[arg(long, global = true)]
+    /// Set the request id sent to the Console.
+    #[arg(long, global = true, hide = true)]
     pub request_id: Option<String>,
 
-    /// Skip If-Match on mutation routes that normally use optimistic concurrency.
-    #[arg(long, global = true)]
+    /// Bypass concurrency checks on supported update commands.
+    #[arg(long, global = true, hide = true)]
     pub force: bool,
 
-    /// Override the aTLS policy file used for tunnels.
-    #[arg(long, global = true)]
+    /// Use a different aTLS policy file for tunnels.
+    #[arg(long, global = true, hide = true)]
     pub atls_policy: Option<PathBuf>,
 
-    /// Skip aTLS policy evaluation for this invocation. Dev-only.
-    #[arg(long, global = true)]
+    /// Skip aTLS policy verification for this command (dev only).
+    #[arg(long, global = true, hide = true)]
     pub insecure_skip_atls_policy: bool,
 
     #[command(subcommand)]
@@ -57,7 +57,7 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
-    /// Platform-operator maintenance commands.
+    /// Run platform operator maintenance commands.
     #[command(subcommand)]
     Admin(AdminCommand),
 
@@ -65,14 +65,14 @@ pub enum Command {
     #[command(subcommand)]
     Alias(AliasCommand),
 
-    /// Authenticate and inspect the local Console session.
+    /// Log in, log out, and inspect your local session.
     #[command(subcommand)]
     Auth(AuthCommand),
 
     /// Attach to a dtach session on a Dev CVM.
     Attach(SessionTargetArgs),
 
-    /// Launch or attach a Claude session on a Dev CVM.
+    /// Start or reopen a Claude session on a Dev CVM.
     Claude(AgentSessionArgs),
 
     /// Print a shell-completion script.
@@ -82,7 +82,7 @@ pub enum Command {
         shell: clap_complete::Shell,
     },
 
-    /// Launch or attach a Codex session on a Dev CVM.
+    /// Start or reopen a Codex session on a Dev CVM.
     Codex(AgentSessionArgs),
 
     /// Open VS Code connected to the selected Dev CVM.
@@ -100,14 +100,14 @@ pub enum Command {
     #[command(subcommand)]
     Entity(EntityCommand),
 
-    /// Manage Dev CVMs.
+    /// Launch and manage Dev CVMs.
     #[command(subcommand)]
     Cvm(CvmCommand),
 
     /// Open Cursor connected to the selected Dev CVM.
     Cursor(CursorArgs),
 
-    /// Manage SSH public keys registered with the Console.
+    /// Manage SSH public keys.
     #[command(subcommand)]
     Key(KeyCommand),
 
@@ -118,17 +118,17 @@ pub enum Command {
     #[command(subcommand)]
     Profile(ProfileCommand),
 
-    /// List active dtach sessions across your running Dev CVMs (or one, with a CVM id / --cvm).
+    /// List active dtach sessions across your running Dev CVMs.
     Ps(SessionListArgs),
 
     /// Manage entity and user quotas.
     #[command(subcommand)]
     Quota(QuotaCommand),
 
-    /// Run a single Console reconciliation pass.
+    /// Run one Console reconciliation pass.
     Reconcile(ReconcileArgs),
 
-    /// Inspect the entity Security CVM.
+    /// Inspect and manage the entity Security CVM.
     #[command(subcommand)]
     SecurityCvm(SecurityCvmCommand),
 
@@ -136,18 +136,19 @@ pub enum Command {
     #[command(subcommand)]
     Skill(SkillCommand),
 
-    /// Show a summary of the current entity and visible resources.
+    /// Show your current entity, session, and visible resources.
     Status,
 
-    /// Open SSH to the selected Dev CVM over an aTLS-verified tunnel.
+    /// Open an SSH session to the selected Dev CVM.
     Ssh(SshArgs),
 
     /// Query egress traffic logs.
     TrafficLogs(TrafficLogsArgs),
 
-    /// Pipe an attested WebSocket tunnel to a Dev CVM.
+    /// Open an attested tunnel to a Dev CVM.
     Tunnel {
         /// Dev CVM FQDN to connect to.
+        #[arg(value_name = "FQDN")]
         target: String,
     },
 
@@ -155,7 +156,7 @@ pub enum Command {
     #[command(subcommand)]
     User(UserCommand),
 
-    /// Print version, build commit, target triple, and build date.
+    /// Print version and build information.
     Version,
 }
 
@@ -299,13 +300,8 @@ pub struct AuditExportArgs {
     #[arg(long)]
     pub output: Option<PathBuf>,
 
-    /// Submit the export and return the operation handle without polling.
-    #[arg(long)]
-    pub no_wait: bool,
-
-    /// Maximum seconds to wait for export completion.
-    #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u32).range(1..=86400))]
-    pub wait_timeout_seconds: u32,
+    #[command(flatten)]
+    pub wait: WaitArgs,
 }
 
 #[derive(Subcommand, Debug)]
@@ -386,7 +382,7 @@ pub enum CvmCommand {
 /// `concrete cvm list --state <STATE>` keeps only CVMs in that state.
 #[derive(clap::Args, Debug)]
 pub struct CvmListArgs {
-    /// Show only CVMs in this lifecycle state (default: alive -- non-terminated).
+    /// Show only CVMs in this lifecycle state. Default: alive (non-terminated).
     #[arg(long, value_enum)]
     pub state: Option<CvmStateFilter>,
 }
@@ -396,7 +392,7 @@ pub struct CvmListArgs {
 /// perform one explicit provider refresh (slower, may fail) before answering.
 #[derive(clap::Args, Debug)]
 pub struct CvmInstanceTypesArgs {
-    /// Ask the Console to refresh the catalog from the provider before listing it.
+    /// Refresh the catalog from the provider before listing.
     #[arg(long)]
     pub refresh: bool,
 }
@@ -437,33 +433,28 @@ pub enum Assigned {
 
 #[derive(clap::Args, Debug)]
 pub struct CvmLaunchArgs {
-    /// SSH key UUID to install. Repeat for multiple keys. Defaults to all registered keys, or creates/registers a local Ed25519 key.
+    /// SSH key UUID to install; repeat for several.
     #[arg(long = "ssh-key")]
     pub ssh_keys: Vec<String>,
 
-    /// Assign a local alias to the launched CVM (see `concrete alias`).
+    /// Assign a local alias to the launched CVM.
     #[arg(long)]
     pub alias: Option<String>,
 
-    /// Instance type (vCPU/RAM); run `concrete cvm instance-types` for the valid set. Defaults to config or Console defaults.
+    /// Instance type (vCPU/RAM); see `concrete cvm instance-types`.
     #[arg(long)]
     pub instance_type: Option<String>,
 
-    /// Phala region. Defaults to config or Console defaults.
+    /// CVM region.
     #[arg(long)]
     pub region: Option<String>,
 
-    /// Disk size in GB. Defaults to the Console default when omitted.
+    /// Disk size in GB.
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..=1_048_576))]
     pub disk_size: Option<u32>,
 
-    /// Submit the launch and return the operation handle without polling.
-    #[arg(long)]
-    pub no_wait: bool,
-
-    /// Maximum seconds to wait for launch completion.
-    #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u32).range(1..=86400))]
-    pub wait_timeout_seconds: u32,
+    #[command(flatten)]
+    pub wait: WaitArgs,
 }
 
 #[derive(clap::Args, Debug)]
@@ -471,13 +462,8 @@ pub struct CvmTerminateArgs {
     #[command(flatten)]
     pub target: CvmTarget,
 
-    /// Submit the terminate request and return the operation handle without polling.
-    #[arg(long)]
-    pub no_wait: bool,
-
-    /// Maximum seconds to wait for termination completion.
-    #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u32).range(1..=86400))]
-    pub wait_timeout_seconds: u32,
+    #[command(flatten)]
+    pub wait: WaitArgs,
 }
 
 #[derive(clap::Args, Debug)]
@@ -485,13 +471,8 @@ pub struct CvmUpdateArgs {
     #[command(flatten)]
     pub target: CvmTarget,
 
-    /// Submit the update request and return the operation handle without polling.
-    #[arg(long)]
-    pub no_wait: bool,
-
-    /// Maximum seconds to wait for update completion.
-    #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u32).range(1..=86400))]
-    pub wait_timeout_seconds: u32,
+    #[command(flatten)]
+    pub wait: WaitArgs,
 }
 
 /// The Dev CVM a verb acts on: positional `<CVM_ID>` or `--cvm` (the positional
@@ -501,12 +482,28 @@ pub struct CvmUpdateArgs {
 /// id, and `ps` lists every running CVM.
 #[derive(clap::Args, Debug)]
 pub struct CvmTarget {
-    /// Dev CVM UUID (or use --cvm). When omitted, the command's default applies -- see its help.
+    /// Target Dev CVM, by UUID or alias (or use --cvm).
+    #[arg(value_name = "CVM_ID|alias")]
     pub cvm_id: Option<String>,
 
-    /// Target Dev CVM UUID. Alternative to the positional; the positional wins if both are given.
-    #[arg(long)]
+    /// Target Dev CVM (UUID or alias); alternative to the positional.
+    #[arg(long, value_name = "CVM_ID|alias")]
     pub cvm: Option<String>,
+}
+
+/// The `--no-wait` / `--wait-timeout-seconds` pair shared by every command that
+/// submits an async Console Operation (`cvm launch`/`update`/`terminate`,
+/// `audit export`, `security-cvm launch`/`update`). Flattened so the default and
+/// range stay identical across all of them.
+#[derive(clap::Args, Debug)]
+pub struct WaitArgs {
+    /// Return the operation handle without polling.
+    #[arg(long)]
+    pub no_wait: bool,
+
+    /// Maximum seconds to wait for the operation.
+    #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u32).range(1..=86400))]
+    pub wait_timeout_seconds: u32,
 }
 
 #[derive(clap::Args, Debug)]
@@ -518,7 +515,7 @@ pub struct SshArgs {
     #[arg(long)]
     pub name: Option<String>,
 
-    /// Private SSH key to pass to ssh(1).
+    /// Private SSH key to pass to ssh.
     #[arg(long)]
     pub identity_file: Option<PathBuf>,
 
@@ -540,15 +537,15 @@ pub struct AgentSessionArgs {
     #[arg(long)]
     pub name: Option<String>,
 
-    /// Private SSH key to pass to ssh(1).
+    /// Private SSH key to pass to ssh.
     #[arg(long)]
     pub identity_file: Option<PathBuf>,
 
-    /// Working directory for the agent on the Dev CVM, for example ~/workspaces/myrepo.
+    /// Working directory on the Dev CVM, for example ~/workspaces/myrepo.
     #[arg(long)]
     pub workspace: Option<String>,
 
-    /// Assign a local alias to the started session (see `concrete alias`).
+    /// Save a local alias for the session.
     #[arg(long)]
     pub alias: Option<String>,
 }
@@ -558,7 +555,7 @@ pub struct CodeArgs {
     #[command(flatten)]
     pub target: CvmTarget,
 
-    /// VS Code binary to invoke. Defaults to code on PATH.
+    /// VS Code binary to invoke. Default: code (on PATH).
     #[arg(long)]
     pub code_bin: Option<PathBuf>,
 
@@ -566,7 +563,7 @@ pub struct CodeArgs {
     #[arg(long)]
     pub workspace: Option<String>,
 
-    /// Private SSH key to pass to ssh(1) as IdentityFile when launching the editor.
+    /// Private SSH key to pass to ssh as IdentityFile when launching the editor.
     #[arg(long)]
     pub identity_file: Option<PathBuf>,
 }
@@ -576,7 +573,7 @@ pub struct CursorArgs {
     #[command(flatten)]
     pub target: CvmTarget,
 
-    /// Cursor binary to invoke. Defaults to cursor on PATH.
+    /// Cursor binary to invoke. Default: cursor (on PATH).
     #[arg(long)]
     pub cursor_bin: Option<PathBuf>,
 
@@ -584,7 +581,7 @@ pub struct CursorArgs {
     #[arg(long)]
     pub workspace: Option<String>,
 
-    /// Private SSH key to pass to ssh(1) as IdentityFile when launching the editor.
+    /// Private SSH key to pass to ssh as IdentityFile when launching the editor.
     #[arg(long)]
     pub identity_file: Option<PathBuf>,
 }
@@ -594,7 +591,7 @@ pub struct SessionListArgs {
     #[command(flatten)]
     pub target: CvmTarget,
 
-    /// Private SSH key to pass to ssh(1).
+    /// Private SSH key to pass to ssh.
     #[arg(long)]
     pub identity_file: Option<PathBuf>,
 }
@@ -602,13 +599,14 @@ pub struct SessionListArgs {
 #[derive(clap::Args, Debug)]
 pub struct SessionTargetArgs {
     /// dtach session name or client-side alias.
+    #[arg(value_name = "SESSION|alias")]
     pub target: String,
 
-    /// Target Dev CVM UUID. Defaults to CONCRETE_DEFAULT_CVM or default_cvm.
+    /// Target Dev CVM (UUID or alias). Default: the persisted default CVM.
     #[arg(long)]
     pub cvm: Option<String>,
 
-    /// Private SSH key to pass to ssh(1).
+    /// Private SSH key to pass to ssh.
     #[arg(long)]
     pub identity_file: Option<PathBuf>,
 }
@@ -660,11 +658,11 @@ pub struct AliasSessionArgs {
     /// Alias to assign.
     pub alias: String,
 
-    /// Target Dev CVM (UUID or alias). Defaults to CONCRETE_DEFAULT_CVM or default_cvm.
+    /// Target Dev CVM (UUID or alias). Default: the persisted default CVM.
     #[arg(long)]
     pub cvm: Option<String>,
 
-    /// Private SSH key to pass to ssh(1) while checking the session exists.
+    /// Private SSH key to pass to ssh while checking the session exists.
     #[arg(long)]
     pub identity_file: Option<PathBuf>,
 }
@@ -690,7 +688,7 @@ pub struct AliasPruneArgs {
     #[arg(long)]
     pub dry_run: bool,
 
-    /// Private SSH key to pass to ssh(1) while probing session aliases.
+    /// Private SSH key to pass to ssh while probing session aliases.
     #[arg(long)]
     pub identity_file: Option<PathBuf>,
 }
@@ -820,7 +818,7 @@ pub enum QuotaCommand {
 
 #[derive(clap::Args, Debug)]
 pub struct QuotaScopeArgs {
-    /// Read or mutate quotas for this entity UUID. Defaults to the current session entity.
+    /// Entity to read or mutate quotas for (UUID). Default: current session entity.
     #[arg(long, conflicts_with = "user")]
     pub entity: Option<String>,
 
@@ -870,32 +868,22 @@ pub enum SecurityCvmCommand {
 
 #[derive(clap::Args, Debug)]
 pub struct SecurityCvmLaunchArgs {
-    /// Instance type (vCPU/RAM); run `concrete cvm instance-types` for the valid set. Defaults to the Console Security CVM default.
+    /// Instance type (vCPU/RAM); see `concrete cvm instance-types`.
     #[arg(long)]
     pub instance_type: Option<String>,
 
-    /// Phala region. Defaults to the Console Security CVM default.
+    /// Security CVM region.
     #[arg(long)]
     pub region: Option<String>,
 
-    /// Submit the launch and return the operation handle without polling.
-    #[arg(long)]
-    pub no_wait: bool,
-
-    /// Maximum seconds to wait for launch completion.
-    #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u32).range(1..=86400))]
-    pub wait_timeout_seconds: u32,
+    #[command(flatten)]
+    pub wait: WaitArgs,
 }
 
 #[derive(clap::Args, Debug)]
 pub struct SecurityCvmUpdateArgs {
-    /// Submit the update and return the operation handle without polling.
-    #[arg(long)]
-    pub no_wait: bool,
-
-    /// Maximum seconds to wait for update completion.
-    #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u32).range(1..=86400))]
-    pub wait_timeout_seconds: u32,
+    #[command(flatten)]
+    pub wait: WaitArgs,
 }
 
 #[derive(clap::Args, Debug)]
@@ -913,7 +901,7 @@ pub enum SkillCommand {
 
 #[derive(clap::Args, Debug)]
 pub struct SkillInstallArgs {
-    /// Comma-separated agents to target (claude, codex). Defaults to all detected agents.
+    /// Agents to target, comma-separated (claude, codex). Default: all detected agents.
     #[arg(long)]
     pub agents: Option<String>,
 }
@@ -953,25 +941,25 @@ pub enum UserCommand {
     /// List users in the current entity.
     List(UserListArgs),
 
-    /// Show one user.
+    /// Show one user by ID.
     Show {
         /// User UUID.
         user_id: String,
     },
 
-    /// Deactivate a user.
+    /// Deactivate a user by ID.
     Deactivate {
         /// User UUID.
         user_id: String,
     },
 
-    /// Reactivate a user.
+    /// Reactivate a user by ID.
     Reactivate {
         /// User UUID.
         user_id: String,
     },
 
-    /// Irreversibly erase a user.
+    /// Permanently erase a user by ID.
     Erase {
         /// User UUID.
         user_id: String,
@@ -1010,11 +998,11 @@ pub struct UserAddArgs {
     /// User email address.
     pub email: String,
 
-    /// Entity UUID to add the user to. Defaults to the current session entity.
+    /// Entity to add the user to (UUID). Default: current session entity.
     #[arg(long)]
     pub entity: Option<String>,
 
-    /// User display name. Defaults to the email local-part.
+    /// User display name. Default: email local-part.
     #[arg(long)]
     pub name: Option<String>,
 
@@ -1054,7 +1042,7 @@ pub enum UserPermissionsCommand {
 
 #[derive(Subcommand, Debug)]
 pub enum AuthCommand {
-    /// Authenticate against the Console.
+    /// Log in to the Console.
     Login {
         /// Console URL to save before logging in, for example https://console.example.com.
         #[arg(value_name = "CONSOLE_URL")]
@@ -1073,13 +1061,13 @@ pub enum AuthCommand {
         no_browser: bool,
     },
 
-    /// Delete the local session and notify the Console best-effort.
+    /// Log out and delete all local sessions.
     Logout,
 
     /// Show local session status without a network call.
     Status,
 
-    /// Force a refresh of the stored access token.
+    /// Refresh the stored access token.
     Refresh,
 
     /// Print the current access token.

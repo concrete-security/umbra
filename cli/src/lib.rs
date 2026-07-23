@@ -3,7 +3,7 @@ use std::{
     process::ExitCode,
 };
 
-use clap::{CommandFactory, Parser};
+use clap::{CommandFactory, FromArgMatches};
 
 #[macro_use]
 mod cli_macros;
@@ -14,6 +14,7 @@ mod config;
 mod console;
 mod cvm_state;
 mod exit;
+mod help;
 mod operation;
 mod session;
 mod ssh_identity;
@@ -27,8 +28,16 @@ pub use exit::ExitStatus;
 pub fn run() -> ExitCode {
     install_default_crypto_provider();
 
-    let args = match cli::Cli::try_parse() {
-        Ok(args) => args,
+    // `help::command()` applies the grouped top-level help and per-command
+    // Examples blocks; parsing semantics are identical to `Cli::try_parse()`.
+    let args = match help::command().try_get_matches() {
+        Ok(matches) => match cli::Cli::from_arg_matches(&matches) {
+            Ok(args) => args,
+            Err(err) => {
+                let _ = err.print();
+                return ExitCode::from(ExitStatus::Usage);
+            }
+        },
         Err(err) => {
             // clap routes --help / --version to stdout and exits 0; routes
             // genuine parse errors to stderr. Map the latter to our Usage

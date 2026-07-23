@@ -96,7 +96,7 @@ fn launch(config: &ResolvedConfig, args: SecurityCvmLaunchArgs, json_output: boo
     }
     let (console_url, session) = try_or_eprintln!(console_session(config));
     let op = try_or_eprintln!(submit_launch(console_url, &session, &args));
-    if args.no_wait {
+    if args.wait.no_wait {
         operation::print_operation(&op, json_output, false);
         return ExitStatus::Ok;
     }
@@ -104,7 +104,7 @@ fn launch(config: &ResolvedConfig, args: SecurityCvmLaunchArgs, json_output: boo
         console_url,
         &session.access_token,
         op,
-        Duration::from_secs(u64::from(args.wait_timeout_seconds)),
+        Duration::from_secs(u64::from(args.wait.wait_timeout_seconds)),
         json_output,
         true,
     ));
@@ -123,7 +123,7 @@ fn launch(config: &ResolvedConfig, args: SecurityCvmLaunchArgs, json_output: boo
 fn update(config: &ResolvedConfig, args: SecurityCvmUpdateArgs, json_output: bool) -> ExitStatus {
     let (console_url, session) = try_or_eprintln!(console_session(config));
     let op = try_or_eprintln!(submit_update(console_url, &session));
-    if args.no_wait {
+    if args.wait.no_wait {
         operation::print_operation(&op, json_output, false);
         return ExitStatus::Ok;
     }
@@ -131,7 +131,7 @@ fn update(config: &ResolvedConfig, args: SecurityCvmUpdateArgs, json_output: boo
         console_url,
         &session.access_token,
         op,
-        Duration::from_secs(u64::from(args.wait_timeout_seconds)),
+        Duration::from_secs(u64::from(args.wait.wait_timeout_seconds)),
         json_output,
         true,
     ));
