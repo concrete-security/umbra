@@ -283,8 +283,22 @@ fn inferred_private_key_path(public_key_path: &Path) -> Option<PathBuf> {
 }
 
 fn remove(config: &ResolvedConfig, key_id: &str, json_output: bool) -> ExitStatus {
+    // Resolve an ssh-key alias to its id (a raw UUID passes straight through), so
+    // `key remove <alias>` works as everywhere a key id is taken.
+    let key_id = match crate::commands::alias::resolve_or_passthrough(
+        config,
+        crate::commands::alias::AliasKind::SshKey,
+        key_id,
+    ) {
+        Ok(id) => id,
+        Err(message) => {
+            crate::style::eprintln_error(&message);
+            return ExitStatus::Error;
+        }
+    };
+    let key_id = key_id.as_str();
     if Uuid::parse_str(key_id).is_err() {
-        crate::style::eprintln_error("[usage] KEY_ID must be a UUID");
+        crate::style::eprintln_error("[usage] KEY_ID must be a UUID or a known alias");
         return ExitStatus::Usage;
     }
     let (console_url, session) = match console_session(config) {
@@ -447,6 +461,7 @@ mod tests {
     use super::*;
     use crate::commands::alias;
     use crate::test_support::{authenticated_config, MockConsole};
+    use rstest::rstest;
     use std::{fs, process::Command};
 
     #[test]
@@ -517,13 +532,18 @@ mod tests {
         fs::remove_dir_all(dir).expect("temp dir removed");
     }
 
-    /// `key remove` (the real command) drops the alias pointing at the removed
-    /// SSH key from the on-disk store while leaving unrelated aliases — the
-    /// `Prune::Resource(SshKey, …)` auto-purge wiring, driven end-to-end against
-    /// a mock Console `204`.
-    #[test]
-    fn test_key_remove_prune_success() {
-        const KEY_ID: &str = "3c4c2b64-b059-41a6-b925-3e4816ffee60";
+    /// `key remove` (the real command) accepts the key by raw id OR by ssh-key
+    /// alias (the alias resolves to the id like everywhere a key id is taken), then
+    /// drops the alias pointing at the removed key while leaving unrelated aliases —
+    /// the `Prune::Resource(SshKey, …)` auto-purge wiring, driven end-to-end against
+    /// a mock Console `204`. The `by_alias` case is what the alias-resolution fix
+    /// added; before it, `key remove laptop` failed with "KEY_ID must be a UUID".
+    const KEY_ID: &str = "3c4c2b64-b059-41a6-b925-3e4816ffee60";
+
+    #[rstest]
+    #[case::by_id(KEY_ID)]
+    #[case::by_alias("laptop")]
+    fn test_key_remove_prune_success(#[case] target: &str) {
         const CVM_ID: &str = "9a7f6b4a-1111-2222-3333-444444444444";
 
         let console = MockConsole::start();
@@ -536,7 +556,7 @@ mod tests {
 
         let status = run(
             KeyCommand::Remove {
-                key_id: KEY_ID.into(),
+                key_id: target.into(),
             },
             &config,
             false,

@@ -21,59 +21,43 @@ pub mod version;
 
 use crate::config::ResolvedConfig;
 
-/// Resolve the target Dev CVM for a verb that acts on a single CVM.
+/// Select the target Dev CVM, then resolve its alias to a UUID.
 ///
-/// Chain: positional `<CVM_ID>` -> `--cvm` -> `CONCRETE_DEFAULT_CVM` -> `default_cvm`.
-/// (`config.default_cvm` already folds the env var and config-file layers.)
-pub(crate) fn resolve_cvm(
+/// The id is the first non-empty of, in order: `positional` `<CVM_ID>`, `flag`
+/// (`--cvm`), then each entry of `fallback` (a raw UUID passes straight through
+/// the alias resolver; a non-UUID consults the store). `fallback` carries the
+/// softer defaults a command allows — pass `&[config.default_cvm.as_deref()]` for
+/// the permissive verbs (`ssh`, `cvm show`, …). Pass an **empty** `fallback` for
+/// destructive verbs (`cvm stop`/`terminate`) so they never silently target a
+/// configured default. Order the slice to order the fallback (e.g.
+/// `&[env_default, file_default]`).
+///
+/// Selection ≠ resolution: this picks *which* id from the available sources; the
+/// alias→id translation is [`alias::resolve_or_passthrough`], the one resolver.
+pub(crate) fn select_cvm(
     positional: Option<&str>,
     flag: Option<&str>,
+    fallback: &[Option<&str>],
     config: &ResolvedConfig,
 ) -> Result<String, String> {
-    let raw = positional
-        .map(ToString::to_string)
-        .or_else(|| flag.map(ToString::to_string))
-        .or_else(|| config.default_cvm.clone())
-        .filter(|value| !value.is_empty())
+    let raw = [positional, flag]
+        .into_iter()
+        .chain(fallback.iter().copied())
+        .filter_map(|candidate| candidate.filter(|value| !value.is_empty()))
+        .next()
         .ok_or_else(|| {
-            "[usage] missing CVM id; pass <CVM_ID> or set --cvm, CONCRETE_DEFAULT_CVM, or default_cvm"
-                .to_string()
+            if fallback.is_empty() {
+                "[usage] this command requires an explicit CVM id; pass <CVM_ID> or --cvm (it will not use CONCRETE_DEFAULT_CVM or default_cvm)".to_string()
+            } else {
+                "[usage] missing CVM id; pass <CVM_ID> or set --cvm, CONCRETE_DEFAULT_CVM, or default_cvm".to_string()
+            }
         })?;
-    resolve_cvm_alias(config, raw)
-}
-
-/// Translate a CVM alias to its UUID, leaving a raw id untouched. A raw UUID
-/// never reads the alias store (so a corrupt store can't block a command driven
-/// by a real id); only a non-UUID value consults it, surfacing a malformed
-/// store rather than silently ignoring it.
-fn resolve_cvm_alias(config: &ResolvedConfig, raw: String) -> Result<String, String> {
-    alias::resolve_or_passthrough(config, alias::AliasKind::Cvm, &raw)
-}
-
-/// Resolve the target Dev CVM for a destructive verb (`cvm stop`, `cvm terminate`).
-///
-/// Only an explicit id counts: positional `<CVM_ID>` or `--cvm`. It deliberately
-/// never falls back to `CONCRETE_DEFAULT_CVM` or `default_cvm`, so these verbs
-/// cannot silently target a configured default.
-pub(crate) fn resolve_cvm_explicit(
-    positional: Option<&str>,
-    flag: Option<&str>,
-    config: &ResolvedConfig,
-) -> Result<String, String> {
-    let raw = positional
-        .map(ToString::to_string)
-        .or_else(|| flag.map(ToString::to_string))
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            "[usage] this command requires an explicit CVM id; pass <CVM_ID> or --cvm (it will not use CONCRETE_DEFAULT_CVM or default_cvm)"
-                .to_string()
-        })?;
-    resolve_cvm_alias(config, raw)
+    alias::resolve_or_passthrough(config, alias::AliasKind::Cvm, raw)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_cvm, resolve_cvm_explicit};
+    use super::select_cvm;
     use crate::config::{ConfigOverrides, ResolvedConfig};
 
     /// A `ResolvedConfig` whose `default_cvm` is set directly, using a throwaway
@@ -90,40 +74,48 @@ mod tests {
         config
     }
 
+    /// With a non-empty `fallback` (the permissive verbs pass the configured
+    /// default), selection walks positional → flag → fallback in order.
     #[test]
-    fn resolve_cvm_prefers_positional_then_flag_then_default() {
+    fn select_cvm_prefers_positional_then_flag_then_fallback_success() {
         let config = config_with_default(Some("default-cvm"));
+        let fallback = [config.default_cvm.as_deref()];
         assert_eq!(
-            resolve_cvm(Some("positional"), Some("flag"), &config).unwrap(),
-            "positional"
-        );
-        assert_eq!(resolve_cvm(None, Some("flag"), &config).unwrap(), "flag");
-        assert_eq!(resolve_cvm(None, None, &config).unwrap(), "default-cvm");
-    }
-
-    #[test]
-    fn resolve_cvm_errors_without_any_source() {
-        let config = config_with_default(None);
-        assert!(resolve_cvm(None, None, &config).is_err());
-    }
-
-    #[test]
-    fn resolve_cvm_explicit_ignores_configured_default() {
-        // Only an explicit positional or --cvm satisfies a destructive verb.
-        // The throwaway config dir has no alias store, so ids pass through.
-        let config = config_with_default(Some("default-cvm"));
-        assert_eq!(
-            resolve_cvm_explicit(Some("positional"), None, &config).unwrap(),
+            select_cvm(Some("positional"), Some("flag"), &fallback, &config).unwrap(),
             "positional"
         );
         assert_eq!(
-            resolve_cvm_explicit(None, Some("flag"), &config).unwrap(),
+            select_cvm(None, Some("flag"), &fallback, &config).unwrap(),
             "flag"
         );
         assert_eq!(
-            resolve_cvm_explicit(Some("positional"), Some("flag"), &config).unwrap(),
+            select_cvm(None, None, &fallback, &config).unwrap(),
+            "default-cvm"
+        );
+    }
+
+    /// No source at all (and a fallback that only holds the absent default) is a
+    /// usage error rather than an empty target.
+    #[test]
+    fn select_cvm_without_any_source_failure() {
+        let config = config_with_default(None);
+        assert!(select_cvm(None, None, &[config.default_cvm.as_deref()], &config).is_err());
+    }
+
+    /// An EMPTY `fallback` is the destructive-verb contract: only an explicit
+    /// positional or `--cvm` counts; the configured default is ignored, so a
+    /// bare invocation errors instead of silently targeting it.
+    #[test]
+    fn select_cvm_empty_fallback_ignores_default_success() {
+        let config = config_with_default(Some("default-cvm"));
+        assert_eq!(
+            select_cvm(Some("positional"), None, &[], &config).unwrap(),
             "positional"
         );
-        assert!(resolve_cvm_explicit(None, None, &config).is_err());
+        assert_eq!(
+            select_cvm(None, Some("flag"), &[], &config).unwrap(),
+            "flag"
+        );
+        assert!(select_cvm(None, None, &[], &config).is_err());
     }
 }

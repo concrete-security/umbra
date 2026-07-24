@@ -726,10 +726,22 @@ fn derived_name(email: &str) -> Result<&str, String> {
 }
 
 fn profile_flags(config: &ResolvedConfig) -> Result<Vec<String>, String> {
-    for profile_id in &config.profile_flags {
-        Uuid::parse_str(profile_id).map_err(|_| "[usage] --profile must be a UUID".to_string())?;
-    }
-    Ok(config.profile_flags.clone())
+    config
+        .profile_flags
+        .iter()
+        .map(|raw| {
+            // Resolve an alias to its id (a raw UUID passes straight through), so
+            // `--profile <alias>` works here as everywhere a profile id is taken.
+            let id = crate::commands::alias::resolve_or_passthrough(
+                config,
+                crate::commands::alias::AliasKind::Profile,
+                raw,
+            )?;
+            Uuid::parse_str(&id)
+                .map_err(|_| "[usage] --profile must be a UUID or a known alias".to_string())?;
+            Ok(id)
+        })
+        .collect()
 }
 
 fn permissions_join(permissions: &[String]) -> String {
@@ -791,6 +803,7 @@ fn print_user(user: &User, json_output: bool) {
 mod tests {
     use super::*;
     use crate::cli::{Assigned, UserStatus};
+    use rstest::rstest;
 
     #[test]
     fn user_list_query_params_maps_status_and_assigned_flags() {
@@ -865,5 +878,42 @@ mod tests {
                 .expect_err("bad entity id is rejected"),
             "[usage] --entity must be a UUID"
         );
+    }
+
+    const PROFILE_UUID: &str = "16286507-f87f-449e-a229-be04067fc23c";
+
+    /// A `ResolvedConfig` on a throwaway config dir with the given `--profile`
+    /// flags — no Console needed, `profile_flags` only reads local state.
+    fn config_with_profile_flags(flags: &[&str]) -> crate::config::ResolvedConfig {
+        let dir = std::env::temp_dir().join(format!("concrete-user-test-{}", uuid::Uuid::new_v4()));
+        crate::config::ResolvedConfig::resolve(crate::config::ConfigOverrides {
+            config_dir: Some(dir),
+            profile: flags.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        })
+    }
+
+    /// `--profile` accepts an alias as well as a raw UUID: a profile alias resolves
+    /// to its id, and a bare UUID passes straight through. Pins that `user add`'s
+    /// flag resolution honours the store, not just UUIDs.
+    #[rstest]
+    #[case::alias("prod", PROFILE_UUID)]
+    #[case::raw_uuid(PROFILE_UUID, PROFILE_UUID)]
+    fn test_profile_flags_resolves_alias_success(#[case] flag: &str, #[case] expected: &str) {
+        let config = config_with_profile_flags(&[flag]);
+        let mut store = crate::commands::alias::Aliases::default();
+        store.profile.insert("prod".into(), PROFILE_UUID.into());
+        crate::commands::alias::save(&config.config_dir, &store).expect("seed store");
+        assert_eq!(profile_flags(&config).unwrap(), vec![expected.to_string()]);
+    }
+
+    /// An unknown `--profile` name (no matching alias, not a UUID) is a usage
+    /// error rather than being sent to the Console as-is.
+    #[test]
+    fn test_profile_flags_unknown_name_failure() {
+        let config = config_with_profile_flags(&["ghost"]);
+        assert!(profile_flags(&config)
+            .expect_err("an unknown non-uuid profile flag is rejected")
+            .contains("must be a UUID or a known alias"));
     }
 }

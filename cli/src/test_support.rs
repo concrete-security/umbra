@@ -282,20 +282,20 @@ fn list_page(items: Vec<Value>) -> Value {
     json!({ "items": items, "next_cursor": null })
 }
 
+/// Minimal registered-SSH-key JSON the CLI can parse.
+fn key_body(id: &str) -> Value {
+    json!({
+        "id": id,
+        "label": "test",
+        "fingerprint": "f",
+        "public_key": "pk",
+        "created_at": "2030-01-01T00:00:00Z"
+    })
+}
+
 /// A `/me/keys` list page containing exactly `ids`.
 fn keys_body(ids: &[&str]) -> Value {
-    let items: Vec<Value> = ids
-        .iter()
-        .map(|id| {
-            json!({
-                "id": id,
-                "label": "test",
-                "fingerprint": "f",
-                "public_key": "pk",
-                "created_at": "2030-01-01T00:00:00Z"
-            })
-        })
-        .collect();
+    let items: Vec<Value> = ids.iter().map(|id| key_body(id)).collect();
     json!({ "items": items })
 }
 

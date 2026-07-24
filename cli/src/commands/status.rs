@@ -160,11 +160,20 @@ fn optional_profile_filter(config: &ResolvedConfig) -> Result<Option<String>, St
     if config.profile_flags.len() > 1 {
         return Err("[usage] expected at most one --profile for status".to_string());
     }
-    if let Some(profile_id) = config.profile_flags.first() {
-        Uuid::parse_str(profile_id).map_err(|_| "[usage] --profile must be a UUID".to_string())?;
-        Ok(Some(profile_id.clone()))
-    } else {
-        Ok(None)
+    match config.profile_flags.first() {
+        Some(raw) => {
+            // Resolve an alias to its id (a raw UUID passes straight through), so
+            // `--profile <alias>` works here as everywhere a profile id is taken.
+            let id = crate::commands::alias::resolve_or_passthrough(
+                config,
+                crate::commands::alias::AliasKind::Profile,
+                raw,
+            )?;
+            Uuid::parse_str(&id)
+                .map_err(|_| "[usage] --profile must be a UUID or a known alias".to_string())?;
+            Ok(Some(id))
+        }
+        None => Ok(None),
     }
 }
 
@@ -441,6 +450,7 @@ fn print_status(status: &StatusOutput, json_output: bool, console_url: Option<&s
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     #[test]
     fn key_output_extracts_algorithm() {
@@ -452,5 +462,52 @@ mod tests {
         };
 
         assert_eq!(key_output(&key).algorithm, "ssh-ed25519");
+    }
+
+    const PROFILE_UUID: &str = "16286507-f87f-449e-a229-be04067fc23c";
+
+    /// A `ResolvedConfig` on a throwaway config dir with the given `--profile`
+    /// flags — no Console needed, `optional_profile_filter` only reads local state.
+    fn config_with_profile_flags(flags: &[&str]) -> ResolvedConfig {
+        let dir =
+            std::env::temp_dir().join(format!("concrete-status-test-{}", uuid::Uuid::new_v4()));
+        ResolvedConfig::resolve(crate::config::ConfigOverrides {
+            config_dir: Some(dir),
+            profile: flags.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        })
+    }
+
+    /// `status --profile` accepts an alias as well as a raw UUID (resolves to the
+    /// id), and no flag yields no filter. Pins that status honours the alias store,
+    /// not just UUIDs.
+    #[rstest]
+    #[case::alias(&["prod"], Some(PROFILE_UUID))]
+    #[case::raw_uuid(&[PROFILE_UUID], Some(PROFILE_UUID))]
+    #[case::none(&[], None)]
+    fn test_optional_profile_filter_resolves_alias_success(
+        #[case] flags: &[&str],
+        #[case] expected: Option<&str>,
+    ) {
+        let config = config_with_profile_flags(flags);
+        let mut store = crate::commands::alias::Aliases::default();
+        store.profile.insert("prod".into(), PROFILE_UUID.into());
+        crate::commands::alias::save(&config.config_dir, &store).expect("seed store");
+        assert_eq!(
+            optional_profile_filter(&config).unwrap(),
+            expected.map(str::to_string)
+        );
+    }
+
+    /// An unknown `--profile` name is rejected, and more than one `--profile` is a
+    /// usage error for status (it filters by a single profile).
+    #[rstest]
+    #[case::unknown(&["ghost"], "must be a UUID or a known alias")]
+    #[case::too_many(&[PROFILE_UUID, PROFILE_UUID], "at most one --profile")]
+    fn test_optional_profile_filter_failure(#[case] flags: &[&str], #[case] expected: &str) {
+        let config = config_with_profile_flags(flags);
+        assert!(optional_profile_filter(&config)
+            .expect_err("bad profile flags are rejected")
+            .contains(expected));
     }
 }

@@ -21,7 +21,7 @@ use crate::{
         wire, CvmCommand, CvmInstanceTypesArgs, CvmLaunchArgs, CvmListArgs, CvmTerminateArgs,
         CvmUpdateArgs,
     },
-    commands::{alias, resolve_cvm, resolve_cvm_explicit},
+    commands::{alias, select_cvm},
     config::{self, ResolvedConfig},
     console::{
         fetch_json, push_query, read_json_response, read_with_etag, validate_uuid, ListPage,
@@ -256,7 +256,12 @@ pub fn run(command: CvmCommand, config: &ResolvedConfig, json: bool) -> ExitStat
         CvmCommand::InstanceTypes(args) => instance_types(config, args, json),
         CvmCommand::Launch(args) => launch(config, args, json),
         CvmCommand::Attach { target } => {
-            match resolve_cvm(target.cvm_id.as_deref(), target.cvm.as_deref(), config) {
+            match select_cvm(
+                target.cvm_id.as_deref(),
+                target.cvm.as_deref(),
+                &[config.default_cvm.as_deref()],
+                config,
+            ) {
                 Ok(cvm_id) => profile_mutation(config, &cvm_id, Mutation::Attach, json),
                 Err(message) => {
                     style::eprintln_error(&message);
@@ -265,7 +270,12 @@ pub fn run(command: CvmCommand, config: &ResolvedConfig, json: bool) -> ExitStat
             }
         }
         CvmCommand::Detach { target } => {
-            match resolve_cvm(target.cvm_id.as_deref(), target.cvm.as_deref(), config) {
+            match select_cvm(
+                target.cvm_id.as_deref(),
+                target.cvm.as_deref(),
+                &[config.default_cvm.as_deref()],
+                config,
+            ) {
                 Ok(cvm_id) => profile_mutation(config, &cvm_id, Mutation::Detach, json),
                 Err(message) => {
                     style::eprintln_error(&message);
@@ -274,7 +284,12 @@ pub fn run(command: CvmCommand, config: &ResolvedConfig, json: bool) -> ExitStat
             }
         }
         CvmCommand::Start { target } => {
-            match resolve_cvm(target.cvm_id.as_deref(), target.cvm.as_deref(), config) {
+            match select_cvm(
+                target.cvm_id.as_deref(),
+                target.cvm.as_deref(),
+                &[config.default_cvm.as_deref()],
+                config,
+            ) {
                 Ok(cvm_id) => lifecycle_action(config, &cvm_id, LifecycleAction::Start, json),
                 Err(message) => {
                     style::eprintln_error(&message);
@@ -283,7 +298,7 @@ pub fn run(command: CvmCommand, config: &ResolvedConfig, json: bool) -> ExitStat
             }
         }
         CvmCommand::Stop { target } => {
-            match resolve_cvm_explicit(target.cvm_id.as_deref(), target.cvm.as_deref(), config) {
+            match select_cvm(target.cvm_id.as_deref(), target.cvm.as_deref(), &[], config) {
                 Ok(cvm_id) => lifecycle_action(config, &cvm_id, LifecycleAction::Stop, json),
                 Err(message) => {
                     style::eprintln_error(&message);
@@ -611,9 +626,10 @@ fn lifecycle_action(
 }
 
 fn update(config: &ResolvedConfig, args: CvmUpdateArgs, json_output: bool) -> ExitStatus {
-    let cvm_id = match resolve_cvm(
+    let cvm_id = match select_cvm(
         args.target.cvm_id.as_deref(),
         args.target.cvm.as_deref(),
+        &[config.default_cvm.as_deref()],
         config,
     ) {
         Ok(value) => value,
@@ -683,9 +699,10 @@ fn update(config: &ResolvedConfig, args: CvmUpdateArgs, json_output: bool) -> Ex
 }
 
 fn terminate(config: &ResolvedConfig, args: CvmTerminateArgs, json_output: bool) -> ExitStatus {
-    let cvm_id = match resolve_cvm_explicit(
+    let cvm_id = match select_cvm(
         args.target.cvm_id.as_deref(),
         args.target.cvm.as_deref(),
+        &[],
         config,
     ) {
         Ok(value) => value,

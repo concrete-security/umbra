@@ -680,6 +680,11 @@ pub struct AliasRenameArgs {
 
     /// New alias name.
     pub new: String,
+
+    /// Private SSH key to pass to ssh while checking a renamed session alias
+    /// would not shadow a live dtach session name.
+    #[arg(long)]
+    pub identity_file: Option<PathBuf>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -1133,7 +1138,8 @@ mod tests {
             other => panic!("expected cvm start, got {other:?}"),
         }
         // A destructive verb still parses with no id; the explicit-id requirement
-        // is enforced at run time by resolve_cvm_explicit, not by the parser.
+        // is enforced at run time by `select_cvm` with an empty fallback, not by
+        // the parser.
         match Cli::try_parse_from(["concrete", "cvm", "stop"])
             .unwrap()
             .command

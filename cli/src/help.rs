@@ -348,7 +348,13 @@ const EXAMPLES: &[(&str, &[&str])] = &[
         ],
     ),
     ("alias rm", &["concrete alias rm myvm"]),
-    ("alias rename", &["concrete alias rename oldname newname"]),
+    (
+        "alias rename",
+        &[
+            "concrete alias rename oldname newname",
+            "concrete alias rename mysess newsess --identity-file ~/.ssh/id_ed25519",
+        ],
+    ),
     (
         "alias prune",
         &["concrete alias prune", "concrete alias prune --dry-run"],

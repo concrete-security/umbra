@@ -145,7 +145,7 @@ impl ResolvedConfig {
         let console_url = console_url.map(|value| value.trim_end_matches('/').to_string());
 
         // `--cvm` is no longer a global override folded in here; it is a per-verb
-        // target flag resolved at the command layer (see commands::resolve_cvm),
+        // target flag resolved at the command layer (see commands::select_cvm),
         // which sits above this default. So `default_cvm` only carries the env var
         // and config-file layers.
         let (default_cvm, default_cvm_source) = if let Some(value) =

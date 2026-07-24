@@ -18,7 +18,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 use crate::{
     cli::{AgentSessionArgs, CodeArgs, CursorArgs, SessionListArgs, SessionTargetArgs, SshArgs},
-    commands::{alias, resolve_cvm, resolve_cvm_explicit},
+    commands::{alias, select_cvm},
     config::ResolvedConfig,
     console::{console_session, fetch_json, ListPage},
     exit::ExitStatus,
@@ -85,9 +85,10 @@ pub fn run(args: SshArgs, config: &ResolvedConfig) -> ExitStatus {
         );
         return ExitStatus::Usage;
     }
-    let cvm_id = match resolve_cvm(
+    let cvm_id = match select_cvm(
         args.target.cvm_id.as_deref(),
         args.target.cvm.as_deref(),
+        &[config.default_cvm.as_deref()],
         config,
     ) {
         Ok(value) => value,
@@ -129,7 +130,9 @@ pub fn run(args: SshArgs, config: &ResolvedConfig) -> ExitStatus {
         config,
     );
     if !matches!(status, ExitStatus::Ok) {
-        drop_launch_alias(config, args.alias.as_deref());
+        if let Some(name) = &session_name {
+            drop_launch_alias(config, args.alias.as_deref(), name, &cvm_id);
+        }
     }
     status
 }
@@ -153,9 +156,10 @@ pub fn run_agent(
             return ExitStatus::Usage;
         }
     }
-    let cvm_id = match resolve_cvm(
+    let cvm_id = match select_cvm(
         args.target.cvm_id.as_deref(),
         args.target.cvm.as_deref(),
+        &[config.default_cvm.as_deref()],
         config,
     ) {
         Ok(value) => value,
@@ -192,7 +196,7 @@ pub fn run_agent(
         config,
     );
     if !matches!(status, ExitStatus::Ok) {
-        drop_launch_alias(config, args.alias.as_deref());
+        drop_launch_alias(config, args.alias.as_deref(), &session_name, &cvm_id);
     }
     status
 }
@@ -218,13 +222,12 @@ fn record_launch_alias(
     // session name would shadow that session (unreachable by name). Probe the
     // CVM and reject the collision, as the direct `alias session` path does.
     match list_session_names(cvm_id, identity_file, config) {
-        Ok(live) if live.iter().any(|name| name == nickname) => {
-            crate::style::eprintln_error(&format!(
-                "[error] alias {nickname} collides with an existing dtach session name on {cvm_id}"
-            ));
-            return Some(ExitStatus::Error);
+        Ok(live) => {
+            if let Some(message) = session_shadow_error(&live, nickname, cvm_id) {
+                crate::style::eprintln_error(&message);
+                return Some(ExitStatus::Error);
+            }
         }
-        Ok(_) => {}
         Err((status, message)) => {
             crate::style::eprintln_error(&message);
             return Some(status);
@@ -240,21 +243,27 @@ fn record_launch_alias(
 /// Undo the optimistic launch alias when the session never established (ssh
 /// failed): a failed launch must not leave a dangling alias that then blocks
 /// retrying the same name. A clean detach exits `Ok` and keeps the alias.
-fn drop_launch_alias(config: &ResolvedConfig, nickname: Option<&str>) {
+fn drop_launch_alias(config: &ResolvedConfig, nickname: Option<&str>, session: &str, cvm: &str) {
     let Some(nickname) = nickname else {
         return;
     };
-    if let Ok(mut aliases) = alias::load(&config.config_dir) {
-        if aliases.remove_alias(nickname) {
-            let _ = alias::save(&config.config_dir, &aliases);
-        }
-    }
+    // Match the mapping this launch wrote: if another process rm'd and recreated
+    // the same name to a different target between launch and this rollback, leave
+    // that fresh mapping alone.
+    let observed = alias::ObservedAlias::Session(alias::SessionAlias {
+        session: session.to_string(),
+        cvm: cvm.to_string(),
+    });
+    alias::prune_and_save(config, |aliases| {
+        aliases.remove_if_matches(nickname, &observed)
+    });
 }
 
 pub fn run_code(args: CodeArgs, config: &ResolvedConfig) -> ExitStatus {
-    let cvm_id = match resolve_cvm(
+    let cvm_id = match select_cvm(
         args.target.cvm_id.as_deref(),
         args.target.cvm.as_deref(),
+        &[config.default_cvm.as_deref()],
         config,
     ) {
         Ok(value) => value,
@@ -274,9 +283,10 @@ pub fn run_code(args: CodeArgs, config: &ResolvedConfig) -> ExitStatus {
 }
 
 pub fn run_cursor(args: CursorArgs, config: &ResolvedConfig) -> ExitStatus {
-    let cvm_id = match resolve_cvm(
+    let cvm_id = match select_cvm(
         args.target.cvm_id.as_deref(),
         args.target.cvm.as_deref(),
+        &[config.default_cvm.as_deref()],
         config,
     ) {
         Ok(value) => value,
@@ -335,7 +345,7 @@ pub fn run_ps(args: SessionListArgs, config: &ResolvedConfig, json_output: bool)
             }
         },
         (positional, flag) => {
-            let cvm_id = match resolve_cvm_explicit(positional, flag, config) {
+            let cvm_id = match select_cvm(positional, flag, &[], config) {
                 Ok(id) => id,
                 Err(message) => {
                     crate::style::eprintln_error(&message);
@@ -415,7 +425,7 @@ pub fn run_ps(args: SessionListArgs, config: &ResolvedConfig, json_output: bool)
 /// concrete `(session_name, cvm_id)` to act on. A session alias carries its own
 /// CVM, so it works without `--cvm`; an explicit `--cvm` overrides it (with a
 /// warning), and a raw name resolves the CVM the usual way (`--cvm`/default,
-/// alias-aware via [`resolve_cvm`]).
+/// alias-aware via [`select_cvm`]).
 fn resolve_session_target(
     target: &str,
     cvm_flag: Option<&str>,
@@ -427,7 +437,8 @@ fn resolve_session_target(
         let cvm_id = match cvm_flag {
             Some(flag) => {
                 let overridden =
-                    resolve_cvm(None, Some(flag), config).map_err(|m| (ExitStatus::Usage, m))?;
+                    select_cvm(None, Some(flag), &[config.default_cvm.as_deref()], config)
+                        .map_err(|m| (ExitStatus::Usage, m))?;
                 if overridden != entry.cvm {
                     // Show the stored CVM by its alias when it has one (readable).
                     let stored = aliases
@@ -447,7 +458,8 @@ fn resolve_session_target(
         Ok((entry.session.clone(), cvm_id))
     } else {
         validate_session_name(target).map_err(|m| (ExitStatus::Usage, m))?;
-        let cvm_id = resolve_cvm(None, cvm_flag, config).map_err(|m| (ExitStatus::Usage, m))?;
+        let cvm_id = select_cvm(None, cvm_flag, &[config.default_cvm.as_deref()], config)
+            .map_err(|m| (ExitStatus::Usage, m))?;
         Ok((target.to_string(), cvm_id))
     }
 }
@@ -556,6 +568,17 @@ pub(crate) fn list_session_names(
     let rows = parse_session_rows(&output, &BTreeMap::new())
         .map_err(|message| (ExitStatus::Error, message))?;
     Ok(rows.into_iter().map(|row| row.name).collect())
+}
+
+/// The shadowing error if `name` matches a live dtach session in `live` on
+/// `cvm_id`, else `None`. Resolution consults aliases first, so an alias named
+/// like a real session would make that session unreachable by name. Shared by the
+/// three sites that must reject the collision identically — `alias session`,
+/// `ssh/claude/codex --alias`, and `alias rename` — so their check never drifts.
+pub(crate) fn session_shadow_error(live: &[String], name: &str, cvm_id: &str) -> Option<String> {
+    live.iter().any(|session| session == name).then(|| {
+        format!("[error] alias {name} collides with an existing dtach session name on {cvm_id}")
+    })
 }
 
 fn run_ssh(invocation: SshInvocation<'_>, config: &ResolvedConfig) -> ExitStatus {
@@ -1394,6 +1417,26 @@ mod tests {
     fn shell_quote_wraps_and_escapes_single_quotes() {
         assert_eq!(shell_quote("abc"), "'abc'");
         assert_eq!(shell_quote("a'b"), "'a'\\''b'");
+    }
+
+    /// The shared anti-shadow guard used by `alias session`, `--alias`, and
+    /// `alias rename`: a name that matches a live dtach session yields the collision
+    /// error (naming the session and CVM); a name absent from the live set yields
+    /// `None` so the alias is allowed.
+    #[rstest]
+    #[case::collides("agent-1", true)]
+    #[case::free("agent-2", false)]
+    fn test_session_shadow_error(#[case] name: &str, #[case] shadows: bool) {
+        let live = vec!["agent-1".to_string(), "worker".to_string()];
+        let result = session_shadow_error(&live, name, "cvm-x");
+        assert_eq!(result.is_some(), shadows, "name={name}");
+        if let Some(message) = result {
+            assert!(message.contains("collides"), "message: {message}");
+            assert!(
+                message.contains(name) && message.contains("cvm-x"),
+                "message: {message}"
+            );
+        }
     }
 
     #[test]
