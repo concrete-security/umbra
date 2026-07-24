@@ -28,6 +28,8 @@ GOOGLE_KID_RE = re.compile(r"^[a-f0-9]{40}$")
 class OidcSettings:
     google_client_id: str
     google_client_secret: str
+    google_device_client_id: str
+    google_device_client_secret: str
     console_url: str
     client_allowlist: frozenset[str]
     authorize_url: str
@@ -76,6 +78,8 @@ def oidc_settings() -> OidcSettings:
     return OidcSettings(
         google_client_id=raw["GOOGLE_OIDC_CLIENT_ID"],
         google_client_secret=raw["GOOGLE_OIDC_CLIENT_SECRET"],
+        google_device_client_id=raw.get("GOOGLE_OIDC_DEVICE_CLIENT_ID") or raw["GOOGLE_OIDC_CLIENT_ID"],
+        google_device_client_secret=raw.get("GOOGLE_OIDC_DEVICE_CLIENT_SECRET") or raw["GOOGLE_OIDC_CLIENT_SECRET"],
         console_url=raw["CONSOLE_URL"].rstrip("/"),
         client_allowlist=allowlist,
         authorize_url=GOOGLE_AUTH_URL,
@@ -132,7 +136,7 @@ async def start_device_flow(*, settings: OidcSettings | None = None) -> dict[str
         response = await client.post(
             settings.device_code_url,
             data={
-                "client_id": settings.google_client_id,
+                "client_id": settings.google_device_client_id,
                 "scope": "openid email profile",
             },
         )
@@ -146,8 +150,8 @@ async def poll_device_code(device_code: str, *, settings: OidcSettings | None = 
         response = await client.post(
             settings.token_url,
             data={
-                "client_id": settings.google_client_id,
-                "client_secret": settings.google_client_secret,
+                "client_id": settings.google_device_client_id,
+                "client_secret": settings.google_device_client_secret,
                 "device_code": device_code,
                 "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
             },
@@ -220,9 +224,13 @@ async def verify_google_id_token(
     *,
     nonce: str | None,
     access_token: str | None,
+    audience: str | None = None,
     settings: OidcSettings | None = None,
 ) -> dict[str, Any]:
     settings = settings or oidc_settings()
+    # Each login flow verifies against its own Google client: the device flow passes the device
+    # client id; the loopback flow relies on the default (the web client the browser leg used).
+    expected_audience = audience or settings.google_client_id
     header = _decode_header(id_token)
     if FORBIDDEN_KEY_HEADERS.intersection(header):
         raise jwt.InvalidTokenError("caller-supplied key headers are forbidden")
@@ -248,19 +256,19 @@ async def verify_google_id_token(
         id_token,
         jwt.PyJWK.from_dict({**jwk, "alg": "RS256"}).key,
         algorithms=["RS256"],
-        audience=settings.google_client_id,
+        audience=expected_audience,
         options={"require": ["exp", "iat", "sub", "email"]},
         leeway=300,
     )
     if claims.get("iss") not in GOOGLE_ISSUERS:
         raise jwt.InvalidTokenError("invalid issuer")
-    audience = claims.get("aud")
-    if isinstance(audience, list):
-        if any(item != settings.google_client_id for item in audience):
+    audience_claim = claims.get("aud")
+    if isinstance(audience_claim, list):
+        if any(item != expected_audience for item in audience_claim):
             raise jwt.InvalidTokenError("invalid audience")
-        if claims.get("azp") != settings.google_client_id:
+        if claims.get("azp") != expected_audience:
             raise jwt.InvalidTokenError("invalid authorized party")
-    elif claims.get("azp") not in {None, settings.google_client_id}:
+    elif claims.get("azp") not in {None, expected_audience}:
         raise jwt.InvalidTokenError("invalid authorized party")
     email = claims.get("email")
     if not isinstance(email, str) or not email.strip():

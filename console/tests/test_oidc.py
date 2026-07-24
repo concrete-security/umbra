@@ -10,9 +10,11 @@ from concrete_console.oidc import (
     IdpOAuthError,
     OidcSettings,
     _at_hash,
+    exchange_authorization_code,
     google_authorize_redirect,
     oidc_settings,
     poll_device_code,
+    start_device_flow,
     verify_google_id_token,
 )
 
@@ -24,6 +26,8 @@ def oidc_test_settings() -> OidcSettings:
     return OidcSettings(
         google_client_id="google-client",
         google_client_secret="secret",
+        google_device_client_id="google-device-client",
+        google_device_client_secret="device-secret",
         console_url="https://console.example.com",
         client_allowlist=frozenset({"concrete-cli-v1"}),
         authorize_url="https://accounts.example/authorize",
@@ -84,6 +88,38 @@ def install_jwks(monkeypatch, jwks):
     monkeypatch.setattr("concrete_console.oidc.load_google_jwks", fake_load_google_jwks)
 
 
+class RecordingResponse:
+    def __init__(self, *, status_code: int = 200, body: dict | None = None) -> None:
+        self.status_code = status_code
+        self._body = body if body is not None else {}
+
+    def json(self) -> dict:
+        return self._body
+
+    def raise_for_status(self) -> None:
+        return None
+
+
+def recording_client(captured: list[dict], *, response: RecordingResponse):
+    """httpx.AsyncClient stand-in recording each POST's url + form data."""
+
+    class _RecordingClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args) -> None:
+            return None
+
+        async def post(self, url, *args, **kwargs) -> RecordingResponse:
+            captured.append({"url": url, "data": kwargs.get("data")})
+            return response
+
+    return _RecordingClient
+
+
 def test_oidc_settings_refuses_endpoint_override_without_debug_flag(monkeypatch) -> None:
     monkeypatch.setenv("GOOGLE_OIDC_CLIENT_ID", "google-client")
     monkeypatch.setenv("GOOGLE_OIDC_CLIENT_SECRET", "secret")
@@ -97,16 +133,7 @@ def test_oidc_settings_refuses_endpoint_override_without_debug_flag(monkeypatch)
 
 
 def test_google_authorize_redirect_uses_console_callback_and_nonce() -> None:
-    settings = OidcSettings(
-        google_client_id="google-client",
-        google_client_secret="secret",
-        console_url="https://console.example.com",
-        client_allowlist=frozenset({"concrete-cli-v1"}),
-        authorize_url="https://accounts.example/authorize",
-        token_url="https://accounts.example/token",
-        device_code_url="https://accounts.example/device",
-        jwks_url="https://accounts.example/jwks",
-    )
+    settings = oidc_test_settings()
 
     redirect = google_authorize_redirect(idp_state="state-value", nonce="nonce-value", settings=settings)
 
@@ -125,16 +152,7 @@ def test_pkce_s256_matches_rfc7636_example() -> None:
 
 
 def test_google_id_token_rejects_caller_supplied_key_headers_before_jwks(monkeypatch) -> None:
-    settings = OidcSettings(
-        google_client_id="google-client",
-        google_client_secret="secret",
-        console_url="https://console.example.com",
-        client_allowlist=frozenset({"concrete-cli-v1"}),
-        authorize_url="https://accounts.example/authorize",
-        token_url="https://accounts.example/token",
-        device_code_url="https://accounts.example/device",
-        jwks_url="https://accounts.example/jwks",
-    )
+    settings = oidc_test_settings()
     token = jwt.encode(
         {"sub": "subject", "email": "admin@example.com"},
         "unused-but-long-enough-for-hs256-tests",
@@ -221,16 +239,7 @@ def test_google_id_token_accepts_matching_at_hash(monkeypatch) -> None:
 
 
 def test_device_poll_preserves_idp_pending_error(monkeypatch) -> None:
-    settings = OidcSettings(
-        google_client_id="google-client",
-        google_client_secret="secret",
-        console_url="https://console.example.com",
-        client_allowlist=frozenset({"concrete-cli-v1"}),
-        authorize_url="https://accounts.example/authorize",
-        token_url="https://accounts.example/token",
-        device_code_url="https://accounts.example/device",
-        jwks_url="https://accounts.example/jwks",
-    )
+    settings = oidc_test_settings()
 
     class FakeResponse:
         status_code = 400
@@ -262,3 +271,125 @@ def test_device_poll_preserves_idp_pending_error(monkeypatch) -> None:
         asyncio.run(poll_device_code("device-code", settings=settings))
 
     assert exc.value.error == "authorization_pending"
+
+
+@pytest.mark.parametrize(
+    ("device_id", "device_secret", "expected_id", "expected_secret"),
+    [
+        ("device-id", "device-secret", "device-id", "device-secret"),
+        (None, None, "web-id", "web-secret"),
+    ],
+    ids=["device_set", "device_unset_falls_back"],
+)
+def test_oidc_settings_resolves_device_client(
+    monkeypatch, device_id, device_secret, expected_id, expected_secret
+) -> None:
+    monkeypatch.setenv("GOOGLE_OIDC_CLIENT_ID", "web-id")
+    monkeypatch.setenv("GOOGLE_OIDC_CLIENT_SECRET", "web-secret")
+    monkeypatch.setenv("CONSOLE_URL", "https://console.example.com")
+    monkeypatch.setenv("OIDC_CLIENT_ALLOWLIST", "concrete-cli-v1")
+    monkeypatch.delenv("GOOGLE_OIDC_DEVICE_CLIENT_ID", raising=False)
+    monkeypatch.delenv("GOOGLE_OIDC_DEVICE_CLIENT_SECRET", raising=False)
+    for override in ("GOOGLE_TOKEN_URL", "GOOGLE_DEVICE_CODE_URL", "GOOGLE_JWKS_URL"):
+        monkeypatch.delenv(override, raising=False)
+    if device_id is not None:
+        monkeypatch.setenv("GOOGLE_OIDC_DEVICE_CLIENT_ID", device_id)
+    if device_secret is not None:
+        monkeypatch.setenv("GOOGLE_OIDC_DEVICE_CLIENT_SECRET", device_secret)
+
+    settings = oidc_settings()
+
+    assert settings.google_client_id == "web-id"
+    assert settings.google_device_client_id == expected_id
+    assert settings.google_device_client_secret == expected_secret
+
+
+def test_start_device_flow_uses_device_client(monkeypatch) -> None:
+    settings = oidc_test_settings()
+    captured: list[dict] = []
+    monkeypatch.setattr(
+        "concrete_console.oidc.httpx.AsyncClient",
+        recording_client(captured, response=RecordingResponse(body={"device_code": "dc"})),
+    )
+
+    import asyncio
+
+    result = asyncio.run(start_device_flow(settings=settings))
+
+    assert result == {"device_code": "dc"}
+    assert captured[-1]["url"] == settings.device_code_url
+    assert captured[-1]["data"]["client_id"] == "google-device-client"
+
+
+def test_poll_device_code_uses_device_client(monkeypatch) -> None:
+    settings = oidc_test_settings()
+    captured: list[dict] = []
+    monkeypatch.setattr(
+        "concrete_console.oidc.httpx.AsyncClient",
+        recording_client(captured, response=RecordingResponse(body={"id_token": "tok", "access_token": "at"})),
+    )
+
+    import asyncio
+
+    result = asyncio.run(poll_device_code("device-code", settings=settings))
+
+    assert result.id_token == "tok"
+    assert captured[-1]["url"] == settings.token_url
+    assert captured[-1]["data"]["client_id"] == "google-device-client"
+    assert captured[-1]["data"]["client_secret"] == "device-secret"
+
+
+def test_exchange_authorization_code_uses_web_client(monkeypatch) -> None:
+    settings = oidc_test_settings()
+    captured: list[dict] = []
+    monkeypatch.setattr(
+        "concrete_console.oidc.httpx.AsyncClient",
+        recording_client(captured, response=RecordingResponse(body={"id_token": "tok"})),
+    )
+
+    import asyncio
+
+    asyncio.run(exchange_authorization_code("auth-code", settings=settings))
+
+    assert captured[-1]["url"] == settings.token_url
+    assert captured[-1]["data"]["client_id"] == "google-client"
+    assert captured[-1]["data"]["client_secret"] == "secret"
+
+
+def test_verify_google_id_token_accepts_device_client_audience(monkeypatch) -> None:
+    settings = oidc_test_settings()
+    token, jwks = signed_google_token(claims_override={"aud": "google-device-client"})
+    install_jwks(monkeypatch, jwks)
+
+    import asyncio
+
+    claims = asyncio.run(
+        verify_google_id_token(
+            token,
+            nonce=None,
+            access_token=None,
+            audience=settings.google_device_client_id,
+            settings=settings,
+        )
+    )
+
+    assert claims["sub"] == "subject"
+
+
+def test_verify_google_id_token_rejects_cross_client_audience(monkeypatch) -> None:
+    settings = oidc_test_settings()
+    token, jwks = signed_google_token()  # aud == "google-client"
+    install_jwks(monkeypatch, jwks)
+
+    with pytest.raises(jwt.InvalidTokenError, match="udience"):
+        import asyncio
+
+        asyncio.run(
+            verify_google_id_token(
+                token,
+                nonce=None,
+                access_token=None,
+                audience=settings.google_device_client_id,
+                settings=settings,
+            )
+        )

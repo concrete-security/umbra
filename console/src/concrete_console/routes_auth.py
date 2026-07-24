@@ -247,8 +247,9 @@ async def device_poll(
     if invalid_polling_secret:
         raise api_error(401, "UNAUTHORIZED", "invalid polling secret")
 
+    settings = oidc_settings()
     try:
-        idp_tokens = await poll_device_code(body.device_code)
+        idp_tokens = await poll_device_code(body.device_code, settings=settings)
     except IdpOAuthError as exc:
         if exc.error in {"authorization_pending", "slow_down"}:
             return oauth_error(exc.error)
@@ -259,7 +260,13 @@ async def device_poll(
         raise api_error(502, "UPSTREAM_ERROR", "OIDC device token exchange failed") from None
 
     try:
-        claims = await verify_google_id_token(idp_tokens.id_token, nonce=None, access_token=idp_tokens.access_token)
+        claims = await verify_google_id_token(
+            idp_tokens.id_token,
+            nonce=None,
+            access_token=idp_tokens.access_token,
+            audience=settings.google_device_client_id,
+            settings=settings,
+        )
     except (jwt.PyJWTError, ValueError):
         raise api_error(502, "UPSTREAM_ERROR", "OIDC id_token verification failed") from None
 
