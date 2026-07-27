@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, time::Duration};
+use std::collections::BTreeMap;
 
 use reqwest::blocking::{Client, Response};
 use serde::{Deserialize, Serialize};
@@ -96,26 +96,18 @@ fn launch(config: &ResolvedConfig, args: SecurityCvmLaunchArgs, json_output: boo
     }
     let (console_url, session) = try_or_eprintln!(console_session(config));
     let op = try_or_eprintln!(submit_launch(console_url, &session, &args));
-    if args.wait.no_wait {
-        operation::print_operation(&op, json_output, false);
-        return ExitStatus::Ok;
-    }
-    let op = try_or_eprintln!(operation::wait_for_operation(
+    let result: SecurityCvmProvisionResult = match try_or_eprintln!(operation::await_result(
         console_url,
         &session.access_token,
         op,
-        Duration::from_secs(u64::from(args.wait.wait_timeout_seconds)),
+        &args.wait,
         json_output,
         true,
-    ));
-    let result: SecurityCvmProvisionResult =
-        match operation::extract_operation_result(&op, "Security CVM launch") {
-            Ok(value) => value,
-            Err(message) => {
-                crate::style::eprintln_error(&message);
-                return ExitStatus::Error;
-            }
-        };
+        "Security CVM launch",
+    )) {
+        Some(value) => value,
+        None => return ExitStatus::Ok,
+    };
     print_launch_result(&result, json_output);
     ExitStatus::Ok
 }
@@ -123,26 +115,18 @@ fn launch(config: &ResolvedConfig, args: SecurityCvmLaunchArgs, json_output: boo
 fn update(config: &ResolvedConfig, args: SecurityCvmUpdateArgs, json_output: bool) -> ExitStatus {
     let (console_url, session) = try_or_eprintln!(console_session(config));
     let op = try_or_eprintln!(submit_update(console_url, &session));
-    if args.wait.no_wait {
-        operation::print_operation(&op, json_output, false);
-        return ExitStatus::Ok;
-    }
-    let op = try_or_eprintln!(operation::wait_for_operation(
+    let result: SecurityCvmUpdateResult = match try_or_eprintln!(operation::await_result(
         console_url,
         &session.access_token,
         op,
-        Duration::from_secs(u64::from(args.wait.wait_timeout_seconds)),
+        &args.wait,
         json_output,
         true,
-    ));
-    let result: SecurityCvmUpdateResult =
-        match operation::extract_operation_result(&op, "Security CVM update") {
-            Ok(value) => value,
-            Err(message) => {
-                crate::style::eprintln_error(&message);
-                return ExitStatus::Error;
-            }
-        };
+        "Security CVM update",
+    )) {
+        Some(value) => value,
+        None => return ExitStatus::Ok,
+    };
     print_update_result(&result, json_output);
     ExitStatus::Ok
 }
@@ -197,39 +181,31 @@ fn submit_launch(
     if let Some(value) = &args.region {
         body.insert("region".to_string(), Value::String(value.clone()));
     }
-    let response = Client::new()
-        .post(format!(
-            "{console_url}/api/v1/entities/{}/security-cvm",
-            session.entity.id
-        ))
-        .bearer_auth(&session.access_token)
-        .header("Idempotency-Key", Uuid::new_v4().to_string())
-        .json(&Value::Object(body))
-        .send()
-        .map_err(|err| {
-            (
-                ExitStatus::Error,
-                format!("[error] failed to submit Security CVM launch: {err}"),
-            )
-        })?;
+    let response = console::send(
+        Client::new()
+            .post(format!(
+                "{console_url}/api/v1/entities/{}/security-cvm",
+                session.entity.id
+            ))
+            .bearer_auth(&session.access_token)
+            .header("Idempotency-Key", Uuid::new_v4().to_string())
+            .json(&Value::Object(body)),
+        "submit Security CVM launch",
+    )?;
     sc_read_json_response(response, "submit Security CVM launch")
 }
 
 fn submit_update(console_url: &str, session: &Session) -> Result<Operation, (ExitStatus, String)> {
-    let response = Client::new()
-        .post(format!(
-            "{console_url}/api/v1/entities/{}/security-cvm/actions/update",
-            session.entity.id
-        ))
-        .bearer_auth(&session.access_token)
-        .header("Idempotency-Key", Uuid::new_v4().to_string())
-        .send()
-        .map_err(|err| {
-            (
-                ExitStatus::Error,
-                format!("[error] failed to submit Security CVM update: {err}"),
-            )
-        })?;
+    let response = console::send(
+        Client::new()
+            .post(format!(
+                "{console_url}/api/v1/entities/{}/security-cvm/actions/update",
+                session.entity.id
+            ))
+            .bearer_auth(&session.access_token)
+            .header("Idempotency-Key", Uuid::new_v4().to_string()),
+        "submit Security CVM update",
+    )?;
     sc_read_json_response(response, "submit Security CVM update")
 }
 
@@ -237,19 +213,15 @@ fn submit_terminate(
     console_url: &str,
     session: &Session,
 ) -> Result<SecurityCvm, (ExitStatus, String)> {
-    let response = Client::new()
-        .delete(format!(
-            "{console_url}/api/v1/entities/{}/security-cvm",
-            session.entity.id
-        ))
-        .bearer_auth(&session.access_token)
-        .send()
-        .map_err(|err| {
-            (
-                ExitStatus::Error,
-                format!("[error] failed to terminate Security CVM: {err}"),
-            )
-        })?;
+    let response = console::send(
+        Client::new()
+            .delete(format!(
+                "{console_url}/api/v1/entities/{}/security-cvm",
+                session.entity.id
+            ))
+            .bearer_auth(&session.access_token),
+        "terminate Security CVM",
+    )?;
     sc_read_json_response(response, "terminate Security CVM")
 }
 
@@ -299,28 +271,17 @@ fn sc_read_json_response<T: for<'de> Deserialize<'de>>(
 
 fn validate_launch_args(args: &SecurityCvmLaunchArgs) -> Result<(), String> {
     if let Some(value) = args.instance_type.as_deref() {
-        validate_security_cvm_config_value("--instance-type", value, 100)?;
+        crate::console::validate_config_value("--instance-type", value, 100)?;
     }
     if let Some(value) = args.region.as_deref() {
-        validate_security_cvm_config_value("--region", value, 64)?;
+        crate::console::validate_config_value("--region", value, 64)?;
     }
     Ok(())
 }
 
-fn validate_security_cvm_config_value(
-    name: &str,
-    value: &str,
-    max_len: usize,
-) -> Result<(), String> {
-    crate::console::validate_config_value(name, value, max_len)
-}
-
 fn print_security_cvm(security_cvm: &SecurityCvm, json_output: bool) {
     if json_output {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(security_cvm).expect("Security CVM output serializes")
-        );
+        style::emit_json(security_cvm);
     } else {
         let view = style::SecurityCvmView {
             id: &security_cvm.id,
@@ -341,10 +302,7 @@ fn print_security_cvm(security_cvm: &SecurityCvm, json_output: bool) {
 
 fn print_launch_result(result: &SecurityCvmProvisionResult, json_output: bool) {
     if json_output {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(result).expect("Security CVM launch output serializes")
-        );
+        style::emit_json(result);
     } else {
         let sc = &result.security_cvm;
         let mut confirm = style::ConfirmBlock::new("launched", "security cvm", sc.id.clone())
@@ -364,10 +322,7 @@ fn print_launch_result(result: &SecurityCvmProvisionResult, json_output: bool) {
 
 fn print_update_result(result: &SecurityCvmUpdateResult, json_output: bool) {
     if json_output {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(result).expect("Security CVM update output serializes")
-        );
+        style::emit_json(result);
     } else {
         let sc = &result.security_cvm;
         let mut confirm = style::ConfirmBlock::new("updated", "security cvm", sc.id.clone())
@@ -391,10 +346,7 @@ fn print_update_result(result: &SecurityCvmUpdateResult, json_output: bool) {
 
 fn print_terminate_result(security_cvm: &SecurityCvm, json_output: bool) {
     if json_output {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(security_cvm).expect("Security CVM output serializes")
-        );
+        style::emit_json(security_cvm);
     } else {
         let confirm =
             style::ConfirmBlock::new("terminated", "security cvm", security_cvm.id.clone())
@@ -409,11 +361,7 @@ fn print_terminate_result(security_cvm: &SecurityCvm, json_output: bool) {
 
 fn print_attestation(attestation: &SecurityCvmAttestation, json_output: bool) {
     if json_output {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(attestation)
-                .expect("Security CVM attestation output serializes")
-        );
+        style::emit_json(attestation);
     } else {
         let view = style::SecurityCvmAttestationView {
             security_cvm_id: &attestation.security_cvm_id,
@@ -426,19 +374,5 @@ fn print_attestation(attestation: &SecurityCvmAttestation, json_output: bool) {
             verified_at: attestation.verdict.verified_at.as_deref(),
         };
         println!("{}", style::security_cvm_attestation_card(&view));
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn validate_security_cvm_config_value_rejects_slash() {
-        assert_eq!(
-            validate_security_cvm_config_value("--instance-type", "tdx/small", 100)
-                .expect_err("slash rejected"),
-            "[usage] --instance-type may contain only letters, digits, '.', '_', and '-'"
-        );
     }
 }

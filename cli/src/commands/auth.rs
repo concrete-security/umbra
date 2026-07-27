@@ -702,13 +702,7 @@ fn refresh(config: &ResolvedConfig, json_output: bool) -> ExitStatus {
 }
 
 fn token(config: &ResolvedConfig) -> ExitStatus {
-    let session = match load_session_or_auth_required(config) {
-        Ok(session) => session,
-        Err((status, message)) => {
-            crate::style::eprintln_error(&message);
-            return status;
-        }
-    };
+    let session = try_or_eprintln!(load_session_or_auth_required(config));
     if session.expires_at > Utc::now() {
         println!("{}", session.access_token);
         return ExitStatus::Ok;
@@ -935,10 +929,7 @@ fn status(config: &ResolvedConfig, json_output: bool) -> ExitStatus {
                 mode: session::mode_string(&config.config_dir),
             },
         };
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&payload).expect("status payload serializes")
-        );
+        style::emit_json(&payload);
     } else {
         let config_dir = config.config_dir.display().to_string();
         let session_path = session::session_path(&config.config_dir)

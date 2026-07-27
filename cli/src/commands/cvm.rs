@@ -5,7 +5,6 @@ use std::{
     io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    time::Duration,
 };
 
 #[cfg(unix)]
@@ -24,7 +23,8 @@ use crate::{
     commands::{alias, select_cvm},
     config::{self, ResolvedConfig},
     console::{
-        fetch_json, push_query, read_json_response, read_with_etag, validate_uuid, ListPage,
+        fetch_json, post_json, push_query, read_json_response, read_with_etag, send, validate_uuid,
+        ListPage,
     },
     exit::ExitStatus,
     operation::{self, Operation},
@@ -319,25 +319,18 @@ fn list(config: &ResolvedConfig, args: CvmListArgs, json_output: bool) -> ExitSt
             return ExitStatus::Usage;
         }
     };
-    let (console_url, session) = match crate::console::console_session(config) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            style::eprintln_error(&message);
-            return status;
-        }
-    };
+    let (console_url, session) = try_or_eprintln!(crate::console::console_session(config));
     // Assemble the query string `?state=..&profile_id=..` from --state and the
     // global --profile. The Console does the filtering, not the CLI.
     let mut query = args.query_params();
     push_query(&mut query, "profile_id", &profile_id);
-    let page: ListPage<Cvm> =
-        match fetch_json(console_url, &session, "/api/v1/cvms", &query, "list CVMs") {
-            Ok(value) => value,
-            Err((status, message)) => {
-                style::eprintln_error(&message);
-                return status;
-            }
-        };
+    let page: ListPage<Cvm> = try_or_eprintln!(fetch_json(
+        console_url,
+        &session,
+        "/api/v1/cvms",
+        &query,
+        "list CVMs"
+    ));
     let state_filter = args.state.map(wire);
     print_cvm_list(
         page,
@@ -365,35 +358,20 @@ fn instance_types(
     args: CvmInstanceTypesArgs,
     json_output: bool,
 ) -> ExitStatus {
-    let (console_url, session) = match crate::console::console_session(config) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            style::eprintln_error(&message);
-            return status;
-        }
-    };
+    let (console_url, session) = try_or_eprintln!(crate::console::console_session(config));
     let mut query: Vec<(&'static str, String)> = Vec::new();
     if args.refresh {
         query.push(("refresh", "true".to_string()));
     }
-    let response: InstanceTypesResponse = match fetch_json(
+    let response: InstanceTypesResponse = try_or_eprintln!(fetch_json(
         console_url,
         &session,
         "/api/v1/instance-types",
         &query,
         "get instance types",
-    ) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            style::eprintln_error(&message);
-            return status;
-        }
-    };
+    ));
     if json_output {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&response).expect("instance types output serializes")
-        );
+        style::emit_json(&response);
         return ExitStatus::Ok;
     }
     if response.has_unknown_fields() {
@@ -448,45 +426,20 @@ fn launch(config: &ResolvedConfig, args: CvmLaunchArgs, json_output: bool) -> Ex
             return status;
         }
     }
-    let (console_url, session) = match crate::console::console_session(config) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            style::eprintln_error(&message);
-            return status;
-        }
-    };
-    let launch = match prepare_launch(config, console_url, &session, &args) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            style::eprintln_error(&message);
-            return status;
-        }
-    };
-    let op = match submit_launch(console_url, &session.access_token, &launch) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            style::eprintln_error(&message);
-            return status;
-        }
-    };
-    if args.wait.no_wait {
-        operation::print_operation(&op, json_output, false);
-        return ExitStatus::Ok;
-    }
-    let op = try_or_eprintln!(operation::wait_for_operation(
+    let (console_url, session) = try_or_eprintln!(crate::console::console_session(config));
+    let launch = try_or_eprintln!(prepare_launch(config, console_url, &session, &args));
+    let op = try_or_eprintln!(submit_launch(console_url, &session.access_token, &launch));
+    let result: CvmLaunchResult = match try_or_eprintln!(operation::await_result(
         console_url,
         &session.access_token,
         op,
-        Duration::from_secs(u64::from(args.wait.wait_timeout_seconds)),
+        &args.wait,
         json_output,
         true,
-    ));
-    let result: CvmLaunchResult = match operation::extract_operation_result(&op, "CVM launch") {
-        Ok(value) => value,
-        Err(message) => {
-            style::eprintln_error(&message);
-            return ExitStatus::Error;
-        }
+        "CVM launch",
+    )) {
+        Some(value) => value,
+        None => return ExitStatus::Ok,
     };
     // Record the alias as soon as the CVM exists, so a later failure writing the
     // policy file or defaults cannot silently lose it.
@@ -530,46 +483,20 @@ fn profile_mutation(
         style::eprintln_error(&message);
         return ExitStatus::Usage;
     }
-    let profile_id = match selected_profile(config) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            style::eprintln_error(&message);
-            return status;
-        }
-    };
-    let (console_url, session) = match crate::console::console_session(config) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            style::eprintln_error(&message);
-            return status;
-        }
-    };
-    let (_, etag) = match fetch_cvm_with_etag(console_url, &session, cvm_id) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            style::eprintln_error(&message);
-            return status;
-        }
-    };
-    let cvm = match mutate_profile(
+    let profile_id = try_or_eprintln!(selected_profile(config));
+    let (console_url, session) = try_or_eprintln!(crate::console::console_session(config));
+    let (_, etag) = try_or_eprintln!(fetch_cvm_with_etag(console_url, &session, cvm_id));
+    let cvm = try_or_eprintln!(mutate_profile(
         console_url,
         &session.access_token,
         cvm_id,
         &etag,
         &profile_id,
         mutation,
-    ) {
-        Ok((cvm, _)) => cvm,
-        Err((status, message)) => {
-            style::eprintln_error(&message);
-            return status;
-        }
-    };
+    ))
+    .0;
     if json_output {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&cvm).expect("CVM output serializes")
-        );
+        style::emit_json(&cvm);
     } else {
         // Sync mutation: render the section 6.4 confirm template. The verb
         // matches the requested action; the entity-noun is `profile`; the
@@ -593,28 +520,16 @@ fn lifecycle_action(
         style::eprintln_error(&message);
         return ExitStatus::Usage;
     }
-    let (console_url, session) = match crate::console::console_session(config) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            style::eprintln_error(&message);
-            return status;
-        }
-    };
-    let (_, etag) = match fetch_cvm_with_etag(console_url, &session, cvm_id) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            style::eprintln_error(&message);
-            return status;
-        }
-    };
-    let cvm =
-        match submit_lifecycle_action(console_url, &session.access_token, cvm_id, &etag, action) {
-            Ok((cvm, _)) => cvm,
-            Err((status, message)) => {
-                style::eprintln_error(&message);
-                return status;
-            }
-        };
+    let (console_url, session) = try_or_eprintln!(crate::console::console_session(config));
+    let (_, etag) = try_or_eprintln!(fetch_cvm_with_etag(console_url, &session, cvm_id));
+    let cvm = try_or_eprintln!(submit_lifecycle_action(
+        console_url,
+        &session.access_token,
+        cvm_id,
+        &etag,
+        action
+    ))
+    .0;
     // Stopping a CVM kills its sessions (they live in the CVM's tmpfs `/run`);
     // drop their now-stale aliases, but keep the CVM's own alias — it can be
     // restarted. `start` leaves the store untouched.
@@ -642,45 +557,25 @@ fn update(config: &ResolvedConfig, args: CvmUpdateArgs, json_output: bool) -> Ex
         style::eprintln_error(&message);
         return ExitStatus::Usage;
     }
-    let (console_url, session) = match crate::console::console_session(config) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            style::eprintln_error(&message);
-            return status;
-        }
-    };
-    let (_, etag) = match fetch_cvm_with_etag(console_url, &session, &cvm_id) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            style::eprintln_error(&message);
-            return status;
-        }
-    };
-    let op = match submit_update(console_url, &session.access_token, &cvm_id, &etag) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            style::eprintln_error(&message);
-            return status;
-        }
-    };
-    if args.wait.no_wait {
-        operation::print_operation(&op, json_output, false);
-        return ExitStatus::Ok;
-    }
-    let op = try_or_eprintln!(operation::wait_for_operation(
+    let (console_url, session) = try_or_eprintln!(crate::console::console_session(config));
+    let (_, etag) = try_or_eprintln!(fetch_cvm_with_etag(console_url, &session, &cvm_id));
+    let op = try_or_eprintln!(submit_update(
+        console_url,
+        &session.access_token,
+        &cvm_id,
+        &etag
+    ));
+    let result: CvmLaunchResult = match try_or_eprintln!(operation::await_result(
         console_url,
         &session.access_token,
         op,
-        Duration::from_secs(u64::from(args.wait.wait_timeout_seconds)),
+        &args.wait,
         json_output,
         true,
-    ));
-    let result: CvmLaunchResult = match operation::extract_operation_result(&op, "CVM update") {
-        Ok(value) => value,
-        Err(message) => {
-            style::eprintln_error(&message);
-            return ExitStatus::Error;
-        }
+        "CVM update",
+    )) {
+        Some(value) => value,
+        None => return ExitStatus::Ok,
     };
     let (policy_file, policy_status) = match write_policy_file_after_update(
         &config.config_dir,
@@ -715,48 +610,28 @@ fn terminate(config: &ResolvedConfig, args: CvmTerminateArgs, json_output: bool)
         style::eprintln_error(&message);
         return ExitStatus::Usage;
     }
-    let (console_url, session) = match crate::console::console_session(config) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            style::eprintln_error(&message);
-            return status;
-        }
-    };
-    let (_, etag) = match fetch_cvm_with_etag(console_url, &session, &cvm_id) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            style::eprintln_error(&message);
-            return status;
-        }
-    };
-    let op = match submit_terminate(console_url, &session.access_token, &cvm_id, &etag) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            style::eprintln_error(&message);
-            return status;
-        }
-    };
-    if args.wait.no_wait {
-        // The teardown is only submitted, not confirmed complete, so the alias
-        // is left in place — a later `alias prune` (or a waited terminate)
-        // reconciles it once the CVM is actually gone.
-        operation::print_operation(&op, json_output, false);
-        return ExitStatus::Ok;
-    }
-    let op = try_or_eprintln!(operation::wait_for_operation(
+    let (console_url, session) = try_or_eprintln!(crate::console::console_session(config));
+    let (_, etag) = try_or_eprintln!(fetch_cvm_with_etag(console_url, &session, &cvm_id));
+    let op = try_or_eprintln!(submit_terminate(
+        console_url,
+        &session.access_token,
+        &cvm_id,
+        &etag
+    ));
+    let cvm: Cvm = match try_or_eprintln!(operation::await_result(
         console_url,
         &session.access_token,
         op,
-        Duration::from_secs(u64::from(args.wait.wait_timeout_seconds)),
+        &args.wait,
         json_output,
         true,
-    ));
-    let cvm: Cvm = match operation::extract_operation_result(&op, "CVM") {
-        Ok(value) => value,
-        Err(message) => {
-            style::eprintln_error(&message);
-            return ExitStatus::Error;
-        }
+        "CVM",
+    )) {
+        Some(value) => value,
+        // The teardown is only submitted, not confirmed complete (--no-wait), so
+        // the alias is left in place — a later `alias prune` (or a waited
+        // terminate) reconciles it once the CVM is actually gone.
+        None => return ExitStatus::Ok,
     };
     // The CVM is now confirmed terminated; drop its alias and any session
     // aliases bound to it (best-effort, never fails the terminate).
@@ -1039,37 +914,21 @@ fn fetch_launch_profiles(
     console_url: &str,
     session: &Session,
 ) -> Result<ListPage<LaunchProfile>, (ExitStatus, String)> {
-    let response = Client::new()
-        .get(format!(
-            "{console_url}/api/v1/entities/{}/profiles",
-            session.entity.id
-        ))
-        .bearer_auth(&session.access_token)
-        .send()
-        .map_err(|err| {
-            (
-                ExitStatus::Error,
-                format!("[error] failed to list profiles: {err}"),
-            )
-        })?;
-    read_json_response(response, "list profiles")
+    let path = format!("/api/v1/entities/{}/profiles", session.entity.id);
+    fetch_json(console_url, session, &path, &[], "list profiles")
 }
 
 fn fetch_launch_keys(
     console_url: &str,
     session: &Session,
 ) -> Result<ListPage<ConsoleSshKey>, (ExitStatus, String)> {
-    let response = Client::new()
-        .get(format!("{console_url}/api/v1/me/keys"))
-        .bearer_auth(&session.access_token)
-        .send()
-        .map_err(|err| {
-            (
-                ExitStatus::Error,
-                format!("[error] failed to list SSH keys: {err}"),
-            )
-        })?;
-    read_json_response(response, "list SSH keys")
+    fetch_json(
+        console_url,
+        session,
+        "/api/v1/me/keys",
+        &[],
+        "list SSH keys",
+    )
 }
 
 fn create_launch_key(
@@ -1078,19 +937,13 @@ fn create_launch_key(
     label: &str,
     public_key: &str,
 ) -> Result<ConsoleSshKey, (ExitStatus, String)> {
-    let response = Client::new()
-        .post(format!("{console_url}/api/v1/me/keys"))
-        .bearer_auth(&session.access_token)
-        .header("Idempotency-Key", Uuid::new_v4().to_string())
-        .json(&json!({ "label": label, "public_key": public_key }))
-        .send()
-        .map_err(|err| {
-            (
-                ExitStatus::Error,
-                format!("[error] failed to add SSH key: {err}"),
-            )
-        })?;
-    read_json_response(response, "add SSH key")
+    post_json(
+        console_url,
+        &session.access_token,
+        "/api/v1/me/keys",
+        &json!({ "label": label, "public_key": public_key }),
+        "add SSH key",
+    )
 }
 
 fn ensure_default_ssh_keypair(
@@ -1373,19 +1226,13 @@ fn submit_launch(
     if let Some(value) = launch.disk_size_gb {
         body.insert("disk_size_gb".to_string(), Value::Number(value.into()));
     }
-    let response = Client::new()
-        .post(format!("{console_url}/api/v1/cvms"))
-        .bearer_auth(access_token)
-        .header("Idempotency-Key", Uuid::new_v4().to_string())
-        .json(&Value::Object(body))
-        .send()
-        .map_err(|err| {
-            (
-                ExitStatus::Error,
-                format!("[error] failed to submit CVM launch: {err}"),
-            )
-        })?;
-    read_json_response(response, "submit CVM launch")
+    post_json(
+        console_url,
+        access_token,
+        "/api/v1/cvms",
+        &Value::Object(body),
+        "submit CVM launch",
+    )
 }
 
 fn mutate_profile(
@@ -1405,18 +1252,15 @@ fn mutate_profile(
             "{console_url}/api/v1/cvms/{cvm_id}/profiles/{profile_id}"
         )),
     };
-    let response = request
-        .bearer_auth(access_token)
-        .header(IF_MATCH, etag)
-        .header("Idempotency-Key", Uuid::new_v4().to_string())
-        .send()
-        .map_err(|err| {
-            (
-                ExitStatus::Error,
-                format!("[error] failed to {} CVM profile: {err}", mutation.as_str()),
-            )
-        })?;
-    read_with_etag::<Cvm>(response, mutation.as_str())
+    let label = format!("{} CVM profile", mutation.as_str());
+    let response = send(
+        request
+            .bearer_auth(access_token)
+            .header(IF_MATCH, etag)
+            .header("Idempotency-Key", Uuid::new_v4().to_string()),
+        &label,
+    )?;
+    read_with_etag::<Cvm>(response, &label)
 }
 
 fn submit_lifecycle_action(
@@ -1426,22 +1270,19 @@ fn submit_lifecycle_action(
     etag: &str,
     action: LifecycleAction,
 ) -> Result<(Cvm, String), (ExitStatus, String)> {
-    let response = Client::new()
-        .post(format!(
-            "{console_url}{}",
-            cvm_action_path(cvm_id, action.as_str())
-        ))
-        .bearer_auth(access_token)
-        .header(IF_MATCH, etag)
-        .header("Idempotency-Key", Uuid::new_v4().to_string())
-        .send()
-        .map_err(|err| {
-            (
-                ExitStatus::Error,
-                format!("[error] failed to {} CVM: {err}", action.as_str()),
-            )
-        })?;
-    read_with_etag::<Cvm>(response, action.as_str())
+    let label = format!("{} CVM", action.as_str());
+    let response = send(
+        Client::new()
+            .post(format!(
+                "{console_url}{}",
+                cvm_action_path(cvm_id, action.as_str())
+            ))
+            .bearer_auth(access_token)
+            .header(IF_MATCH, etag)
+            .header("Idempotency-Key", Uuid::new_v4().to_string()),
+        &label,
+    )?;
+    read_with_etag::<Cvm>(response, &label)
 }
 
 fn submit_update(
@@ -1450,21 +1291,17 @@ fn submit_update(
     cvm_id: &str,
     etag: &str,
 ) -> Result<Operation, (ExitStatus, String)> {
-    let response = Client::new()
-        .post(format!(
-            "{console_url}{}",
-            cvm_action_path(cvm_id, "update")
-        ))
-        .bearer_auth(access_token)
-        .header(IF_MATCH, etag)
-        .header("Idempotency-Key", Uuid::new_v4().to_string())
-        .send()
-        .map_err(|err| {
-            (
-                ExitStatus::Error,
-                format!("[error] failed to submit CVM update: {err}"),
-            )
-        })?;
+    let response = send(
+        Client::new()
+            .post(format!(
+                "{console_url}{}",
+                cvm_action_path(cvm_id, "update")
+            ))
+            .bearer_auth(access_token)
+            .header(IF_MATCH, etag)
+            .header("Idempotency-Key", Uuid::new_v4().to_string()),
+        "submit CVM update",
+    )?;
     read_json_response(response, "submit CVM update")
 }
 
@@ -1474,21 +1311,17 @@ fn submit_terminate(
     cvm_id: &str,
     etag: &str,
 ) -> Result<Operation, (ExitStatus, String)> {
-    let response = Client::new()
-        .post(format!(
-            "{console_url}{}",
-            cvm_action_path(cvm_id, "terminate")
-        ))
-        .bearer_auth(access_token)
-        .header(IF_MATCH, etag)
-        .header("Idempotency-Key", Uuid::new_v4().to_string())
-        .send()
-        .map_err(|err| {
-            (
-                ExitStatus::Error,
-                format!("[error] failed to submit CVM termination: {err}"),
-            )
-        })?;
+    let response = send(
+        Client::new()
+            .post(format!(
+                "{console_url}{}",
+                cvm_action_path(cvm_id, "terminate")
+            ))
+            .bearer_auth(access_token)
+            .header(IF_MATCH, etag)
+            .header("Idempotency-Key", Uuid::new_v4().to_string()),
+        "submit CVM termination",
+    )?;
     read_json_response(response, "submit CVM termination")
 }
 
@@ -1553,29 +1386,8 @@ fn prepare_policy_file(
 }
 
 fn install_policy_file(target: &Path, data: &[u8]) -> Result<(), String> {
-    let dir = target
-        .parent()
-        .ok_or_else(|| "[error] failed to resolve policy directory".to_string())?;
-    let stem = target
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or("policy");
-    let tmp = dir.join(format!(".{stem}.{}.tmp", std::process::id()));
-    let mut options = OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-    }
-    let mut file = options
-        .open(&tmp)
-        .map_err(|err| format!("[error] failed to create temporary aTLS policy file: {err}"))?;
-    file.write_all(data)
-        .and_then(|_| file.sync_all())
-        .map_err(|err| format!("[error] failed to write aTLS policy file: {err}"))?;
-    fs::rename(&tmp, target)
-        .map_err(|err| format!("[error] failed to install aTLS policy file: {err}"))?;
-    tighten_policy_permissions(target)
+    crate::fsutil::write_atomic_file(target, data, 0o600)
+        .map_err(|err| format!("[error] failed to write aTLS policy file: {err}"))
 }
 
 fn tighten_policy_permissions(target: &Path) -> Result<(), String> {
@@ -1704,10 +1516,7 @@ fn print_cvm_list(
     state_filter: Option<&str>,
 ) {
     if json_output {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&page.items).expect("CVM list output serializes")
-        );
+        style::emit_json(&page.items);
         return;
     }
     let views: Vec<style::CvmView<'_>> = page
@@ -1746,10 +1555,7 @@ fn print_launch_result(cvm: Cvm, policy_file: PathBuf, alias: Option<&str>, json
             policy_file_path: policy_file.display().to_string(),
             policy_file_status: None,
         };
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&output).expect("CVM launch output serializes")
-        );
+        style::emit_json(&output);
     } else {
         let cvm_id = cvm.id.clone();
         // The next step and every later verb accept the alias, so prefer it;
@@ -1767,10 +1573,7 @@ fn print_launch_result(cvm: Cvm, policy_file: PathBuf, alias: Option<&str>, json
 
 fn print_lifecycle_result(action: LifecycleAction, cvm: &Cvm, json_output: bool) {
     if json_output {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(cvm).expect("CVM output serializes")
-        );
+        style::emit_json(cvm);
     } else {
         let confirm = style::ConfirmBlock::new(action.past_tense(), "cvm", cvm.id.clone());
         println!("{}", style::render_confirm(&confirm));
@@ -1789,10 +1592,7 @@ fn print_update_result(
             policy_file_path: policy_file.display().to_string(),
             policy_file_status: Some(policy_status.as_str().to_string()),
         };
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&output).expect("CVM update output serializes")
-        );
+        style::emit_json(&output);
     } else {
         let cvm_id = cvm.id.clone();
         let confirm = style::ConfirmBlock::new("updated", "cvm", cvm_id.clone())
@@ -1807,10 +1607,7 @@ fn print_update_result(
 
 fn print_terminate_result(cvm: &Cvm, json_output: bool) {
     if json_output {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(cvm).expect("CVM output serializes")
-        );
+        style::emit_json(cvm);
     } else {
         let confirm = style::ConfirmBlock::new("terminated", "cvm", cvm.id.clone())
             .field("state", cvm.state.clone());

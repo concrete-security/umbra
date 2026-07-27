@@ -1,14 +1,12 @@
 use std::{
     env, fs,
-    fs::OpenOptions,
-    io::Write,
     path::{Path, PathBuf},
 };
 
 use serde::Deserialize;
 
 #[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 
 #[derive(Debug, Default, Deserialize)]
 struct ConfigFile {
@@ -423,26 +421,8 @@ pub(crate) fn persist_string_values(
     }
     let data = toml::to_string_pretty(&table)
         .map_err(|err| format!("[error] failed to serialize config: {err}"))?;
-    let tmp = config_dir.join(format!(".config.{}.tmp", std::process::id()));
-    let mut options = OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-    }
-    let mut file = options
-        .open(&tmp)
-        .map_err(|err| format!("[error] failed to create temporary config file: {err}"))?;
-    file.write_all(data.as_bytes())
-        .and_then(|_| file.sync_all())
+    crate::fsutil::write_atomic_file(&target, data.as_bytes(), 0o600)
         .map_err(|err| format!("[error] failed to write config file: {err}"))?;
-    fs::rename(&tmp, &target)
-        .map_err(|err| format!("[error] failed to install config file: {err}"))?;
-    #[cfg(unix)]
-    {
-        fs::set_permissions(&target, fs::Permissions::from_mode(0o600))
-            .map_err(|err| format!("[error] failed to tighten config file permissions: {err}"))?;
-    }
     Ok(())
 }
 

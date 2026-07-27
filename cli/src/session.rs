@@ -1,6 +1,5 @@
 use std::{
-    fs::{self, OpenOptions},
-    io::Write,
+    fs,
     path::{Path, PathBuf},
 };
 
@@ -9,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, Zeroizing};
 
 #[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Entity {
@@ -67,31 +66,12 @@ pub fn remove(config_dir: &Path) -> Result<bool, String> {
 pub fn write_atomic(config_dir: &Path, session: &Session) -> Result<(), String> {
     ensure_config_dir(config_dir)?;
     let target = session_path(config_dir);
-    let tmp = config_dir.join(format!(".session.{}.tmp", std::process::id()));
     let data = Zeroizing::new(
         serde_json::to_vec_pretty(session)
             .map_err(|err| format!("[error] failed to serialize session: {err}"))?,
     );
-
-    let mut options = OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-    }
-    let mut file = options
-        .open(&tmp)
-        .map_err(|err| format!("[error] failed to create temporary session file: {err}"))?;
-    file.write_all(&data)
-        .and_then(|_| file.sync_all())
+    crate::fsutil::write_atomic_file(&target, &data, 0o600)
         .map_err(|err| format!("[error] failed to write session file: {err}"))?;
-    fs::rename(&tmp, &target)
-        .map_err(|err| format!("[error] failed to install session file: {err}"))?;
-    #[cfg(unix)]
-    {
-        fs::set_permissions(&target, fs::Permissions::from_mode(0o600))
-            .map_err(|err| format!("[error] failed to tighten session file permissions: {err}"))?;
-    }
     Ok(())
 }
 

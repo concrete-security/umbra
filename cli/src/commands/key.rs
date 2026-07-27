@@ -13,8 +13,9 @@ use uuid::Uuid;
 use crate::{
     cli::{KeyAddArgs, KeyCommand},
     config::ResolvedConfig,
-    console::{console_session, read_empty_response, read_json_response, ListPage},
+    console::{console_session, fetch_json, post_json, read_empty_response, send, ListPage},
     exit::ExitStatus,
+    session::Session,
     ssh_identity::{self, persistable_path},
     ssh_identity_store, style,
 };
@@ -54,26 +55,11 @@ pub fn run(command: KeyCommand, config: &ResolvedConfig, json: bool) -> ExitStat
 }
 
 fn list(config: &ResolvedConfig, json_output: bool) -> ExitStatus {
-    let (console_url, session) = match console_session(config) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            crate::style::eprintln_error(&message);
-            return status;
-        }
-    };
-    let page = match fetch_keys(console_url, &session.access_token) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            crate::style::eprintln_error(&message);
-            return status;
-        }
-    };
+    let (console_url, session) = try_or_eprintln!(console_session(config));
+    let page = try_or_eprintln!(fetch_keys(console_url, &session));
     let keys: Vec<_> = page.items.iter().map(key_output).collect();
     if json_output {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&keys).expect("key list output serializes")
-        );
+        style::emit_json(&keys);
     } else {
         let views: Vec<style::KeyView<'_>> = page
             .items
@@ -111,31 +97,18 @@ fn add(config: &ResolvedConfig, args: KeyAddArgs, json_output: bool) -> ExitStat
             return ExitStatus::Error;
         }
     };
-    let identity = match resolve_key_add_identity(
+    let identity = try_or_eprintln!(resolve_key_add_identity(
         args.file.as_deref(),
         args.identity_file.as_deref(),
         &public_key,
-    ) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            crate::style::eprintln_error(&message);
-            return status;
-        }
-    };
-    let (console_url, session) = match console_session(config) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            crate::style::eprintln_error(&message);
-            return status;
-        }
-    };
-    let key = match create_key(console_url, &session.access_token, &args.label, &public_key) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            crate::style::eprintln_error(&message);
-            return status;
-        }
-    };
+    ));
+    let (console_url, session) = try_or_eprintln!(console_session(config));
+    let key = try_or_eprintln!(create_key(
+        console_url,
+        &session.access_token,
+        &args.label,
+        &public_key
+    ));
     if let Some(path) = identity.path.as_deref() {
         if let Err(err) =
             ssh_identity_store::write_identity(&config.config_dir, &key.id, &persistable_path(path))
@@ -162,10 +135,7 @@ fn add(config: &ResolvedConfig, args: KeyAddArgs, json_output: bool) -> ExitStat
     }
     let output = key_output(&key);
     if json_output {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&output).expect("key add output serializes")
-        );
+        style::emit_json(&output);
     } else {
         let confirm = style::ConfirmBlock::new("added", "key", output.label.clone())
             .field("id", output.id.clone())
@@ -301,13 +271,7 @@ fn remove(config: &ResolvedConfig, key_id: &str, json_output: bool) -> ExitStatu
         crate::style::eprintln_error("[usage] KEY_ID must be a UUID or a known alias");
         return ExitStatus::Usage;
     }
-    let (console_url, session) = match console_session(config) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            crate::style::eprintln_error(&message);
-            return status;
-        }
-    };
+    let (console_url, session) = try_or_eprintln!(console_session(config));
     if let Err((status, message)) = delete_key(console_url, &session.access_token, key_id) {
         crate::style::eprintln_error(&message);
         return status;
@@ -320,11 +284,7 @@ fn remove(config: &ResolvedConfig, key_id: &str, json_output: bool) -> ExitStatu
         ))
     });
     if json_output {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&KeyRemoveOutput { key_id })
-                .expect("key remove output serializes")
-        );
+        style::emit_json(&KeyRemoveOutput { key_id });
     } else {
         let confirm = style::ConfirmBlock::new("removed", "key", key_id);
         println!("{}", style::render_confirm(&confirm));
@@ -332,25 +292,33 @@ fn remove(config: &ResolvedConfig, key_id: &str, json_output: bool) -> ExitStatu
     ExitStatus::Ok
 }
 
-/// Whether the caller owns a registered SSH key with `key_id`. The Console has
-/// no single-key GET, so this lists the caller's keys and tests membership —
-/// used to fail-fast when aliasing a key that does not exist.
+/// Confirm the caller owns a registered SSH key with `key_id`, erroring if it
+/// is absent. The Console has no single-key GET, so this lists the caller's
+/// keys and tests membership — used to fail-fast when aliasing a key. Mirrors
+/// `cvm_exists` / `profile_exists` so alias creation dispatches uniformly.
 pub(crate) fn key_exists(
     console_url: &str,
-    access_token: &str,
+    session: &Session,
     key_id: &str,
-) -> Result<bool, (ExitStatus, String)> {
-    let page = fetch_keys(console_url, access_token)?;
-    Ok(page.items.iter().any(|key| key.id == key_id))
+) -> Result<(), (ExitStatus, String)> {
+    let page = fetch_keys(console_url, session)?;
+    if page.items.iter().any(|key| key.id == key_id) {
+        Ok(())
+    } else {
+        Err((
+            ExitStatus::Error,
+            format!("[error] ssh-key {key_id} was not found"),
+        ))
+    }
 }
 
 /// Ids of the caller's registered SSH keys, for `alias prune` to drop aliases
 /// whose key no longer exists.
 pub(crate) fn key_ids(
     console_url: &str,
-    access_token: &str,
+    session: &Session,
 ) -> Result<Vec<String>, (ExitStatus, String)> {
-    Ok(fetch_keys(console_url, access_token)?
+    Ok(fetch_keys(console_url, session)?
         .items
         .into_iter()
         .map(|key| key.id)
@@ -371,19 +339,9 @@ pub(crate) fn key_path(key_id: &str) -> String {
 
 fn fetch_keys(
     console_url: &str,
-    access_token: &str,
+    session: &Session,
 ) -> Result<ListPage<ConsoleSshKey>, (ExitStatus, String)> {
-    let response = Client::new()
-        .get(format!("{console_url}{}", keys_path()))
-        .bearer_auth(access_token)
-        .send()
-        .map_err(|err| {
-            (
-                ExitStatus::Error,
-                format!("[error] failed to list SSH keys: {err}"),
-            )
-        })?;
-    read_json_response(response, "list SSH keys")
+    fetch_json(console_url, session, keys_path(), &[], "list SSH keys")
 }
 
 fn create_key(
@@ -392,19 +350,13 @@ fn create_key(
     label: &str,
     public_key: &str,
 ) -> Result<ConsoleSshKey, (ExitStatus, String)> {
-    let response = Client::new()
-        .post(format!("{console_url}/api/v1/me/keys"))
-        .bearer_auth(access_token)
-        .header("Idempotency-Key", Uuid::new_v4().to_string())
-        .json(&json!({ "label": label, "public_key": public_key }))
-        .send()
-        .map_err(|err| {
-            (
-                ExitStatus::Error,
-                format!("[error] failed to add SSH key: {err}"),
-            )
-        })?;
-    read_json_response(response, "add SSH key")
+    post_json(
+        console_url,
+        access_token,
+        keys_path(),
+        &json!({ "label": label, "public_key": public_key }),
+        "add SSH key",
+    )
 }
 
 fn delete_key(
@@ -412,16 +364,12 @@ fn delete_key(
     access_token: &str,
     key_id: &str,
 ) -> Result<(), (ExitStatus, String)> {
-    let response = Client::new()
-        .delete(format!("{console_url}{}", key_path(key_id)))
-        .bearer_auth(access_token)
-        .send()
-        .map_err(|err| {
-            (
-                ExitStatus::Error,
-                format!("[error] failed to remove SSH key: {err}"),
-            )
-        })?;
+    let response = send(
+        Client::new()
+            .delete(format!("{console_url}{}", key_path(key_id)))
+            .bearer_auth(access_token),
+        "remove SSH key",
+    )?;
     read_empty_response(response, "remove SSH key")
 }
 

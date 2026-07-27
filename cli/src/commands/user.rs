@@ -13,7 +13,7 @@ use crate::{
     config::ResolvedConfig,
     console::{
         console_session, fetch_json, read_empty_response, read_etag_only, read_json_response,
-        read_with_etag, validate_uuid, ListPage,
+        read_with_etag, send, validate_uuid, ListPage,
     },
     exit::ExitStatus,
     session::Session,
@@ -120,13 +120,7 @@ fn add(config: &ResolvedConfig, args: UserAddArgs, json_output: bool) -> ExitSta
             return ExitStatus::Usage;
         }
     }
-    let (console_url, session) = match console_session(config) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            crate::style::eprintln_error(&message);
-            return status;
-        }
-    };
+    let (console_url, session) = try_or_eprintln!(console_session(config));
     let target_entity_id = match target_entity_id(args.entity.as_ref(), &session.entity.id) {
         Ok(value) => value,
         Err(message) => {
@@ -134,29 +128,17 @@ fn add(config: &ResolvedConfig, args: UserAddArgs, json_output: bool) -> ExitSta
             return ExitStatus::Usage;
         }
     };
-    let created = match create_user(
+    let created = try_or_eprintln!(create_user(
         console_url,
         &session.access_token,
         &target_entity_id,
         &args.email,
         &name,
         &args.permissions,
-    ) {
-        Ok(value) => value.user,
-        Err((status, message)) => {
-            crate::style::eprintln_error(&message);
-            return status;
-        }
-    };
+    ))
+    .user;
     for profile_id in &profile_ids {
-        let profile_etag = match fetch_profile_etag(console_url, &session.access_token, profile_id)
-        {
-            Ok(value) => value,
-            Err((status, message)) => {
-                crate::style::eprintln_error(&message);
-                return status;
-            }
-        };
+        let profile_etag = try_or_eprintln!(fetch_profile_etag(console_url, &session, profile_id));
         if let Err((status, message)) = assign_profile_member(
             console_url,
             &session.access_token,
@@ -171,45 +153,35 @@ fn add(config: &ResolvedConfig, args: UserAddArgs, json_output: bool) -> ExitSta
     let output = if profile_ids.is_empty() {
         created
     } else {
-        match fetch_user_with_etag(console_url, &session, &target_entity_id, &created.id) {
-            Ok(value) => value.user,
-            Err((status, message)) => {
-                crate::style::eprintln_error(&message);
-                return status;
-            }
-        }
+        try_or_eprintln!(fetch_user_with_etag(
+            console_url,
+            &session,
+            &target_entity_id,
+            &created.id
+        ))
+        .user
     };
     print_user_add(&output, json_output);
     ExitStatus::Ok
 }
 
 fn list(config: &ResolvedConfig, args: UserListArgs, json_output: bool) -> ExitStatus {
-    let (console_url, session) = match console_session(config) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            crate::style::eprintln_error(&message);
-            return status;
-        }
-    };
+    let (console_url, session) = try_or_eprintln!(console_session(config));
     // Build the query string `?status=..&assigned=..` from --status and
     // --assigned. The Console does the filtering, not the CLI.
     let query = args.query_params();
     let path = format!("/api/v1/entities/{}/users", session.entity.id);
-    let page: ListPage<User> = match fetch_json(console_url, &session, &path, &query, "list users")
-    {
-        Ok(value) => value,
-        Err((status, message)) => {
-            crate::style::eprintln_error(&message);
-            return status;
-        }
-    };
+    let page: ListPage<User> = try_or_eprintln!(fetch_json(
+        console_url,
+        &session,
+        &path,
+        &query,
+        "list users"
+    ));
     let status_filter = args.status.map(wire);
     let assigned_filter = args.assigned.map(wire);
     if json_output {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&page.items).expect("user list output serializes")
-        );
+        style::emit_json(&page.items);
     } else {
         let views: Vec<style::UserView<'_>> = page
             .items
@@ -256,20 +228,14 @@ fn show(config: &ResolvedConfig, user_id: &str, json_output: bool) -> ExitStatus
         crate::style::eprintln_error(&message);
         return ExitStatus::Usage;
     }
-    let (console_url, session) = match console_session(config) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            crate::style::eprintln_error(&message);
-            return status;
-        }
-    };
-    let user = match fetch_user_with_etag(console_url, &session, &session.entity.id, user_id) {
-        Ok(value) => value.user,
-        Err((status, message)) => {
-            crate::style::eprintln_error(&message);
-            return status;
-        }
-    };
+    let (console_url, session) = try_or_eprintln!(console_session(config));
+    let user = try_or_eprintln!(fetch_user_with_etag(
+        console_url,
+        &session,
+        &session.entity.id,
+        user_id
+    ))
+    .user;
     print_user(&user, json_output);
     ExitStatus::Ok
 }
@@ -284,25 +250,10 @@ fn lifecycle(
         crate::style::eprintln_error(&message);
         return ExitStatus::Usage;
     }
-    let (console_url, session) = match console_session(config) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            crate::style::eprintln_error(&message);
-            return status;
-        }
-    };
-    let user = match post_user_action(console_url, &session, user_id, action) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            crate::style::eprintln_error(&message);
-            return status;
-        }
-    };
+    let (console_url, session) = try_or_eprintln!(console_session(config));
+    let user = try_or_eprintln!(post_user_action(console_url, &session, user_id, action));
     if json_output {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&user).expect("user lifecycle output serializes")
-        );
+        style::emit_json(&user);
     } else {
         // Section 7.25 mutation confirm: verb = `<action>d` (deactivated /
         // reactivated), identifier = email, detail rows = user id / state.
@@ -319,26 +270,16 @@ fn erase(config: &ResolvedConfig, user_id: &str, json_output: bool) -> ExitStatu
         crate::style::eprintln_error(&message);
         return ExitStatus::Usage;
     }
-    let (console_url, session) = match console_session(config) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            crate::style::eprintln_error(&message);
-            return status;
-        }
-    };
+    let (console_url, session) = try_or_eprintln!(console_session(config));
     if let Err((status, message)) = delete_user(console_url, &session, user_id) {
         crate::style::eprintln_error(&message);
         return status;
     }
     if json_output {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&UserEraseOutput {
-                user_id,
-                state: "erased",
-            })
-            .expect("user erase output serializes")
-        );
+        style::emit_json(&UserEraseOutput {
+            user_id,
+            state: "erased",
+        });
     } else {
         // Section 7.25 mutation confirm: erase is irreversible and emits a
         // single-line block (no detail rows; we do not have the user's email
@@ -372,26 +313,16 @@ fn permissions_list(config: &ResolvedConfig, user_id: &str, json_output: bool) -
         crate::style::eprintln_error(&message);
         return ExitStatus::Usage;
     }
-    let (console_url, session) = match console_session(config) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            crate::style::eprintln_error(&message);
-            return status;
-        }
-    };
-    let user = match fetch_user_with_etag(console_url, &session, &session.entity.id, user_id) {
-        Ok(value) => value.user,
-        Err((status, message)) => {
-            crate::style::eprintln_error(&message);
-            return status;
-        }
-    };
+    let (console_url, session) = try_or_eprintln!(console_session(config));
+    let user = try_or_eprintln!(fetch_user_with_etag(
+        console_url,
+        &session,
+        &session.entity.id,
+        user_id
+    ))
+    .user;
     if json_output {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&user.permissions)
-                .expect("permission list output serializes")
-        );
+        style::emit_json(&user.permissions);
     } else {
         println!("{}", style::user_permissions_list(&user.permissions));
     }
@@ -408,42 +339,25 @@ fn permissions_grant(
         crate::style::eprintln_error(&message);
         return ExitStatus::Usage;
     }
-    let (console_url, session) = match console_session(config) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            crate::style::eprintln_error(&message);
-            return status;
-        }
-    };
-    let user = match fetch_user_with_etag(console_url, &session, &session.entity.id, user_id) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            crate::style::eprintln_error(&message);
-            return status;
-        }
-    };
-    let result = match grant_permissions(
+    let (console_url, session) = try_or_eprintln!(console_session(config));
+    let user = try_or_eprintln!(fetch_user_with_etag(
+        console_url,
+        &session,
+        &session.entity.id,
+        user_id
+    ));
+    let result = try_or_eprintln!(grant_permissions(
         console_url,
         &session.access_token,
         user_id,
         &user.etag,
         &permissions,
-    ) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            crate::style::eprintln_error(&message);
-            return status;
-        }
-    };
+    ));
     if json_output {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&PermissionGrantOutput {
-                user_id: &result.user_id,
-                granted: permissions,
-            })
-            .expect("permission grant output serializes")
-        );
+        style::emit_json(&PermissionGrantOutput {
+            user_id: &result.user_id,
+            granted: permissions,
+        });
     } else {
         let confirm = style::ConfirmBlock::new("granted", "permission", result.user_id.clone())
             .field("permissions", permissions_join(&result.permissions));
@@ -462,21 +376,14 @@ fn permissions_revoke(
         crate::style::eprintln_error(&message);
         return ExitStatus::Usage;
     }
-    let (console_url, session) = match console_session(config) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            crate::style::eprintln_error(&message);
-            return status;
-        }
-    };
+    let (console_url, session) = try_or_eprintln!(console_session(config));
     for permission in &permissions {
-        let user = match fetch_user_with_etag(console_url, &session, &session.entity.id, user_id) {
-            Ok(value) => value,
-            Err((status, message)) => {
-                crate::style::eprintln_error(&message);
-                return status;
-            }
-        };
+        let user = try_or_eprintln!(fetch_user_with_etag(
+            console_url,
+            &session,
+            &session.entity.id,
+            user_id
+        ));
         if let Err((status, message)) = revoke_permission(
             console_url,
             &session.access_token,
@@ -489,14 +396,10 @@ fn permissions_revoke(
         }
     }
     if json_output {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&PermissionRevokeOutput {
-                user_id,
-                revoked: permissions.clone(),
-            })
-            .expect("permission revoke output serializes")
-        );
+        style::emit_json(&PermissionRevokeOutput {
+            user_id,
+            revoked: permissions.clone(),
+        });
     } else {
         let confirm = style::ConfirmBlock::new("revoked", "permission", user_id)
             .field("permissions", permissions_join(&permissions));
@@ -534,18 +437,14 @@ fn create_user(
     name: &str,
     permissions: &[String],
 ) -> Result<UserWithEtag, (ExitStatus, String)> {
-    let response = Client::new()
-        .post(format!("{console_url}/api/v1/entities/{entity_id}/users"))
-        .bearer_auth(access_token)
-        .header("Idempotency-Key", Uuid::new_v4().to_string())
-        .json(&json!({ "email": email, "name": name, "permissions": permissions }))
-        .send()
-        .map_err(|err| {
-            (
-                ExitStatus::Error,
-                format!("[error] failed to add user: {err}"),
-            )
-        })?;
+    let response = send(
+        Client::new()
+            .post(format!("{console_url}/api/v1/entities/{entity_id}/users"))
+            .bearer_auth(access_token)
+            .header("Idempotency-Key", Uuid::new_v4().to_string())
+            .json(&json!({ "email": email, "name": name, "permissions": permissions })),
+        "add user",
+    )?;
     read_user_with_etag(response, "add user")
 }
 
@@ -555,20 +454,17 @@ fn post_user_action(
     user_id: &str,
     action: &str,
 ) -> Result<User, (ExitStatus, String)> {
-    let response = Client::new()
-        .post(format!(
-            "{console_url}/api/v1/entities/{}/users/{user_id}/actions/{action}",
-            session.entity.id
-        ))
-        .bearer_auth(&session.access_token)
-        .send()
-        .map_err(|err| {
-            (
-                ExitStatus::Error,
-                format!("[error] failed to {action} user: {err}"),
-            )
-        })?;
-    read_json_response(response, action)
+    let label = format!("{action} user");
+    let response = send(
+        Client::new()
+            .post(format!(
+                "{console_url}/api/v1/entities/{}/users/{user_id}/actions/{action}",
+                session.entity.id
+            ))
+            .bearer_auth(&session.access_token),
+        &label,
+    )?;
+    read_json_response(response, &label)
 }
 
 fn delete_user(
@@ -576,31 +472,27 @@ fn delete_user(
     session: &Session,
     user_id: &str,
 ) -> Result<(), (ExitStatus, String)> {
-    let response = Client::new()
-        .delete(format!(
-            "{console_url}/api/v1/entities/{}/users/{user_id}",
-            session.entity.id
-        ))
-        .bearer_auth(&session.access_token)
-        .header("Idempotency-Key", Uuid::new_v4().to_string())
-        .send()
-        .map_err(|err| {
-            (
-                ExitStatus::Error,
-                format!("[error] failed to erase user: {err}"),
-            )
-        })?;
+    let response = send(
+        Client::new()
+            .delete(format!(
+                "{console_url}/api/v1/entities/{}/users/{user_id}",
+                session.entity.id
+            ))
+            .bearer_auth(&session.access_token)
+            .header("Idempotency-Key", Uuid::new_v4().to_string()),
+        "erase user",
+    )?;
     read_empty_response(response, "erase user")
 }
 
 fn fetch_profile_etag(
     console_url: &str,
-    access_token: &str,
+    session: &Session,
     profile_id: &str,
 ) -> Result<String, (ExitStatus, String)> {
     let response = Client::new()
         .get(format!("{console_url}/api/v1/profiles/{profile_id}"))
-        .bearer_auth(access_token)
+        .bearer_auth(&session.access_token)
         .send()
         .map_err(|err| {
             (
@@ -608,7 +500,7 @@ fn fetch_profile_etag(
                 format!("[error] failed to fetch profile: {err}"),
             )
         })?;
-    read_etag_response(response, "fetch profile")
+    read_etag_only(response, "fetch profile")
 }
 
 fn assign_profile_member(
@@ -618,19 +510,15 @@ fn assign_profile_member(
     etag: &str,
     user_id: &str,
 ) -> Result<(), (ExitStatus, String)> {
-    let response = Client::new()
-        .post(format!("{console_url}/api/v1/profiles/{profile_id}/users"))
-        .bearer_auth(access_token)
-        .header(IF_MATCH, etag)
-        .header("Idempotency-Key", Uuid::new_v4().to_string())
-        .json(&json!({ "user_id": user_id }))
-        .send()
-        .map_err(|err| {
-            (
-                ExitStatus::Error,
-                format!("[error] failed to assign profile: {err}"),
-            )
-        })?;
+    let response = send(
+        Client::new()
+            .post(format!("{console_url}/api/v1/profiles/{profile_id}/users"))
+            .bearer_auth(access_token)
+            .header(IF_MATCH, etag)
+            .header("Idempotency-Key", Uuid::new_v4().to_string())
+            .json(&json!({ "user_id": user_id })),
+        "assign profile",
+    )?;
     read_empty_response(response, "assign profile")
 }
 
@@ -641,19 +529,15 @@ fn grant_permissions(
     etag: &str,
     permissions: &[String],
 ) -> Result<PermissionSet, (ExitStatus, String)> {
-    let response = Client::new()
-        .post(format!("{console_url}/api/v1/users/{user_id}/permissions"))
-        .bearer_auth(access_token)
-        .header(IF_MATCH, etag)
-        .header("Idempotency-Key", Uuid::new_v4().to_string())
-        .json(&json!({ "permissions": permissions }))
-        .send()
-        .map_err(|err| {
-            (
-                ExitStatus::Error,
-                format!("[error] failed to grant permissions: {err}"),
-            )
-        })?;
+    let response = send(
+        Client::new()
+            .post(format!("{console_url}/api/v1/users/{user_id}/permissions"))
+            .bearer_auth(access_token)
+            .header(IF_MATCH, etag)
+            .header("Idempotency-Key", Uuid::new_v4().to_string())
+            .json(&json!({ "permissions": permissions })),
+        "grant permissions",
+    )?;
     read_json_response(response, "grant permissions")
 }
 
@@ -664,19 +548,15 @@ fn revoke_permission(
     etag: &str,
     permission: &str,
 ) -> Result<(), (ExitStatus, String)> {
-    let response = Client::new()
-        .delete(format!(
-            "{console_url}/api/v1/users/{user_id}/permissions/{permission}"
-        ))
-        .bearer_auth(access_token)
-        .header(IF_MATCH, etag)
-        .send()
-        .map_err(|err| {
-            (
-                ExitStatus::Error,
-                format!("[error] failed to revoke permission: {err}"),
-            )
-        })?;
+    let response = send(
+        Client::new()
+            .delete(format!(
+                "{console_url}/api/v1/users/{user_id}/permissions/{permission}"
+            ))
+            .bearer_auth(access_token)
+            .header(IF_MATCH, etag),
+        "revoke permission",
+    )?;
     read_empty_response(response, "revoke permission")
 }
 
@@ -686,10 +566,6 @@ fn read_user_with_etag(
 ) -> Result<UserWithEtag, (ExitStatus, String)> {
     let (user, etag) = read_with_etag::<User>(response, action)?;
     Ok(UserWithEtag { user, etag })
-}
-
-fn read_etag_response(response: Response, action: &str) -> Result<String, (ExitStatus, String)> {
-    read_etag_only(response, action)
 }
 
 fn target_entity_id(
@@ -754,10 +630,7 @@ fn permissions_join(permissions: &[String]) -> String {
 
 fn print_user_add(user: &User, json_output: bool) {
     if json_output {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(user).expect("user add output serializes")
-        );
+        style::emit_json(user);
     } else {
         // Section 7.25 mutation confirm: identifier = email, detail rows =
         // user id / state.
@@ -770,10 +643,7 @@ fn print_user_add(user: &User, json_output: bool) {
 
 fn print_user(user: &User, json_output: bool) {
     if json_output {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(user).expect("user output serializes")
-        );
+        style::emit_json(user);
         return;
     }
     let profiles: Vec<(String, String)> = user

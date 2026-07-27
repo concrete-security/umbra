@@ -15,10 +15,7 @@ pub fn run(json_output: bool) -> ExitStatus {
             "target": BUILD_TARGET,
             "build_date": BUILD_DATE,
         });
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&payload).expect("version output serializes")
-        );
+        style::emit_json(&payload);
     } else {
         println!(
             "{}",

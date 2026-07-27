@@ -20,7 +20,7 @@ use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{console, exit::ExitStatus, style};
+use crate::{cli::WaitArgs, console, exit::ExitStatus, style};
 
 /// Console async operation envelope.
 ///
@@ -229,4 +229,128 @@ where
         .ok_or_else(|| format!("[error] {label} operation succeeded without result"))?;
     serde_json::from_value::<T>(result)
         .map_err(|err| format!("[error] malformed {label} result: {err}"))
+}
+
+/// Drive a just-submitted saga to its result: honor `--no-wait` (print the
+/// handle and stop), else poll to completion and decode the `result` into `T`.
+///
+/// The single home of the `if no_wait { print; return } else { wait; extract }`
+/// block every saga command repeats. Returns `Ok(None)` when `--no-wait` handled
+/// the operation (the caller returns success), `Ok(Some(result))` on completion,
+/// and the usual `(ExitStatus, String)` on failure so the caller's
+/// `try_or_eprintln!` reports it. `wire_steps` matches [`wait_for_operation`].
+pub(crate) fn await_result<T>(
+    console_url: &str,
+    access_token: &str,
+    op: Operation,
+    wait: &WaitArgs,
+    json_output: bool,
+    wire_steps: bool,
+    label: &str,
+) -> Result<Option<T>, (ExitStatus, String)>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    if wait.no_wait {
+        print_operation(&op, json_output, false);
+        return Ok(None);
+    }
+    let op = wait_for_operation(
+        console_url,
+        access_token,
+        op,
+        Duration::from_secs(u64::from(wait.wait_timeout_seconds)),
+        json_output,
+        wire_steps,
+    )?;
+    extract_operation_result(&op, label)
+        .map(Some)
+        .map_err(|message| (ExitStatus::Error, message))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::WaitArgs;
+
+    fn op(status: &str, result: Option<Value>) -> Operation {
+        Operation {
+            id: "op-1".into(),
+            kind: "cvm.launch".into(),
+            status: status.into(),
+            actor_id: None,
+            target: OperationTarget {
+                kind: "cvm".into(),
+                id: Some("c1".into()),
+            },
+            result,
+            error: None,
+            progress: None,
+            created_at: "2030-01-01T00:00:00Z".into(),
+            updated_at: "2030-01-01T00:00:00Z".into(),
+            expires_at: None,
+        }
+    }
+
+    /// `--no-wait` prints the handle and returns `Ok(None)` without any poll, so
+    /// the caller returns success. The unused url/token prove no request is made.
+    #[test]
+    fn await_result_no_wait_returns_none_success() {
+        let wait = WaitArgs {
+            no_wait: true,
+            wait_timeout_seconds: 60,
+        };
+        let out: Result<Option<Value>, _> = await_result(
+            "http://unused",
+            "tok",
+            op("running", None),
+            &wait,
+            true,
+            true,
+            "launch",
+        );
+        assert!(matches!(out, Ok(None)));
+    }
+
+    /// An already-terminal `succeeded` operation is extracted into `Some(result)`
+    /// without polling (wait_for_operation returns immediately on a terminal op).
+    #[test]
+    fn await_result_terminal_extracts_result_success() {
+        let wait = WaitArgs {
+            no_wait: false,
+            wait_timeout_seconds: 60,
+        };
+        let out: Result<Option<Value>, _> = await_result(
+            "http://unused",
+            "tok",
+            op("succeeded", Some(serde_json::json!({ "id": "c1" }))),
+            &wait,
+            true,
+            true,
+            "launch",
+        );
+        let value = out
+            .expect("terminal succeeded extracts")
+            .expect("some result");
+        assert_eq!(value["id"], serde_json::json!("c1"));
+    }
+
+    /// An already-terminal `failed` operation surfaces as an error (no poll).
+    #[test]
+    fn await_result_terminal_failed_failure() {
+        let wait = WaitArgs {
+            no_wait: false,
+            wait_timeout_seconds: 60,
+        };
+        let out: Result<Option<Value>, _> = await_result(
+            "http://unused",
+            "tok",
+            op("failed", None),
+            &wait,
+            true,
+            true,
+            "launch",
+        );
+        assert!(out.is_err());
+    }
 }

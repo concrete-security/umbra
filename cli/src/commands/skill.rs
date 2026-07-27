@@ -381,8 +381,5 @@ fn print_json(canonical: &Path, home: &Path, results: &[AgentResult]) {
         "canonical": display_home(canonical, home),
         "agents": agents,
     });
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&payload).expect("skill output serializes")
-    );
+    style::emit_json(&payload);
 }

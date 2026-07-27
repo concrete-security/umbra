@@ -9,8 +9,8 @@ use crate::{
     cli::{QuotaClearArgs, QuotaCommand, QuotaScopeArgs, QuotaSetArgs},
     config::ResolvedConfig,
     console::{
-        console_session, read_empty_response, read_json_response, resolve_entity_name,
-        resolve_user_email, validate_uuid,
+        console_session, fetch_json, read_empty_response, read_json_response, resolve_entity_name,
+        resolve_user_email, send, validate_uuid,
     },
     exit::ExitStatus,
     session::Session,
@@ -72,13 +72,7 @@ pub fn run(command: QuotaCommand, config: &ResolvedConfig, json: bool) -> ExitSt
 }
 
 fn get(config: &ResolvedConfig, args: QuotaScopeArgs, json_output: bool) -> ExitStatus {
-    let (console_url, session) = match console_session(config) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            crate::style::eprintln_error(&message);
-            return status;
-        }
-    };
+    let (console_url, session) = try_or_eprintln!(console_session(config));
     let scope = match resolve_scope(&args, &session) {
         Ok(value) => value,
         Err(message) => {
@@ -86,13 +80,7 @@ fn get(config: &ResolvedConfig, args: QuotaScopeArgs, json_output: bool) -> Exit
             return ExitStatus::Usage;
         }
     };
-    let quotas = match fetch_quotas(console_url, &session.access_token, &scope) {
-        Ok(value) => value.quotas,
-        Err((status, message)) => {
-            crate::style::eprintln_error(&message);
-            return status;
-        }
-    };
+    let quotas = try_or_eprintln!(fetch_quotas(console_url, &session, &scope)).quotas;
     print_quotas(
         &quotas,
         json_output,
@@ -105,13 +93,7 @@ fn get(config: &ResolvedConfig, args: QuotaScopeArgs, json_output: bool) -> Exit
 }
 
 fn set(config: &ResolvedConfig, args: QuotaSetArgs, json_output: bool) -> ExitStatus {
-    let (console_url, session) = match console_session(config) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            crate::style::eprintln_error(&message);
-            return status;
-        }
-    };
+    let (console_url, session) = try_or_eprintln!(console_session(config));
     let scope = match resolve_scope(&args.scope, &session) {
         Ok(value) => value,
         Err(message) => {
@@ -125,7 +107,7 @@ fn set(config: &ResolvedConfig, args: QuotaSetArgs, json_output: bool) -> ExitSt
     }
     // Capture the previous limit (when present) for the confirm block's
     // `previous limit` row (section 7.24). On 404/error, simply leave it `-`.
-    let previous_limit = fetch_quotas(console_url, &session.access_token, &scope)
+    let previous_limit = fetch_quotas(console_url, &session, &scope)
         .ok()
         .and_then(|list| {
             list.quotas
@@ -133,24 +115,15 @@ fn set(config: &ResolvedConfig, args: QuotaSetArgs, json_output: bool) -> ExitSt
                 .find(|q| q.resource == args.resource)
                 .map(|q| q.limit)
         });
-    let quota = match set_quota(
+    let quota = try_or_eprintln!(set_quota(
         console_url,
         &session.access_token,
         &scope,
         &args.resource,
         args.limit,
-    ) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            crate::style::eprintln_error(&message);
-            return status;
-        }
-    };
+    ));
     if json_output {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&quota).expect("quota set output serializes")
-        );
+        style::emit_json(&quota);
     } else {
         let (scope_noun, scope_id) = scope_parts(&scope);
         let human = match &scope {
@@ -179,13 +152,7 @@ fn set(config: &ResolvedConfig, args: QuotaSetArgs, json_output: bool) -> ExitSt
 }
 
 fn clear(config: &ResolvedConfig, args: QuotaClearArgs, json_output: bool) -> ExitStatus {
-    let (console_url, session) = match console_session(config) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            crate::style::eprintln_error(&message);
-            return status;
-        }
-    };
+    let (console_url, session) = try_or_eprintln!(console_session(config));
     let scope = match resolve_scope(&args.scope, &session) {
         Ok(value) => value,
         Err(message) => {
@@ -198,7 +165,7 @@ fn clear(config: &ResolvedConfig, args: QuotaClearArgs, json_output: bool) -> Ex
         return ExitStatus::Usage;
     }
     // Capture previous limit before clearing (section 7.24 `previous limit`).
-    let previous_limit = fetch_quotas(console_url, &session.access_token, &scope)
+    let previous_limit = fetch_quotas(console_url, &session, &scope)
         .ok()
         .and_then(|list| {
             list.quotas
@@ -214,16 +181,12 @@ fn clear(config: &ResolvedConfig, args: QuotaClearArgs, json_output: bool) -> Ex
     }
     let (scope_noun, scope_id) = scope_parts(&scope);
     if json_output {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&QuotaClearOutput {
-                scope: scope_noun,
-                scope_id,
-                resource: &args.resource,
-                cleared: true,
-            })
-            .expect("quota clear output serializes")
-        );
+        style::emit_json(&QuotaClearOutput {
+            scope: scope_noun,
+            scope_id,
+            resource: &args.resource,
+            cleared: true,
+        });
     } else {
         let human = match &scope {
             QuotaScope::Entity(id) => {
@@ -265,26 +228,14 @@ fn resolve_scope(args: &QuotaScopeArgs, session: &Session) -> Result<QuotaScope,
 
 fn fetch_quotas(
     console_url: &str,
-    access_token: &str,
+    session: &Session,
     scope: &QuotaScope,
 ) -> Result<QuotaList, (ExitStatus, String)> {
-    let url = match scope {
-        QuotaScope::Entity(entity_id) => {
-            format!("{console_url}/api/v1/entities/{entity_id}/quotas")
-        }
-        QuotaScope::User(user_id) => format!("{console_url}/api/v1/users/{user_id}/quotas"),
+    let path = match scope {
+        QuotaScope::Entity(entity_id) => format!("/api/v1/entities/{entity_id}/quotas"),
+        QuotaScope::User(user_id) => format!("/api/v1/users/{user_id}/quotas"),
     };
-    let response = Client::new()
-        .get(url)
-        .bearer_auth(access_token)
-        .send()
-        .map_err(|err| {
-            (
-                ExitStatus::Error,
-                format!("[error] failed to get quotas: {err}"),
-            )
-        })?;
-    read_json_response(response, "get quotas")
+    fetch_json(console_url, session, &path, &[], "get quotas")
 }
 
 fn set_quota(
@@ -302,18 +253,14 @@ fn set_quota(
             format!("{console_url}/api/v1/users/{user_id}/quotas/{resource}")
         }
     };
-    let response = Client::new()
-        .patch(url)
-        .bearer_auth(access_token)
-        .header("Idempotency-Key", Uuid::new_v4().to_string())
-        .json(&json!({ "limit": limit }))
-        .send()
-        .map_err(|err| {
-            (
-                ExitStatus::Error,
-                format!("[error] failed to set quota: {err}"),
-            )
-        })?;
+    let response = send(
+        Client::new()
+            .patch(url)
+            .bearer_auth(access_token)
+            .header("Idempotency-Key", Uuid::new_v4().to_string())
+            .json(&json!({ "limit": limit })),
+        "set quota",
+    )?;
     read_json_response(response, "set quota")
 }
 
@@ -331,16 +278,10 @@ fn clear_quota(
             format!("{console_url}/api/v1/users/{user_id}/quotas/{resource}")
         }
     };
-    let response = Client::new()
-        .delete(url)
-        .bearer_auth(access_token)
-        .send()
-        .map_err(|err| {
-            (
-                ExitStatus::Error,
-                format!("[error] failed to clear quota: {err}"),
-            )
-        })?;
+    let response = send(
+        Client::new().delete(url).bearer_auth(access_token),
+        "clear quota",
+    )?;
     read_empty_response(response, "clear quota")
 }
 
@@ -374,10 +315,7 @@ fn print_quotas(
     access_token: &str,
 ) {
     if json_output {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(quotas).expect("quota list output serializes")
-        );
+        style::emit_json(quotas);
         return;
     }
     let (filter_entity_id, filter_user_id) = match scope {

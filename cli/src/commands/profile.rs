@@ -16,10 +16,7 @@ use crate::{
         ProfileMembersCommand,
     },
     config::ResolvedConfig,
-    console::{
-        self, console_session, fetch_json, read_empty_response, read_json_response, read_with_etag,
-        ListPage,
-    },
+    console::{self, console_session, fetch_json, read_empty_response, read_with_etag, ListPage},
     exit::ExitStatus,
     session::Session,
     style,
@@ -92,20 +89,9 @@ fn create(config: &ResolvedConfig, args: ProfileCreateArgs, json_output: bool) -
             return status;
         }
     }
-    let (console_url, session) = match console_session(config) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            crate::style::eprintln_error(&message);
-            return status;
-        }
-    };
-    let profile = match create_profile(console_url, &session, name, &description) {
-        Ok(value) => value.profile,
-        Err((status, message)) => {
-            crate::style::eprintln_error(&message);
-            return status;
-        }
-    };
+    let (console_url, session) = try_or_eprintln!(console_session(config));
+    let profile =
+        try_or_eprintln!(create_profile(console_url, &session, name, &description)).profile;
     if let Some(nick) = args.alias.as_deref() {
         if let Err(message) = crate::commands::alias::record_resource_alias(
             config,
@@ -119,10 +105,7 @@ fn create(config: &ResolvedConfig, args: ProfileCreateArgs, json_output: bool) -
         }
     }
     if json_output {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&profile).expect("profile create output serializes")
-        );
+        style::emit_json(&profile);
     } else {
         let confirm = style::ConfirmBlock::new("created", "profile", profile.name.clone())
             .field("id", profile.id.clone())
@@ -136,31 +119,21 @@ fn create(config: &ResolvedConfig, args: ProfileCreateArgs, json_output: bool) -
 }
 
 fn list(config: &ResolvedConfig, args: ProfileListArgs, json_output: bool) -> ExitStatus {
-    let (console_url, session) = match console_session(config) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            crate::style::eprintln_error(&message);
-            return status;
-        }
-    };
+    let (console_url, session) = try_or_eprintln!(console_session(config));
     // Build the query string `?assigned=..` from --assigned. The Console does
     // the filtering, not the CLI.
     let query = args.query_params();
     let path = format!("/api/v1/entities/{}/profiles", session.entity.id);
-    let page: ListPage<Profile> =
-        match fetch_json(console_url, &session, &path, &query, "list profiles") {
-            Ok(value) => value,
-            Err((status, message)) => {
-                crate::style::eprintln_error(&message);
-                return status;
-            }
-        };
+    let page: ListPage<Profile> = try_or_eprintln!(fetch_json(
+        console_url,
+        &session,
+        &path,
+        &query,
+        "list profiles"
+    ));
     let assigned_filter = args.assigned.map(wire);
     if json_output {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&page.items).expect("profile list output serializes")
-        );
+        style::emit_json(&page.items);
     } else {
         let views: Vec<style::ProfileView<'_>> = page
             .items
@@ -200,48 +173,18 @@ impl ProfileListArgs {
 }
 
 fn show(config: &ResolvedConfig, json_output: bool) -> ExitStatus {
-    let (console_url, session, profile_id) = match selected_profile_session(config) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            crate::style::eprintln_error(&message);
-            return status;
-        }
-    };
+    let (console_url, session, profile_id) = try_or_eprintln!(selected_profile_session(config));
     let profile_id = profile_id.as_str();
-    let profile = match fetch_profile(console_url, &session.access_token, profile_id) {
-        Ok(value) => value.profile,
-        Err((status, message)) => {
-            crate::style::eprintln_error(&message);
-            return status;
-        }
-    };
+    let profile = try_or_eprintln!(fetch_profile(console_url, &session, profile_id)).profile;
     print_profile(&profile, json_output);
     ExitStatus::Ok
 }
 
 fn configure(config: &ResolvedConfig, args: ProfileConfigureArgs, json_output: bool) -> ExitStatus {
-    let (console_url, session, profile_id) = match selected_profile_session(config) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            crate::style::eprintln_error(&message);
-            return status;
-        }
-    };
+    let (console_url, session, profile_id) = try_or_eprintln!(selected_profile_session(config));
     let profile_id = profile_id.as_str();
-    let policy = match read_policy(args.policy_file.as_deref()) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            crate::style::eprintln_error(&message);
-            return status;
-        }
-    };
-    let current = match fetch_profile(console_url, &session.access_token, profile_id) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            crate::style::eprintln_error(&message);
-            return status;
-        }
-    };
+    let policy = try_or_eprintln!(read_policy(args.policy_file.as_deref()));
+    let current = try_or_eprintln!(fetch_profile(console_url, &session, profile_id));
     let mut body = Map::new();
     if let Some(name) = args.name {
         body.insert("name".to_string(), Value::String(name));
@@ -256,25 +199,17 @@ fn configure(config: &ResolvedConfig, args: ProfileConfigureArgs, json_output: b
     let profile = if !changed {
         current.profile
     } else {
-        match patch_profile(
+        try_or_eprintln!(patch_profile(
             console_url,
             &session.access_token,
             profile_id,
             &current.etag,
             &Value::Object(body),
-        ) {
-            Ok(value) => value.profile,
-            Err((status, message)) => {
-                crate::style::eprintln_error(&message);
-                return status;
-            }
-        }
+        ))
+        .profile
     };
     if json_output {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&profile).expect("profile configure output serializes")
-        );
+        style::emit_json(&profile);
     } else if !changed {
         let confirm = style::ConfirmBlock::new("unchanged", "profile", profile.name.clone())
             .field("id", profile.id.clone());
@@ -300,32 +235,16 @@ fn members(
 }
 
 fn member_list(config: &ResolvedConfig, json_output: bool) -> ExitStatus {
-    let (console_url, session, profile_id) = match selected_profile_session(config) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            crate::style::eprintln_error(&message);
-            return status;
-        }
-    };
+    let (console_url, session, profile_id) = try_or_eprintln!(selected_profile_session(config));
     let profile_id = profile_id.as_str();
-    let page = match fetch_profile_members(console_url, &session.access_token, profile_id) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            crate::style::eprintln_error(&message);
-            return status;
-        }
-    };
+    let page = try_or_eprintln!(fetch_profile_members(console_url, &session, profile_id));
     if json_output {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&page.items)
-                .expect("profile member list output serializes")
-        );
+        style::emit_json(&page.items);
     } else {
-        // Section 7.23: resolve the profile name via a cached/lookup path. We
-        // fetch the profile once to populate the Filter: header; this is a
-        // single extra call, acceptable for a one-shot list rendering.
-        let profile_name = fetch_profile(console_url, &session.access_token, profile_id)
+        // Section 7.23: resolve the profile name with one extra profile fetch to
+        // populate the Filter: header; a single extra call, acceptable for a
+        // one-shot list rendering.
+        let profile_name = fetch_profile(console_url, &session, profile_id)
             .ok()
             .map(|p| p.profile.name);
         let extras_empty: BTreeMap<String, Value> = BTreeMap::new();
@@ -356,21 +275,9 @@ fn member_add(config: &ResolvedConfig, user_id: &str, json_output: bool) -> Exit
         crate::style::eprintln_error("[usage] USER_ID must be a UUID");
         return ExitStatus::Usage;
     }
-    let (console_url, session, profile_id) = match selected_profile_session(config) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            crate::style::eprintln_error(&message);
-            return status;
-        }
-    };
+    let (console_url, session, profile_id) = try_or_eprintln!(selected_profile_session(config));
     let profile_id = profile_id.as_str();
-    let profile = match fetch_profile(console_url, &session.access_token, profile_id) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            crate::style::eprintln_error(&message);
-            return status;
-        }
-    };
+    let profile = try_or_eprintln!(fetch_profile(console_url, &session, profile_id));
     if let Err((status, message)) = assign_member(
         console_url,
         &session.access_token,
@@ -400,21 +307,9 @@ fn member_remove(config: &ResolvedConfig, user_id: &str, json_output: bool) -> E
         crate::style::eprintln_error("[usage] USER_ID must be a UUID");
         return ExitStatus::Usage;
     }
-    let (console_url, session, profile_id) = match selected_profile_session(config) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            crate::style::eprintln_error(&message);
-            return status;
-        }
-    };
+    let (console_url, session, profile_id) = try_or_eprintln!(selected_profile_session(config));
     let profile_id = profile_id.as_str();
-    let profile = match fetch_profile(console_url, &session.access_token, profile_id) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            crate::style::eprintln_error(&message);
-            return status;
-        }
-    };
+    let profile = try_or_eprintln!(fetch_profile(console_url, &session, profile_id));
     if let Err((status, message)) = remove_member(
         console_url,
         &session.access_token,
@@ -466,21 +361,17 @@ fn create_profile(
     name: &str,
     description: &str,
 ) -> Result<ProfileWithEtag, (ExitStatus, String)> {
-    let response = Client::new()
-        .post(format!(
-            "{console_url}/api/v1/entities/{}/profiles",
-            session.entity.id
-        ))
-        .bearer_auth(&session.access_token)
-        .header("Idempotency-Key", Uuid::new_v4().to_string())
-        .json(&json!({ "name": name, "description": description }))
-        .send()
-        .map_err(|err| {
-            (
-                ExitStatus::Error,
-                format!("[error] failed to create profile: {err}"),
-            )
-        })?;
+    let response = console::send(
+        Client::new()
+            .post(format!(
+                "{console_url}/api/v1/entities/{}/profiles",
+                session.entity.id
+            ))
+            .bearer_auth(&session.access_token)
+            .header("Idempotency-Key", Uuid::new_v4().to_string())
+            .json(&json!({ "name": name, "description": description })),
+        "create profile",
+    )?;
     read_profile_with_etag(response, "create profile")
 }
 
@@ -504,10 +395,10 @@ pub(crate) fn profiles_path(entity_id: &str) -> String {
 /// Whether a profile with `profile_id` exists, for fail-fast alias creation.
 pub(crate) fn profile_exists(
     console_url: &str,
-    access_token: &str,
+    session: &Session,
     profile_id: &str,
 ) -> Result<(), (ExitStatus, String)> {
-    fetch_profile(console_url, access_token, profile_id).map(|_| ())
+    fetch_profile(console_url, session, profile_id).map(|_| ())
 }
 
 /// Path of the single-profile GET, the one source of truth shared by the
@@ -518,12 +409,12 @@ pub(crate) fn profile_path(profile_id: &str) -> String {
 
 fn fetch_profile(
     console_url: &str,
-    access_token: &str,
+    session: &Session,
     profile_id: &str,
 ) -> Result<ProfileWithEtag, (ExitStatus, String)> {
     let response = Client::new()
         .get(format!("{console_url}{}", profile_path(profile_id)))
-        .bearer_auth(access_token)
+        .bearer_auth(&session.access_token)
         .send()
         .map_err(|err| {
             (
@@ -536,20 +427,11 @@ fn fetch_profile(
 
 fn fetch_profile_members(
     console_url: &str,
-    access_token: &str,
+    session: &Session,
     profile_id: &str,
 ) -> Result<ListPage<ProfileMember>, (ExitStatus, String)> {
-    let response = Client::new()
-        .get(format!("{console_url}/api/v1/profiles/{profile_id}/users"))
-        .bearer_auth(access_token)
-        .send()
-        .map_err(|err| {
-            (
-                ExitStatus::Error,
-                format!("[error] failed to list profile members: {err}"),
-            )
-        })?;
-    read_json_response(response, "list profile members")
+    let path = format!("/api/v1/profiles/{profile_id}/users");
+    fetch_json(console_url, session, &path, &[], "list profile members")
 }
 
 fn patch_profile(
@@ -559,19 +441,15 @@ fn patch_profile(
     etag: &str,
     body: &Value,
 ) -> Result<ProfileWithEtag, (ExitStatus, String)> {
-    let response = Client::new()
-        .patch(format!("{console_url}/api/v1/profiles/{profile_id}"))
-        .bearer_auth(access_token)
-        .header(IF_MATCH, etag)
-        .header("Idempotency-Key", Uuid::new_v4().to_string())
-        .json(body)
-        .send()
-        .map_err(|err| {
-            (
-                ExitStatus::Error,
-                format!("[error] failed to configure profile: {err}"),
-            )
-        })?;
+    let response = console::send(
+        Client::new()
+            .patch(format!("{console_url}/api/v1/profiles/{profile_id}"))
+            .bearer_auth(access_token)
+            .header(IF_MATCH, etag)
+            .header("Idempotency-Key", Uuid::new_v4().to_string())
+            .json(body),
+        "configure profile",
+    )?;
     read_profile_with_etag(response, "configure profile")
 }
 
@@ -582,19 +460,15 @@ fn assign_member(
     etag: &str,
     user_id: &str,
 ) -> Result<(), (ExitStatus, String)> {
-    let response = Client::new()
-        .post(format!("{console_url}/api/v1/profiles/{profile_id}/users"))
-        .bearer_auth(access_token)
-        .header(IF_MATCH, etag)
-        .header("Idempotency-Key", Uuid::new_v4().to_string())
-        .json(&json!({ "user_id": user_id }))
-        .send()
-        .map_err(|err| {
-            (
-                ExitStatus::Error,
-                format!("[error] failed to add profile member: {err}"),
-            )
-        })?;
+    let response = console::send(
+        Client::new()
+            .post(format!("{console_url}/api/v1/profiles/{profile_id}/users"))
+            .bearer_auth(access_token)
+            .header(IF_MATCH, etag)
+            .header("Idempotency-Key", Uuid::new_v4().to_string())
+            .json(&json!({ "user_id": user_id })),
+        "add profile member",
+    )?;
     read_empty_response(response, "add profile member")
 }
 
@@ -605,19 +479,15 @@ fn remove_member(
     etag: &str,
     user_id: &str,
 ) -> Result<(), (ExitStatus, String)> {
-    let response = Client::new()
-        .delete(format!(
-            "{console_url}/api/v1/profiles/{profile_id}/users/{user_id}"
-        ))
-        .bearer_auth(access_token)
-        .header(IF_MATCH, etag)
-        .send()
-        .map_err(|err| {
-            (
-                ExitStatus::Error,
-                format!("[error] failed to remove profile member: {err}"),
-            )
-        })?;
+    let response = console::send(
+        Client::new()
+            .delete(format!(
+                "{console_url}/api/v1/profiles/{profile_id}/users/{user_id}"
+            ))
+            .bearer_auth(access_token)
+            .header(IF_MATCH, etag),
+        "remove profile member",
+    )?;
     read_empty_response(response, "remove profile member")
 }
 
@@ -666,10 +536,7 @@ fn read_policy(path: Option<&Path>) -> Result<Option<Value>, (ExitStatus, String
 
 fn print_profile(profile: &Profile, json_output: bool) {
     if json_output {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(profile).expect("profile output serializes")
-        );
+        style::emit_json(profile);
         return;
     }
     let policy_pretty =
@@ -699,14 +566,10 @@ fn print_member_output(
     added: bool,
 ) {
     if json_output {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&ProfileMemberOutput {
-                profile_id,
-                user_id,
-            })
-            .expect("profile member output serializes")
-        );
+        style::emit_json(&ProfileMemberOutput {
+            profile_id,
+            user_id,
+        });
         return;
     }
     // Section 7.16 confirm shape:

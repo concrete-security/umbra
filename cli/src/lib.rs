@@ -14,6 +14,7 @@ mod config;
 mod console;
 mod cvm_state;
 mod exit;
+mod fsutil;
 mod help;
 mod operation;
 mod session;

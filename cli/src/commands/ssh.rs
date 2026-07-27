@@ -2,19 +2,18 @@ use std::{
     collections::BTreeMap,
     env,
     ffi::OsString,
-    fs::{self, OpenOptions},
+    fs,
     io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
 
 use chrono::Utc;
-use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 #[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 
 use crate::{
     cli::{AgentSessionArgs, CodeArgs, CursorArgs, SessionListArgs, SessionTargetArgs, SshArgs},
@@ -319,31 +318,22 @@ fn ps_failure_to_propagate(explicit: bool, groups: &[PsGroup]) -> Option<&(ExitS
 }
 
 pub fn run_ps(args: SessionListArgs, config: &ResolvedConfig, json_output: bool) -> ExitStatus {
-    let (console_url, session) = match console_session(config) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            crate::style::eprintln_error(&message);
-            return status;
-        }
-    };
+    let (console_url, session) = try_or_eprintln!(console_session(config));
     // No explicit target -> every RUNNING Dev CVM of the caller (owner-scoped by
     // the Console); `ps` deliberately does not fall back to `default_cvm`. An
     // explicit positional/`--cvm` scopes to that one CVM. Either way we keep the
     // full `Cvm` records so the probe reuses them via `build_ssh` (no re-fetch).
     let cvms: Vec<Cvm> = match (args.target.cvm_id.as_deref(), args.target.cvm.as_deref()) {
-        (None, None) => match fetch_json::<ListPage<Cvm>>(
-            console_url,
-            &session,
-            "/api/v1/cvms",
-            &[("state", "running".to_string())],
-            "list CVMs",
-        ) {
-            Ok(page) => page.items,
-            Err((status, message)) => {
-                crate::style::eprintln_error(&message);
-                return status;
-            }
-        },
+        (None, None) => {
+            try_or_eprintln!(fetch_json::<ListPage<Cvm>>(
+                console_url,
+                &session,
+                "/api/v1/cvms",
+                &[("state", "running".to_string())],
+                "list CVMs",
+            ))
+            .items
+        }
         (positional, flag) => {
             let cvm_id = match select_cvm(positional, flag, &[], config) {
                 Ok(id) => id,
@@ -352,13 +342,7 @@ pub fn run_ps(args: SessionListArgs, config: &ResolvedConfig, json_output: bool)
                     return ExitStatus::Usage;
                 }
             };
-            match fetch_cvm(console_url, &session, &cvm_id) {
-                Ok(cvm) => vec![cvm],
-                Err((status, message)) => {
-                    crate::style::eprintln_error(&message);
-                    return status;
-                }
-            }
+            vec![try_or_eprintln!(fetch_cvm(console_url, &session, &cvm_id))]
         }
     };
 
@@ -441,12 +425,7 @@ fn resolve_session_target(
                         .map_err(|m| (ExitStatus::Usage, m))?;
                 if overridden != entry.cvm {
                     // Show the stored CVM by its alias when it has one (readable).
-                    let stored = aliases
-                        .cvm
-                        .iter()
-                        .find(|(_, uuid)| uuid.as_str() == entry.cvm)
-                        .map(|(name, _)| name.as_str())
-                        .unwrap_or(entry.cvm.as_str());
+                    let stored = aliases.cvm_display(&entry.cvm);
                     crate::style::eprintln_warn(&format!(
                         "[warn] alias {target} targets CVM {stored}; --cvm forces {overridden}. See `concrete alias list`."
                     ));
@@ -465,14 +444,11 @@ fn resolve_session_target(
 }
 
 pub fn run_attach(args: SessionTargetArgs, config: &ResolvedConfig) -> ExitStatus {
-    let (session_name, cvm_id) =
-        match resolve_session_target(&args.target, args.cvm.as_deref(), config) {
-            Ok(value) => value,
-            Err((status, message)) => {
-                crate::style::eprintln_error(&message);
-                return status;
-            }
-        };
+    let (session_name, cvm_id) = try_or_eprintln!(resolve_session_target(
+        &args.target,
+        args.cvm.as_deref(),
+        config
+    ));
     run_ssh(
         SshInvocation {
             cvm_id: &cvm_id,
@@ -485,14 +461,11 @@ pub fn run_attach(args: SessionTargetArgs, config: &ResolvedConfig) -> ExitStatu
 }
 
 pub fn run_kill(args: SessionTargetArgs, config: &ResolvedConfig, json_output: bool) -> ExitStatus {
-    let (session_name, cvm_id) =
-        match resolve_session_target(&args.target, args.cvm.as_deref(), config) {
-            Ok(value) => value,
-            Err((status, message)) => {
-                crate::style::eprintln_error(&message);
-                return status;
-            }
-        };
+    let (session_name, cvm_id) = try_or_eprintln!(resolve_session_target(
+        &args.target,
+        args.cvm.as_deref(),
+        config
+    ));
     match run_ssh_capture(
         SshInvocation {
             cvm_id: &cvm_id,
@@ -528,14 +501,10 @@ fn finish_kill(
         })
     });
     if json_output {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&json!({
-                "cvm_id": cvm_id,
-                "session_name": session_name,
-            }))
-            .expect("kill output serializes")
-        );
+        style::emit_json(&json!({
+            "cvm_id": cvm_id,
+            "session_name": session_name,
+        }));
     } else {
         // Section 7.30: identifier is the session name (the entity being
         // killed); detail row records the CVM the session was running on.
@@ -582,13 +551,11 @@ pub(crate) fn session_shadow_error(live: &[String], name: &str, cvm_id: &str) ->
 }
 
 fn run_ssh(invocation: SshInvocation<'_>, config: &ResolvedConfig) -> ExitStatus {
-    let prepared = match prepare_ssh(invocation.cvm_id, invocation.identity_file, config) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            crate::style::eprintln_error(&message);
-            return status;
-        }
-    };
+    let prepared = try_or_eprintln!(prepare_ssh(
+        invocation.cvm_id,
+        invocation.identity_file,
+        config
+    ));
     let mut ssh = base_ssh_command(&prepared, invocation.allocate_tty);
     ssh.arg(invocation.remote_command);
     let result = ssh.status();
@@ -621,13 +588,7 @@ fn run_editor(
             return ExitStatus::Usage;
         }
     }
-    let prepared = match prepare_ssh(cvm_id, identity_file, config) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            crate::style::eprintln_error(&message);
-            return status;
-        }
-    };
+    let prepared = try_or_eprintln!(prepare_ssh(cvm_id, identity_file, config));
     let workspace = resolve_workspace(workspace_arg, config, &prepared.cvm_id);
     let launch = match write_editor_ssh_files(config, &prepared) {
         Ok(value) => value,
@@ -751,27 +712,13 @@ fn build_ssh(
             ));
         }
     };
-    let policy_path = match resolve_policy_path(config, console_url, session, &cvm.id) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            return Err((status, message));
-        }
-    };
-    let proxy_command = match proxy_command(config, &policy_path, &fqdn) {
-        Ok(value) => value,
-        Err(message) => {
-            return Err((ExitStatus::Error, message));
-        }
-    };
+    let policy_path = resolve_policy_path(config, console_url, session, &cvm.id)?;
+    let proxy_command = proxy_command(config, &policy_path, &fqdn)
+        .map_err(|message| (ExitStatus::Error, message))?;
     let identity_file = if let Some(path) = explicit_identity {
         Some(ssh_identity::resolve_explicit_identity(path)?)
     } else {
-        let installed_keys = match installed_keys(console_url, session, &cvm) {
-            Ok(value) => value,
-            Err((status, message)) => {
-                return Err((status, message));
-            }
-        };
+        let installed_keys = installed_keys(console_url, session, &cvm)?;
         let fingerprints = installed_keys
             .iter()
             .map(|key| key.fingerprint.clone())
@@ -836,17 +783,13 @@ fn fetch_cvm(
     session: &Session,
     cvm_id: &str,
 ) -> Result<Cvm, (ExitStatus, String)> {
-    let response = Client::new()
-        .get(format!("{console_url}/api/v1/cvms/{cvm_id}"))
-        .bearer_auth(&session.access_token)
-        .send()
-        .map_err(|err| {
-            (
-                ExitStatus::Error,
-                format!("[error] failed to fetch Dev CVM: {err}"),
-            )
-        })?;
-    crate::console::read_json_response(response, "fetch Dev CVM")
+    fetch_json(
+        console_url,
+        session,
+        &format!("/api/v1/cvms/{cvm_id}"),
+        &[],
+        "fetch Dev CVM",
+    )
 }
 
 fn installed_keys(
@@ -857,17 +800,13 @@ fn installed_keys(
     if cvm.ssh_keys.is_empty() {
         return Ok(Vec::new());
     }
-    let response = Client::new()
-        .get(format!("{console_url}/api/v1/me/keys"))
-        .bearer_auth(&session.access_token)
-        .send()
-        .map_err(|err| {
-            (
-                ExitStatus::Error,
-                format!("[error] failed to list SSH keys: {err}"),
-            )
-        })?;
-    let page: ListPage<MeSshKey> = crate::console::read_json_response(response, "list SSH keys")?;
+    let page: ListPage<MeSshKey> = fetch_json(
+        console_url,
+        session,
+        "/api/v1/me/keys",
+        &[],
+        "list SSH keys",
+    )?;
     let installed_ids = cvm
         .ssh_keys
         .iter()
@@ -925,17 +864,13 @@ fn fetch_policy_bundle(
     session: &Session,
     cvm_id: &str,
 ) -> Result<crate::commands::cvm::PolicyBundle, (ExitStatus, String)> {
-    let response = Client::new()
-        .get(format!("{console_url}/api/v1/cvms/{cvm_id}/policy-bundle"))
-        .bearer_auth(&session.access_token)
-        .send()
-        .map_err(|err| {
-            (
-                ExitStatus::Error,
-                format!("[error] failed to fetch Dev CVM policy bundle: {err}"),
-            )
-        })?;
-    crate::console::read_json_response(response, "fetch Dev CVM policy bundle")
+    fetch_json(
+        console_url,
+        session,
+        &format!("/api/v1/cvms/{cvm_id}/policy-bundle"),
+        &[],
+        "fetch Dev CVM policy bundle",
+    )
 }
 
 fn per_cvm_policy_path(config_dir: &Path, cvm_id: &str) -> PathBuf {
@@ -1009,7 +944,8 @@ fn write_editor_ssh_files(
 
     let config_path = base_dir.join("config");
     let ssh_config = render_editor_ssh_config(&host_alias, prepared)?;
-    write_atomic_file(&config_path, ssh_config.as_bytes(), 0o600)?;
+    crate::fsutil::write_atomic_file(&config_path, ssh_config.as_bytes(), 0o600)
+        .map_err(|err| format!("[error] failed to write editor SSH config: {err}"))?;
 
     let ssh_bin = find_ssh_binary()
         .ok_or_else(|| "[error] failed to find ssh on PATH for editor launch".to_string())?;
@@ -1019,47 +955,13 @@ fn write_editor_ssh_files(
         shell_quote(&ssh_bin.display().to_string()),
         shell_quote(&config_path.display().to_string()),
     );
-    write_atomic_file(&wrapper_path, wrapper.as_bytes(), 0o700)?;
+    crate::fsutil::write_atomic_file(&wrapper_path, wrapper.as_bytes(), 0o700)
+        .map_err(|err| format!("[error] failed to write editor SSH wrapper: {err}"))?;
 
     Ok(EditorLaunch {
         host_alias,
         wrapper_dir,
     })
-}
-
-fn write_atomic_file(path: &Path, data: &[u8], mode: u32) -> Result<(), String> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| "[error] editor SSH path has no parent directory".to_string())?;
-    fs::create_dir_all(parent)
-        .map_err(|err| format!("[error] failed to create editor SSH directory: {err}"))?;
-    let tmp = parent.join(format!(
-        ".{}.{}.tmp",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("concrete"),
-        std::process::id()
-    ));
-    let mut options = OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        options.mode(mode).custom_flags(libc::O_NOFOLLOW);
-    }
-    let mut file = options
-        .open(&tmp)
-        .map_err(|err| format!("[error] failed to create temporary editor SSH file: {err}"))?;
-    file.write_all(data)
-        .and_then(|_| file.sync_all())
-        .map_err(|err| format!("[error] failed to write editor SSH file: {err}"))?;
-    fs::rename(&tmp, path)
-        .map_err(|err| format!("[error] failed to install editor SSH file: {err}"))?;
-    #[cfg(unix)]
-    {
-        fs::set_permissions(path, fs::Permissions::from_mode(mode))
-            .map_err(|err| format!("[error] failed to set editor SSH file mode: {err}"))?;
-    }
-    Ok(())
 }
 
 fn find_ssh_binary() -> Option<PathBuf> {
@@ -1312,10 +1214,7 @@ fn print_ps(groups: &[PsGroup], json_output: bool) {
                 Err((_, message)) => json!({ "cvm_id": cvm_id, "error": message, "sessions": [] }),
             })
             .collect();
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&payload).expect("ps output serializes")
-        );
+        style::emit_json(&payload);
         return;
     }
     let extra = std::collections::BTreeMap::new();

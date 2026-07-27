@@ -1,15 +1,14 @@
 use std::collections::BTreeMap;
 
-use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use uuid::Uuid;
 
 use crate::{
     cli::{EntityAddArgs, EntityCommand, EntityListArgs},
     config::ResolvedConfig,
-    console::{console_session, read_json_response, ListPage},
+    console::{console_session, fetch_json, post_json, push_query, ListPage},
     exit::ExitStatus,
+    session::Session,
     style,
 };
 
@@ -65,7 +64,7 @@ fn list(config: &ResolvedConfig, args: EntityListArgs, json_output: bool) -> Exi
         return ExitStatus::Usage;
     }
     let (console_url, session) = try_or_eprintln!(console_session(config));
-    let page = try_or_eprintln!(fetch_entities(console_url, &session.access_token, &args));
+    let page = try_or_eprintln!(fetch_entities(console_url, &session, &args));
     print_entities(page, json_output);
     ExitStatus::Ok
 }
@@ -76,54 +75,37 @@ fn create_entity(
     name: &str,
     domain: &str,
 ) -> Result<Entity, (ExitStatus, String)> {
-    let response = Client::new()
-        .post(format!("{console_url}/api/v1/entities"))
-        .bearer_auth(access_token)
-        .header("Idempotency-Key", Uuid::new_v4().to_string())
-        .json(&json!({ "name": name, "domain": domain }))
-        .send()
-        .map_err(|err| {
-            (
-                ExitStatus::Error,
-                format!("[error] failed to create entity: {err}"),
-            )
-        })?;
-    read_json_response(response, "create entity")
+    post_json(
+        console_url,
+        access_token,
+        "/api/v1/entities",
+        &json!({ "name": name, "domain": domain }),
+        "create entity",
+    )
 }
 
 fn fetch_entities(
     console_url: &str,
-    access_token: &str,
+    session: &Session,
     args: &EntityListArgs,
 ) -> Result<ListPage<Entity>, (ExitStatus, String)> {
     let mut query = vec![("limit", args.limit.to_string())];
-    if let Some(cursor) = &args.cursor {
-        query.push(("cursor", cursor.clone()));
-    }
-    let response = Client::new()
-        .get(format!("{console_url}/api/v1/entities"))
-        .bearer_auth(access_token)
-        .query(&query)
-        .send()
-        .map_err(|err| {
-            (
-                ExitStatus::Error,
-                format!("[error] failed to list entities: {err}"),
-            )
-        })?;
-    read_json_response(response, "list entities")
+    push_query(&mut query, "cursor", &args.cursor);
+    fetch_json(
+        console_url,
+        session,
+        "/api/v1/entities",
+        &query,
+        "list entities",
+    )
 }
 
 fn print_entities(page: ListPage<Entity>, json_output: bool) {
     if json_output {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&EntityListOutput {
-                entities: page.items,
-                next_cursor: page.next_cursor,
-            })
-            .expect("entity list output serializes")
-        );
+        style::emit_json(&EntityListOutput {
+            entities: page.items,
+            next_cursor: page.next_cursor,
+        });
     } else {
         let views: Vec<style::EntityView<'_>> = page
             .items
@@ -145,10 +127,7 @@ fn print_entities(page: ListPage<Entity>, json_output: bool) {
 
 fn print_entity(entity: &Entity, json_output: bool, verb: &str) {
     if json_output {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(entity).expect("entity output serializes")
-        );
+        style::emit_json(entity);
     } else {
         let confirm = style::ConfirmBlock::new(verb, "entity", entity.name.clone())
             .field("id", entity.id.clone())

@@ -178,6 +178,20 @@ impl MockConsole {
         );
     }
 
+    /// Register a raw reply (arbitrary status + JSON body, no ETag) for `path`.
+    /// For exercising the shared `console::send`/`post_json`/`fetch_json` status
+    /// mapping directly, independent of any specific endpoint.
+    pub(crate) fn reply_raw(&self, path: &str, status: u16, body: &str) {
+        self.set(
+            path,
+            Reply {
+                status,
+                etag: None,
+                body: body.to_string(),
+            },
+        );
+    }
+
     // --- primitives (used by the endpoint helpers above) --------------------
 
     /// A GET-by-id resource endpoint: present (`200` + `body`) or absent (`404`).

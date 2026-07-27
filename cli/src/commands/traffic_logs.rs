@@ -1,15 +1,15 @@
 use std::collections::BTreeMap;
 
 use chrono::DateTime;
-use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
     cli::TrafficLogsArgs,
     config::ResolvedConfig,
-    console::{console_session, push_query, read_json_response, validate_uuid, ListPage},
+    console::{console_session, fetch_json, push_query, validate_uuid, ListPage},
     exit::ExitStatus,
+    session::Session,
     style,
 };
 
@@ -44,20 +44,8 @@ pub fn run(args: TrafficLogsArgs, config: &ResolvedConfig, json: bool) -> ExitSt
         crate::style::eprintln_error(&message);
         return ExitStatus::Usage;
     }
-    let (console_url, session) = match console_session(config) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            crate::style::eprintln_error(&message);
-            return status;
-        }
-    };
-    let page = match fetch_traffic_logs(console_url, &session.access_token, &args) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            crate::style::eprintln_error(&message);
-            return status;
-        }
-    };
+    let (console_url, session) = try_or_eprintln!(console_session(config));
+    let page = try_or_eprintln!(fetch_traffic_logs(console_url, &session, &args));
     print_traffic_logs(page, json, &args);
     ExitStatus::Ok
 }
@@ -83,7 +71,7 @@ fn validate_args(args: &TrafficLogsArgs) -> Result<(), String> {
 
 fn fetch_traffic_logs(
     console_url: &str,
-    access_token: &str,
+    session: &Session,
     args: &TrafficLogsArgs,
 ) -> Result<ListPage<TrafficLog>, (ExitStatus, String)> {
     let mut query = vec![("limit", args.limit.to_string())];
@@ -92,30 +80,21 @@ fn fetch_traffic_logs(
     push_query(&mut query, "from", &args.from);
     push_query(&mut query, "to", &args.to);
     push_query(&mut query, "cursor", &args.cursor);
-    let response = Client::new()
-        .get(format!("{console_url}/api/v1/traffic-logs"))
-        .bearer_auth(access_token)
-        .query(&query)
-        .send()
-        .map_err(|err| {
-            (
-                ExitStatus::Error,
-                format!("[error] failed to query traffic logs: {err}"),
-            )
-        })?;
-    read_json_response(response, "query traffic logs")
+    fetch_json(
+        console_url,
+        session,
+        "/api/v1/traffic-logs",
+        &query,
+        "query traffic logs",
+    )
 }
 
 fn print_traffic_logs(page: ListPage<TrafficLog>, json_output: bool, args: &TrafficLogsArgs) {
     if json_output {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&TrafficLogsOutput {
-                logs: page.items,
-                next_cursor: page.next_cursor,
-            })
-            .expect("traffic log output serializes")
-        );
+        style::emit_json(&TrafficLogsOutput {
+            logs: page.items,
+            next_cursor: page.next_cursor,
+        });
         return;
     }
     // Section 7.6: v0 guarantees at most one SC per entity, so the renderer

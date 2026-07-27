@@ -25,11 +25,7 @@ fn show(config: &ResolvedConfig, json_output: bool) -> ExitStatus {
                 }),
             );
         }
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&Value::Object(output))
-                .expect("config show output serializes")
-        );
+        style::emit_json(&Value::Object(output));
     } else {
         let display_values: Vec<String> = entries.iter().map(|e| display_value(&e.value)).collect();
         let views: Vec<style::ConfigEntryView<'_>> = entries

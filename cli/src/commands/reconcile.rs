@@ -1,12 +1,10 @@
-use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
-use uuid::Uuid;
+use serde_json::json;
 
 use crate::{
     cli::ReconcileArgs,
     config::ResolvedConfig,
-    console::{console_session, read_json_response},
+    console::{console_session, post_json},
     exit::ExitStatus,
 };
 
@@ -18,30 +16,17 @@ struct ReconcileOutput {
 }
 
 pub fn run(args: ReconcileArgs, config: &ResolvedConfig, json_output: bool) -> ExitStatus {
-    let (console_url, session) = match console_session(config) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            crate::style::eprintln_error(&message);
-            return status;
-        }
-    };
+    let (console_url, session) = try_or_eprintln!(console_session(config));
     let body = json!({"include_orphans": !args.no_orphans});
-    let output: ReconcileOutput = match post_json(
-        format!("{console_url}/api/v1/admin/reconcile"),
+    let output: ReconcileOutput = try_or_eprintln!(post_json(
+        console_url,
         &session.access_token,
+        "/api/v1/admin/reconcile",
         &body,
-    ) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            crate::style::eprintln_error(&message);
-            return status;
-        }
-    };
+        "run reconcile",
+    ));
     if json_output {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&output).expect("reconcile output serializes")
-        );
+        crate::style::emit_json(&output);
     } else {
         // Section 7.28: a reconcile run produces a single confirm block whose
         // header records the verb (`reconciled`), the noun (`run`) and a
@@ -91,26 +76,6 @@ fn reconcile_identifier(output: &ReconcileOutput, no_orphans: bool) -> String {
         };
     }
     format!("{total} actions")
-}
-
-fn post_json<T: for<'de> Deserialize<'de>>(
-    url: String,
-    access_token: &str,
-    body: &Value,
-) -> Result<T, (ExitStatus, String)> {
-    let response = Client::new()
-        .post(url)
-        .bearer_auth(access_token)
-        .header("Idempotency-Key", Uuid::new_v4().to_string())
-        .json(body)
-        .send()
-        .map_err(|err| {
-            (
-                ExitStatus::Error,
-                format!("[error] failed to run reconcile: {err}"),
-            )
-        })?;
-    read_json_response(response, "reconcile")
 }
 
 fn format_ids(values: &[String]) -> String {

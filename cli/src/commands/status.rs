@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::{
     config::ResolvedConfig,
-    console::{console_session, read_json_response, ListPage},
+    console::{console_session, fetch_json, read_json_response, ListPage},
     exit::ExitStatus,
     session::Session,
     style,
@@ -114,8 +114,7 @@ struct StatusOutput {
     /// SC read). The human renderer omits the Security CVM section entirely
     /// in that case; the JSON output sets `security_cvm` to `null` (same as
     /// "no SC provisioned" -- the two states are not distinguishable in JSON
-    /// today and that is acceptable because previously the command crashed
-    /// outright).
+    /// today, which is acceptable).
     #[serde(skip)]
     security_cvm_hidden: bool,
     profiles: Vec<Profile>,
@@ -138,20 +137,8 @@ pub fn run(config: &ResolvedConfig, json_output: bool) -> ExitStatus {
             return ExitStatus::Usage;
         }
     };
-    let (console_url, session) = match console_session(config) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            crate::style::eprintln_error(&message);
-            return status;
-        }
-    };
-    let status = match fetch_status(console_url, &session, profile_id.as_deref()) {
-        Ok(value) => value,
-        Err((status, message)) => {
-            crate::style::eprintln_error(&message);
-            return status;
-        }
-    };
+    let (console_url, session) = try_or_eprintln!(console_session(config));
+    let status = try_or_eprintln!(fetch_status(console_url, &session, profile_id.as_deref()));
     print_status(&status, json_output, config.console_url.as_deref());
     ExitStatus::Ok
 }
@@ -221,37 +208,21 @@ fn fetch_status(
 }
 
 fn fetch_me(console_url: &str, session: &Session) -> Result<User, (ExitStatus, String)> {
-    let response = Client::new()
-        .get(format!("{console_url}/api/v1/me"))
-        .bearer_auth(&session.access_token)
-        .send()
-        .map_err(|err| {
-            (
-                ExitStatus::Error,
-                format!("[error] failed to fetch session identity: {err}"),
-            )
-        })?;
-    read_json_response(response, "fetch session identity")
+    fetch_json(
+        console_url,
+        session,
+        "/api/v1/me",
+        &[],
+        "fetch session identity",
+    )
 }
 
 fn fetch_profiles(
     console_url: &str,
     session: &Session,
 ) -> Result<ListPage<Profile>, (ExitStatus, String)> {
-    let response = Client::new()
-        .get(format!(
-            "{console_url}/api/v1/entities/{}/profiles",
-            session.entity.id
-        ))
-        .bearer_auth(&session.access_token)
-        .send()
-        .map_err(|err| {
-            (
-                ExitStatus::Error,
-                format!("[error] failed to list profiles: {err}"),
-            )
-        })?;
-    read_json_response(response, "list profiles")
+    let path = format!("/api/v1/entities/{}/profiles", session.entity.id);
+    fetch_json(console_url, session, &path, &[], "list profiles")
 }
 
 fn fetch_cvms(
@@ -259,36 +230,24 @@ fn fetch_cvms(
     session: &Session,
     profile_id: Option<&str>,
 ) -> Result<ListPage<Cvm>, (ExitStatus, String)> {
-    let mut request = Client::new()
-        .get(format!("{console_url}/api/v1/cvms"))
-        .bearer_auth(&session.access_token);
-    if let Some(profile_id) = profile_id {
-        request = request.query(&[("profile_id", profile_id)]);
-    }
-    let response = request.send().map_err(|err| {
-        (
-            ExitStatus::Error,
-            format!("[error] failed to list CVMs: {err}"),
-        )
-    })?;
-    read_json_response(response, "list CVMs")
+    let query = match profile_id {
+        Some(profile_id) => vec![("profile_id", profile_id.to_string())],
+        None => Vec::new(),
+    };
+    fetch_json(console_url, session, "/api/v1/cvms", &query, "list CVMs")
 }
 
 fn fetch_keys(
     console_url: &str,
     session: &Session,
 ) -> Result<ListPage<ConsoleSshKey>, (ExitStatus, String)> {
-    let response = Client::new()
-        .get(format!("{console_url}/api/v1/me/keys"))
-        .bearer_auth(&session.access_token)
-        .send()
-        .map_err(|err| {
-            (
-                ExitStatus::Error,
-                format!("[error] failed to list SSH keys: {err}"),
-            )
-        })?;
-    read_json_response(response, "list SSH keys")
+    fetch_json(
+        console_url,
+        session,
+        "/api/v1/me/keys",
+        &[],
+        "list SSH keys",
+    )
 }
 
 /// Result of attempting to fetch the entity's Security CVM. The caller may
@@ -348,10 +307,7 @@ fn key_output(key: &ConsoleSshKey) -> SshKeyOutput {
 
 fn print_status(status: &StatusOutput, json_output: bool, console_url: Option<&str>) {
     if json_output {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(status).expect("status output serializes")
-        );
+        style::emit_json(status);
         return;
     }
     let sc_view = status

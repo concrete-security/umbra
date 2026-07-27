@@ -1,12 +1,11 @@
 use std::{
     collections::BTreeMap,
-    fs::{self, OpenOptions},
-    io::{self, Write},
+    fs, io,
     path::{Path, PathBuf},
 };
 
 #[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 
 use serde::{Deserialize, Serialize};
 
@@ -55,22 +54,7 @@ pub fn write_identity(config_dir: &Path, key_id: &str, identity_file: &Path) -> 
     keys.insert(key_id.to_string(), identity_file.display().to_string());
 
     let body = toml::to_string_pretty(&StoreFileOut { keys: &keys }).map_err(io::Error::other)?;
-    let tmp = config_dir.join(format!(".ssh-identities.{}.tmp", std::process::id()));
-    let mut opts = OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        opts.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-    }
-    let mut file = opts.open(&tmp)?;
-    file.write_all(body.as_bytes())?;
-    file.sync_all()?;
-    fs::rename(&tmp, &path)?;
-    #[cfg(unix)]
-    {
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
-    }
-    Ok(())
+    crate::fsutil::write_atomic_file(&path, body.as_bytes(), 0o600)
 }
 
 #[cfg(test)]

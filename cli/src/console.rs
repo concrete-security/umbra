@@ -8,8 +8,8 @@
 //! and others did not. Centralising them here keeps the envelope-to-bracket
 //! mapping in one place per `docs/specs/cli-style.md` section 6.5 / 7.20.
 //!
-//! The [`console_session`] helper used to be 10x duplicated too; it has been
-//! consolidated to [`console_session`] here.
+//! The [`console_session`] helper used to be duplicated ~10x too; it now lives
+//! here.
 use std::time::Duration;
 
 use reqwest::{
@@ -275,17 +275,55 @@ pub(crate) fn fetch_json<T: DeserializeOwned>(
     query: &[(&'static str, String)],
     action: &str,
 ) -> Result<T, (ExitStatus, String)> {
-    let response = Client::new()
-        .get(format!("{console_url}{path}"))
-        .bearer_auth(&session.access_token)
-        .query(query)
-        .send()
-        .map_err(|err| {
-            (
-                ExitStatus::Error,
-                format!("[error] failed to {action}: {err}"),
-            )
-        })?;
+    let response = send(
+        Client::new()
+            .get(format!("{console_url}{path}"))
+            .bearer_auth(&session.access_token)
+            .query(query),
+        action,
+    )?;
+    read_json_response(response, action)
+}
+
+/// Send a prepared Console request, mapping a transport-level failure to a
+/// section 6.5 error string. The single home of the `.send().map_err(...)` that
+/// every write endpoint (POST/PATCH/DELETE) otherwise re-hand-rolls: build the
+/// request (bearer auth, `Idempotency-Key`, `If-Match`, body — whatever the
+/// endpoint needs), pass it here, then decode with the matching
+/// `read_*_response`. GET reads that decode a typed JSON body go through
+/// [`fetch_json`] (itself built on this); reads that need the raw response
+/// (ETag capture, custom 404 handling) build their own.
+pub(crate) fn send(
+    request: reqwest::blocking::RequestBuilder,
+    action: &str,
+) -> Result<Response, (ExitStatus, String)> {
+    request.send().map_err(|err| {
+        (
+            ExitStatus::Error,
+            format!("[error] failed to {action}: {err}"),
+        )
+    })
+}
+
+/// The common write: an idempotent `POST` of `body` that decodes a JSON payload
+/// back into `T`. A fresh `Idempotency-Key` is generated per call. Endpoints
+/// that need an `If-Match`, return `204`, or hand back an `ETag` build the
+/// request themselves and pair [`send`] with the matching `read_*_response`.
+pub(crate) fn post_json<T: DeserializeOwned>(
+    console_url: &str,
+    access_token: &str,
+    path: &str,
+    body: &Value,
+    action: &str,
+) -> Result<T, (ExitStatus, String)> {
+    let response = send(
+        Client::new()
+            .post(format!("{console_url}{path}"))
+            .bearer_auth(access_token)
+            .header("Idempotency-Key", uuid::Uuid::new_v4().to_string())
+            .json(body),
+        action,
+    )?;
     read_json_response(response, action)
 }
 
@@ -526,5 +564,53 @@ mod tests {
             validate_uuid("--id", "not-a-uuid").unwrap_err(),
             "[usage] --id must be a UUID"
         );
+    }
+
+    #[test]
+    fn validate_config_value_rejects_slash() {
+        assert_eq!(
+            validate_config_value("--instance-type", "tdx/small", 100).unwrap_err(),
+            "[usage] --instance-type may contain only letters, digits, '.', '_', and '-'"
+        );
+    }
+
+    /// `fetch_json` (and thus the shared GET path) maps HTTP status to the
+    /// section-6.5 exit code: 401 -> auth_required, 400/422 -> usage, else error.
+    #[test]
+    fn fetch_json_maps_status_to_exit_code_failure() {
+        use crate::test_support::{fake_authenticated_session, MockConsole};
+        let mock = MockConsole::start();
+        let session = fake_authenticated_session();
+        for (status, expected) in [
+            (401u16, ExitStatus::AuthRequired),
+            (400u16, ExitStatus::Usage),
+            (422u16, ExitStatus::Usage),
+            (500u16, ExitStatus::Error),
+        ] {
+            let path = format!("/api/v1/probe-{status}");
+            mock.reply_raw(&path, status, r#"{"error":{"code":"E","message":"boom"}}"#);
+            let (got, _message) =
+                fetch_json::<Value>(mock.base_url(), &session, &path, &[], "probe")
+                    .expect_err("a non-2xx status must be an error");
+            assert_eq!(got as u8, expected as u8, "status {status}");
+        }
+    }
+
+    /// `post_json` sends the body and decodes a 200 JSON payload back into `T`.
+    #[test]
+    fn post_json_round_trips_success() {
+        use crate::test_support::{fake_authenticated_session, MockConsole};
+        let mock = MockConsole::start();
+        let session = fake_authenticated_session();
+        mock.reply_raw("/api/v1/echo", 200, r#"{"ok":true}"#);
+        let value: Value = post_json(
+            mock.base_url(),
+            &session.access_token,
+            "/api/v1/echo",
+            &serde_json::json!({}),
+            "echo",
+        )
+        .expect("a 200 body decodes");
+        assert_eq!(value["ok"], serde_json::json!(true));
     }
 }

@@ -340,7 +340,7 @@ pub enum CvmCommand {
     /// List Dev CVMs visible to the current user.
     List(CvmListArgs),
 
-    /// List the launchable instance types (vCPU, memory, hourly rate).
+    /// List the launchable instance types (family, vCPU, memory).
     InstanceTypes(CvmInstanceTypesArgs),
 
     /// Launch a Dev CVM.

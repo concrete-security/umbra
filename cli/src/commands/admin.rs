@@ -1,5 +1,4 @@
 use chrono::DateTime;
-use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use uuid::Uuid;
@@ -10,7 +9,7 @@ use crate::{
         AdminSessionsRevokeArgs,
     },
     config::ResolvedConfig,
-    console::{console_session, read_json_response},
+    console::{console_session, post_json},
     exit::ExitStatus,
     style,
 };
@@ -52,16 +51,14 @@ fn sessions_revoke(
     };
     let (console_url, session) = try_or_eprintln!(console_session(config));
     let output: SessionsRevokeOutput = try_or_eprintln!(post_json(
-        format!("{console_url}/api/v1/admin/sessions/revoke"),
+        console_url,
         &session.access_token,
+        "/api/v1/admin/sessions/revoke",
         &Value::Object(body),
         "revoke sessions",
     ));
     if json_output {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&output).expect("session revoke output serializes")
-        );
+        style::emit_json(&output);
     } else {
         // Confirm template for the admin sessions revoke mutation. The
         // command has no single primary identifier; the identifier slot
@@ -88,16 +85,14 @@ fn keys_rotate(
         "retire_old_after_seconds": args.retire_old_after_seconds,
     });
     let output: KeysRotateOutput = try_or_eprintln!(post_json(
-        format!("{console_url}/api/v1/admin/keys/rotate"),
+        console_url,
         &session.access_token,
+        "/api/v1/admin/keys/rotate",
         &body,
         "rotate JWT keys",
     ));
     if json_output {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&output).expect("key rotation output serializes")
-        );
+        style::emit_json(&output);
     } else {
         let retiring = if output.retiring_kids.is_empty() {
             "-".to_string()
@@ -112,27 +107,6 @@ fn keys_rotate(
         println!("{}", style::render_confirm(&confirm));
     }
     ExitStatus::Ok
-}
-
-fn post_json<T: for<'de> Deserialize<'de>>(
-    url: String,
-    access_token: &str,
-    body: &Value,
-    action: &str,
-) -> Result<T, (ExitStatus, String)> {
-    let response = Client::new()
-        .post(url)
-        .bearer_auth(access_token)
-        .header("Idempotency-Key", Uuid::new_v4().to_string())
-        .json(body)
-        .send()
-        .map_err(|err| {
-            (
-                ExitStatus::Error,
-                format!("[error] failed to {action}: {err}"),
-            )
-        })?;
-    read_json_response(response, action)
 }
 
 fn sessions_revoke_body(args: &AdminSessionsRevokeArgs) -> Result<Map<String, Value>, String> {
