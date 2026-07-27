@@ -1,7 +1,7 @@
 """store per-user host-bound secret material for profile secret injections
 
 Revision ID: 0026_user_secret_material
-Revises: 0025_cvm_disk_size
+Revises: 0026_instance_type_catalog
 Create Date: 2026-07-07
 """
 
@@ -9,7 +9,7 @@ from alembic import op
 
 
 revision = "0026_user_secret_material"
-down_revision = "0025_cvm_disk_size"
+down_revision = "0026_instance_type_catalog"
 branch_labels = None
 depends_on = None
 

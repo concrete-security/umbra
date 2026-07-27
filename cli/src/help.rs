@@ -88,7 +88,7 @@ const GROUPS: &[(&str, &[&str])] = &[
     ("Manage sandboxes", &["cvm", "security-cvm"]),
     (
         "Org, policy & access",
-        &["user", "profile", "key", "quota", "entity"],
+        &["user", "profile", "key", "secret", "quota", "entity"],
     ),
     ("Observability", &["audit", "traffic-logs"]),
     (
@@ -298,6 +298,18 @@ const EXAMPLES: &[(&str, &[&str])] = &[
         ],
     ),
     ("key remove", &["concrete key remove <KEY_ID>"]),
+    // `secret` group. Values come from stdin or --value-file, never argv.
+    (
+        "secret set",
+        &[
+            "concrete secret set slack-user-token --host slack.com --host '*.slack.com'",
+            "concrete secret set gh-pat --host api.github.com --value-file ./pat.txt",
+        ],
+    ),
+    (
+        "secret remove",
+        &["concrete secret remove slack-user-token"],
+    ),
     // `quota` group.
     (
         "quota get",
