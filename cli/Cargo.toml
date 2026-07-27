@@ -39,7 +39,16 @@ webbrowser = "1"
 webpki-roots = "0.26"
 zeroize = { version = "1", features = ["derive"] }
 
+# The in-process mock Console and local-state fixtures (`src/test_support.rs`) are
+# compiled into the library only for `cargo test` (`cfg(test)`) or when this feature
+# is on. Integration tests under `tests/` link the library as an external crate, so
+# they need the feature — hence the dev-dependency on this very package below. Never
+# enable it for a release build: it would ship a test HTTP server in the binary.
+[features]
+test-support = []
+
 [dev-dependencies]
+concrete-cli = { path = ".", features = ["test-support"] }
 rstest = { version = "0.23", default-features = false }
 
 [build-dependencies]

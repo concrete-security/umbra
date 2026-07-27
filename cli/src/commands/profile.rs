@@ -15,6 +15,7 @@ use crate::{
         wire, ProfileCommand, ProfileConfigureArgs, ProfileCreateArgs, ProfileListArgs,
         ProfileMembersCommand,
     },
+    commands::alias,
     config::ResolvedConfig,
     console::{self, console_session, fetch_json, read_empty_response, read_with_etag, ListPage},
     exit::ExitStatus,
@@ -135,11 +136,14 @@ fn list(config: &ResolvedConfig, args: ProfileListArgs, json_output: bool) -> Ex
     if json_output {
         style::emit_json(&page.items);
     } else {
+        // Local alias names for the page, read once (human view only).
+        let aliases = alias::load_for_display(config);
         let views: Vec<style::ProfileView<'_>> = page
             .items
             .iter()
             .map(|p| style::ProfileView {
                 id: &p.id,
+                alias: alias::cell_source(&aliases, alias::AliasKind::Profile, &p.id),
                 name: &p.name,
                 assigned: p.assigned,
                 attached_cvm_count: p.attached_cvm_count,
@@ -176,7 +180,7 @@ fn show(config: &ResolvedConfig, json_output: bool) -> ExitStatus {
     let (console_url, session, profile_id) = try_or_eprintln!(selected_profile_session(config));
     let profile_id = profile_id.as_str();
     let profile = try_or_eprintln!(fetch_profile(console_url, &session, profile_id)).profile;
-    print_profile(&profile, json_output);
+    print_profile(&profile, config, json_output);
     ExitStatus::Ok
 }
 
@@ -534,7 +538,7 @@ fn read_policy(path: Option<&Path>) -> Result<Option<Value>, (ExitStatus, String
     Ok(Some(value))
 }
 
-fn print_profile(profile: &Profile, json_output: bool) {
+fn print_profile(profile: &Profile, config: &ResolvedConfig, json_output: bool) {
     if json_output {
         style::emit_json(profile);
         return;
@@ -542,8 +546,11 @@ fn print_profile(profile: &Profile, json_output: bool) {
     let policy_pretty =
         serde_json::to_string_pretty(&profile.policy).expect("policy output serializes");
     let attached_ids: Vec<String> = profile.attached_cvms.iter().map(|c| c.id.clone()).collect();
+    // Human view only.
+    let aliases = alias::load_for_display(config);
     let view = style::ProfileShowView {
         id: &profile.id,
+        alias: alias::cell_source(&aliases, alias::AliasKind::Profile, &profile.id),
         name: &profile.name,
         description: Some(profile.description.as_str()),
         assigned: profile.assigned,

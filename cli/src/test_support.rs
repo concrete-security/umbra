@@ -7,6 +7,11 @@
 //! for the test binary's lifetime (the listener is moved into it); tests are
 //! short-lived, so the leaked thread and port are harmless.
 
+// Fixture library: which endpoints and helpers a given build uses depends on the
+// tests compiled with it (in-crate `cfg(test)` vs. the `test-support` feature for
+// `tests/`), so an unused fixture is expected, not a defect.
+#![allow(dead_code)]
+
 use std::{
     collections::HashMap,
     io::{BufRead, BufReader, Write},
@@ -59,6 +64,45 @@ pub(crate) fn authenticated_config(mock: &MockConsole) -> crate::config::Resolve
     })
 }
 
+/// A temp config directory holding a valid session for `mock`, ready to be passed
+/// as `concrete --config`. The fixture for driving the real binary from an
+/// integration test; in-crate tests use [`authenticated_config`] instead (same
+/// directory, wrapped in a resolved config).
+pub fn temp_config_with_session(mock: &MockConsole) -> std::path::PathBuf {
+    authenticated_config(mock).config_dir
+}
+
+/// Record a valid alias for `kind` (`"cvm"` / `"profile"` / `"ssh-key"`) in the store
+/// under `config_dir`, through the CLI's own write path (lock, uniqueness check,
+/// atomic 0600 write) — so a test seeds the format the code really produces, not one
+/// it assumes.
+pub fn seed_resource_alias(config_dir: &std::path::Path, kind: &str, id: &str, name: &str) {
+    let kind = match kind {
+        "cvm" => crate::commands::alias::AliasKind::Cvm,
+        "profile" => crate::commands::alias::AliasKind::Profile,
+        "ssh-key" => crate::commands::alias::AliasKind::SshKey,
+        other => panic!("unknown alias kind {other}"),
+    };
+    crate::commands::alias::record_resource_alias(&config_for(config_dir), kind, id, name)
+        .expect("seed alias");
+}
+
+/// Overwrite the alias store under `config_dir` with bytes that are NOT valid TOML,
+/// bypassing the write path on purpose (which would refuse to produce them).
+pub fn corrupt_alias_store(config_dir: &std::path::Path) {
+    std::fs::write(config_dir.join("aliases.toml"), "not = = valid toml")
+        .expect("corrupt alias store");
+}
+
+/// A resolved config over `config_dir` alone, for the seed helpers above (they touch
+/// local state only, never the Console).
+fn config_for(config_dir: &std::path::Path) -> crate::config::ResolvedConfig {
+    crate::config::ResolvedConfig::resolve(crate::config::ConfigOverrides {
+        config_dir: Some(config_dir.to_path_buf()),
+        ..Default::default()
+    })
+}
+
 /// One pre-registered HTTP reply the mock Console returns for a given path:
 /// status code, an optional ETag header (some CLI readers require it), and the
 /// JSON body.
@@ -71,14 +115,14 @@ struct Reply {
 
 /// The output a test wants a resource GET to simulate: the resource is present
 /// (`200` with its body) or absent (`404`).
-pub(crate) enum Presence {
+pub enum Presence {
     Present,
     Absent,
 }
 
 /// A throwaway Console reachable at [`base_url`](Self::base_url). Each method
 /// mirrors a real Console endpoint; the test picks the output it should return.
-pub(crate) struct MockConsole {
+pub struct MockConsole {
     base_url: String,
     // What to answer, per path. Read outside-in:
     //   Arc     -> shared between the test and the serving thread
@@ -92,7 +136,7 @@ impl MockConsole {
     /// background thread that answers requests from the `replies` table, and
     /// return the handle. Register endpoints on it, then point the code under
     /// test at [`base_url`](Self::base_url).
-    pub(crate) fn start() -> Self {
+    pub fn start() -> Self {
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind mock console");
         let port = listener.local_addr().expect("mock console addr").port();
         let replies: Arc<Mutex<HashMap<String, Reply>>> = Arc::new(Mutex::new(HashMap::new()));
@@ -109,7 +153,7 @@ impl MockConsole {
     }
 
     /// Base URL to pass as `console_url` to the code under test.
-    pub(crate) fn base_url(&self) -> &str {
+    pub fn base_url(&self) -> &str {
         &self.base_url
     }
 
@@ -136,31 +180,38 @@ impl MockConsole {
     }
 
     /// `GET /api/v1/profiles/{id}`.
-    pub(crate) fn get_profile(&self, id: &str, presence: Presence) {
+    pub fn get_profile(&self, id: &str, presence: Presence) {
         self.get_resource(profile::profile_path(id), presence, profile_body(id));
     }
 
     /// `GET /api/v1/me/keys` — the caller's registered keys (the Console has no
     /// per-key GET, so existence is a membership test on this list).
-    pub(crate) fn list_keys(&self, ids: &[&str]) {
+    pub fn list_keys(&self, ids: &[&str]) {
         self.reply_found(key::keys_path(), keys_body(ids));
     }
 
-    /// `GET /api/v1/cvms?state=alive` — the caller's non-terminated CVMs, the
-    /// live set `alias prune` reconciles cvm and session aliases against. Each id
-    /// is returned `running`.
-    pub(crate) fn list_alive_cvms(&self, ids: &[&str]) {
-        let items = ids.iter().map(|id| cvm_body(id)).collect();
-        self.reply_found(
-            &format!("{}?state=alive", cvm::cvms_path()),
-            list_page(items),
-        );
+    /// `GET /api/v1/cvms[?state=<state>]` — the caller's CVMs, each returned
+    /// `running`, for exactly ONE request form: `Some("alive")` is what `alias prune`
+    /// reconciles against, `Some("running")` what a fleet `concrete ps` asks for, and
+    /// `None` the bare path `concrete cvm list` sends (no `state` param — the Console
+    /// applies its own `alive` default, `docs/specs/console.md` §3.6).
+    ///
+    /// One form per call ON PURPOSE. Registering several at once would let a command
+    /// silently lose its `state` filter with every test still green — and that filter
+    /// is what keeps `alias prune` from reconciling against terminated CVMs.
+    pub fn list_cvms(&self, state: Option<&str>, ids: &[&str]) {
+        let items: Vec<Value> = ids.iter().map(|id| cvm_body(id)).collect();
+        let path = match state {
+            Some(state) => format!("{}?state={state}", cvm::cvms_path()),
+            None => cvm::cvms_path().to_string(),
+        };
+        self.reply_found(&path, list_page(items));
     }
 
     /// `GET /api/v1/entities/{entity}/profiles` — the entity's profiles, the
     /// live set `alias prune` reconciles profile aliases against. Uses the fake
     /// session's [`FAKE_ENTITY_ID`].
-    pub(crate) fn list_profiles(&self, ids: &[&str]) {
+    pub fn list_profiles(&self, ids: &[&str]) {
         let items = ids.iter().map(|id| profile_body(id)).collect();
         self.reply_found(&profile::profiles_path(FAKE_ENTITY_ID), list_page(items));
     }

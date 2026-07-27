@@ -421,6 +421,7 @@ dependencies = [
  "chrono",
  "clap",
  "clap_complete",
+ "concrete-cli",
  "dirs",
  "getrandom 0.3.4",
  "libc",

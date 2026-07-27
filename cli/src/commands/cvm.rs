@@ -334,6 +334,7 @@ fn list(config: &ResolvedConfig, args: CvmListArgs, json_output: bool) -> ExitSt
     let state_filter = args.state.map(wire);
     print_cvm_list(
         page,
+        config,
         json_output,
         profile_id.as_deref(),
         state_filter.as_deref(),
@@ -1511,6 +1512,7 @@ fn policy_document(bundle: &PolicyBundle) -> Value {
 
 fn print_cvm_list(
     page: ListPage<Cvm>,
+    config: &ResolvedConfig,
     json_output: bool,
     profile_filter: Option<&str>,
     state_filter: Option<&str>,
@@ -1519,11 +1521,15 @@ fn print_cvm_list(
         style::emit_json(&page.items);
         return;
     }
+    // Local alias names for the page, read once (human view only — `--json` is the
+    // Console record). Rationale for the `Result`: `alias::load_for_display`.
+    let aliases = alias::load_for_display(config);
     let views: Vec<style::CvmView<'_>> = page
         .items
         .iter()
         .map(|cvm| style::CvmView {
             id: &cvm.id,
+            alias: alias::cell_source(&aliases, alias::AliasKind::Cvm, &cvm.id),
             state: &cvm.state,
             error_reason: cvm.error_reason.as_deref(),
             fqdn: cvm.fqdn.as_deref(),

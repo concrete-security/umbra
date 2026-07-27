@@ -346,13 +346,12 @@ pub fn run_ps(args: SessionListArgs, config: &ResolvedConfig, json_output: bool)
         }
     };
 
-    // Alias config is a single local file shared by all CVMs: validate it once,
-    // up front. A read/parse failure is a local config error, not a per-CVM
-    // probe failure, so surface it instead of silently rendering "no aliases".
-    if let Err(message) = alias::load(&config.config_dir) {
-        crate::style::eprintln_error(&message);
-        return ExitStatus::Error;
-    }
+    // Alias config is a single local file shared by all CVMs: read it ONCE here,
+    // not once per CVM. An unreadable store is reported once on stderr and marked
+    // in each session's `alias` cell (`load_for_display`), never turned into a
+    // failed listing: the sessions come from the Dev CVMs, not from this file — the
+    // same policy the resource views apply (docs/specs/cli-style.md §7.9).
+    let alias_store = alias::load_for_display(config);
 
     // `--identity-file` is a local, CVM-independent argument: a bad path fails
     // identically for every CVM, so validate it once here (fail fast) instead
@@ -373,7 +372,8 @@ pub fn run_ps(args: SessionListArgs, config: &ResolvedConfig, json_output: bool)
         .into_iter()
         .map(|cvm| {
             let cvm_id = cvm.id.clone();
-            let aliases = alias::load(&config.config_dir)
+            let aliases = alias_store
+                .as_ref()
                 .map(|aliases| aliases.session_names_on(&cvm_id))
                 .unwrap_or_default();
             let sessions = build_ssh(
@@ -401,7 +401,11 @@ pub fn run_ps(args: SessionListArgs, config: &ResolvedConfig, json_output: bool)
         return *status;
     }
 
-    print_ps(&groups, json_output);
+    print_ps(
+        &groups,
+        alias_store.as_ref().err().map(String::as_str),
+        json_output,
+    );
     ExitStatus::Ok
 }
 
@@ -1201,7 +1205,7 @@ fn parse_session_rows(
     Ok(rows)
 }
 
-fn print_ps(groups: &[PsGroup], json_output: bool) {
+fn print_ps(groups: &[PsGroup], alias_store_error: Option<&str>, json_output: bool) {
     if json_output {
         // Per-CVM objects so a failed/empty CVM still appears; each row already
         // carries no CVM id, so the group provides it for unambiguous re-attach.
@@ -1229,7 +1233,13 @@ fn print_ps(groups: &[PsGroup], json_output: bool) {
                     .map(|row| style::PsSessionView {
                         name: &row.name,
                         attached: row.attached,
-                        alias: row.alias.as_deref(),
+                        // The store error wins over the (then always empty) alias
+                        // map, so the cell marks the fault instead of claiming the
+                        // session has no alias.
+                        alias: match alias_store_error {
+                            Some(message) => Err(message),
+                            None => Ok(row.alias.as_deref()),
+                        },
                         created_at: &row.created_at,
                         extra: &extra,
                     })
@@ -1308,7 +1318,7 @@ fn shell_quote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{authenticated_config, MockConsole, Presence};
+    use crate::test_support::{authenticated_config, MockConsole};
     use rstest::rstest;
     use std::{fs, process::Command};
 
@@ -1635,23 +1645,26 @@ mod tests {
         );
     }
 
-    /// A corrupt `aliases.toml` makes `ps` fail fast — it must surface the
-    /// malformed-file error, not silently render every session with `alias -`.
-    /// Guards the up-front `alias::load` check (a raw-UUID target is used so
-    /// resolution itself never touches the broken file).
+    /// A corrupt `aliases.toml` must NOT fail `ps`: the sessions come from the Dev
+    /// CVMs, not from that local file, so the store error is reported once on stderr
+    /// and marked in each `alias` cell while the listing still exits `0` — the same
+    /// policy as the resource views (§7.2/7.9). Fleet mode is used because it is the
+    /// mode whose exit status only a real failure can change: a per-CVM probe error
+    /// (there is no reachable CVM here) stays in the payload. Before, the up-front
+    /// `alias::load` check made this exit `1`.
     #[test]
     fn test_ps_malformed_aliases_failure() {
         const CVM_ID: &str = "9a7f6b4a-1111-2222-3333-444444444444";
         let console = MockConsole::start();
         let config = authenticated_config(&console);
-        console.get_cvm(CVM_ID, Presence::Present);
+        console.list_cvms(Some("running"), &[CVM_ID]);
         fs::write(config.config_dir.join("aliases.toml"), "not = = valid toml")
             .expect("corrupt store written");
 
         let status = run_ps(
             SessionListArgs {
                 target: crate::cli::CvmTarget {
-                    cvm_id: Some(CVM_ID.into()),
+                    cvm_id: None,
                     cvm: None,
                 },
                 identity_file: None,
@@ -1660,8 +1673,8 @@ mod tests {
             false,
         );
         assert!(
-            matches!(status, ExitStatus::Error),
-            "ps must fail fast on a malformed alias file, not render sessions"
+            matches!(status, ExitStatus::Ok),
+            "a malformed alias file must not fail the listing"
         );
     }
 }

@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 use crate::{
     cli::{KeyAddArgs, KeyCommand},
+    commands::alias,
     config::ResolvedConfig,
     console::{console_session, fetch_json, post_json, read_empty_response, send, ListPage},
     exit::ExitStatus,
@@ -61,12 +62,15 @@ fn list(config: &ResolvedConfig, json_output: bool) -> ExitStatus {
     if json_output {
         style::emit_json(&keys);
     } else {
+        // Local alias names for the page, read once (human view only).
+        let aliases = alias::load_for_display(config);
         let views: Vec<style::KeyView<'_>> = page
             .items
             .iter()
             .zip(keys.iter())
             .map(|(raw, out)| style::KeyView {
                 id: &out.id,
+                alias: alias::cell_source(&aliases, alias::AliasKind::SshKey, &out.id),
                 label: &out.label,
                 fingerprint: &out.fingerprint,
                 algorithm: &out.algorithm,

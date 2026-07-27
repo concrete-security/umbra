@@ -21,8 +21,8 @@ mod session;
 mod ssh_identity;
 mod ssh_identity_store;
 mod style;
-#[cfg(test)]
-mod test_support;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 
 pub use exit::ExitStatus;
 
