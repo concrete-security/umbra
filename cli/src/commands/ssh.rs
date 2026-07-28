@@ -213,7 +213,14 @@ fn record_launch_alias(
     identity_file: Option<&Path>,
 ) -> Option<ExitStatus> {
     let nickname = nickname?;
-    if let Err((status, message)) = alias::check_new_alias(config, nickname) {
+    // The target is known here — `dtach -A` re-attaches, so `--name` may well point at
+    // a session that already has an alias — so check it BEFORE the SSH probe rather
+    // than leaving it to the write, which would pay for the probe first.
+    let target = alias::AliasTarget::Session(alias::SessionAlias {
+        session: session_name.to_string(),
+        cvm: cvm_id.to_string(),
+    });
+    if let Err((status, message)) = alias::validate_alias(config, nickname, Some(&target)) {
         crate::style::eprintln_error(&message);
         return Some(status);
     }
@@ -249,7 +256,7 @@ fn drop_launch_alias(config: &ResolvedConfig, nickname: Option<&str>, session: &
     // Match the mapping this launch wrote: if another process rm'd and recreated
     // the same name to a different target between launch and this rollback, leave
     // that fresh mapping alone.
-    let observed = alias::ObservedAlias::Session(alias::SessionAlias {
+    let observed = alias::AliasTarget::Session(alias::SessionAlias {
         session: session.to_string(),
         cvm: cvm.to_string(),
     });
@@ -424,9 +431,13 @@ fn resolve_session_target(
     if let Some(entry) = aliases.resolve_session(target) {
         let cvm_id = match cvm_flag {
             Some(flag) => {
-                let overridden =
-                    select_cvm(None, Some(flag), &[config.default_cvm.as_deref()], config)
-                        .map_err(|m| (ExitStatus::Usage, m))?;
+                // Canonical: `select_cvm` hands a raw UUID straight through while the
+                // store holds one canonical form, so comparing as typed would warn
+                // about an "override" that names the very same CVM.
+                let overridden = alias::canonical_id(
+                    &select_cvm(None, Some(flag), &[config.default_cvm.as_deref()], config)
+                        .map_err(|m| (ExitStatus::Usage, m))?,
+                );
                 if overridden != entry.cvm {
                     // Show the stored CVM by its alias when it has one (readable).
                     let stored = aliases.cvm_display(&entry.cvm);
@@ -1642,6 +1653,69 @@ mod tests {
         assert!(
             reloaded.resolve_session("kept-one").is_some(),
             "the CVM's other session must survive"
+        );
+    }
+
+    /// An explicit `--cvm` that names the alias's OWN CVM in another spelling is not an
+    /// override: the resolved id is canonicalized before it is compared with the stored
+    /// one, so the session resolves to that same CVM (and no `[warn] --cvm forces …` is
+    /// emitted). Without it every non-canonical `--cvm` warns about forcing the CVM it
+    /// already points at.
+    #[test]
+    fn test_resolve_session_target_non_canonical_success() {
+        const CVM_ID: &str = "9a7f6b4a-1111-2222-3333-444444444444";
+        let dir = std::env::temp_dir().join(format!("concrete-target-{}", uuid::Uuid::new_v4()));
+        let config = ResolvedConfig::resolve(crate::config::ConfigOverrides {
+            config_dir: Some(dir),
+            ..Default::default()
+        });
+        let mut store = alias::Aliases::default();
+        store.insert_session("work".into(), "agent-1".into(), CVM_ID.into());
+        alias::save(&config.config_dir, &store).expect("seed store");
+
+        let (session, cvm) =
+            resolve_session_target("work", Some(&CVM_ID.to_ascii_uppercase()), &config)
+                .expect("the alias resolves");
+        assert_eq!(session, "agent-1");
+        assert_eq!(cvm, CVM_ID, "the CVM must resolve to its canonical form");
+    }
+
+    /// `--alias` on a session that already carries one is refused BEFORE the SSH probe:
+    /// `record_launch_alias` knows the `{session, cvm}` target at that point, and
+    /// `dtach -A` re-attaches, so `--name` may well name an already-aliased session. The
+    /// refusal returns a status, which aborts the launch (deliberate: a refused alias
+    /// kills the session) — and it happens with no CVM to probe here, which is what pins
+    /// that the check precedes `list_session_names`. The CVM is passed in a
+    /// non-canonical spelling, the store holding the canonical one.
+    #[test]
+    fn test_record_launch_alias_second_name_failure() {
+        const CVM_ID: &str = "9a7f6b4a-1111-2222-3333-444444444444";
+        let dir =
+            std::env::temp_dir().join(format!("concrete-launch-alias-{}", uuid::Uuid::new_v4()));
+        let config = ResolvedConfig::resolve(crate::config::ConfigOverrides {
+            config_dir: Some(dir),
+            ..Default::default()
+        });
+        let mut store = alias::Aliases::default();
+        store.insert_session("work".into(), "agent-1".into(), CVM_ID.into());
+        alias::save(&config.config_dir, &store).expect("seed store");
+
+        let status = record_launch_alias(
+            &config,
+            Some("work-2"),
+            "agent-1",
+            &CVM_ID.to_ascii_uppercase(),
+            None,
+        );
+        assert_eq!(
+            status.map(|status| status as u8),
+            Some(ExitStatus::Error as u8),
+            "an already-aliased session must abort the launch"
+        );
+        assert_eq!(
+            alias::load(&config.config_dir).unwrap(),
+            store,
+            "the store must be left exactly as it was"
         );
     }
 

@@ -85,7 +85,7 @@ fn create(config: &ResolvedConfig, args: ProfileCreateArgs, json_output: bool) -
     let description = args.description.unwrap_or_default();
     // Fail fast on a bad/taken alias before creating anything.
     if let Some(nick) = args.alias.as_deref() {
-        if let Err((status, message)) = crate::commands::alias::check_new_alias(config, nick) {
+        if let Err((status, message)) = crate::commands::alias::validate_alias(config, nick, None) {
             crate::style::eprintln_error(&message);
             return status;
         }

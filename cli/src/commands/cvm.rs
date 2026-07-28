@@ -422,7 +422,7 @@ fn launch(config: &ResolvedConfig, args: CvmLaunchArgs, json_output: bool) -> Ex
             return ExitStatus::Usage;
         }
         // Fail fast on a bad/taken alias before launching anything.
-        if let Err((status, message)) = alias::check_new_alias(config, nick) {
+        if let Err((status, message)) = alias::validate_alias(config, nick, None) {
             style::eprintln_error(&message);
             return status;
         }
