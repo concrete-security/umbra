@@ -8,12 +8,12 @@ import os
 from threading import Thread
 from typing import Awaitable, Callable, Mapping
 
-from concrete_security_cvm.binding import BootBinding, REQUIRED_ENV
-from concrete_security_cvm.ca import InMemoryRootCA, generate_root_ca
-from concrete_security_cvm.control import SCControlClient
-from concrete_security_cvm.control_loop import ControlPlaneState, run_control_plane_poll_loop
-from concrete_security_cvm.management_http import serve_management_http
-from concrete_security_cvm.traffic import (
+from umbra_security_cvm.binding import BootBinding, REQUIRED_ENV
+from umbra_security_cvm.ca import InMemoryRootCA, generate_root_ca
+from umbra_security_cvm.control import SCControlClient
+from umbra_security_cvm.control_loop import ControlPlaneState, run_control_plane_poll_loop
+from umbra_security_cvm.management_http import serve_management_http
+from umbra_security_cvm.traffic import (
     TrafficLogClient,
     TrafficLogEmitter,
     TrafficLogQueue,

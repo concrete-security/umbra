@@ -10,7 +10,7 @@ services:
 cvm:
   domain: ${SECURITY_CVM_FQDN}
   routes:
-    - path: /concrete/proxy
+    - path: /umbra/proxy
       service: proxy-tunnel
       port: 8082
       websocket: true

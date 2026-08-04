@@ -1,5 +1,5 @@
 #!/bin/bash
-. /usr/local/lib/concrete/concrete-update-agents.sh
+. /usr/local/lib/umbra/umbra-update-agents.sh
 
 mkdir -p /home/dev/.claude || exit 1
 if [ -e /home/dev/.claude.json ] && [ ! -L /home/dev/.claude.json ]; then
@@ -18,4 +18,4 @@ fi
 if [ -x /home/dev/.local/bin/claude ]; then
   exec /home/dev/.local/bin/claude "$@"
 fi
-exec /usr/local/lib/concrete/claude.real "$@"
+exec /usr/local/lib/umbra/claude.real "$@"

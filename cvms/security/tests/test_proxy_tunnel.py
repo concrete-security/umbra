@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 
-from concrete_security_cvm.proxy_tunnel import ProxyTunnelConfig, handle_client
+from umbra_security_cvm.proxy_tunnel import ProxyTunnelConfig, handle_client
 
 
 async def fake_mitmproxy(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -31,10 +31,10 @@ async def _proxy_tunnel_upgrades_then_bridges_raw_proxy_bytes() -> None:
     reader, writer = await asyncio.open_connection("127.0.0.1", port)
 
     writer.write(
-        b"GET /concrete/proxy HTTP/1.1\r\n"
+        b"GET /umbra/proxy HTTP/1.1\r\n"
         b"Host: sc.example.com\r\n"
         b"Connection: Upgrade\r\n"
-        b"Upgrade: concrete-proxy\r\n"
+        b"Upgrade: umbra-proxy\r\n"
         b"\r\n"
         b"CONNECT example.com:443 HTTP/1.1\r\n"
         b"Host: example.com:443\r\n"
@@ -68,7 +68,7 @@ async def _proxy_tunnel_rejects_plain_request_without_upgrade() -> None:
     port = server.sockets[0].getsockname()[1]
     reader, writer = await asyncio.open_connection("127.0.0.1", port)
 
-    writer.write(b"GET /concrete/proxy HTTP/1.1\r\nHost: sc.example.com\r\n\r\n")
+    writer.write(b"GET /umbra/proxy HTTP/1.1\r\nHost: sc.example.com\r\n\r\n")
     await writer.drain()
 
     response = await reader.read()
@@ -91,10 +91,10 @@ async def _proxy_tunnel_rejects_outer_proxy_authorization() -> None:
     reader, writer = await asyncio.open_connection("127.0.0.1", port)
 
     writer.write(
-        b"GET /concrete/proxy HTTP/1.1\r\n"
+        b"GET /umbra/proxy HTTP/1.1\r\n"
         b"Host: sc.example.com\r\n"
         b"Connection: Upgrade\r\n"
-        b"Upgrade: concrete-proxy\r\n"
+        b"Upgrade: umbra-proxy\r\n"
         b"Proxy-Authorization: Bearer proxy-token\r\n"
         b"\r\n"
     )

@@ -6,8 +6,8 @@ import os
 from typing import Any
 from urllib.parse import urlsplit
 
-from concrete_security_cvm.ca import InMemoryRootCA, generate_root_ca
-from concrete_security_cvm.management import ManagementResponse, handle_ca_pem_request
+from umbra_security_cvm.ca import InMemoryRootCA, generate_root_ca
+from umbra_security_cvm.management import ManagementResponse, handle_ca_pem_request
 
 
 logger = logging.getLogger(__name__)
@@ -22,7 +22,7 @@ def make_management_handler(
         raise ValueError("ca_export_token is required")
 
     class SecurityCVMManagementHandler(BaseHTTPRequestHandler):
-        server_version = "ConcreteSecurityCVMManagement/0.1"
+        server_version = "UmbraSecurityCVMManagement/0.1"
 
         def do_GET(self) -> None:
             if urlsplit(self.path).path != "/ca.pem":

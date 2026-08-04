@@ -4,7 +4,7 @@ from uuid import UUID
 
 import httpx
 
-from concrete_security_cvm.control import ControlMap, SCControlClient
+from umbra_security_cvm.control import ControlMap, SCControlClient
 
 
 def policy() -> dict[str, object]:

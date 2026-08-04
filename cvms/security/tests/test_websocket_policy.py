@@ -5,7 +5,7 @@ import zlib
 
 import pytest
 
-from concrete_security_cvm.policy import (
+from umbra_security_cvm.policy import (
     MAX_BODY_ASSERTION_BYTES,
     MAX_LIFECYCLE_CONTENT_BYTES,
     MAX_LIFECYCLE_STRING_LEN,

@@ -2,8 +2,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-PROJECT="concrete-dev-compose-smoke"
-IMAGE_TAG="${DEV_CVM_COMPOSE_SMOKE_IMAGE:-concrete-dev-sandbox-smoke:check}"
+PROJECT="umbra-dev-compose-smoke"
+IMAGE_TAG="${DEV_CVM_COMPOSE_SMOKE_IMAGE:-umbra-dev-sandbox-smoke:check}"
 TMPDIR="$(mktemp -d)"
 STATUS=0
 
@@ -112,7 +112,7 @@ key = base64.b64encode(os.urandom(16)).decode("ascii")
 with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
     sock.sendall(
         (
-            "GET /concrete/tunnel HTTP/1.1\r\n"
+            "GET /umbra/tunnel HTTP/1.1\r\n"
             "Host: localhost\r\n"
             "Upgrade: websocket\r\n"
             "Connection: Upgrade\r\n"

@@ -1,10 +1,10 @@
 from datetime import datetime, timezone
 import hashlib
 
-from concrete_security_cvm.control import ControlMap
+from umbra_security_cvm.control import ControlMap
 import pytest
 
-from concrete_security_cvm.enforcement import (
+from umbra_security_cvm.enforcement import (
     DLPScanTimeout,
     ProxyRequest,
     enforce_authenticated_request,
@@ -93,7 +93,7 @@ def request(**overrides: object) -> ProxyRequest:
         "path": "/v1/messages",
         "headers": {
             "Proxy-Authorization": "Bearer proxy-token",
-            "Authorization": "Bearer concrete-proxy-injected",
+            "Authorization": "Bearer umbra-proxy-injected",
         },
         "body": b'{"message":"hello"}',
         "timestamp": datetime(2026, 5, 16, 5, 50, tzinfo=timezone.utc),
@@ -228,7 +228,7 @@ def test_authenticated_request_reuses_connect_identity_without_proxy_auth() -> N
     assert cvm is not None
 
     result = enforce_authenticated_request(
-        request(headers={"Authorization": "Bearer concrete-proxy-injected"}),
+        request(headers={"Authorization": "Bearer umbra-proxy-injected"}),
         cvm,
     )
 
@@ -251,7 +251,7 @@ def test_allowed_connect_uses_host_port_gate_and_records_tunnel_log() -> None:
     assert result.traffic_log.method == "CONNECT"
     assert result.traffic_log.response_code == 200
     assert "proxy-authorization" not in result.upstream_headers
-    assert result.upstream_headers["authorization"] == "Bearer concrete-proxy-injected"
+    assert result.upstream_headers["authorization"] == "Bearer umbra-proxy-injected"
 
 
 def test_blocked_destination_returns_403_and_records_traffic_log() -> None:
@@ -437,7 +437,7 @@ def slack_request(**overrides: object) -> ProxyRequest:
         "path": "/api/conversations.history",
         "headers": {
             "Proxy-Authorization": "Bearer proxy-token",
-            "Authorization": "Bearer concrete-proxy-injected",
+            "Authorization": "Bearer umbra-proxy-injected",
             "Content-Type": "application/x-www-form-urlencoded",
         },
         "body": b"channel=C0ALLOWED1&limit=10",
@@ -461,7 +461,7 @@ def test_body_assertion_form_with_wrong_content_type_denies() -> None:
     result = enforce_request(
         slack_request(headers={
             "Proxy-Authorization": "Bearer proxy-token",
-            "Authorization": "Bearer concrete-proxy-injected",
+            "Authorization": "Bearer umbra-proxy-injected",
             "Content-Type": "application/json",
         }),
         control_map(slack_policy()),
@@ -485,14 +485,14 @@ def test_ambiguous_slack_path_denies_before_injection(path: str) -> None:
     assert result.allowed is False
     assert result.response_code == 403
     assert result.reason == "destination_not_allowed"
-    assert result.upstream_headers["authorization"] == "Bearer concrete-proxy-injected"
+    assert result.upstream_headers["authorization"] == "Bearer umbra-proxy-injected"
 
 
 def test_body_assertion_allowed_json_emits_attribute_in_traffic_log() -> None:
     result = enforce_request(
         slack_request(body=b'{"channel":"C0ALLOWED1"}', headers={
             "Proxy-Authorization": "Bearer proxy-token",
-            "Authorization": "Bearer concrete-proxy-injected",
+            "Authorization": "Bearer umbra-proxy-injected",
             "Content-Type": "application/json",
         }),
         control_map(slack_policy()),
@@ -536,14 +536,14 @@ def test_body_assertion_failure_is_ceiling_over_broad_allow_and_prevents_injecti
     assert result.response_code == 403
     assert result.reason == "body_assertion_failed"
     assert result.matched_policy_id == "slack-read-conv-form"
-    assert result.upstream_headers["authorization"] == "Bearer concrete-proxy-injected"
+    assert result.upstream_headers["authorization"] == "Bearer umbra-proxy-injected"
 
 
 def test_body_assertion_malformed_body_denies() -> None:
     result = enforce_request(
         slack_request(body=b"{not json", headers={
             "Proxy-Authorization": "Bearer proxy-token",
-            "Authorization": "Bearer concrete-proxy-injected",
+            "Authorization": "Bearer umbra-proxy-injected",
             "Content-Type": "application/json",
         }),
         control_map(slack_policy()),

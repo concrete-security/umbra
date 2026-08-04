@@ -25,6 +25,7 @@ from umbra_console.routes import (
     UserStatusFilter,
     delete_user_secret,
     list_user_secrets,
+    lock_cvm_for_lifecycle_action,
     put_user_secret,
     apply_provider_cvm_lifecycle_action,
     cvm_etag,
@@ -45,6 +46,7 @@ from umbra_console.routes import (
     redacted_security_cvm_provision_result,
     profile_etag,
     require_cvm_owner_or_manager,
+    require_cvm_update_supported,
     require_cvm_profile_mutable,
     require_idempotency_key,
     require_if_match,
@@ -175,6 +177,45 @@ def test_require_cvm_owner_or_manager_hides_other_owner_without_manage() -> None
 
     assert exc.value.status_code == 404
     assert exc.value.detail["error"]["code"] == "NOT_FOUND"
+
+
+def test_require_cvm_update_supported_legacy_marker_failure() -> None:
+    """A preserved legacy marker rejects update with the safe replacement path."""
+    with pytest.raises(HTTPException) as exc:
+        require_cvm_update_supported(cvm_row(error_reason="SECURITY_CVM_REBIND_REQUIRED"))
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail["error"]["code"] == "CONFLICT"
+    assert exc.value.detail["error"]["details"] == {
+        "state": "legacy_cvm_replacement_required",
+        "error_reason": "SECURITY_CVM_REBIND_REQUIRED",
+    }
+    assert "pre-Umbra control plane" in exc.value.detail["error"]["message"]
+    assert "launch a replacement under Umbra" in exc.value.detail["error"]["message"]
+    assert "`umbra cvm update` is not a recovery path" in exc.value.detail["error"]["message"]
+
+
+def test_lock_cvm_for_lifecycle_action_selects_error_reason_success() -> None:
+    """The row lock carries the legacy marker into the update guard."""
+
+    class LockConn:
+        query = ""
+
+        async def fetchrow(self, query, *args):
+            self.query = query
+            return cvm_row(error_reason="SECURITY_CVM_REBIND_REQUIRED")
+
+    conn = LockConn()
+    row = asyncio.run(
+        lock_cvm_for_lifecycle_action(
+            conn,
+            cvm_id=UUID("00000000-0000-4000-8000-000000000030"),
+            current_user=SimpleNamespace(entity_id=UUID("00000000-0000-4000-8000-000000000002")),
+        )
+    )
+
+    assert "error_reason" in conn.query
+    assert row["error_reason"] == "SECURITY_CVM_REBIND_REQUIRED"
 
 
 def test_apply_provider_cvm_lifecycle_action_calls_phala(monkeypatch) -> None:
@@ -493,7 +534,7 @@ def test_resolve_cvm_launch_config_uses_defaults(monkeypatch) -> None:
     monkeypatch.delenv("DEV_CVM_DEFAULT_INSTANCE_TYPE", raising=False)
     monkeypatch.setenv("DEV_CVM_DEFAULT_REGION", "FR-PARIS-1")
     monkeypatch.setenv("PHALA_REGION", "US-ASHBURN-1")
-    monkeypatch.setenv("DEV_CVM_IMAGE", "ghcr.io/concrete-security/dev-cvm/user-sandbox@sha256:abc")
+    monkeypatch.setenv("DEV_CVM_IMAGE", "registry.invalid/umbra/dev-cvm@sha256:abc")
     monkeypatch.setenv("DEV_CVM_IMAGE_MEASUREMENT", "A" * 96)
     monkeypatch.setenv("CLOUDFLARE_BASE_DOMAIN", "dev.example.com")
 
@@ -536,7 +577,7 @@ def test_resolve_dev_cvm_disk_gb_rejects_out_of_range_default() -> None:
 def test_resolve_cvm_launch_config_falls_back_to_phala_region(monkeypatch) -> None:
     monkeypatch.delenv("DEV_CVM_DEFAULT_REGION", raising=False)
     monkeypatch.setenv("PHALA_REGION", "FR-PARIS-1")
-    monkeypatch.setenv("DEV_CVM_IMAGE", "ghcr.io/concrete-security/dev-cvm/user-sandbox@sha256:abc")
+    monkeypatch.setenv("DEV_CVM_IMAGE", "registry.invalid/umbra/dev-cvm@sha256:abc")
     monkeypatch.setenv("DEV_CVM_IMAGE_MEASUREMENT", "A" * 96)
     monkeypatch.setenv("CLOUDFLARE_BASE_DOMAIN", "dev.example.com")
 
@@ -569,7 +610,7 @@ def test_resolve_cvm_launch_config_requires_image(monkeypatch) -> None:
 
 def test_resolve_cvm_launch_config_requires_image_measurement(monkeypatch) -> None:
     monkeypatch.setenv("DEV_CVM_DEFAULT_REGION", "FR-PARIS-1")
-    monkeypatch.setenv("DEV_CVM_IMAGE", "ghcr.io/concrete-security/dev-cvm/user-sandbox@sha256:abc")
+    monkeypatch.setenv("DEV_CVM_IMAGE", "registry.invalid/umbra/dev-cvm@sha256:abc")
     monkeypatch.setenv("DEV_CVM_IMAGE_MEASUREMENT", "not-hex")
 
     with pytest.raises(HTTPException) as exc:
@@ -581,7 +622,7 @@ def test_resolve_cvm_launch_config_requires_image_measurement(monkeypatch) -> No
 
 def test_resolve_cvm_launch_config_requires_base_domain(monkeypatch) -> None:
     monkeypatch.setenv("DEV_CVM_DEFAULT_REGION", "FR-PARIS-1")
-    monkeypatch.setenv("DEV_CVM_IMAGE", "ghcr.io/concrete-security/dev-cvm/user-sandbox@sha256:abc")
+    monkeypatch.setenv("DEV_CVM_IMAGE", "registry.invalid/umbra/dev-cvm@sha256:abc")
     monkeypatch.setenv("DEV_CVM_IMAGE_MEASUREMENT", "a" * 96)
     monkeypatch.delenv("CLOUDFLARE_BASE_DOMAIN", raising=False)
 
@@ -594,7 +635,7 @@ def test_resolve_cvm_launch_config_requires_base_domain(monkeypatch) -> None:
 
 def test_resolve_cvm_launch_config_rejects_cert_cn_too_long_base_domain(monkeypatch) -> None:
     monkeypatch.setenv("DEV_CVM_DEFAULT_REGION", "FR-PARIS-1")
-    monkeypatch.setenv("DEV_CVM_IMAGE", "ghcr.io/concrete-security/dev-cvm/user-sandbox@sha256:abc")
+    monkeypatch.setenv("DEV_CVM_IMAGE", "registry.invalid/umbra/dev-cvm@sha256:abc")
     monkeypatch.setenv("DEV_CVM_IMAGE_MEASUREMENT", "a" * 96)
     monkeypatch.setenv("CLOUDFLARE_BASE_DOMAIN", f"{'a' * 23}.example.com")
 
@@ -608,7 +649,7 @@ def test_resolve_cvm_launch_config_rejects_cert_cn_too_long_base_domain(monkeypa
 def test_render_dev_cvm_compose_config_keeps_runtime_values_as_placeholders() -> None:
     compose = render_dev_cvm_compose_config(
         {
-            "image": "ghcr.io/concrete-security/dev-cvm/user-sandbox@sha256:abc",
+            "image": "registry.invalid/umbra/dev-cvm@sha256:abc",
             "instance_type": "tdx.small",
             "region": "FR-PARIS-1",
             "expected_image_measurement": "a" * 96,
@@ -616,13 +657,14 @@ def test_render_dev_cvm_compose_config_keeps_runtime_values_as_placeholders() ->
         }
     )
 
-    assert "ghcr.io/concrete-security/dev-cvm/user-sandbox@sha256:abc" in compose
+    assert "registry.invalid/umbra/dev-cvm@sha256:abc" in compose
     user_sandbox_section = compose.split("  dev-egress-forwarder:", 1)[0]
     forwarder_section = compose.split("  dev-egress-forwarder:", 1)[1].split("  dev-tunnel:", 1)[0]
     assert "${SECURITY_CVM_PROXY_TOKEN}" not in user_sandbox_section
     assert "${SECURITY_CVM_ATLS_POLICY_B64}" not in user_sandbox_section
     assert "${DEV_CVM_CONTROL_TOKEN}" not in user_sandbox_section
     assert "${CONSOLE_URL:-}" not in user_sandbox_section
+    assert "SECURITY_CVM_FQDN: ${SECURITY_CVM_FQDN}" in user_sandbox_section
     assert "${SECURITY_CVM_PROXY_TOKEN}" in forwarder_section
     assert "${SECURITY_CVM_ATLS_POLICY_B64}" in forwarder_section
     assert "${DEV_CVM_CONTROL_TOKEN}" in forwarder_section
@@ -630,9 +672,11 @@ def test_render_dev_cvm_compose_config_keeps_runtime_values_as_placeholders() ->
     assert "${SECURITY_CVM_CONNECT_HOST:-}" not in compose
     assert "${AUTHORIZED_SSH_KEYS_B64}" in compose
     assert "  dev-egress-forwarder:" in compose
-    assert "entrypoint: [\"concrete-dev-egress-forwarder\"]" in compose
+    assert "entrypoint: [\"umbra-dev-egress-forwarder\"]" in compose
+    assert "cvm-ca:/var/lib/umbra-ca:ro" in user_sandbox_section
+    assert "cvm-ca:/var/lib/umbra-ca" in forwarder_section
     assert "  dev-tunnel:" in compose
-    assert "entrypoint: [\"concrete-dev-tunnel\"]" in compose
+    assert "entrypoint: [\"umbra-dev-tunnel\"]" in compose
     assert "runtime: sysbox-runc" in compose
     assert "internal: true" in compose
     assert "no-new-privileges:true" in compose
@@ -644,7 +688,7 @@ def test_resolve_security_cvm_provision_config_uses_defaults(monkeypatch) -> Non
     monkeypatch.delenv("PHALA_DEFAULT_INSTANCE_TYPE", raising=False)
     monkeypatch.setenv("SECURITY_CVM_DEFAULT_REGION", "FR-PARIS-1")
     monkeypatch.setenv("PHALA_REGION", "US-ASHBURN-1")
-    monkeypatch.setenv("SECURITY_CVM_IMAGE_REF", "ghcr.io/concrete-security/security-cvm/mitmproxy@sha256:abc")
+    monkeypatch.setenv("SECURITY_CVM_IMAGE_REF", "registry.invalid/umbra/security-cvm@sha256:abc")
     monkeypatch.setenv("SECURITY_CVM_IMAGE_MEASUREMENT", "B" * 96)
     monkeypatch.setenv("SECURITY_CVM_BASE_DOMAIN", "sc.example.com")
 
@@ -659,7 +703,7 @@ def test_resolve_security_cvm_provision_config_uses_defaults(monkeypatch) -> Non
 def test_resolve_security_cvm_provision_config_falls_back_to_phala_region(monkeypatch) -> None:
     monkeypatch.delenv("SECURITY_CVM_DEFAULT_REGION", raising=False)
     monkeypatch.setenv("PHALA_REGION", "FR-PARIS-1")
-    monkeypatch.setenv("SECURITY_CVM_IMAGE_REF", "ghcr.io/concrete-security/security-cvm/mitmproxy@sha256:abc")
+    monkeypatch.setenv("SECURITY_CVM_IMAGE_REF", "registry.invalid/umbra/security-cvm@sha256:abc")
     monkeypatch.setenv("SECURITY_CVM_IMAGE_MEASUREMENT", "B" * 96)
     monkeypatch.setenv("SECURITY_CVM_BASE_DOMAIN", "sc.example.com")
 
@@ -701,7 +745,7 @@ def test_resolve_security_cvm_provision_config_requires_image(monkeypatch) -> No
 
 def test_resolve_security_cvm_provision_config_requires_base_domain(monkeypatch) -> None:
     monkeypatch.setenv("PHALA_REGION", "FR-PARIS-1")
-    monkeypatch.setenv("SECURITY_CVM_IMAGE_REF", "ghcr.io/concrete-security/security-cvm/mitmproxy@sha256:abc")
+    monkeypatch.setenv("SECURITY_CVM_IMAGE_REF", "registry.invalid/umbra/security-cvm@sha256:abc")
     monkeypatch.setenv("SECURITY_CVM_IMAGE_MEASUREMENT", "b" * 96)
     monkeypatch.delenv("SECURITY_CVM_BASE_DOMAIN", raising=False)
 
@@ -714,7 +758,7 @@ def test_resolve_security_cvm_provision_config_requires_base_domain(monkeypatch)
 
 def test_resolve_security_cvm_provision_config_rejects_cert_cn_too_long_base_domain(monkeypatch) -> None:
     monkeypatch.setenv("PHALA_REGION", "FR-PARIS-1")
-    monkeypatch.setenv("SECURITY_CVM_IMAGE_REF", "ghcr.io/concrete-security/security-cvm/mitmproxy@sha256:abc")
+    monkeypatch.setenv("SECURITY_CVM_IMAGE_REF", "registry.invalid/umbra/security-cvm@sha256:abc")
     monkeypatch.setenv("SECURITY_CVM_IMAGE_MEASUREMENT", "b" * 96)
     monkeypatch.setenv("SECURITY_CVM_BASE_DOMAIN", f"{'a' * 24}.example.com")
 
@@ -728,7 +772,7 @@ def test_resolve_security_cvm_provision_config_rejects_cert_cn_too_long_base_dom
 def test_render_security_cvm_compose_config_keeps_runtime_values_as_placeholders() -> None:
     compose = render_security_cvm_compose_config(
         {
-            "image_ref": "ghcr.io/concrete-security/security-cvm/mitmproxy@sha256:abc",
+            "image_ref": "registry.invalid/umbra/security-cvm@sha256:abc",
             "instance_type": "tdx.small",
             "region": "FR-PARIS-1",
             "expected_image_measurement": "b" * 96,
@@ -736,12 +780,13 @@ def test_render_security_cvm_compose_config_keeps_runtime_values_as_placeholders
         }
     )
 
-    assert "ghcr.io/concrete-security/security-cvm/mitmproxy@sha256:abc" in compose
+    assert "registry.invalid/umbra/security-cvm@sha256:abc" in compose
     assert "  mitmproxy:" in compose
-    assert "command: [\"concrete-security-mitmproxy\"]" in compose
+    assert "command: [\"umbra-security-mitmproxy\"]" in compose
     assert "  proxy-tunnel:" in compose
-    assert "command: [\"concrete-security-proxy-tunnel\"]" in compose
-    assert "SC_PROXY_TUNNEL_PATH: /concrete/proxy" in compose
+    assert "command: [\"umbra-security-proxy-tunnel\"]" in compose
+    assert "SC_PROXY_TUNNEL_PATH: /umbra/proxy" in compose
+    assert "SC_PROXY_TUNNEL_UPGRADE: umbra-proxy" in compose
     assert "${ENTITY_ID}" in compose
     assert "${SC_ID}" in compose
     assert "${SC_FQDN}" not in compose
@@ -1345,7 +1390,7 @@ def test_validate_profile_policy_rejects_bad_sandbox_env() -> None:
                 "sandbox_env": {
                     "1BAD": "value",
                     "PATH": "/tmp/bin",
-                    "CONCRETE_RUNTIME": "reserved",
+                    "UMBRA_RUNTIME": "reserved",
                     "TOKEN": "sk-" + "a" * 32,
                 }
             }
@@ -2710,7 +2755,7 @@ def test_operation_result_for_read_discloses_once_then_scrubs_db(monkeypatch) ->
 
 
 def dev_launch_env(monkeypatch) -> None:
-    monkeypatch.setenv("DEV_CVM_IMAGE", "ghcr.io/concrete-security/dev-cvm/user-sandbox@sha256:abc")
+    monkeypatch.setenv("DEV_CVM_IMAGE", "registry.invalid/umbra/dev-cvm@sha256:abc")
     monkeypatch.setenv("DEV_CVM_IMAGE_MEASUREMENT", "A" * 96)
     monkeypatch.setenv("CLOUDFLARE_BASE_DOMAIN", "dev.example.com")
     monkeypatch.setenv("PHALA_REGION", "FR-PARIS-1")
@@ -2751,7 +2796,7 @@ def test_launch_accepts_a_cataloged_cpu_instance_type(monkeypatch) -> None:
 
 
 def sc_launch_env(monkeypatch) -> None:
-    monkeypatch.setenv("SECURITY_CVM_IMAGE_REF", "ghcr.io/concrete-security/security-cvm/mitmproxy@sha256:abc")
+    monkeypatch.setenv("SECURITY_CVM_IMAGE_REF", "registry.invalid/umbra/security-cvm@sha256:abc")
     monkeypatch.setenv("SECURITY_CVM_IMAGE_MEASUREMENT", "B" * 96)
     monkeypatch.setenv("SECURITY_CVM_BASE_DOMAIN", "sc.example.com")
     monkeypatch.setenv("PHALA_REGION", "FR-PARIS-1")

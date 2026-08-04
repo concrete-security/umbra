@@ -13,7 +13,7 @@ import httpx
 
 log = logging.getLogger(__name__)
 
-from concrete_security_cvm.policy import EffectivePolicy, PolicyValidationError, parse_effective_policy, valid_proxy_token_hash
+from umbra_security_cvm.policy import EffectivePolicy, PolicyValidationError, parse_effective_policy, valid_proxy_token_hash
 
 
 @dataclass(frozen=True)

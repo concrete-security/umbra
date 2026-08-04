@@ -28,4 +28,4 @@ USER security-cvm
 
 EXPOSE 8080 8081 8082
 
-CMD ["concrete-security-mitmproxy"]
+CMD ["umbra-security-mitmproxy"]

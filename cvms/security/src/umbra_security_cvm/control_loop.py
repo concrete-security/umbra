@@ -7,7 +7,7 @@ import logging
 import random
 from typing import Awaitable, Callable
 
-from concrete_security_cvm.control import ControlMap, SCControlClient
+from umbra_security_cvm.control import ControlMap, SCControlClient
 
 
 log = logging.getLogger(__name__)

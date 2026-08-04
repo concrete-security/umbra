@@ -27,9 +27,9 @@ def run(awaitable):
 def test_delete_managed_cvms_deletes_only_managed_prefix_rows() -> None:
     client = FakePhalaClient(
         [
-            {"name": "concrete-v0-cvm-owned", "id": "app-1"},
+            {"name": "umbra-v0-cvm-owned", "id": "app-1"},
             {"name": "teammate-prod", "id": "app-2"},
-            {"cvmName": "concrete-v0-sc-owned", "app_id": "app-3"},
+            {"cvmName": "umbra-v0-sc-owned", "app_id": "app-3"},
         ]
     )
     output = StringIO()
@@ -39,7 +39,7 @@ def test_delete_managed_cvms_deletes_only_managed_prefix_rows() -> None:
     assert summary.deleted == 2
     assert client.deleted == ["app-1", "app-3"]
     assert "teammate-prod" not in output.getvalue()
-    assert "concrete-v0-cvm-owned" in output.getvalue()
+    assert "umbra-v0-cvm-owned" in output.getvalue()
 
 
 def test_delete_managed_cvms_reports_empty_scope() -> None:
@@ -50,11 +50,11 @@ def test_delete_managed_cvms_reports_empty_scope() -> None:
 
     assert summary.deleted == 0
     assert client.deleted == []
-    assert "no concrete-v0 Phala CVMs found" in output.getvalue()
+    assert "no umbra-v0 Phala CVMs found" in output.getvalue()
 
 
 def test_delete_managed_cvms_requires_app_id_for_owned_rows() -> None:
-    client = FakePhalaClient([{"name": "concrete-v0-cvm-owned"}])
+    client = FakePhalaClient([{"name": "umbra-v0-cvm-owned"}])
 
     with pytest.raises(PhalaCleanupError):
         run(delete_managed_cvms(client))

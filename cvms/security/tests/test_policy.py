@@ -1,6 +1,6 @@
 import pytest
 
-from concrete_security_cvm.policy import (
+from umbra_security_cvm.policy import (
     MAX_BODY_ASSERTION_BYTES,
     PolicyValidationError,
     parse_effective_policy,
@@ -58,7 +58,7 @@ def sample_policy() -> dict[str, object]:
                 "value_template": "Bearer ${secret}",
             }
         ],
-        "sandbox_env": [{"name": "ANTHROPIC_API_KEY", "value": "concrete-proxy-injected"}],
+        "sandbox_env": [{"name": "ANTHROPIC_API_KEY", "value": "umbra-proxy-injected"}],
     }
 
 

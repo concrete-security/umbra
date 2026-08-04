@@ -7,8 +7,8 @@ from typing import Iterator
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from concrete_security_cvm.ca import generate_root_ca
-from concrete_security_cvm.management_http import make_management_handler
+from umbra_security_cvm.ca import generate_root_ca
+from umbra_security_cvm.management_http import make_management_handler
 
 
 @contextmanager

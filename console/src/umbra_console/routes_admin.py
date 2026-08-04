@@ -50,7 +50,7 @@ router = APIRouter(prefix="/api/v1/admin")
 
 log = logger()
 
-PHALA_CVM_NAME_PREFIX = re.compile(r"^concrete-v0-cvm-")
+PHALA_CVM_NAME_PREFIX = re.compile(r"^umbra-v0-cvm-")
 
 
 def require_platform_operator(current_user: CurrentUser) -> None:
@@ -58,7 +58,7 @@ def require_platform_operator(current_user: CurrentUser) -> None:
 
 
 def phala_name_for_cvm_id(cvm_id: UUID) -> str:
-    return f"concrete-v0-cvm-{str(cvm_id).replace('-', '')[:12]}"
+    return f"umbra-v0-cvm-{str(cvm_id).replace('-', '')[:12]}"
 
 
 def admin_operation_summary(row: Any) -> dict[str, Any]:

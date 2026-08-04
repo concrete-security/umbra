@@ -1,5 +1,5 @@
 #!/bin/bash
-_marker="/tmp/.concrete-agents-updated"
+_marker="/tmp/.umbra-agents-updated"
 _cooldown=14400
 if [[ -f "$_marker" ]] && [[ "$(uname -s)" == "Linux" ]]; then
   now=$(date +%s)
@@ -19,8 +19,8 @@ touch "$_marker" 2>/dev/null || true
     fi
     if [ -x /home/dev/.local/bin/claude ]; then
       /home/dev/.local/bin/claude update >/dev/null 2>&1 &
-    elif [ -x /usr/local/lib/concrete/claude.real ]; then
-      /usr/local/lib/concrete/claude.real update >/dev/null 2>&1 &
+    elif [ -x /usr/local/lib/umbra/claude.real ]; then
+      /usr/local/lib/umbra/claude.real update >/dev/null 2>&1 &
     fi
     if command -v gh >/dev/null 2>&1; then
       gh upgrade >/dev/null 2>&1 &

@@ -12,7 +12,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
 
-DEFAULT_CA_COMMON_NAME = "Concrete Security CVM Root CA"
+DEFAULT_CA_COMMON_NAME = "Umbra Security CVM Root CA"
 DEFAULT_CA_VALIDITY_DAYS = 365
 
 

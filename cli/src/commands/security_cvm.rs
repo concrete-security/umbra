@@ -69,6 +69,9 @@ struct SecurityCvmProvisionResult {
 #[derive(Debug, Deserialize, Serialize)]
 struct SecurityCvmUpdateResult {
     security_cvm: SecurityCvm,
+    #[serde(default)]
+    ca_changed: bool,
+    #[serde(default)]
     dev_cvms_requiring_update: Vec<String>,
 }
 
@@ -324,24 +327,34 @@ fn print_update_result(result: &SecurityCvmUpdateResult, json_output: bool) {
     if json_output {
         style::emit_json(result);
     } else {
-        let sc = &result.security_cvm;
-        let mut confirm = style::ConfirmBlock::new("updated", "security cvm", sc.id.clone())
-            .field("fqdn", sc.fqdn.clone())
-            .field("state", sc.state.clone())
-            .field("policy version", format!("v{}", sc.policy_version));
-        // Console only populates this list when the SC CA changed. Pure SC
-        // aTLS-policy changes are recovered by Dev CVM forwarders through the
-        // internal Console refresh path.
-        if !result.dev_cvms_requiring_update.is_empty() {
-            confirm = confirm
-                .field(
-                    "dev cvms requiring update",
-                    result.dev_cvms_requiring_update.join(", "),
-                )
-                .next_step("run umbra cvm update <cvm-id> for each listed Dev CVM");
-        }
-        println!("{}", style::render_confirm(&confirm));
+        println!("{}", style::render_confirm(&update_confirm(result)));
     }
+}
+
+fn update_confirm(result: &SecurityCvmUpdateResult) -> style::ConfirmBlock {
+    let sc = &result.security_cvm;
+    let mut confirm = style::ConfirmBlock::new("updated", "security cvm", sc.id.clone())
+        .field("fqdn", sc.fqdn.clone())
+        .field("state", sc.state.clone())
+        .field("policy version", format!("v{}", sc.policy_version));
+    if result.ca_changed {
+        confirm = confirm.field(
+            "ca refresh",
+            "automatic for compatible Umbra runtimes; for a persisted legacy marker, decommission with the pre-Umbra control plane and launch a replacement under Umbra (`umbra cvm update` is not recovery)",
+        );
+    }
+    // CA and SC-policy changes recover through the authenticated runtime pull
+    // path. Keep the generic rebind result path for a future update that
+    // genuinely changes launch-bound identity, bearer, or RTMR material.
+    if !result.dev_cvms_requiring_update.is_empty() {
+        confirm = confirm
+            .field(
+                "dev cvms requiring update",
+                result.dev_cvms_requiring_update.join(", "),
+            )
+            .next_step("run umbra cvm update <cvm-id> for each listed Dev CVM");
+    }
+    confirm
 }
 
 fn print_terminate_result(security_cvm: &SecurityCvm, json_output: bool) {
@@ -374,5 +387,60 @@ fn print_attestation(attestation: &SecurityCvmAttestation, json_output: bool) {
             verified_at: attestation.verdict.verified_at.as_deref(),
         };
         println!("{}", style::security_cvm_attestation_card(&view));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rstest::rstest;
+
+    fn update_result(
+        ca_changed: bool,
+        dev_cvms_requiring_update: Vec<String>,
+    ) -> SecurityCvmUpdateResult {
+        SecurityCvmUpdateResult {
+            security_cvm: SecurityCvm {
+                id: "sc-1".into(),
+                entity_id: "entity-1".into(),
+                state: "RUNNING".into(),
+                fqdn: "sc.example.com".into(),
+                instance_type: Some("tdx.small".into()),
+                region: Some("eu-west-3".into()),
+                error_reason: None,
+                policy_version: 2,
+                expected_image_measurement: None,
+                image_measurement: None,
+                rtmr3_digest: None,
+                attestation_verified_at: None,
+                created_at: "2026-08-04T00:00:00Z".into(),
+                updated_at: "2026-08-04T00:00:00Z".into(),
+                extra: BTreeMap::new(),
+            },
+            ca_changed,
+            dev_cvms_requiring_update,
+        }
+    }
+
+    /// A CA-only rotation scopes automatic recovery to compatible runtimes,
+    /// while the generic manual path remains reserved for explicitly listed CVMs.
+    #[rstest]
+    #[case::ca_only(true, vec![], "ca refresh", "automatic for compatible Umbra runtimes", "run umbra cvm update")]
+    #[case::launch_binding(false, vec!["cvm-1".into()], "dev cvms requiring update", "run umbra cvm update", "ca refresh")]
+    fn test_update_confirm_recovery_success(
+        #[case] ca_changed: bool,
+        #[case] dev_cvms: Vec<String>,
+        #[case] expected: &str,
+        #[case] expected_detail: &str,
+        #[case] absent: &str,
+    ) {
+        let rendered = style::render_confirm(&update_confirm(&update_result(ca_changed, dev_cvms)));
+
+        assert!(rendered.contains(expected), "rendered output: {rendered}");
+        assert!(
+            rendered.contains(expected_detail),
+            "rendered output: {rendered}"
+        );
+        assert!(!rendered.contains(absent), "rendered output: {rendered}");
     }
 }

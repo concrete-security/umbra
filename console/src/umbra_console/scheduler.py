@@ -40,6 +40,7 @@ _last_successful_tick_monotonic: float | None = None
 _last_traffic_prune_wall: datetime | None = None
 TRAFFIC_LOG_PRUNE_LOCK_ID = 884_422_001
 TRAFFIC_LOG_DELETE_CHUNK = 10_000
+LEGACY_SECURITY_CVM_REBIND_MARKER = "SECURITY_CVM_REBIND_REQUIRED"
 OPERATION_START_STEPS = {
     "audit.export": ("materialize", 20),
     "cvm.launch": ("phala_deploy", 20),
@@ -139,6 +140,12 @@ class CvmKind:
     audit_target: str  # audit target_type: "cvm" / "security_cvm"
     audit_prefix: str  # audit action prefix: "CVM" / "SECURITY_CVM"
     log_id_key: str  # structlog id field: "cvm_id" / "security_cvm_id"
+    protected_error_reason: str | None  # marker reconciliation must never clear/replace
+
+    def protected_error_reason_guard(self, column: str) -> str:
+        if self.protected_error_reason is None:
+            return ""
+        return f"AND {column} IS DISTINCT FROM '{self.protected_error_reason}'"
 
 
 DEV_CVM = CvmKind(
@@ -148,6 +155,7 @@ DEV_CVM = CvmKind(
     audit_target="cvm",
     audit_prefix="CVM",
     log_id_key="cvm_id",
+    protected_error_reason=LEGACY_SECURITY_CVM_REBIND_MARKER,
 )
 SECURITY_CVM = CvmKind(
     slug="security_cvm",
@@ -156,6 +164,7 @@ SECURITY_CVM = CvmKind(
     audit_target="security_cvm",
     audit_prefix="SECURITY_CVM",
     log_id_key="security_cvm_id",
+    protected_error_reason=None,
 )
 
 
@@ -1807,24 +1816,18 @@ async def execute_security_cvm_update_finalise_operation(operation_id: Any) -> N
                 _row_value(snapshot, "id"),
                 json.dumps(final_metadata),
             )
+            # This in-place SC update preserves every Dev-CVM boot binding that
+            # requires a provider rebind: the SC FQDN, per-Dev proxy/control
+            # bearers, and RTMR3-bound Console origin. The forwarder pulls both
+            # the current SC aTLS policy and a rotated public CA over that
+            # existing authenticated control channel, and the sandbox watcher
+            # replaces its trust bundle. A CA-only change therefore must not
+            # mark or block attached Dev CVMs.
             impacted_dev_cvms: list[str] = []
-            if ca_changed:
-                impacted_rows = await conn.fetch(
-                    """
-                    UPDATE cvms
-                    SET error_reason = 'SECURITY_CVM_REBIND_REQUIRED',
-                        updated_at = now()
-                    WHERE security_cvm_id = $1
-                      AND state IN ('RUNNING', 'STOPPED')
-                      AND deleted_at IS NULL
-                    RETURNING id
-                    """,
-                    _row_value(snapshot, "id"),
-                )
-                impacted_dev_cvms = [str(row["id"]) for row in impacted_rows]
             security_cvm_payload = await fetch_security_cvm_resource_for_scheduler(conn, _row_value(snapshot, "id"))
             result = {
                 "security_cvm": security_cvm_payload,
+                "ca_changed": ca_changed,
                 "dev_cvms_requiring_update": impacted_dev_cvms,
             }
             await insert_audit_event(
@@ -3458,7 +3461,7 @@ def render_dev_cvm_shade_config(snapshot: Any, *, name: str) -> str:
             f"  instance_type: {_row_value(snapshot, 'instance_type')}",
             f"  region: {_row_value(snapshot, 'region')}",
             "  routes:",
-            "    - path: /concrete/tunnel",
+            "    - path: /umbra/tunnel",
             "      service: dev-tunnel",
             "      port: 8090",
             "      websocket: true",
@@ -3491,7 +3494,7 @@ def render_security_cvm_shade_config(snapshot: Any, *, name: str) -> str:
             f"  instance_type: {_row_value(snapshot, 'instance_type')}",
             f"  region: {_row_value(snapshot, 'region')}",
             "  routes:",
-            "    - path: /concrete/proxy",
+            "    - path: /umbra/proxy",
             "      service: proxy-tunnel",
             "      port: 8082",
             "      websocket: true",
@@ -4827,12 +4830,12 @@ def provider_gateway_host(metadata: Any) -> str | None:
 
 def cvm_launch_provider_name(cvm_id: Any) -> str:
     token = str(cvm_id).replace("-", "")[:16]
-    return f"concrete-v0-cvm-{token}"
+    return f"umbra-v0-cvm-{token}"
 
 
 def security_cvm_provider_name(security_cvm_id: Any) -> str:
     token = str(security_cvm_id).replace("-", "")[:16]
-    return f"concrete-v0-sc-{token}"
+    return f"umbra-v0-sc-{token}"
 
 
 def sha256_text(value: str) -> str:
@@ -5675,7 +5678,7 @@ async def reconcile_dev_cvm_attestations(conn: Any) -> list[str]:
     # (console.md §13.1). Each persist then re-opens its own short, state-guarded transaction.
     async with conn.transaction():
         rows = await conn.fetch(
-            """
+            f"""
             SELECT
                 c.id,
                 c.entity_id,
@@ -5689,6 +5692,7 @@ async def reconcile_dev_cvm_attestations(conn: Any) -> list[str]:
             FROM cvms c
             WHERE c.state = 'RUNNING'
               AND c.deleted_at IS NULL
+              {DEV_CVM.protected_error_reason_guard("c.error_reason")}
               AND (
                 c.attestation_verified_at IS NULL
                 OR c.attestation_verified_at < now() - ($1::int * INTERVAL '1 second')
@@ -5794,6 +5798,7 @@ async def _persist_cvm_attestation_refresh(conn: Any, row: Any, report: Any, kin
         WHERE id = $1
           AND state = 'RUNNING'
           AND deleted_at IS NULL
+          {kind.protected_error_reason_guard("error_reason")}
         """,
         _row_value(row, "id"),
         report.image_measurement,
@@ -5842,6 +5847,7 @@ async def _record_cvm_attestation_refresh_drift(
         WHERE id = $1
           AND state = 'RUNNING'
           AND deleted_at IS NULL
+          {kind.protected_error_reason_guard("error_reason")}
         """,
         _row_value(row, "id"),
     )

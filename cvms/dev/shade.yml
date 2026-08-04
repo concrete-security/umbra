@@ -8,7 +8,7 @@ services:
 cvm:
   domain: ${CVM_FQDN}
   routes:
-    - path: /concrete/tunnel
+    - path: /umbra/tunnel
       service: dev-tunnel
       port: 8090
       websocket: true

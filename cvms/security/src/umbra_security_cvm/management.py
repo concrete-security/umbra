@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Mapping
 
-from concrete_security_cvm.ca import CAExportUnauthorized, InMemoryRootCA
+from umbra_security_cvm.ca import CAExportUnauthorized, InMemoryRootCA
 
 
 @dataclass(frozen=True)

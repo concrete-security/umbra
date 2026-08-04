@@ -115,7 +115,7 @@ validate_placeholder_name() {
   local name="$1"
   [[ "$name" =~ ^[A-Za-z_][A-Za-z0-9_]{0,127}$ ]] || return 1
   case "$name" in
-    HTTP_PROXY|HTTPS_PROXY|NO_PROXY|PATH|HOME|CONCRETE_*|SECURITY_CVM_*|AUTHORIZED_SSH_*|SANDBOX_ENV_*)
+    HTTP_PROXY|HTTPS_PROXY|NO_PROXY|PATH|HOME|UMBRA_*|SECURITY_CVM_*|AUTHORIZED_SSH_*|SANDBOX_ENV_*)
       return 1
       ;;
   esac
@@ -148,16 +148,16 @@ export http_proxy='http://dev-egress-forwarder:3128'
 export https_proxy='http://dev-egress-forwarder:3128'
 export NO_PROXY='localhost,127.0.0.1,user-sandbox,dev-tunnel,dev-egress-forwarder'
 export no_proxy='localhost,127.0.0.1,user-sandbox,dev-tunnel,dev-egress-forwarder'
-export REQUESTS_CA_BUNDLE='/run/concrete/ca-bundle.pem'
-export SSL_CERT_FILE='/run/concrete/ca-bundle.pem'
-export CURL_CA_BUNDLE='/run/concrete/ca-bundle.pem'
-export GIT_SSL_CAINFO='/run/concrete/ca-bundle.pem'
-export NODE_EXTRA_CA_CERTS='/run/concrete/ca-bundle.pem'
+export REQUESTS_CA_BUNDLE='/run/umbra/ca-bundle.pem'
+export SSL_CERT_FILE='/run/umbra/ca-bundle.pem'
+export CURL_CA_BUNDLE='/run/umbra/ca-bundle.pem'
+export GIT_SSL_CAINFO='/run/umbra/ca-bundle.pem'
+export NODE_EXTRA_CA_CERTS='/run/umbra/ca-bundle.pem'
 export NPM_CONFIG_IGNORE_SCRIPTS='true'
 export NPM_CONFIG_AUDIT='false'
 export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC='1'
 export PYTHONDONTWRITEBYTECODE='1'
-export BASH_ENV='/run/concrete-env.sh'
+export BASH_ENV='/run/umbra/env.sh'
 export PATH='/home/dev/.local/bin:'"\$PATH"
 export PIP_USER='1'
 export GH_CONFIG_DIR='/home/dev/.local/share/gh'
@@ -211,18 +211,18 @@ ensure_claude_native_install() {
   local version
   local target
   local current
-  version="$(cat /usr/local/lib/concrete/claude.version 2>/dev/null || true)"
+  version="$(cat /usr/local/lib/umbra/claude.version 2>/dev/null || true)"
   if [ -z "$version" ]; then
     fail "missing Claude version metadata"
   fi
-  if [ ! -x /usr/local/lib/concrete/claude.real ]; then
+  if [ ! -x /usr/local/lib/umbra/claude.real ]; then
     fail "missing baked Claude binary"
   fi
 
   target="/home/dev/.local/share/claude/versions/${version}"
   install -d -o dev -g dev -m 0755 /home/dev/.local/share/claude/versions
   if [ ! -x "$target" ]; then
-    install -o dev -g dev -m 0755 /usr/local/lib/concrete/claude.real "$target"
+    install -o dev -g dev -m 0755 /usr/local/lib/umbra/claude.real "$target"
   fi
 
   current="$(readlink -f /home/dev/.local/bin/claude 2>/dev/null || true)"
@@ -233,8 +233,8 @@ ensure_claude_native_install() {
   chown -h dev:dev /home/dev/.local/bin/claude
 }
 
-if [ "${CONCRETE_ENTRYPOINT_SELF_TEST:-}" = "validate-placeholder-value" ]; then
-  validate_placeholder_value "concrete-proxy-injected" \
+if [ "${UMBRA_ENTRYPOINT_SELF_TEST:-}" = "validate-placeholder-value" ]; then
+  validate_placeholder_value "umbra-proxy-injected" \
     || fail "self-test rejected benign placeholder value"
   if validate_placeholder_value $'line\nbreak'; then
     fail "self-test accepted newline placeholder value"
@@ -248,18 +248,18 @@ if [ "${CONCRETE_ENTRYPOINT_SELF_TEST:-}" = "validate-placeholder-value" ]; then
   export HTTP_PROXY='http://dev-egress-forwarder:3128'
   export HTTPS_PROXY='http://dev-egress-forwarder:3128'
   export NO_PROXY='localhost,127.0.0.1,user-sandbox,dev-tunnel,dev-egress-forwarder'
-  export REQUESTS_CA_BUNDLE='/run/concrete/ca-bundle.pem'
-  export SSL_CERT_FILE='/run/concrete/ca-bundle.pem'
-  export CURL_CA_BUNDLE='/run/concrete/ca-bundle.pem'
-  export GIT_SSL_CAINFO='/run/concrete/ca-bundle.pem'
-  export NODE_EXTRA_CA_CERTS='/run/concrete/ca-bundle.pem'
-  export BASH_ENV='/run/concrete-env.sh'
+  export REQUESTS_CA_BUNDLE='/run/umbra/ca-bundle.pem'
+  export SSL_CERT_FILE='/run/umbra/ca-bundle.pem'
+  export CURL_CA_BUNDLE='/run/umbra/ca-bundle.pem'
+  export GIT_SSL_CAINFO='/run/umbra/ca-bundle.pem'
+  export NODE_EXTRA_CA_CERTS='/run/umbra/ca-bundle.pem'
+  export BASH_ENV='/run/umbra/env.sh'
   export PATH="/home/dev/.local/bin:${PATH}"
   export PIP_USER='1'
   export GH_CONFIG_DIR='/home/dev/.local/share/gh'
   printf 'VERIFY_PLACEHOLDER=non-secret-placeholder\nQUOTED_PLACEHOLDER=value"with\\slashes\n' \
     >"${self_test_dir}/placeholders"
-  printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMockConcreteVerifyKeyForEntryPointTests test\n' \
+  printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMockUmbraVerifyKeyForEntryPointTests test\n' \
     >"${self_test_dir}/authorized_keys.source"
   write_authorized_keys \
     "${self_test_dir}/authorized_keys.source" \
@@ -276,9 +276,9 @@ if [ "$(id -u)" -ne 0 ]; then
   fail "entrypoint must run as root"
 fi
 
-mkdir -p /run/ssh/authorized_keys /run/sshd /run/concrete
+mkdir -p /run/ssh/authorized_keys /run/sshd /run/umbra
 ensure_runtime_dev_dir 0700 /run/ssh/user-ssh
-ensure_runtime_dev_dir 0700 /run/concrete/sessions
+ensure_runtime_dev_dir 0700 /run/umbra/sessions
 ensure_dev_dir_if_missing 0755 /home/dev/workspaces
 ensure_dev_dir_if_missing 0755 /home/dev/.local
 ensure_dev_dir_if_missing 0755 /home/dev/.local/bin
@@ -300,30 +300,32 @@ fi
 export HTTP_PROXY='http://dev-egress-forwarder:3128'
 export HTTPS_PROXY='http://dev-egress-forwarder:3128'
 export NO_PROXY='localhost,127.0.0.1,user-sandbox,dev-tunnel,dev-egress-forwarder'
-export REQUESTS_CA_BUNDLE='/run/concrete/ca-bundle.pem'
-export SSL_CERT_FILE='/run/concrete/ca-bundle.pem'
-export CURL_CA_BUNDLE='/run/concrete/ca-bundle.pem'
-export GIT_SSL_CAINFO='/run/concrete/ca-bundle.pem'
-export NODE_EXTRA_CA_CERTS='/run/concrete/ca-bundle.pem'
-export BASH_ENV='/run/concrete-env.sh'
+export REQUESTS_CA_BUNDLE='/run/umbra/ca-bundle.pem'
+export SSL_CERT_FILE='/run/umbra/ca-bundle.pem'
+export CURL_CA_BUNDLE='/run/umbra/ca-bundle.pem'
+export GIT_SSL_CAINFO='/run/umbra/ca-bundle.pem'
+export NODE_EXTRA_CA_CERTS='/run/umbra/ca-bundle.pem'
+export BASH_ENV='/run/umbra/env.sh'
 export PATH="/home/dev/.local/bin:${PATH}"
 export PIP_USER='1'
 export GH_CONFIG_DIR='/home/dev/.local/share/gh'
 
-decode_b64_to_file SECURITY_CVM_CA_CERT_B64 /run/concrete/security-cvm-ca.pem 0444
-decode_b64_to_file AUTHORIZED_SSH_KEYS_B64 /run/concrete/authorized_keys.bootstrap 0644
-printf '%s' "${SANDBOX_ENV_PLACEHOLDERS_B64:-}" | base64 -d >/run/concrete/sandbox-env-placeholders \
+required_env SECURITY_CVM_FQDN
+decode_b64_to_file SECURITY_CVM_CA_CERT_B64 /run/umbra/security-cvm-ca.launch.pem 0444
+decode_b64_to_file AUTHORIZED_SSH_KEYS_B64 /run/umbra/authorized_keys.bootstrap 0644
+printf '%s' "${SANDBOX_ENV_PLACEHOLDERS_B64:-}" | base64 -d >/run/umbra/sandbox-env-placeholders \
   || fail "invalid base64 in SANDBOX_ENV_PLACEHOLDERS_B64"
-chmod 0444 /run/concrete/sandbox-env-placeholders
+chmod 0444 /run/umbra/sandbox-env-placeholders
 
 unset SECURITY_CVM_CA_CERT_B64 AUTHORIZED_SSH_KEYS_B64 SANDBOX_ENV_PLACEHOLDERS_B64
 
-[ -s /run/concrete/security-cvm-ca.pem ] || fail "Security CVM CA is empty"
-validate_authorized_keys /run/concrete/authorized_keys.bootstrap
-cat /etc/ssl/certs/ca-certificates.crt /run/concrete/security-cvm-ca.pem >/run/concrete/ca-bundle.pem
-chmod 0644 /run/concrete/ca-bundle.pem
-write_runtime_env /run/concrete/sandbox-env-placeholders /run/concrete-env.sh
-write_authorized_keys /run/concrete/authorized_keys.bootstrap /run/ssh/authorized_keys/dev /run/concrete/sandbox-env-placeholders
+validate_authorized_keys /run/umbra/authorized_keys.bootstrap
+# Prefer a valid forwarder-owned rotated CA on restart. An empty volume uses
+# the attested launch CA; corrupt/partial state blocks here until the forwarder
+# repairs it through the authenticated Console refresh path.
+umbra-ca-refresh --bootstrap /run/umbra/security-cvm-ca.launch.pem
+write_runtime_env /run/umbra/sandbox-env-placeholders /run/umbra/env.sh
+write_authorized_keys /run/umbra/authorized_keys.bootstrap /run/ssh/authorized_keys/dev /run/umbra/sandbox-env-placeholders
 
 if [ -e /home/dev/.ssh ] && [ ! -L /home/dev/.ssh ]; then
   fail "/home/dev/.ssh exists and is not a symlink"
@@ -345,7 +347,7 @@ fi
 # Follow Security CVM CA rotation at runtime (re-installs the forwarder-published SC CA into the
 # shared trust bundle), so an SC update does not require a fleet-wide cvm.update. See
 # docs/specs/dev-cvm.md §3.6/§4.5.
-concrete-ca-refresh >/var/log/concrete-ca-refresh.log 2>&1 &
+umbra-ca-refresh >/var/log/umbra-ca-refresh.log 2>&1 &
 
 exec /usr/sbin/sshd -D -e -f /etc/ssh/sshd_config \
   -h /run/sshd/ssh_host_ed25519_key \

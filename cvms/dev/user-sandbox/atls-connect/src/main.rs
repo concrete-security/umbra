@@ -1,8 +1,8 @@
 use std::io::Write;
 
-use concrete_atls_connect::{load_policy, parse_request, HelperError, RelayResponse, Result};
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
+use umbra_atls_connect::{load_policy, parse_request, HelperError, RelayResponse, Result};
 
 const MAX_STDIN_BYTES: u64 = 1024 * 1024;
 
@@ -11,7 +11,7 @@ async fn main() {
     install_default_crypto_provider();
 
     if let Err(error) = run().await {
-        eprintln!("concrete-atls-connect: {error}");
+        eprintln!("umbra-atls-connect: {error}");
         std::process::exit(1);
     }
 }
@@ -50,7 +50,7 @@ async fn run() -> Result<()> {
     Ok(())
 }
 
-async fn read_request() -> Result<concrete_atls_connect::ConnectRequest> {
+async fn read_request() -> Result<umbra_atls_connect::ConnectRequest> {
     let mut input = Vec::new();
     tokio::io::stdin()
         .take(MAX_STDIN_BYTES + 1)

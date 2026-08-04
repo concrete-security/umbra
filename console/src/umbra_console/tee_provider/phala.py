@@ -29,7 +29,7 @@ from umbra_console.tee_provider import (
 from umbra_console.readiness import DEFAULT_PHALA_CLI_PATH
 
 APP_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
-MANAGED_CVM_NAME_RE = re.compile(r"^concrete-v0-(?:cvm|sc)-[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$")
+MANAGED_CVM_NAME_RE = re.compile(r"^umbra-v0-(?:cvm|sc)-[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$")
 DNS_HOST_RE = re.compile(r"^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$")
 ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 INSTANCE_TYPE_CURRENCY = "USD"
@@ -585,7 +585,7 @@ def append_optional_arg(args: list[str], flag: str, value: str | None) -> None:
 def managed_cvm_name(row: dict[str, Any]) -> str | None:
     for key in ("name", "cvm_name", "cvmName"):
         value = row.get(key)
-        if isinstance(value, str) and value.startswith("concrete-v0-"):
+        if isinstance(value, str) and value.startswith("umbra-v0-"):
             return value
     return None
 

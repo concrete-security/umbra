@@ -11,6 +11,7 @@ import os
 import shlex
 import stat
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,8 +20,10 @@ from urllib.parse import urlsplit
 
 MAX_HEADER_BYTES = 65536
 READ_SIZE = 65536
-DEFAULT_SECURITY_CVM_PROXY_PATH = "/concrete/proxy"
-DEFAULT_SECURITY_CVM_PROXY_UPGRADE = "concrete-proxy"
+DEFAULT_SECURITY_CVM_PROXY_PATH = "/umbra/proxy"
+DEFAULT_SECURITY_CVM_PROXY_UPGRADE = "umbra-proxy"
+PEM_BEGIN = "-----BEGIN CERTIFICATE-----"
+PEM_END = "-----END CERTIFICATE-----"
 HOP_BY_HOP_HEADERS = {
     "connection",
     "keep-alive",
@@ -51,6 +54,7 @@ class ForwarderConfig:
     atls_connect_cmd: tuple[str, ...]
     atls_connect_timeout_seconds: float
     ca_distribution_path: Path
+    ca_distribution_binding_path: Path
     ca_refresh_interval_seconds: float
 
 
@@ -130,10 +134,32 @@ def decode_required_b64(name: str) -> bytes:
 
 def write_private_file(path: Path, payload: bytes, mode: int) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
-    with os.fdopen(fd, "wb") as handle:
-        handle.write(payload)
-    os.chmod(path, mode)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def create_private_file(path: Path, payload: bytes, mode: int) -> bool:
+    """Create ``path`` without replacing concurrent or persisted state."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+    except FileExistsError:
+        return False
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+        os.chmod(path, mode)
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
+    return True
 
 
 def materialize_runtime_files(runtime_dir: Path) -> tuple[Path, Path, str]:
@@ -159,11 +185,11 @@ def materialize_runtime_files(runtime_dir: Path) -> tuple[Path, Path, str]:
     return policy_path, ca_path, proxy_token
 
 
-def load_config(runtime_dir: Path = Path("/run/concrete")) -> ForwarderConfig:
+def load_config(runtime_dir: Path = Path("/run/umbra")) -> ForwarderConfig:
     policy_path, ca_path, proxy_token = materialize_runtime_files(runtime_dir)
     dev_control_token = required_env("DEV_CVM_CONTROL_TOKEN")
     os.environ.pop("DEV_CVM_CONTROL_TOKEN", None)
-    command = os.environ.get("DEV_EGRESS_ATLS_CONNECT_CMD", "/usr/local/bin/concrete-atls-connect")
+    command = os.environ.get("DEV_EGRESS_ATLS_CONNECT_CMD", "/usr/local/bin/umbra-atls-connect")
     argv = tuple(shlex.split(command))
     if not argv:
         raise RuntimeError("DEV_EGRESS_ATLS_CONNECT_CMD is empty")
@@ -184,7 +210,10 @@ def load_config(runtime_dir: Path = Path("/run/concrete")) -> ForwarderConfig:
         atls_connect_cmd=argv,
         atls_connect_timeout_seconds=float(os.environ.get("DEV_EGRESS_ATLS_CONNECT_TIMEOUT_SECONDS", "10")),
         ca_distribution_path=Path(
-            os.environ.get("DEV_EGRESS_CA_DISTRIBUTION_PATH", "/var/lib/concrete-ca/security-cvm-ca.pem")
+            os.environ.get("DEV_EGRESS_CA_DISTRIBUTION_PATH", "/var/lib/umbra-ca/security-cvm-ca.pem")
+        ),
+        ca_distribution_binding_path=Path(
+            os.environ.get("DEV_EGRESS_CA_BINDING_PATH", "/var/lib/umbra-ca/security-cvm-ca.json")
         ),
         ca_refresh_interval_seconds=float(os.environ.get("DEV_EGRESS_CA_REFRESH_INTERVAL_SECONDS", "60")),
     )
@@ -412,11 +441,15 @@ def fetch_refreshed_atls_policy(config: ForwarderConfig) -> RefreshedAtlsPolicy 
     if payload.get("security_cvm_fqdn") != config.security_cvm_fqdn:
         log("atls_console_refresh_rejected reason=fqdn_mismatch")
         return None
-    try:
-        expected_ca_sha256 = hashlib.sha256(config.ca_cert_path.read_bytes()).hexdigest()
-    except OSError as exc:
-        log(f"atls_console_refresh_rejected reason=ca_unreadable detail={exc}")
+    distribution_state, distributed_ca = read_ca_distribution(config)
+    if distribution_state != "valid" or distributed_ca is None:
+        log(f"atls_console_refresh_rejected reason=ca_distribution_{distribution_state}")
         return None
+    # The persisted CA is replaced only by launch-bound seeding or after the
+    # authenticated CA endpoint passes the bound-FQDN and digest checks. Binding
+    # policy refresh to that same CA lets rotation converge without accepting an
+    # unbound or stale file left by a different launch configuration.
+    expected_ca_sha256 = hashlib.sha256(distributed_ca).hexdigest()
     if payload.get("ca_cert_sha256") != expected_ca_sha256:
         log("atls_console_refresh_rejected reason=ca_changed")
         return None
@@ -449,7 +482,7 @@ def extract_validated_ca(payload: object, expected_fqdn: str) -> str | None:
         log("ca_fetch_rejected reason=fqdn_mismatch")
         return None
     ca_pem = payload.get("ca_cert_pem")
-    if not isinstance(ca_pem, str) or "-----BEGIN CERTIFICATE-----" not in ca_pem:
+    if not isinstance(ca_pem, str) or not is_valid_ca_pem(ca_pem.encode("utf-8")):
         log("ca_fetch_rejected reason=invalid_ca")
         return None
     expected_sha = payload.get("ca_cert_sha256")
@@ -499,34 +532,153 @@ def fetch_security_cvm_ca(config: ForwarderConfig) -> str | None:
     return extract_validated_ca(payload, config.security_cvm_fqdn)
 
 
-def write_ca_distribution(config: ForwarderConfig, ca_pem: str) -> bool:
-    """Atomically publish the SC CA to the sandbox-shared path. Returns True if it changed."""
-    data = ca_pem.encode("utf-8")
-    path = config.ca_distribution_path
+def is_valid_ca_pem(data: bytes) -> bool:
     try:
-        if path.read_bytes() == data:
-            return False
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return PEM_BEGIN in text and PEM_END in text
+
+
+def launch_ca_digest(config: ForwarderConfig) -> str | None:
+    try:
+        launch_ca = config.ca_cert_path.read_bytes()
+    except OSError:
+        return None
+    if not is_valid_ca_pem(launch_ca):
+        return None
+    return hashlib.sha256(launch_ca).hexdigest()
+
+
+def ca_distribution_binding(config: ForwarderConfig, ca_data: bytes) -> bytes:
+    launch_digest = launch_ca_digest(config)
+    if launch_digest is None:
+        raise ValueError("launch Security CVM CA is unavailable or invalid")
+    return (
+        json.dumps(
+            {
+                "security_cvm_fqdn": config.security_cvm_fqdn,
+                "ca_cert_sha256": hashlib.sha256(ca_data).hexdigest(),
+                "launch_ca_cert_sha256": launch_digest,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def path_presence(path: Path) -> bool | None:
+    """Return existence without collapsing probe errors into absence."""
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return None
+    return True if stat.S_ISREG(metadata.st_mode) else None
+
+
+def read_ca_distribution(config: ForwarderConfig) -> tuple[str, bytes | None]:
+    """Return ``(state, CA)`` for the forwarder-owned persisted distribution.
+
+    ``missing`` means both files are absent and first-boot seeding is safe.
+    ``foreign`` is a valid distribution for a different launch-bound SC FQDN
+    or launch-CA baseline.
+    Any partial, unreadable, malformed, or digest-mismatched pair is ``invalid``.
+    """
+    ca_exists = path_presence(config.ca_distribution_path)
+    binding_exists = path_presence(config.ca_distribution_binding_path)
+    if ca_exists is None or binding_exists is None:
+        return "invalid", None
+    if not ca_exists and not binding_exists:
+        return "missing", None
+    if not ca_exists or not binding_exists:
+        return "invalid", None
+    try:
+        ca_data = config.ca_distribution_path.read_bytes()
+        binding = json.loads(config.ca_distribution_binding_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return "invalid", None
+    if not is_valid_ca_pem(ca_data) or not isinstance(binding, dict):
+        return "invalid", None
+    if binding.get("ca_cert_sha256") != hashlib.sha256(ca_data).hexdigest():
+        return "invalid", None
+    current_launch_digest = launch_ca_digest(config)
+    if current_launch_digest is None:
+        return "invalid", None
+    if (
+        binding.get("security_cvm_fqdn") != config.security_cvm_fqdn
+        or binding.get("launch_ca_cert_sha256") != current_launch_digest
+    ):
+        return "foreign", None
+    return "valid", ca_data
+
+
+def write_ca_distribution(config: ForwarderConfig, ca_pem: str) -> bool:
+    """Publish an authenticated SC CA plus its FQDN/digest binding."""
+    data = ca_pem.encode("utf-8")
+    if not is_valid_ca_pem(data):
+        raise ValueError("Security CVM CA is not a PEM certificate")
+    binding = ca_distribution_binding(config, data)
+    ca_changed = True
+    binding_changed = True
+    try:
+        ca_changed = config.ca_distribution_path.read_bytes() != data
     except OSError:
         pass
-    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        binding_changed = config.ca_distribution_binding_path.read_bytes() != binding
+    except OSError:
+        pass
+    if not ca_changed and not binding_changed:
+        return False
     mode = stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH
-    tmp = path.with_name(path.name + ".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
-    with os.fdopen(fd, "wb") as handle:
-        handle.write(data)
-    os.chmod(tmp, mode)
-    os.replace(tmp, path)
+    if ca_changed:
+        write_private_file(config.ca_distribution_path, data, mode)
+    if binding_changed:
+        write_private_file(config.ca_distribution_binding_path, binding, mode)
     log("ca_distribution_updated")
     return True
 
 
 def seed_ca_distribution(config: ForwarderConfig) -> None:
-    """Publish the launch-material CA at startup so the sandbox has a baseline before polling."""
+    """Seed first boot without rolling a persisted rotated CA back on restart."""
     try:
-        ca_pem = config.ca_cert_path.read_text(encoding="utf-8")
-        write_ca_distribution(config, ca_pem)
+        ca_data = config.ca_cert_path.read_bytes()
     except OSError as exc:
         log(f"ca_distribution_seed_skipped reason={exc}")
+        return
+    if not is_valid_ca_pem(ca_data):
+        log("ca_distribution_seed_skipped reason=invalid_launch_ca")
+        return
+
+    state, _persisted_ca = read_ca_distribution(config)
+    if state == "valid":
+        log("ca_distribution_seed_preserved")
+        return
+    if state == "foreign":
+        # A full Dev CVM update can retain the named volume while changing the
+        # launch-bound SC FQDN or launch CA baseline. The new compose material
+        # is attested, so replace the foreign distribution with its launch CA.
+        write_ca_distribution(config, ca_data.decode("utf-8"))
+        log("ca_distribution_seed_rebound")
+        return
+    if state == "invalid":
+        # Never repair partial/corrupt state from the immutable launch baseline:
+        # only a fresh authenticated Console response may replace it.
+        log("ca_distribution_seed_skipped reason=invalid_existing_state")
+        return
+
+    mode = stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH
+    if not create_private_file(config.ca_distribution_path, ca_data, mode):
+        log("ca_distribution_seed_skipped reason=concurrent_state")
+        return
+    binding = ca_distribution_binding(config, ca_data)
+    if not create_private_file(config.ca_distribution_binding_path, binding, mode):
+        log("ca_distribution_seed_skipped reason=concurrent_binding")
+        return
+    log("ca_distribution_seeded")
 
 
 async def ca_distribution_loop(config: ForwarderConfig) -> None:
@@ -536,7 +688,6 @@ async def ca_distribution_loop(config: ForwarderConfig) -> None:
         return
     while True:
         try:
-            await asyncio.sleep(config.ca_refresh_interval_seconds)
             ca_pem = await asyncio.to_thread(fetch_security_cvm_ca, config)
             if ca_pem is not None:
                 await asyncio.to_thread(write_ca_distribution, config, ca_pem)
@@ -544,6 +695,7 @@ async def ca_distribution_loop(config: ForwarderConfig) -> None:
             raise
         except Exception as exc:  # keep the proxy serving even if CA refresh fails
             log(f"ca_distribution_error reason={exc}")
+        await asyncio.sleep(config.ca_refresh_interval_seconds)
 
 
 async def open_security_proxy_tunnel(upstream: VerifiedUpstream, config: ForwarderConfig) -> None:

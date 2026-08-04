@@ -7,8 +7,8 @@ from pathlib import Path
 
 
 def load_tunnel_module():
-    path = Path(__file__).resolve().parents[1] / "user-sandbox" / "concrete-dev-tunnel.py"
-    spec = importlib.util.spec_from_file_location("concrete_dev_tunnel", path)
+    path = Path(__file__).resolve().parents[1] / "user-sandbox" / "umbra-dev-tunnel.py"
+    spec = importlib.util.spec_from_file_location("umbra_dev_tunnel", path)
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
@@ -44,14 +44,14 @@ async def smoke():
     tunnel_module = load_tunnel_module()
     ssh = await asyncio.start_server(echo_server, "127.0.0.1", 0)
     ssh_port = ssh.sockets[0].getsockname()[1]
-    config = tunnel_module.TunnelConfig("127.0.0.1", 0, "127.0.0.1", ssh_port, "/concrete/tunnel")
+    config = tunnel_module.TunnelConfig("127.0.0.1", 0, "127.0.0.1", ssh_port, "/umbra/tunnel")
     tunnel = await asyncio.start_server(lambda r, w: tunnel_module.handle_client(r, w, config), "127.0.0.1", 0)
     tunnel_port = tunnel.sockets[0].getsockname()[1]
     reader, writer = await asyncio.open_connection("127.0.0.1", tunnel_port)
     key = base64.b64encode(os.urandom(16)).decode("ascii")
     writer.write(
         (
-            "GET /concrete/tunnel HTTP/1.1\r\n"
+            "GET /umbra/tunnel HTTP/1.1\r\n"
             "Host: localhost\r\n"
             "Upgrade: websocket\r\n"
             "Connection: Upgrade\r\n"

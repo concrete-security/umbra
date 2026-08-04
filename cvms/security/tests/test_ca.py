@@ -6,7 +6,7 @@ from cryptography import x509
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtensionOID
 
-from concrete_security_cvm.ca import CAExportUnauthorized, generate_root_ca, write_mitmproxy_ca_files
+from umbra_security_cvm.ca import CAExportUnauthorized, generate_root_ca, write_mitmproxy_ca_files
 
 
 def test_generate_root_ca_uses_p384_ca_certificate() -> None:

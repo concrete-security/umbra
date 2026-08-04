@@ -5,12 +5,12 @@ import os
 from pathlib import Path
 from typing import Any, Mapping
 
-from concrete_security_cvm.ca import write_mitmproxy_ca_files
-from concrete_security_cvm.mitmproxy_addon import ResponseFactory, SecurityCVMProxyAddon
-from concrete_security_cvm.runtime import SecurityCVMRuntime, SecurityCVMRuntimeConfig
+from umbra_security_cvm.ca import write_mitmproxy_ca_files
+from umbra_security_cvm.mitmproxy_addon import ResponseFactory, SecurityCVMProxyAddon
+from umbra_security_cvm.runtime import SecurityCVMRuntime, SecurityCVMRuntimeConfig
 
 
-MITMPROXY_SCRIPT_ENV = "CONCRETE_SECURITY_CVM_MITMPROXY_SCRIPT"
+MITMPROXY_SCRIPT_ENV = "UMBRA_SECURITY_CVM_MITMPROXY_SCRIPT"
 DEFAULT_MITMPROXY_CONFDIR = "/tmp/mitmproxy"
 DEFAULT_MITMPROXY_HOST = "0.0.0.0"
 DEFAULT_MITMPROXY_PORT = "8080"

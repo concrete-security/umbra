@@ -1,5 +1,5 @@
 [package]
-name = "concrete-atls-connect"
+name = "umbra-atls-connect"
 version = "0.1.0"
 edition.workspace = true
 authors.workspace = true
@@ -9,7 +9,7 @@ publish = false
 description = "Dev CVM aTLS loopback relay helper"
 
 [[bin]]
-name = "concrete-atls-connect"
+name = "umbra-atls-connect"
 path = "src/main.rs"
 
 [dependencies]

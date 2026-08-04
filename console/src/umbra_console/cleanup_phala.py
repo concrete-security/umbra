@@ -48,7 +48,7 @@ async def delete_managed_cvms(client: PhalaClient, *, out: TextIO = sys.stderr) 
         deleted += 1
         print(f"clean-phala: deleted Phala CVM {name} ({app_id})", file=out)
     if deleted == 0:
-        print("clean-phala: no concrete-v0 Phala CVMs found", file=out)
+        print("clean-phala: no umbra-v0 Phala CVMs found", file=out)
     return CleanupSummary(deleted=deleted)
 
 

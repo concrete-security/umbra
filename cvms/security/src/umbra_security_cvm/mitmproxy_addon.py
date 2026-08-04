@@ -9,8 +9,8 @@ from typing import Any, Callable, Mapping
 from urllib.parse import urlsplit
 from uuid import UUID
 
-from concrete_security_cvm.control_loop import ControlPlaneState
-from concrete_security_cvm.enforcement import (
+from umbra_security_cvm.control_loop import ControlPlaneState
+from umbra_security_cvm.enforcement import (
     DLP_SCAN_BODY_LIMIT_BYTES,
     EnforcementResult,
     ProxyRequest,
@@ -19,7 +19,7 @@ from concrete_security_cvm.enforcement import (
     enforce_connect_request,
     enforce_request,
 )
-from concrete_security_cvm.traffic import TrafficLogEmitter, TrafficLogRecord
+from umbra_security_cvm.traffic import TrafficLogEmitter, TrafficLogRecord
 
 
 logger = logging.getLogger(__name__)
@@ -68,7 +68,7 @@ class SecurityCVMProxyAddon:
             not connect_only
             and isinstance(raw_method, str)
             and raw_method.upper() == "CONNECT"
-            and _metadata(flow).get("concrete_connect_allowed") is True
+            and _metadata(flow).get("umbra_connect_allowed") is True
         ):
             return
         try:
@@ -76,7 +76,7 @@ class SecurityCVMProxyAddon:
         except FlowTranslationError as exc:
             flow.response = self.response_factory(
                 400,
-                b"Concrete Proxy: Malformed proxy request\n",
+                b"Umbra Proxy: Malformed proxy request\n",
                 {"Content-Type": "text/plain; charset=utf-8"},
             )
             logger.info("proxy_request_malformed", extra={"reason": str(exc)})
@@ -91,8 +91,8 @@ class SecurityCVMProxyAddon:
         if result.allowed:
             metadata = _metadata(flow)
             if result.cvm is not None:
-                metadata["concrete_cvm_id"] = str(result.cvm.cvm_id)
-                metadata["concrete_websocket_governed"] = result.cvm.merged_policy.websocket_governed(
+                metadata["umbra_cvm_id"] = str(result.cvm.cvm_id)
+                metadata["umbra_websocket_governed"] = result.cvm.merged_policy.websocket_governed(
                     scheme=proxy_request.scheme,
                     host=proxy_request.host,
                     port=proxy_request.port,
@@ -101,12 +101,12 @@ class SecurityCVMProxyAddon:
             if (connect_only or proxy_request.method == "CONNECT") and result.cvm is not None:
                 if result.traffic_log is not None:
                     self.traffic_emitter.enqueue(result.traffic_log)
-                metadata["concrete_connect_allowed"] = True
+                metadata["umbra_connect_allowed"] = True
                 if key := _client_connection_key(flow):
                     self._remember_connect_identity(key, result.cvm.cvm_id)
                 return
             if result.traffic_log is not None:
-                metadata["concrete_traffic_log"] = result.traffic_log
+                metadata["umbra_traffic_log"] = result.traffic_log
             return
         self._reject(flow, result)
 
@@ -125,7 +125,7 @@ class SecurityCVMProxyAddon:
             return
         content = _websocket_message_content(message) or b""
         metadata = _metadata(flow)
-        was_governed = metadata.get("concrete_websocket_governed") is True
+        was_governed = metadata.get("umbra_websocket_governed") is True
         flow_cvm_id = _flow_cvm_id(flow)
         control_map = self.control_state.snapshot().control_map
         cvm = _connect_cvm(flow, control_map, self._connect_identities)
@@ -274,18 +274,18 @@ class SecurityCVMProxyAddon:
         if response is None:
             return
         metadata = _metadata(flow)
-        metadata["concrete_streamed_bytes"] = 0
+        metadata["umbra_streamed_bytes"] = 0
 
         def _count_streamed(chunk: bytes) -> bytes:
-            metadata["concrete_streamed_bytes"] += len(chunk)
+            metadata["umbra_streamed_bytes"] += len(chunk)
             return chunk
 
         response.stream = _count_streamed
 
     def response(self, flow: Any) -> None:
         metadata = _metadata(flow)
-        traffic_log = metadata.pop("concrete_traffic_log", None)
-        streamed_bytes = metadata.pop("concrete_streamed_bytes", None)
+        traffic_log = metadata.pop("umbra_traffic_log", None)
+        streamed_bytes = metadata.pop("umbra_streamed_bytes", None)
         if not isinstance(traffic_log, TrafficLogRecord):
             return
         response = getattr(flow, "response", None)
@@ -309,8 +309,8 @@ class SecurityCVMProxyAddon:
 
     def error(self, flow: Any) -> None:
         metadata = _metadata(flow)
-        traffic_log = metadata.pop("concrete_traffic_log", None)
-        metadata.pop("concrete_streamed_bytes", None)
+        traffic_log = metadata.pop("umbra_traffic_log", None)
+        metadata.pop("umbra_streamed_bytes", None)
         if not isinstance(traffic_log, TrafficLogRecord):
             return
         self.traffic_emitter.enqueue(replace(traffic_log, response_code=502, bytes_transferred=0))
@@ -399,12 +399,12 @@ def _blocked_headers(result: EnforcementResult) -> dict[str, str]:
     if result.response_code == 403 and result.cvm is not None:
         headers.update(
             {
-                "Proxy-Status": f"concrete-security-cvm; error={result.reason}",
-                "X-Concrete-Blocked": "true",
-                "X-Concrete-Block-Source": "profile",
-                "X-Concrete-Block-Reason": result.reason,
-                "X-Concrete-CVM-ID": str(result.cvm.cvm_id),
-                "X-Concrete-Policy-Version": str(result.cvm.policy_version),
+                "Proxy-Status": f"umbra-security-cvm; error={result.reason}",
+                "X-Umbra-Blocked": "true",
+                "X-Umbra-Block-Source": "profile",
+                "X-Umbra-Block-Reason": result.reason,
+                "X-Umbra-CVM-ID": str(result.cvm.cvm_id),
+                "X-Umbra-Policy-Version": str(result.cvm.policy_version),
             }
         )
     return headers
@@ -412,8 +412,8 @@ def _blocked_headers(result: EnforcementResult) -> dict[str, str]:
 
 def _blocked_body(result: EnforcementResult) -> bytes:
     auth_messages = {
-        "proxy_auth_missing": "Concrete Proxy: Proxy authentication required\n",
-        "proxy_auth_unknown": "Concrete Proxy: Proxy authentication required\n",
+        "proxy_auth_missing": "Umbra Proxy: Proxy authentication required\n",
+        "proxy_auth_unknown": "Umbra Proxy: Proxy authentication required\n",
     }
     if result.reason in auth_messages:
         return auth_messages[result.reason].encode("utf-8")
@@ -432,9 +432,9 @@ def _blocked_body(result: EnforcementResult) -> bytes:
     }
     body = "\n".join(
         [
-            "Concrete network restriction: this request was blocked by the profile policy assigned to this Dev CVM.",
+            "Umbra network restriction: this request was blocked by the profile policy assigned to this Dev CVM.",
             reason_messages.get(result.reason, "Reason: profile policy blocked this request."),
-            "This is a Concrete policy decision, not a network or server failure.",
+            "This is an Umbra policy decision, not a network or server failure.",
             "",
         ]
     )
@@ -719,7 +719,7 @@ def _metadata(flow: Any) -> dict[str, Any]:
 
 
 def _connect_cvm(flow: Any, control_map: Any, identities: Mapping[str, tuple[str, float]]) -> Any:
-    raw = _metadata(flow).get("concrete_cvm_id")
+    raw = _metadata(flow).get("umbra_cvm_id")
     if not isinstance(raw, str):
         key = _client_connection_key(flow)
         identity = identities.get(key) if key is not None else None
@@ -735,7 +735,7 @@ def _connect_cvm(flow: Any, control_map: Any, identities: Mapping[str, tuple[str
 
 
 def _flow_cvm_id(flow: Any) -> UUID | None:
-    raw = _metadata(flow).get("concrete_cvm_id")
+    raw = _metadata(flow).get("umbra_cvm_id")
     if not isinstance(raw, str):
         return None
     try:

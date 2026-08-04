@@ -1,5 +1,5 @@
-from concrete_security_cvm.ca import generate_root_ca
-from concrete_security_cvm.management import handle_ca_pem_request, parse_bearer
+from umbra_security_cvm.ca import generate_root_ca
+from umbra_security_cvm.management import handle_ca_pem_request, parse_bearer
 
 
 def test_parse_bearer_accepts_single_bearer_token() -> None:

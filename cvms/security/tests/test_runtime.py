@@ -4,7 +4,7 @@ import hashlib
 
 import pytest
 
-from concrete_security_cvm.runtime import SecurityCVMRuntime, SecurityCVMRuntimeConfig
+from umbra_security_cvm.runtime import SecurityCVMRuntime, SecurityCVMRuntimeConfig
 
 
 def env() -> dict[str, str]:

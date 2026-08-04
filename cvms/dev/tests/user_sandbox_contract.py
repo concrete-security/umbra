@@ -15,10 +15,12 @@ def main() -> None:
     dockerfile = (SANDBOX / "Dockerfile").read_text()
     compose = (ROOT / "cvms" / "dev" / "docker-compose.yml").read_text()
     entrypoint = (SANDBOX / "entrypoint.sh").read_text()
-    claude_wrapper = (SANDBOX / "concrete-agent-claude.sh").read_text()
-    codex_wrapper = (SANDBOX / "concrete-agent-codex.sh").read_text()
-    update_agents = (SANDBOX / "concrete-update-agents.sh").read_text()
-    profile = (SANDBOX / "concrete-env-profile.sh").read_text()
+    claude_wrapper = (SANDBOX / "umbra-agent-claude.sh").read_text()
+    codex_wrapper = (SANDBOX / "umbra-agent-codex.sh").read_text()
+    update_agents = (SANDBOX / "umbra-update-agents.sh").read_text()
+    profile = (SANDBOX / "umbra-env-profile.sh").read_text()
+    forwarder = (SANDBOX / "umbra-dev-egress-forwarder.py").read_text()
+    ca_refresh = (SANDBOX / "umbra-ca-refresh.py").read_text()
     sshd_config = (SANDBOX / "sshd_config").read_text().splitlines()
 
     require("groupadd --gid 1001 dev" in dockerfile, "dev group must use GID 1001")
@@ -46,32 +48,41 @@ def main() -> None:
     )
     require("visudo -cf /etc/sudoers.d/dev" in dockerfile, "sudoers drop-in must be validated")
     require(
-        "apt-concrete-proxy.conf /etc/apt/apt.conf.d/95concrete-proxy" in dockerfile,
-        "APT must be configured to use the Concrete forwarder",
+        "apt-umbra-proxy.conf /etc/apt/apt.conf.d/95umbra-proxy" in dockerfile,
+        "APT must be configured to use the Umbra forwarder",
     )
-    apt_proxy = (SANDBOX / "apt-concrete-proxy.conf").read_text()
+    apt_proxy = (SANDBOX / "apt-umbra-proxy.conf").read_text()
     require(
         'Acquire::http::Proxy "http://dev-egress-forwarder:3128";' in apt_proxy,
-        "APT HTTP traffic must use the Concrete forwarder",
+        "APT HTTP traffic must use the Umbra forwarder",
     )
     require(
         'Acquire::https::Proxy "http://dev-egress-forwarder:3128";' in apt_proxy,
-        "APT HTTPS traffic must use the Concrete forwarder",
+        "APT HTTPS traffic must use the Umbra forwarder",
     )
     require(
-        'Acquire::https::CaInfo "/run/concrete/ca-bundle.pem";' in apt_proxy,
+        'Acquire::https::CaInfo "/run/umbra/ca-bundle.pem";' in apt_proxy,
         "APT HTTPS must trust the runtime Security CVM CA bundle",
     )
     require("dev:100000:65536" in dockerfile, "dev subuid/subgid range must be configured")
     require("claude.real" in dockerfile, "claude must be baked into the image")
     require("claude.version" in dockerfile, "claude version metadata must be baked into the image")
     require("@openai/codex" in dockerfile, "codex must be baked into the image")
-    require("concrete-agent-claude.sh" in dockerfile, "claude wrapper must be installed")
+    require(
+        "cargo build --locked --release -p umbra-atls-connect" in dockerfile
+        and "release/umbra-atls-connect /usr/local/bin/umbra-atls-connect" in dockerfile,
+        "Umbra aTLS helper must be built and installed under its current binary identity",
+    )
+    require(
+        '"/usr/local/bin/umbra-atls-connect"' in forwarder,
+        "forwarder must default to the Umbra aTLS helper",
+    )
+    require("umbra-agent-claude.sh" in dockerfile, "claude wrapper must be installed")
     require(
         "printf '{}\\n' >/home/dev/.claude/.claude.json" in claude_wrapper,
         "claude wrapper must repair empty volume-backed config",
     )
-    require("concrete-agent-codex.sh" in dockerfile, "codex wrapper must be installed")
+    require("umbra-agent-codex.sh" in dockerfile, "codex wrapper must be installed")
     require(
         codex_wrapper.count("--dangerously-bypass-approvals-and-sandbox") == 2,
         "both updated and baked Codex launch paths must bypass Codex's inner sandbox",
@@ -99,7 +110,7 @@ def main() -> None:
     require("entrypoint must run as root" in entrypoint, "entrypoint must assert root startup")
     require("ensure_runtime_dev_dir 0700 /run/ssh/user-ssh" in entrypoint, "SSH user dir must be dev-owned")
     require(
-        "ensure_runtime_dev_dir 0700 /run/concrete/sessions" in entrypoint,
+        "ensure_runtime_dev_dir 0700 /run/umbra/sessions" in entrypoint,
         "session directory must be dev-owned",
     )
     require(
@@ -121,8 +132,29 @@ def main() -> None:
         "Claude updater must use the native install path when present",
     )
     require(
-        '"$(id -u)" = "1001"' in profile and "concrete-update-agents.sh" in profile,
+        '"$(id -u)" = "1001"' in profile and "umbra-update-agents.sh" in profile,
         "dev login profile must start the non-blocking agent updater",
+    )
+    require(
+        "/run/umbra/env.sh" in profile
+        and "export BASH_ENV='/run/umbra/env.sh'" in entrypoint
+        and "write_runtime_env /run/umbra/sandbox-env-placeholders /run/umbra/env.sh"
+        in entrypoint,
+        "the generated shell environment must stay under the canonical Umbra runtime directory",
+    )
+    require(
+        "required_env SECURITY_CVM_FQDN" in entrypoint
+        and "umbra-ca-refresh --bootstrap /run/umbra/security-cvm-ca.launch.pem" in entrypoint
+        and entrypoint.index("umbra-ca-refresh --bootstrap") < entrypoint.index("umbra-ca-refresh >/var/log"),
+        "sandbox restart must validate and install bound persisted CA state before starting the watcher",
+    )
+    require(
+        "security-cvm-ca.json" in forwarder
+        and "security-cvm-ca.json" in ca_refresh
+        and "ca_cert_sha256" in ca_refresh
+        and "launch_ca_cert_sha256" in ca_refresh
+        and "security_cvm_fqdn" in ca_refresh,
+        "persisted CA trust must bind FQDN, current digest, and immutable launch baseline",
     )
     require(
         "/home/dev/.ssh exists and is not a symlink" in entrypoint,
@@ -132,6 +164,11 @@ def main() -> None:
     require(
         re.search(r"dev-egress-forwarder:.*?healthcheck:\s+disable:\s+true", compose, re.DOTALL) is not None,
         "forwarder must disable the inherited sshd image healthcheck",
+    )
+    user_sandbox = compose.split("  dev-egress-forwarder:", 1)[0]
+    require(
+        "SECURITY_CVM_FQDN: ${SECURITY_CVM_FQDN}" in user_sandbox,
+        "sandbox CA bootstrap must receive the launch-bound Security CVM FQDN",
     )
     require(
         re.search(r"dev-tunnel:.*?healthcheck:\s+disable:\s+true", compose, re.DOTALL) is not None,

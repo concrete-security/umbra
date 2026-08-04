@@ -17,7 +17,7 @@ use std::os::unix::fs::PermissionsExt;
 
 use crate::{
     cli::{AgentSessionArgs, CodeArgs, CursorArgs, SessionListArgs, SessionTargetArgs, SshArgs},
-    commands::{alias, select_cvm},
+    commands::{alias, legacy_cvm_replacement_error, select_cvm},
     config::ResolvedConfig,
     console::{console_session, fetch_json, ListPage},
     exit::ExitStatus,
@@ -689,8 +689,9 @@ fn prepare_ssh(
     build_ssh(console_url, &session, cvm, explicit_identity, config)
 }
 
-/// Build the SSH connection from an ALREADY-fetched Dev CVM: check
-/// running/rebind/FQDN, build the aTLS tunnel ProxyCommand, resolve the SSH key.
+/// Build the SSH connection from an ALREADY-fetched Dev CVM: check the lifecycle
+/// state/legacy replacement marker/FQDN, build the aTLS tunnel ProxyCommand, and
+/// resolve the SSH key.
 /// Does no Console fetch of the CVM, so a caller holding it (e.g. `ps` enumerating
 /// the fleet) skips a redundant `GET /cvms/{id}`.
 fn build_ssh(
@@ -709,14 +710,8 @@ fn build_ssh(
             ),
         ));
     }
-    if cvm.error_reason.as_deref() == Some("SECURITY_CVM_REBIND_REQUIRED") {
-        return Err((
-            ExitStatus::Error,
-            format!(
-                "[error] Dev CVM {} needs an update after the Security CVM changed. Run `umbra cvm update {}`; if the local aTLS policy changes, the CLI will ask before replacing your trusted measurement.",
-                cvm.id, cvm.id
-            ),
-        ));
+    if let Some(message) = legacy_cvm_replacement_error(&cvm.id, cvm.error_reason.as_deref()) {
+        return Err((ExitStatus::Error, message));
     }
     let fqdn = match cvm.fqdn.as_deref() {
         Some(value) if !value.is_empty() => value.to_string(),
@@ -1120,9 +1115,9 @@ fn restore_local_cursor(allocate_tty: bool) {
 }
 
 fn dtach_remote_command(session_name: &str, program_command: &str) -> String {
-    let socket = format!("/run/concrete/sessions/{session_name}.sock");
+    let socket = format!("/run/umbra/sessions/{session_name}.sock");
     format!(
-        "mkdir -p /run/concrete/sessions && chmod 700 /run/concrete/sessions && exec dtach -A {} -r winch {}",
+        "mkdir -p /run/umbra/sessions && chmod 700 /run/umbra/sessions && exec dtach -A {} -r winch {}",
         shell_quote(&socket),
         program_command,
     )
@@ -1173,11 +1168,11 @@ fn workspace_cd_command(workspace: &str) -> String {
 }
 
 fn ps_remote_command() -> String {
-    "dir=/run/concrete/sessions; [ -d \"$dir\" ] || exit 0; for sock in \"$dir\"/*.sock; do [ -e \"$sock\" ] || continue; name=${sock##*/}; name=${name%.sock}; if fuser \"$sock\" >/dev/null 2>&1 || lsof \"$sock\" >/dev/null 2>&1; then attached=true; else attached=false; fi; created=$(stat -c %Y \"$sock\" 2>/dev/null || stat -f %m \"$sock\"); printf '%s\\t%s\\t%s\\n' \"$name\" \"$attached\" \"$created\"; done".to_string()
+    "dir=/run/umbra/sessions; [ -d \"$dir\" ] || exit 0; for sock in \"$dir\"/*.sock; do [ -e \"$sock\" ] || continue; name=${sock##*/}; name=${name%.sock}; if fuser \"$sock\" >/dev/null 2>&1 || lsof \"$sock\" >/dev/null 2>&1; then attached=true; else attached=false; fi; created=$(stat -c %Y \"$sock\" 2>/dev/null || stat -f %m \"$sock\"); printf '%s\\t%s\\t%s\\n' \"$name\" \"$attached\" \"$created\"; done".to_string()
 }
 
 fn attach_remote_command(session_name: &str) -> String {
-    let socket = format!("/run/concrete/sessions/{session_name}.sock");
+    let socket = format!("/run/umbra/sessions/{session_name}.sock");
     format!(
         "sock={}; [ -S \"$sock\" ] || {{ echo \"missing session\" >&2; exit 1; }}; exec dtach -a \"$sock\" -r winch",
         shell_quote(&socket),
@@ -1185,7 +1180,7 @@ fn attach_remote_command(session_name: &str) -> String {
 }
 
 fn kill_remote_command(session_name: &str) -> String {
-    let socket = format!("/run/concrete/sessions/{session_name}.sock");
+    let socket = format!("/run/umbra/sessions/{session_name}.sock");
     format!(
         "sock={}; [ -S \"$sock\" ] || {{ echo \"missing session\" >&2; exit 1; }}; pids=$(fuser \"$sock\" 2>/dev/null || true); if [ -z \"$pids\" ] && command -v lsof >/dev/null 2>&1; then pids=$(lsof -t \"$sock\" 2>/dev/null || true); fi; if [ -n \"$pids\" ]; then kill -TERM $pids 2>/dev/null || true; sleep 1; for pid in $pids; do kill -0 \"$pid\" 2>/dev/null && kill -KILL \"$pid\" 2>/dev/null || true; done; fi; rm -f \"$sock\"",
         shell_quote(&socket),
@@ -1553,6 +1548,7 @@ mod tests {
         assert!(!command.contains("printf"));
         assert!(!command.contains("?25h"));
         assert!(command.contains("exec dtach -a \"$sock\" -r winch"));
+        assert!(command.contains("/run/umbra/sessions/ssh-20260526-120000.sock"));
     }
 
     #[test]

@@ -72,17 +72,17 @@ pub fn load_policy(path: &Path) -> Result<Policy> {
     let policy: Policy = serde_json::from_slice(&policy_bytes)
         .map_err(|error| HelperError::new(format!("invalid aTLS policy JSON: {error}")))?;
     validate_policy(&policy)?;
-    // ===== CONCRETE TEMPORARY: SC aTLS image-policy check disabled (delete to re-enable) =====
+    // ===== UMBRA TEMPORARY: SC aTLS image-policy check disabled (delete to re-enable) =====
     // The delivered policy is still validated above (strict, well-formed). Here we strip the
     // image/runtime pins so the Dev egress forwarder accepts any genuine SC TEE at the bound
     // FQDN regardless of its app image, avoiding fleet-wide Dev CVM updates on SC image bumps.
     // See docs/sc-policy-check-disabled.md.
     let policy = force_disable_sc_runtime_verification(policy);
-    // ===== END CONCRETE TEMPORARY =====
+    // ===== END UMBRA TEMPORARY =====
     Ok(policy)
 }
 
-// ===== CONCRETE TEMPORARY: SC aTLS image-policy check disabled =====
+// ===== UMBRA TEMPORARY: SC aTLS image-policy check disabled =====
 // Forces runtime verification OFF on the loaded SC policy so the Dev egress forwarder accepts
 // ANY genuine SC TEE at the bound FQDN, regardless of its app image. Genuine-TEE proof is
 // retained by atlas-rs (DCAP quote, TCB status, cert-in-event-log binding, EKM anti-replay,
@@ -101,7 +101,7 @@ fn force_disable_sc_runtime_verification(mut policy: Policy) -> Policy {
     }
     policy
 }
-// ===== END CONCRETE TEMPORARY =====
+// ===== END UMBRA TEMPORARY =====
 
 pub fn validate_policy(policy: &Policy) -> Result<()> {
     match policy {
@@ -187,7 +187,7 @@ mod tests {
         assert!(load_policy(&request.policy_path).is_ok());
     }
 
-    // ===== CONCRETE TEMPORARY: SC aTLS image-policy check disabled =====
+    // ===== UMBRA TEMPORARY: SC aTLS image-policy check disabled =====
     // Verifies load_policy() strips the image/runtime pins from a strict delivered policy.
     // Delete this test when re-enabling. See docs/sc-policy-check-disabled.md.
     #[test]
@@ -205,7 +205,7 @@ mod tests {
             }
         }
     }
-    // ===== END CONCRETE TEMPORARY =====
+    // ===== END UMBRA TEMPORARY =====
 
     #[test]
     fn rejects_runtime_verification_bypass() {

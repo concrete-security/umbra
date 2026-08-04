@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 
-from concrete_security_cvm.mitmproxy_runtime import (
+from umbra_security_cvm.mitmproxy_runtime import (
     MITMPROXY_SCRIPT_ENV,
     build_runtime_addon_from_env,
     mitmdump_args,
@@ -51,7 +51,7 @@ def test_mitmdump_args_pin_internal_listener_and_tmpfs_confdir(tmp_path) -> None
 
 
 def test_module_import_does_not_build_addon_without_mitmproxy_script_env() -> None:
-    from concrete_security_cvm import mitmproxy_runtime
+    from umbra_security_cvm import mitmproxy_runtime
 
     assert os.environ.get(MITMPROXY_SCRIPT_ENV) != "1"
     assert mitmproxy_runtime.addons == []

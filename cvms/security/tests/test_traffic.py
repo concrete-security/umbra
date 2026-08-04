@@ -7,7 +7,7 @@ from uuid import UUID
 import httpx
 import pytest
 
-from concrete_security_cvm.traffic import (
+from umbra_security_cvm.traffic import (
     TrafficLogBatch,
     TrafficLogClient,
     TrafficLogEmitter,
@@ -73,7 +73,7 @@ def test_emitter_logs_when_queue_drops_oldest(caplog: pytest.LogCaptureFixture) 
     client = TrafficLogClient(console_url="https://console.example.com", ingest_token="ingest")
     emitter = TrafficLogEmitter(queue=queue, client=client, max_batch_entries=100)
 
-    with caplog.at_level(logging.ERROR, logger="concrete_security_cvm.traffic"):
+    with caplog.at_level(logging.ERROR, logger="umbra_security_cvm.traffic"):
         emitter.enqueue(record(path="/first"))
         emitter.enqueue(record(path="/second"))
 

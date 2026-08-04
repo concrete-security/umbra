@@ -43,18 +43,15 @@
     return "";
   }
 
-  function needsSecurityCvmRebind(cvm) {
+  function needsLegacySecurityCvmReplacement(cvm) {
     return cvm?.error_reason === "SECURITY_CVM_REBIND_REQUIRED";
   }
 
-  function updateActionLabel(cvm) {
-    return needsSecurityCvmRebind(cvm) ? "Rebind Security CVM trust" : "Update image";
+  function legacySecurityCvmReplacementMessage() {
+    return "Umbra cannot prove that the selected legacy Dev CVM runtime can refresh a rotated Security CVM CA. Keep it fail-closed. Use the pre-Umbra control plane to terminate or decommission the preserved CVM/provider resource, then launch a replacement under Umbra. This renamed build cannot manage it, and `umbra cvm update` is not a recovery path.";
   }
 
-  function updateConfirmBody(cvm) {
-    if (needsSecurityCvmRebind(cvm)) {
-      return "Refresh this CVM's measured Security CVM CA and aTLS material. Use this after a Security CVM update reports CA rotation.";
-    }
+  function updateConfirmBody() {
     return "Update this CVM to the latest measured image/config and re-attest it. Named volumes are preserved.";
   }
 
@@ -103,14 +100,20 @@
     const canAct = A.canActOnCvms() && A.has(A.P.CVM_MANAGE);
     const state = String(c.state || "").toLowerCase();
     const items = [{ id: "open", label: "Open detail", icon: "external" }];
-    if (canAct) {
+    if (canAct && !needsLegacySecurityCvmReplacement(c)) {
       if (state === "stopped" || state === "error") items.push({ id: "start", label: "Start", icon: "refresh" });
       if (state === "running") items.push({ id: "stop", label: "Stop", icon: "x" });
-      if (state === "running" || state === "stopped") items.push({ id: "update", label: updateActionLabel(c), icon: "refresh" });
+      if (state === "running" || state === "stopped") {
+        items.push({ id: "update", label: "Update image", icon: "refresh" });
+      }
     }
     items.push({ id: "copy-id", label: "Copy ID", icon: "copy" });
-    if (c.fqdn) items.push({ id: "copy-ssh", label: "Copy SSH command", icon: "terminal" });
-    if (canAct && state !== "terminated") items.push({ id: "terminate", label: "Terminate", icon: "x", danger: true });
+    if (c.fqdn && !needsLegacySecurityCvmReplacement(c)) {
+      items.push({ id: "copy-ssh", label: "Copy SSH command", icon: "terminal" });
+    }
+    if (canAct && state !== "terminated" && !needsLegacySecurityCvmReplacement(c)) {
+      items.push({ id: "terminate", label: "Terminate", icon: "x", danger: true });
+    }
     return UI.kebabMenu(items);
   }
 
@@ -131,8 +134,9 @@
 
   function rowCheckbox(c, st) {
     const checked = st.selected.has(c.id) ? "checked" : "";
+    const disabled = needsLegacySecurityCvmReplacement(c) ? "disabled title=\"Use the pre-Umbra control plane to decommission this resource\"" : "";
     return `<label class="inline-flex items-center" onclick="event.stopPropagation()">
-      <input type="checkbox" data-cvm-select="${UI.escapeHtml(c.id)}" class="accent-accent h-3.5 w-3.5" ${checked}>
+      <input type="checkbox" data-cvm-select="${UI.escapeHtml(c.id)}" class="accent-accent h-3.5 w-3.5" ${checked} ${disabled}>
     </label>`;
   }
 
@@ -197,10 +201,10 @@
         render: (c) => {
           const pending = A.Ops.pendingForCvm(c.id).length;
           const op = pending ? ` <span class="badge badge-pending">${UI.icon("clock", "h-3 w-3")} op</span>` : "";
-          const rebind = needsSecurityCvmRebind(c)
-            ? ` <span class="badge badge-warn">${UI.icon("alert", "h-3 w-3")} SC rebind</span>`
+          const replacement = needsLegacySecurityCvmReplacement(c)
+            ? ` <span class="badge badge-warn" title="${UI.escapeHtml(legacySecurityCvmReplacementMessage())}">${UI.icon("alert", "h-3 w-3")} replace legacy CVM</span>`
             : "";
-          return UI.badge(c.state) + rebind + op;
+          return UI.badge(c.state) + replacement + op;
         },
       },
       {
@@ -340,10 +344,14 @@
   async function handleRowAction(action, cvm) {
     if (action === "open") return A.Drawer.openCvm(cvm, "summary");
     if (action === "copy-id") { navigator.clipboard?.writeText(cvm.id); return A.UI.toast("CVM ID copied", "ok"); }
+    if (needsLegacySecurityCvmReplacement(cvm)) return A.UI.toast(legacySecurityCvmReplacementMessage(), "err");
     if (action === "copy-ssh") { navigator.clipboard?.writeText(`umbra ssh ${cvm.id}`); return A.UI.toast("SSH command copied", "ok"); }
     if (action === "start") return runCvmAction(cvm, "start", "Start CVM", "Boot this CVM and reconnect its profile bindings.");
     if (action === "stop") return runCvmAction(cvm, "stop", "Stop CVM", "Suspend this CVM. Disk state is preserved. You can restart it later.");
-    if (action === "update") return runCvmAction(cvm, "update", updateActionLabel(cvm), updateConfirmBody(cvm));
+    if (action === "update") {
+      if (needsLegacySecurityCvmReplacement(cvm)) return A.UI.toast(legacySecurityCvmReplacementMessage(), "err");
+      return runCvmAction(cvm, "update", "Update image", updateConfirmBody());
+    }
     if (action === "terminate") {
       const ok = await A.UI.strongConfirm({
         title: "Terminate " + (cvm.fqdn || cvm.id),
@@ -390,6 +398,10 @@
     if (action === "clear") { st.selected.clear(); renderCvms(); return; }
     const targets = fleet.filter((c) => st.selected.has(c.id));
     if (!targets.length) return;
+    if (targets.some(needsLegacySecurityCvmReplacement)) {
+      A.UI.toast(legacySecurityCvmReplacementMessage(), "err");
+      return;
+    }
     if (action === "terminate") {
       const ok = await A.UI.strongConfirm({
         title: `Terminate ${targets.length} CVM${targets.length > 1 ? "s" : ""}`,
@@ -400,12 +412,9 @@
       });
       if (!ok) return;
     } else {
-      const rebindCount = targets.filter(needsSecurityCvmRebind).length;
       const ok = await A.UI.confirm({
         title: `${action.charAt(0).toUpperCase() + action.slice(1)} ${targets.length} CVM${targets.length > 1 ? "s" : ""}`,
-        message: action === "update" && rebindCount
-          ? `Update all selected CVMs? ${rebindCount} need Security CVM trust rebinding after CA rotation.`
-          : `Apply ${action} to all selected CVMs?`,
+        message: `Apply ${action} to all selected CVMs?`,
         okLabel: action.charAt(0).toUpperCase() + action.slice(1),
       });
       if (!ok) return;

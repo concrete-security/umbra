@@ -1,11 +1,11 @@
 (function (A) {
   const UI = A.UI;
 
-  function rebindList(ids) {
+  function devCvmUpdateList(ids) {
     if (!ids || !ids.length) return "";
     return `
       <div class="rounded-input border border-line bg-elev/40 p-3 mt-3">
-        <div class="text-2xs uppercase tracking-wider text-mute mb-2">Dev CVMs requiring rebind</div>
+        <div class="text-2xs uppercase tracking-wider text-mute mb-2">Dev CVMs requiring update</div>
         <ul class="space-y-1.5">
           ${ids.map((id) => `
             <li class="flex items-center justify-between gap-2 text-xs">
@@ -157,7 +157,7 @@
             <span class="flex h-6 w-6 items-center justify-center rounded-md bg-accent/10 text-accent">${UI.icon("system", "h-3.5 w-3.5")}</span>
             <h4 class="text-sm font-semibold text-ink">Lifecycle</h4>
           </header>
-          <p class="text-xs text-mute mb-3">Update the Security CVM image to roll out a new measured release. Dev CVMs recover automatically from aTLS-policy-only changes; if the update rotates the Security CVM CA, affected Dev CVMs are listed for rebind.</p>
+          <p class="text-xs text-mute mb-3">Update the Security CVM image to roll out a new measured release. Dev CVM forwarders pull the current aTLS policy and CA automatically; a CA rotation may cause brief egress errors while runtime polling converges.</p>
           <div class="flex flex-wrap items-center gap-2">
             <button type="button" class="btn" id="sc-update">${UI.icon("refresh", "h-4 w-4")} Update image</button>
             <button type="button" class="btn btn-danger" id="sc-decommission">${UI.icon("x", "h-4 w-4")} Decommission…</button>
@@ -263,8 +263,8 @@
       subtitle: "Restarts the gateway on the latest measured image. Egress is briefly unavailable while it re-attests.",
       primary: { label: "Start update", run: doUpdate },
       body: `
-        <p class="text-sm text-mute mb-2">Dev CVMs may see brief egress errors during the rollover. If only the Security CVM aTLS policy changes, forwarders fetch a candidate policy from Console and recover without a Dev CVM update.</p>
-        <p class="text-sm text-mute">If the Security CVM CA changes, Console will mark the affected Dev CVMs and this screen will list the rebind actions to run.</p>
+        <p class="text-sm text-mute mb-2">Dev CVMs may see brief egress errors during the rollover while forwarders fetch the current aTLS policy and CA from Console.</p>
+        <p class="text-sm text-mute">CA rotation recovers automatically. Processes that cache CA files at startup may need a restart after propagation.</p>
       `,
     });
   }
@@ -294,17 +294,23 @@
   function showUpdateResult(op) {
     const ids = op?.result?.dev_cvms_requiring_update || [];
     if (!ids.length) {
-      UI.toast("Security CVM updated; Dev CVM forwarders can refresh aTLS policy from Console if needed.", "ok");
+      const caChanged = op?.result?.ca_changed === true;
+      UI.toast(
+        caChanged
+          ? "Security CVM updated; Dev CVM policy and CA refresh will converge automatically."
+          : "Security CVM updated; Dev CVM policy refresh will converge automatically.",
+        "ok"
+      );
       return;
     }
     UI.dialog({
-      title: "Dev CVM rebind required",
-      subtitle: "The Security CVM CA changed during this update.",
+      title: "Dev CVM update required",
+      subtitle: "Launch-bound Security CVM material changed during this operation.",
       primary: { label: "Open CVMs", run: () => { location.hash = "cvms"; } },
       secondary: { label: "Close" },
       body: `
-        <p class="text-sm text-mute">Egress from the listed Dev CVMs fails closed until each CVM update refreshes the bound Security CVM CA and aTLS material. Existing SSH/editor sessions may stay up.</p>
-        ${rebindList(ids)}
+        <p class="text-sm text-mute">Update only the listed Dev CVMs to refresh their launch-bound Security CVM identity, bearer, or RTMR material. CA-only rotation does not populate this list.</p>
+        ${devCvmUpdateList(ids)}
       `,
     });
   }

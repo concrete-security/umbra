@@ -5,6 +5,8 @@ import json
 from types import SimpleNamespace
 from uuid import UUID
 
+import pytest
+
 from umbra_console import attestation
 from umbra_console import scheduler
 
@@ -872,36 +874,36 @@ def test_build_cvm_policy_bundle_uses_shade_policy_and_binding() -> None:
 def test_cvm_launch_provider_name_is_managed_scoped() -> None:
     assert (
         scheduler.cvm_launch_provider_name(UUID("00000000-0000-4000-8000-123456789abc"))
-        == "concrete-v0-cvm-0000000000004000"
+        == "umbra-v0-cvm-0000000000004000"
     )
 
 
 def test_render_dev_cvm_shade_config_routes_tunnel_websocket() -> None:
-    shade = scheduler.render_dev_cvm_shade_config(launch_snapshot(), name="concrete-v0-cvm-test")
+    shade = scheduler.render_dev_cvm_shade_config(launch_snapshot(), name="umbra-v0-cvm-test")
 
-    assert "name: concrete-v0-cvm-test" in shade
+    assert "name: umbra-v0-cvm-test" in shade
     assert "domain: cvm-abc.dev.example.com" in shade
     assert "instance_type: tdx.small" in shade
     assert "region: FR-PARIS-1" in shade
     assert "dev-tunnel:" in shade
-    assert "path: /concrete/tunnel" in shade
+    assert "path: /umbra/tunnel" in shade
     assert "websocket: true" in shade
 
 
 def test_security_cvm_provider_name_is_managed_scoped() -> None:
     assert (
         scheduler.security_cvm_provider_name(UUID("00000000-0000-4000-8000-123456789abc"))
-        == "concrete-v0-sc-0000000000004000"
+        == "umbra-v0-sc-0000000000004000"
     )
 
 
 def test_render_security_cvm_shade_config_routes_proxy_tunnel_websocket() -> None:
-    shade = scheduler.render_security_cvm_shade_config(security_cvm_snapshot(), name="concrete-v0-sc-test")
+    shade = scheduler.render_security_cvm_shade_config(security_cvm_snapshot(), name="umbra-v0-sc-test")
 
-    assert "name: concrete-v0-sc-test" in shade
+    assert "name: umbra-v0-sc-test" in shade
     assert "domain: sc-abc.sc.example.com" in shade
     assert "proxy-tunnel:" in shade
-    assert "path: /concrete/proxy" in shade
+    assert "path: /umbra/proxy" in shade
     assert "service: proxy-tunnel" in shade
     assert "websocket: true" in shade
     assert "path: /ca.pem" in shade
@@ -1154,7 +1156,7 @@ def test_execute_security_cvm_phala_deploy_materializes_env_and_metadata(monkeyp
 
     env = captured["env"]
     assert isinstance(env, dict)
-    assert captured["name"] == "concrete-v0-sc-0000000000004000"
+    assert captured["name"] == "umbra-v0-sc-0000000000004000"
     assert captured["instance_type"] == "tdx.small"
     assert captured["region"] == "FR-PARIS-1"
     assert "domain: sc-abc.sc.example.com" in str(captured["shade_config_yaml"])
@@ -1209,6 +1211,55 @@ def test_execute_security_cvm_finalise_scrubs_stash_and_materializes_result(monk
     assert conn.audit_calls[0]["action"] == "SECURITY_CVM_PROVISIONED"
 
 
+def test_execute_security_cvm_update_finalise_ca_refresh_success(monkeypatch) -> None:
+    """A rotated CA is audited and returned, but runtime polling replaces it
+    without marking attached Dev CVMs for a provider update.
+    """
+    previous_ca = "-----BEGIN CERTIFICATE-----\nold-ca\n-----END CERTIFICATE-----\n"
+    current_ca = "-----BEGIN CERTIFICATE-----\nnew-ca\n-----END CERTIFICATE-----\n"
+    conn = SecurityProvisionFakeConn(
+        security_cvm_snapshot(
+            state="RUNNING",
+            ca_cert_pem=current_ca,
+            metadata={"previous_ca_cert_sha256": scheduler.sha256_text(previous_ca)},
+            image_measurement="b" * 96,
+            rtmr3_digest="d" * 96,
+            attestation_verified_at=scheduler.datetime.now(scheduler.timezone.utc),
+        )
+    )
+
+    async def fake_get_pool():
+        return LaunchFakePool(conn)
+
+    async def fake_insert_audit_event(_conn, **kwargs):
+        conn.audit_calls.append(kwargs)
+
+    monkeypatch.setattr(scheduler, "get_pool", fake_get_pool)
+    monkeypatch.setattr(scheduler, "insert_audit_event", fake_insert_audit_event)
+
+    asyncio.run(
+        scheduler.execute_security_cvm_update_finalise_operation(
+            UUID("00000000-0000-4000-8000-000000000030")
+        )
+    )
+
+    assert not any("UPDATE cvms" in query for query, _args in conn.execute_calls)
+    operation_updates = [
+        args
+        for query, args in conn.execute_calls
+        if "UPDATE operations" in query and "kind = 'security_cvm.update'" in query
+    ]
+    result = json.loads(operation_updates[0][1])
+    assert result["ca_changed"] is True
+    assert result["dev_cvms_requiring_update"] == []
+    assert conn.audit_calls[0]["action"] == "SECURITY_CVM_UPDATED"
+    assert conn.audit_calls[0]["after"] == {
+        "state": "RUNNING",
+        "ca_changed": True,
+        "dev_cvms_requiring_update": [],
+    }
+
+
 def test_execute_cvm_launch_phala_deploy_persists_hash_only(monkeypatch) -> None:
     conn = LaunchFakeConn()
     captured: dict[str, object] = {}
@@ -1250,7 +1301,7 @@ def test_execute_cvm_launch_phala_deploy_persists_hash_only(monkeypatch) -> None
 
     env = captured["env"]
     assert isinstance(env, dict)
-    assert captured["name"] == "concrete-v0-cvm-0000000000004000"
+    assert captured["name"] == "umbra-v0-cvm-0000000000004000"
     assert captured["instance_type"] == "tdx.small"
     assert captured["region"] == "FR-PARIS-1"
     assert captured["disk_size_gb"] == 40
@@ -1301,7 +1352,7 @@ def test_execute_cvm_update_persists_thin_pending_policy_bundle(monkeypatch) -> 
                     metadata={
                         "provider": "phala",
                         "deployment_id": "dep-123",
-                        "name": "concrete-v0-cvm-0000000000004000",
+                        "name": "umbra-v0-cvm-0000000000004000",
                         "policy_bundle": {"old": True},
                     },
                     security_cvm_id=UUID("00000000-0000-4000-8000-000000000041"),
@@ -1574,12 +1625,14 @@ class ReconcileAttestationConn:
         self.dev_rows = dev_rows or []
         self.token_rows = token_rows or []
         self.execute_calls: list[tuple[str, tuple[object, ...]]] = []
+        self.fetch_calls: list[tuple[str, tuple[object, ...]]] = []
         self.audit_calls: list[dict[str, object]] = []
 
     def transaction(self):
         return AsyncContext()
 
     async def fetch(self, query, *args):
+        self.fetch_calls.append((query, args))
         if "FROM security_cvms sc" in query:
             return self.security_rows
         if "FROM cvms c" in query:
@@ -2114,11 +2167,18 @@ def test_reconcile_dev_cvm_attestation_refresh_records_drift(monkeypatch) -> Non
     assert conn.audit_calls[0]["after"]["drift_kind"] == "both"
 
 
-def test_reconcile_dev_cvm_attestation_refresh_skips_on_concurrent_state_change(monkeypatch) -> None:
-    """The reconciler claims candidates then releases the row lock before the (slow) verify, so
-    the CVM can be terminated/failed concurrently. The state-guarded persist UPDATE then matches
-    0 rows: it MUST NOT emit a (misleading) audit event or count the row as advanced. Regression
-    for the lock-release race introduced when shade/verify moved out of the claim transaction."""
+@pytest.mark.parametrize(
+    ("reported_image", "reported_rtmr3", "expected_set"),
+    [
+        ("a" * 96, "d" * 96, "error_reason = NULL"),
+        ("e" * 96, "f" * 96, "error_reason = 'ATTESTATION_DRIFT'"),
+    ],
+    ids=["verified", "drift"],
+)
+def test_reconcile_dev_cvm_attestation_refresh_preserves_legacy_marker_failure(
+    monkeypatch, reported_image: str, reported_rtmr3: str, expected_set: str
+) -> None:
+    """A marker set after candidate claim blocks both verifier outcomes from replacing it."""
     cvm_id = UUID("00000000-0000-4000-8000-000000000031")
     policy_bundle = {
         "compose_template": "services: {}\n",
@@ -2127,13 +2187,18 @@ def test_reconcile_dev_cvm_attestation_refresh_skips_on_concurrent_state_change(
         "rtmr3_binding": {"cvm_id": str(cvm_id)},
     }
 
-    class VanishedConn(ReconcileAttestationConn):
+    class ConcurrentMarkerConn(ReconcileAttestationConn):
         async def execute(self, query, *args):
             self.execute_calls.append((query, args))
-            # CVM terminated during the verify window → the state-guarded UPDATE touches nothing.
-            return "UPDATE 0" if "UPDATE cvms" in query else "UPDATE 1"
+            if "UPDATE cvms" not in query:
+                return "UPDATE 1"
+            assert expected_set in query
+            assert "error_reason IS DISTINCT FROM 'SECURITY_CVM_REBIND_REQUIRED'" in query
+            # The marker appeared while the slow verifier ran, so the guarded
+            # UPDATE must match no rows and must not emit a misleading audit.
+            return "UPDATE 0"
 
-    conn = VanishedConn(
+    conn = ConcurrentMarkerConn(
         dev_rows=[
             {
                 "id": cvm_id,
@@ -2152,7 +2217,10 @@ def test_reconcile_dev_cvm_attestation_refresh_skips_on_concurrent_state_change(
 
     class FakeVerifier:
         async def verify(self, request, *, timeout_seconds):
-            return attestation.AttestationReport(image_measurement="e" * 96, rtmr3_digest="f" * 96)
+            return attestation.AttestationReport(
+                image_measurement=reported_image,
+                rtmr3_digest=reported_rtmr3,
+            )
 
     async def fake_insert_audit_event(_conn, **kwargs):
         conn.audit_calls.append(kwargs)
@@ -2164,6 +2232,8 @@ def test_reconcile_dev_cvm_attestation_refresh_skips_on_concurrent_state_change(
 
     assert advanced == []
     assert conn.audit_calls == []
+    candidate_query = next(query for query, _args in conn.fetch_calls if "FROM cvms c" in query)
+    assert "c.error_reason IS DISTINCT FROM 'SECURITY_CVM_REBIND_REQUIRED'" in candidate_query
 
 
 def test_cleanup_orphan_dns_records_uses_component_zones(monkeypatch) -> None:

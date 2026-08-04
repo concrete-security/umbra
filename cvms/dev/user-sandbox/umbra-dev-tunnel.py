@@ -32,7 +32,7 @@ def load_config() -> TunnelConfig:
         listen_port=int(os.environ.get("DEV_TUNNEL_PORT", "8090")),
         ssh_host=os.environ.get("DEV_CVM_SSH_HOST", "user-sandbox"),
         ssh_port=int(os.environ.get("DEV_CVM_SSH_PORT", "22")),
-        path=os.environ.get("DEV_TUNNEL_PATH", "/concrete/tunnel"),
+        path=os.environ.get("DEV_TUNNEL_PATH", "/umbra/tunnel"),
     )
 
 

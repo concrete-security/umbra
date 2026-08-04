@@ -1,6 +1,6 @@
 import hashlib
 
-from concrete_security_cvm.binding import BootBinding
+from umbra_security_cvm.binding import BootBinding
 
 
 def test_boot_binding_canonicalizes_runtime_values_without_plaintext_tokens() -> None:

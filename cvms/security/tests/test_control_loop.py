@@ -1,8 +1,8 @@
 import asyncio
 import hashlib
 
-from concrete_security_cvm.control import ControlMap, PollResult
-from concrete_security_cvm.control_loop import ControlPlaneState, poll_control_plane_once, run_control_plane_poll_loop
+from umbra_security_cvm.control import ControlMap, PollResult
+from umbra_security_cvm.control_loop import ControlPlaneState, poll_control_plane_once, run_control_plane_poll_loop
 
 
 def payload(token: bytes, etag: str) -> ControlMap:

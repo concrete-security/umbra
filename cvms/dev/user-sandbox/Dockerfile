@@ -7,7 +7,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY cli/Cargo.toml cli/Cargo.toml
 COPY cvms/dev/user-sandbox/atls-connect/Cargo.toml cvms/dev/user-sandbox/atls-connect/Cargo.toml
 COPY cvms/dev/user-sandbox/atls-connect/src cvms/dev/user-sandbox/atls-connect/src
-RUN cargo build --locked --release -p concrete-atls-connect --target-dir /tmp/atls-connect-target
+RUN cargo build --locked --release -p umbra-atls-connect --target-dir /tmp/atls-connect-target
 
 FROM ghcr.io/astral-sh/uv:0.7.8@sha256:0178a92d156b6f6dbe60e3b52b33b421021f46d634aa9f81f42b91445bb81cdf AS uv
 
@@ -100,12 +100,12 @@ RUN set -a \
     && rm /tmp/node.tar.xz \
     && curl -fsSL "https://github.com/anthropics/claude-code/releases/download/v${CLAUDE_VERSION}/claude-linux-x64.tar.gz" -o /tmp/claude.tar.gz \
     && echo "${CLAUDE_SHA256}  /tmp/claude.tar.gz" | sha256sum -c - \
-    && install -d /usr/local/lib/concrete \
-    && tar -xzf /tmp/claude.tar.gz -C /usr/local/lib/concrete \
-    && mv /usr/local/lib/concrete/claude /usr/local/lib/concrete/claude.real \
-    && chmod 0755 /usr/local/lib/concrete/claude.real \
-    && printf '%s\n' "${CLAUDE_VERSION}" >/usr/local/lib/concrete/claude.version \
-    && chmod 0644 /usr/local/lib/concrete/claude.version \
+    && install -d /usr/local/lib/umbra \
+    && tar -xzf /tmp/claude.tar.gz -C /usr/local/lib/umbra \
+    && mv /usr/local/lib/umbra/claude /usr/local/lib/umbra/claude.real \
+    && chmod 0755 /usr/local/lib/umbra/claude.real \
+    && printf '%s\n' "${CLAUDE_VERSION}" >/usr/local/lib/umbra/claude.version \
+    && chmod 0644 /usr/local/lib/umbra/claude.version \
     && rm /tmp/claude.tar.gz \
     && curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz" -o /tmp/gh.tar.gz \
     && echo "${GH_SHA256}  /tmp/gh.tar.gz" | sha256sum -c - \
@@ -114,8 +114,8 @@ RUN set -a \
     && rm -rf /tmp/gh.tar.gz "/tmp/gh_${GH_VERSION}_linux_amd64" \
     && test "$(node -p "require('/tmp/codex-package/package-lock.json').packages['node_modules/@openai/codex'].version")" = "${CODEX_VERSION}" \
     && npm ci --prefix /tmp/codex-package --omit=dev --ignore-scripts --no-audit --no-fund \
-    && install -d /usr/local/lib/concrete/codex \
-    && mv /tmp/codex-package/node_modules /usr/local/lib/concrete/codex/node_modules \
+    && install -d /usr/local/lib/umbra/codex \
+    && mv /tmp/codex-package/node_modules /usr/local/lib/umbra/codex/node_modules \
     && rm -rf /tmp/codex-package \
     && rm /tmp/tool-versions.env
 
@@ -151,24 +151,24 @@ RUN groupadd --gid 1001 dev \
     && chown dev:dev /home/dev/.gitconfig
 
 COPY cvms/dev/user-sandbox/sshd_config /etc/ssh/sshd_config
-COPY cvms/dev/user-sandbox/apt-concrete-proxy.conf /etc/apt/apt.conf.d/95concrete-proxy
-COPY cvms/dev/user-sandbox/concrete-env-profile.sh /etc/profile.d/concrete-env.sh
-COPY cvms/dev/user-sandbox/concrete-update-agents.sh /usr/local/lib/concrete/concrete-update-agents.sh
-COPY cvms/dev/user-sandbox/concrete-agent-claude.sh /usr/local/bin/claude
-COPY cvms/dev/user-sandbox/concrete-agent-codex.sh /usr/local/bin/codex
+COPY cvms/dev/user-sandbox/apt-umbra-proxy.conf /etc/apt/apt.conf.d/95umbra-proxy
+COPY cvms/dev/user-sandbox/umbra-env-profile.sh /etc/profile.d/umbra-env.sh
+COPY cvms/dev/user-sandbox/umbra-update-agents.sh /usr/local/lib/umbra/umbra-update-agents.sh
+COPY cvms/dev/user-sandbox/umbra-agent-claude.sh /usr/local/bin/claude
+COPY cvms/dev/user-sandbox/umbra-agent-codex.sh /usr/local/bin/codex
 COPY cvms/dev/user-sandbox/entrypoint.sh /entrypoint.sh
-COPY cvms/dev/user-sandbox/concrete-dev-tunnel.py /usr/local/bin/concrete-dev-tunnel
-COPY cvms/dev/user-sandbox/concrete-dev-egress-forwarder.py /usr/local/bin/concrete-dev-egress-forwarder
-COPY cvms/dev/user-sandbox/concrete-ca-refresh.py /usr/local/bin/concrete-ca-refresh
-COPY --from=atls-connect-builder /tmp/atls-connect-target/release/concrete-atls-connect /usr/local/bin/concrete-atls-connect
+COPY cvms/dev/user-sandbox/umbra-dev-tunnel.py /usr/local/bin/umbra-dev-tunnel
+COPY cvms/dev/user-sandbox/umbra-dev-egress-forwarder.py /usr/local/bin/umbra-dev-egress-forwarder
+COPY cvms/dev/user-sandbox/umbra-ca-refresh.py /usr/local/bin/umbra-ca-refresh
+COPY --from=atls-connect-builder /tmp/atls-connect-target/release/umbra-atls-connect /usr/local/bin/umbra-atls-connect
 
 RUN chmod +x \
       /entrypoint.sh \
-      /usr/local/bin/concrete-dev-tunnel \
-      /usr/local/bin/concrete-dev-egress-forwarder \
-      /usr/local/bin/concrete-ca-refresh \
-      /usr/local/bin/concrete-atls-connect \
-      /usr/local/lib/concrete/concrete-update-agents.sh \
+      /usr/local/bin/umbra-dev-tunnel \
+      /usr/local/bin/umbra-dev-egress-forwarder \
+      /usr/local/bin/umbra-ca-refresh \
+      /usr/local/bin/umbra-atls-connect \
+      /usr/local/lib/umbra/umbra-update-agents.sh \
       /usr/local/bin/claude \
       /usr/local/bin/codex
 

@@ -143,7 +143,7 @@ def test_deploy_stages_files_with_private_modes_and_cleans(tmp_path) -> None:
 
         assert "PHALA_API_TOKEN" not in os.environ
         assert os.environ["PHALA_CLOUD_API_KEY"] == "phala-token"
-        assert sys.argv[1:4] == ["deploy", "--name", "concrete-v0-cvm-smoke"]
+        assert sys.argv[1:4] == ["deploy", "--name", "umbra-v0-cvm-smoke"]
         assert sys.argv[sys.argv.index("--instance-type") + 1] == "tdx.small"
         assert sys.argv[sys.argv.index("--region") + 1] == "FR-PARIS-1"
         assert "--no-dev-os" in sys.argv
@@ -161,7 +161,7 @@ def test_deploy_stages_files_with_private_modes_and_cleans(tmp_path) -> None:
 
     result = run(
         client.deploy(
-            name="concrete-v0-cvm-smoke",
+            name="umbra-v0-cvm-smoke",
             compose_yaml="services: {}\n",
             env={"SECURITY_CVM_PROXY_TOKEN": "proxy-token"},
             instance_type="tdx.small",
@@ -194,7 +194,7 @@ def test_deploy_appends_disk_size_with_unit(tmp_path) -> None:
 
     result = run(
         client.deploy(
-            name="concrete-v0-cvm-smoke",
+            name="umbra-v0-cvm-smoke",
             compose_yaml="services: {}\n",
             env={},
             instance_type="tdx.small",
@@ -221,7 +221,7 @@ def test_deploy_omits_disk_size_when_absent(tmp_path) -> None:
 
     result = run(
         client.deploy(
-            name="concrete-v0-cvm-smoke",
+            name="umbra-v0-cvm-smoke",
             compose_yaml="services: {}\n",
             env={},
         )
@@ -251,10 +251,10 @@ def test_deploy_falls_back_to_cvms_get_when_cli_stdout_is_empty(tmp_path) -> Non
     )
     client = PhalaClient(cli_path=str(cli), api_token="phala-token", timeout_seconds=TEST_CLI_TIMEOUT_SECONDS)
 
-    result = run(client.deploy(name="concrete-v0-cvm-smoke", compose_yaml="services: {}\n", env={}))
+    result = run(client.deploy(name="umbra-v0-cvm-smoke", compose_yaml="services: {}\n", env={}))
 
     argv = json.loads(marker.read_text())
-    assert argv[:3] == ["deploy", "--name", "concrete-v0-cvm-smoke"]
+    assert argv[:3] == ["deploy", "--name", "umbra-v0-cvm-smoke"]
     assert "--no-dev-os" in argv
     assert "--wait" in argv
     assert result.app_id == "app-123"
@@ -279,13 +279,13 @@ def test_deploy_parses_progress_prefixed_json_and_fetches_gateway(tmp_path) -> N
             }}))
             raise SystemExit(0)
 
-        print("Provisioning CVM concrete-v0-cvm-smoke...")
-        print(json.dumps({{"success": True, "app_id": "app-123", "name": "concrete-v0-cvm-smoke"}}))
+        print("Provisioning CVM umbra-v0-cvm-smoke...")
+        print(json.dumps({{"success": True, "app_id": "app-123", "name": "umbra-v0-cvm-smoke"}}))
         """,
     )
     client = PhalaClient(cli_path=str(cli), api_token="phala-token", timeout_seconds=TEST_CLI_TIMEOUT_SECONDS)
 
-    result = run(client.deploy(name="concrete-v0-cvm-smoke", compose_yaml="services: {}\n", env={}))
+    result = run(client.deploy(name="umbra-v0-cvm-smoke", compose_yaml="services: {}\n", env={}))
 
     assert json.loads(marker.read_text()) == ["cvms", "get", "app-123", "--json"]
     assert result.app_id == "app-123"
@@ -464,9 +464,9 @@ def test_list_filters_to_managed_v0_names(tmp_path) -> None:
 
         print(json.dumps({
             "cvms": [
-                {"name": "concrete-v0-cvm-owned", "id": "app-1"},
+                {"name": "umbra-v0-cvm-owned", "id": "app-1"},
                 {"name": "teammate-prod", "id": "app-2"},
-                {"name": "concrete-v0-sc-owned", "id": "app-3"}
+                {"name": "umbra-v0-sc-owned", "id": "app-3"}
             ]
         }))
         """,

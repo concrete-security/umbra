@@ -9,11 +9,11 @@ from uuid import UUID
 
 import pytest
 
-from concrete_security_cvm.control import ControlMap
-from concrete_security_cvm.control_loop import ControlPlaneState
-from concrete_security_cvm.enforcement import DLP_SCAN_BODY_LIMIT_BYTES
-from concrete_security_cvm.mitmproxy_addon import SecurityCVMProxyAddon
-from concrete_security_cvm.traffic import TrafficLogClient, TrafficLogEmitter, TrafficLogQueue
+from umbra_security_cvm.control import ControlMap
+from umbra_security_cvm.control_loop import ControlPlaneState
+from umbra_security_cvm.enforcement import DLP_SCAN_BODY_LIMIT_BYTES
+from umbra_security_cvm.mitmproxy_addon import SecurityCVMProxyAddon
+from umbra_security_cvm.traffic import TrafficLogClient, TrafficLogEmitter, TrafficLogQueue
 
 
 CVM_ID = UUID("00000000-0000-4000-8000-000000000010")
@@ -54,7 +54,7 @@ class FakeRequest:
         self.pretty_url = pretty_url
         self.headers = headers or {
             "Proxy-Authorization": "Bearer proxy-token",
-            "Authorization": "Bearer concrete-proxy-injected",
+            "Authorization": "Bearer umbra-proxy-injected",
         }
         self.raw_content = b'{"message":"hello"}'
 
@@ -176,7 +176,7 @@ def test_allowed_request_strips_proxy_auth_injects_secret_and_logs_after_respons
     assert log.path == "/v1/messages"
     assert log.response_code == 201
     assert log.bytes_transferred == len(b'{"ok":true}')
-    assert "concrete_traffic_log" not in flow.metadata
+    assert "umbra_traffic_log" not in flow.metadata
 
 
 def test_response_is_streamed_and_logs_streamed_byte_count() -> None:
@@ -193,7 +193,7 @@ def test_response_is_streamed_and_logs_streamed_byte_count() -> None:
     proxy_addon.responseheaders(flow)
 
     assert callable(flow.response.stream)
-    assert flow.metadata["concrete_streamed_bytes"] == 0
+    assert flow.metadata["umbra_streamed_bytes"] == 0
 
     # Body streams through in chunks; the callback returns each chunk unchanged
     # and tallies bytes (the trailing empty chunk signals end-of-stream).
@@ -209,8 +209,8 @@ def test_response_is_streamed_and_logs_streamed_byte_count() -> None:
     assert log.response_code == 200
     # bytes_transferred reflects the streamed total, not response.content.
     assert log.bytes_transferred == 4096 + 4096 + 808
-    assert "concrete_streamed_bytes" not in flow.metadata
-    assert "concrete_traffic_log" not in flow.metadata
+    assert "umbra_streamed_bytes" not in flow.metadata
+    assert "umbra_traffic_log" not in flow.metadata
 
 
 def test_gzip_encoded_request_body_is_decoded_before_dlp_scan() -> None:
@@ -227,7 +227,7 @@ def test_gzip_encoded_request_body_is_decoded_before_dlp_scan() -> None:
 
     assert flow.response is not None
     assert flow.response.status_code == 403
-    assert flow.response.headers["X-Concrete-Block-Reason"] == "dlp_secret_detected"
+    assert flow.response.headers["X-Umbra-Block-Reason"] == "dlp_secret_detected"
     # The real credential MUST NOT have been injected onto a blocked request.
     assert flow.request.headers.get("authorization") != "Bearer sk-ant-real"
     batch = queue.drain_batch()
@@ -278,7 +278,7 @@ def test_multi_member_gzip_body_is_fully_decoded_for_dlp() -> None:
 
     assert flow.response is not None
     assert flow.response.status_code == 403
-    assert flow.response.headers["X-Concrete-Block-Reason"] == "dlp_secret_detected"
+    assert flow.response.headers["X-Umbra-Block-Reason"] == "dlp_secret_detected"
     assert flow.request.headers.get("authorization") != "Bearer sk-ant-real"
 
 
@@ -330,7 +330,7 @@ def test_decrypted_https_request_reuses_connect_identity_without_proxy_auth() ->
     assert len(connect_batch.records) == 1
     assert connect_batch.records[0].method == "CONNECT"
     assert connect_batch.records[0].response_code == 200
-    flow = FakeFlow(FakeRequest(headers={"Authorization": "Bearer concrete-proxy-injected"}))
+    flow = FakeFlow(FakeRequest(headers={"Authorization": "Bearer umbra-proxy-injected"}))
     flow.client_conn = connect_flow.client_conn
     proxy_addon.request(flow)
 
@@ -356,14 +356,15 @@ def test_blocked_request_sets_403_and_emits_sanitized_traffic_log() -> None:
 
     assert flow.response is not None
     assert flow.response.status_code == 403
-    assert b"Concrete network restriction" in flow.response.raw_content
+    assert b"Umbra network restriction" in flow.response.raw_content
     assert b"profile policy assigned to this Dev CVM" in flow.response.raw_content
     assert b"not a network or server failure" in flow.response.raw_content
-    assert flow.response.headers["X-Concrete-Blocked"] == "true"
-    assert flow.response.headers["X-Concrete-Block-Source"] == "profile"
-    assert flow.response.headers["X-Concrete-Block-Reason"] == "blocked_destination"
-    assert flow.response.headers["X-Concrete-CVM-ID"] == str(CVM_ID)
-    assert flow.response.headers["X-Concrete-Policy-Version"] == "3"
+    assert flow.response.headers["Proxy-Status"] == "umbra-security-cvm; error=blocked_destination"
+    assert flow.response.headers["X-Umbra-Blocked"] == "true"
+    assert flow.response.headers["X-Umbra-Block-Source"] == "profile"
+    assert flow.response.headers["X-Umbra-Block-Reason"] == "blocked_destination"
+    assert flow.response.headers["X-Umbra-CVM-ID"] == str(CVM_ID)
+    assert flow.response.headers["X-Umbra-Policy-Version"] == "3"
     assert batch is not None
     assert batch.records[0].path == "/v1/files/upload"
     assert batch.records[0].response_code == 403
@@ -378,8 +379,8 @@ def test_blocked_connect_sets_403_and_emits_sanitized_traffic_log() -> None:
 
     assert flow.response is not None
     assert flow.response.status_code == 403
-    assert b"Concrete network restriction" in flow.response.raw_content
-    assert flow.response.headers["X-Concrete-Block-Source"] == "profile"
+    assert b"Umbra network restriction" in flow.response.raw_content
+    assert flow.response.headers["X-Umbra-Block-Source"] == "profile"
     assert batch is not None
     assert batch.records[0].method == "CONNECT"
     assert batch.records[0].response_code == 403
@@ -394,19 +395,19 @@ def test_unknown_proxy_bearer_returns_407_without_logging_token(
     flow = FakeFlow(FakeRequest(headers={"Proxy-Authorization": "Bearer wrong-token"}))
     expected_prefix = hashlib.sha256(b"wrong-token").hexdigest()[:8]
 
-    with caplog.at_level(logging.INFO, logger="concrete_security_cvm.mitmproxy_addon"):
+    with caplog.at_level(logging.INFO, logger="umbra_security_cvm.mitmproxy_addon"):
         proxy_addon.request(flow)
 
     assert flow.response is not None
     assert flow.response.status_code == 407
-    assert flow.response.raw_content == b"Concrete Proxy: Proxy authentication required\n"
-    assert "X-Concrete-Blocked" not in flow.response.headers
+    assert flow.response.raw_content == b"Umbra Proxy: Proxy authentication required\n"
+    assert "X-Umbra-Blocked" not in flow.response.headers
     assert len(queue) == 0
     assert "wrong-token" not in caplog.text
     assert any(
         getattr(record, "proxy_token_hash_prefix", None) == expected_prefix
         for record in caplog.records
-        if record.name == "concrete_security_cvm.mitmproxy_addon"
+        if record.name == "umbra_security_cvm.mitmproxy_addon"
     )
 
 
@@ -481,7 +482,7 @@ def test_body_assertion_allow_lands_attribute_on_traffic_log() -> None:
     slack_request = FakeRequest(
         headers={
             "Proxy-Authorization": "Bearer proxy-token",
-            "Authorization": "Bearer concrete-proxy-injected",
+            "Authorization": "Bearer umbra-proxy-injected",
             "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
         },
         host="slack.com",
@@ -511,7 +512,7 @@ def test_body_assertion_unallowed_channel_returns_403_and_no_attribute() -> None
     slack_request = FakeRequest(
         headers={
             "Proxy-Authorization": "Bearer proxy-token",
-            "Authorization": "Bearer concrete-proxy-injected",
+            "Authorization": "Bearer umbra-proxy-injected",
             "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
         },
         host="slack.com",
@@ -542,7 +543,7 @@ def test_ambiguous_slack_path_denies_without_injecting_secret(path: str) -> None
     slack_request = FakeRequest(
         headers={
             "Proxy-Authorization": "Bearer proxy-token",
-            "Authorization": "Bearer concrete-proxy-injected",
+            "Authorization": "Bearer umbra-proxy-injected",
             "Content-Type": "application/x-www-form-urlencoded",
         },
         host="slack.com",
@@ -556,7 +557,7 @@ def test_ambiguous_slack_path_denies_without_injecting_secret(path: str) -> None
 
     assert flow.response is not None
     assert flow.response.status_code == 403
-    assert flow.request.headers["Authorization"] == "Bearer concrete-proxy-injected"
+    assert flow.request.headers["Authorization"] == "Bearer umbra-proxy-injected"
     assert "authorization" not in flow.request.headers
     assert batch is not None
     assert batch.records[0].response_code == 403

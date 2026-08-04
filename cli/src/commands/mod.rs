@@ -23,6 +23,21 @@ pub mod version;
 
 use crate::config::ResolvedConfig;
 
+pub(crate) const LEGACY_SECURITY_CVM_REBIND_MARKER: &str = "SECURITY_CVM_REBIND_REQUIRED";
+
+/// Fail-closed message shared by every CLI surface that encounters a Dev CVM
+/// preserved from before Umbra's runtime CA-refresh guarantee.
+pub(crate) fn legacy_cvm_replacement_error(
+    cvm_id: &str,
+    error_reason: Option<&str>,
+) -> Option<String> {
+    (error_reason == Some(LEGACY_SECURITY_CVM_REBIND_MARKER)).then(|| {
+        format!(
+            "[error] Dev CVM {cvm_id} has a legacy Security CVM rebind marker. Umbra cannot prove that this runtime can refresh a rotated CA. Use the pre-Umbra control plane to terminate or decommission the preserved CVM/provider resource, then launch a replacement under Umbra. This renamed build cannot manage it, and `umbra cvm update` is not a recovery path."
+        )
+    })
+}
+
 /// Select the target Dev CVM, then resolve its alias to a UUID.
 ///
 /// The id is the first non-empty of, in order: `positional` `<CVM_ID>`, `flag`
@@ -59,7 +74,7 @@ pub(crate) fn select_cvm(
 
 #[cfg(test)]
 mod tests {
-    use super::select_cvm;
+    use super::{legacy_cvm_replacement_error, select_cvm, LEGACY_SECURITY_CVM_REBIND_MARKER};
     use crate::config::{ConfigOverrides, ResolvedConfig};
 
     /// A `ResolvedConfig` whose `default_cvm` is set directly, using a throwaway
@@ -118,5 +133,19 @@ mod tests {
             "flag"
         );
         assert!(select_cvm(None, None, &[], &config).is_err());
+    }
+
+    /// The shared legacy marker message gives the only safe replacement path
+    /// and explicitly rejects management by the renamed CLI.
+    #[test]
+    fn test_legacy_cvm_replacement_error_failure() {
+        let message =
+            legacy_cvm_replacement_error("cvm-legacy", Some(LEGACY_SECURITY_CVM_REBIND_MARKER))
+                .expect("legacy marker is rejected");
+
+        assert!(message.contains("pre-Umbra control plane"));
+        assert!(message.contains("launch a replacement under Umbra"));
+        assert!(message.contains("renamed build cannot manage it"));
+        assert!(message.contains("`umbra cvm update` is not a recovery path"));
     }
 }

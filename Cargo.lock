@@ -398,20 +398,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "concrete-atls-connect"
-version = "0.1.0"
-dependencies = [
- "atlas-rs",
- "rustls",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-rustls",
- "webpki-roots 0.26.11",
-]
-
-[[package]]
 name = "console_log"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2900,6 +2886,20 @@ name = "typenum"
 version = "1.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40ce102ab67701b8526c123c1bab5cbe42d7040ccfd0f64af1a385808d2f43de"
+
+[[package]]
+name = "umbra-atls-connect"
+version = "0.1.0"
+dependencies = [
+ "atlas-rs",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-rustls",
+ "webpki-roots 0.26.11",
+]
 
 [[package]]
 name = "umbra-cli"

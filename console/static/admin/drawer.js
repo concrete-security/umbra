@@ -1,18 +1,15 @@
 (function (A) {
   const UI = A.UI;
 
-  function needsSecurityCvmRebind(cvm) {
+  function needsLegacySecurityCvmReplacement(cvm) {
     return cvm?.error_reason === "SECURITY_CVM_REBIND_REQUIRED";
   }
 
-  function cvmUpdateLabel(cvm) {
-    return needsSecurityCvmRebind(cvm) ? "Rebind SC trust" : "Update";
+  function legacySecurityCvmReplacementMessage() {
+    return "Umbra cannot prove that this legacy Dev CVM runtime can fetch and install a rotated Security CVM CA. Keep it fail-closed. Use the pre-Umbra control plane to terminate or decommission the preserved CVM/provider resource, then launch a replacement under Umbra. This renamed build cannot manage it, and `umbra cvm update` is not a recovery path.";
   }
 
-  function cvmUpdatePrompt(cvm) {
-    if (needsSecurityCvmRebind(cvm)) {
-      return "Refresh this CVM's bound Security CVM CA and aTLS material. Egress stays fail-closed until this update completes.";
-    }
+  function cvmUpdatePrompt() {
     return "Update this CVM to the latest measured image/config and re-attest it. Named volumes are preserved.";
   }
 
@@ -167,7 +164,13 @@
       if (A.has(A.P.TRAFFIC)) tabs.push(["egress", "Egress"]);
       tabs.push(["summary", "Summary"]);
       if (A.has(A.P.AUDIT)) tabs.push(["audit", "Audit"]);
-      if (A.canActOnCvms() && A.selectedCvm?.state !== "terminated") tabs.push(["actions", "Actions"]);
+      if (
+        A.canActOnCvms() &&
+        A.selectedCvm?.state !== "terminated" &&
+        !needsLegacySecurityCvmReplacement(A.selectedCvm)
+      ) {
+        tabs.push(["actions", "Actions"]);
+      }
       return tabs;
     },
 
@@ -235,8 +238,11 @@
         .join("");
       const state = String(cvm.state || "").toLowerCase();
       let actionHtml = "";
-      if (canManage && state === "running") actionHtml = '<button type="button" class="btn" id="cvm-summary-stop">Stop</button>';
-      else if (canManage && state === "stopped") actionHtml = '<button type="button" class="btn" id="cvm-summary-start">Start</button>';
+      if (canManage && !needsLegacySecurityCvmReplacement(cvm) && state === "running") {
+        actionHtml = '<button type="button" class="btn" id="cvm-summary-stop">Stop</button>';
+      } else if (canManage && !needsLegacySecurityCvmReplacement(cvm) && state === "stopped") {
+        actionHtml = '<button type="button" class="btn" id="cvm-summary-start">Start</button>';
+      }
 
       let html =
         '<div class="card"><h3>Instance</h3>' +
@@ -257,7 +263,7 @@
         "<h3>Profiles</h3><div class=\"chips\">" +
         (profiles || '<span class="muted">none</span>') +
         "</div></div>";
-      if (canManage && state !== "terminated") {
+      if (canManage && state !== "terminated" && !needsLegacySecurityCvmReplacement(cvm)) {
         const profRes = await A.api("/api/v1/entities/" + A.viewEntityId() + "/profiles");
         const allProfiles = profRes.ok ? (await profRes.json()).items || [] : [];
         const attached = new Set(profileItems.map((p) => p.id));
@@ -302,14 +308,12 @@
           " Attach</button></div></div>";
       }
       html += measurementCard(measurementRecordFromAttestation(cvm, null), "Measurements");
-      if (needsSecurityCvmRebind(cvm)) {
+      if (needsLegacySecurityCvmReplacement(cvm)) {
         html +=
-          '<div class="card"><h3>Security CVM rebind required</h3>' +
-          '<p class="muted">The Security CVM CA changed. Run a CVM update to refresh this CVM\'s measured SC CA and aTLS material before relying on egress.</p>' +
-          (A.canActOnCvms() && A.has(A.P.CVM_MANAGE)
-            ? '<button type="button" class="btn" id="cvm-summary-update">Rebind SC trust</button>'
-            : "") +
-          "</div>";
+          '<div class="card"><h3>Legacy runtime replacement required</h3>' +
+          '<p class="err">' +
+          UI.escapeHtml(legacySecurityCvmReplacementMessage()) +
+          "</p></div>";
       }
       const pending = A.Ops.pendingForCvm(cvm.id);
       if (pending.length) {
@@ -402,12 +406,17 @@
     },
 
     async renderCvmActions(cvm) {
+      if (needsLegacySecurityCvmReplacement(cvm)) {
+        return '<div class="card"><h3>Legacy runtime replacement required</h3><p class="err">' +
+          UI.escapeHtml(legacySecurityCvmReplacementMessage()) +
+          "</p></div>";
+      }
       const canManage = A.isHomeEntity() && A.has(A.P.CVM_MANAGE);
       let html = '<div class="card"><h3>Lifecycle</h3><div class="toolbar">';
       if (canManage && cvm.state !== "terminated") {
         if (cvm.state === "running") html += '<button type="button" class="btn" id="cvm-stop">Stop</button>';
         else html += '<button type="button" class="btn" id="cvm-start">Start</button>';
-        html += '<button type="button" class="btn" id="cvm-update">' + UI.escapeHtml(cvmUpdateLabel(cvm)) + "</button>";
+        html += '<button type="button" class="btn" id="cvm-update">Update</button>';
         html += '<button type="button" class="btn danger" id="cvm-terminate">Terminate</button>';
       }
       html += "</div><div id=\"cvm-action-msg\" class=\"msg\"></div></div>";
@@ -503,7 +512,6 @@
         });
       });
       body.querySelector("#cvm-update")?.addEventListener("click", () => Drawer.cvmAsyncAction("update"));
-      body.querySelector("#cvm-summary-update")?.addEventListener("click", () => Drawer.cvmAsyncAction("update"));
       body.querySelector("#cvm-summary-refresh")?.addEventListener("click", async () => {
         A.selectedCvm = await A.fetchCvmDetail(cvm.id);
         await Drawer.renderCvmBody();
@@ -518,6 +526,10 @@
     async cvmSyncAction(action) {
       const msg = A.el("cvm-action-msg") || A.el("drawer-body").querySelector("#cvm-action-msg");
       if (!A.selectedCvm || !msg) return;
+      if (needsLegacySecurityCvmReplacement(A.selectedCvm)) {
+        UI.toast(legacySecurityCvmReplacementMessage(), "err");
+        return;
+      }
       msg.textContent = "Sending…";
       const response = await A.api("/api/v1/cvms/" + A.selectedCvm.id + "/actions/" + action, {
         method: "POST",
@@ -537,7 +549,11 @@
     async cvmAsyncAction(action) {
       const cvm = A.selectedCvm;
       if (!cvm) return;
-      const labels = { update: cvmUpdatePrompt(cvm), terminate: "Terminate this CVM? This cannot be undone." };
+      if (needsLegacySecurityCvmReplacement(cvm)) {
+        UI.toast(legacySecurityCvmReplacementMessage(), "err");
+        return;
+      }
+      const labels = { update: cvmUpdatePrompt(), terminate: "Terminate this CVM? This cannot be undone." };
       const ok = await UI.confirm({
         title: action === "terminate" ? "Terminate CVM" : "Update CVM",
         message: labels[action] || "Continue?",
@@ -568,6 +584,10 @@
     },
 
     async attachProfile(cvm) {
+      if (needsLegacySecurityCvmReplacement(cvm)) {
+        UI.toast(legacySecurityCvmReplacementMessage(), "err");
+        return;
+      }
       const sel = A.el("drawer-body").querySelector("#attach-profile");
       const profileId = sel?.value;
       if (!profileId) return;
@@ -588,6 +608,10 @@
     },
 
     async detachProfile(cvmId, profileId) {
+      if (needsLegacySecurityCvmReplacement(A.selectedCvm)) {
+        UI.toast(legacySecurityCvmReplacementMessage(), "err");
+        return;
+      }
       const ok = await UI.confirm({ title: "Detach profile", message: "Remove this profile from the CVM?" });
       if (!ok) return;
       const etag = A.selectedCvm?._etag || (await A.fetchCvmDetail(cvmId))?._etag;

@@ -20,7 +20,7 @@ use crate::{
         wire, CvmCommand, CvmInstanceTypesArgs, CvmLaunchArgs, CvmListArgs, CvmTerminateArgs,
         CvmUpdateArgs,
     },
-    commands::{alias, select_cvm},
+    commands::{alias, legacy_cvm_replacement_error, select_cvm},
     config::{self, ResolvedConfig},
     console::{
         fetch_json, post_json, push_query, read_json_response, read_with_etag, send, validate_uuid,
@@ -559,7 +559,11 @@ fn update(config: &ResolvedConfig, args: CvmUpdateArgs, json_output: bool) -> Ex
         return ExitStatus::Usage;
     }
     let (console_url, session) = try_or_eprintln!(crate::console::console_session(config));
-    let (_, etag) = try_or_eprintln!(fetch_cvm_with_etag(console_url, &session, &cvm_id));
+    let (cvm, etag) = try_or_eprintln!(fetch_cvm_with_etag(console_url, &session, &cvm_id));
+    if let Some(message) = legacy_cvm_replacement_error(&cvm.id, cvm.error_reason.as_deref()) {
+        style::eprintln_error(&message);
+        return ExitStatus::Error;
+    }
     let op = try_or_eprintln!(submit_update(
         console_url,
         &session.access_token,
@@ -1495,7 +1499,7 @@ fn policy_document(bundle: &PolicyBundle) -> Value {
         .or_insert_with(|| json!(2));
     app_compose
         .entry("name".to_string())
-        .or_insert_with(|| Value::String(format!("concrete-dev-{}", bundle.cvm_id)));
+        .or_insert_with(|| Value::String(format!("umbra-dev-{}", bundle.cvm_id)));
     app_compose
         .entry("runner".to_string())
         .or_insert_with(|| Value::String("docker-compose".to_string()));
@@ -1757,6 +1761,10 @@ mod tests {
             .expect("app_compose serializes")
             .starts_with(r#"{"allowed_envs":[],"docker_compose_file":"#));
         assert_eq!(policy["rtmr3_binding"]["security_cvm_proxy_port"], 8080);
+        assert_eq!(
+            policy["app_compose"]["name"],
+            "umbra-dev-00000000-0000-4000-8000-000000000001"
+        );
     }
 
     #[test]

@@ -237,7 +237,7 @@ wheels = [
 ]
 
 [[package]]
-name = "concrete-security-cvm"
+name = "umbra-security-cvm"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

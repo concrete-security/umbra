@@ -77,7 +77,7 @@ from umbra_console.resources import (
     user_quota_resource,
     user_resource,
 )
-from umbra_console.scheduler import run_reconciliation_pass
+from umbra_console.scheduler import LEGACY_SECURITY_CVM_REBIND_MARKER, run_reconciliation_pass
 
 log = logger()
 PERMISSIONS = {
@@ -94,7 +94,7 @@ PERMISSIONS = {
 }
 SANDBOX_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 SANDBOX_ENV_RESERVED_NAMES = {"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "PATH", "HOME"}
-SANDBOX_ENV_RESERVED_PREFIXES = ("CONCRETE_", "SECURITY_CVM_", "AUTHORIZED_SSH_", "SANDBOX_ENV_")
+SANDBOX_ENV_RESERVED_PREFIXES = ("UMBRA_", "SECURITY_CVM_", "AUTHORIZED_SSH_", "SANDBOX_ENV_")
 POLICY_TOP_LEVEL_FIELDS = {
     "egress_boundary",
     "allowed_destinations",
@@ -566,6 +566,20 @@ def require_cvm_profile_mutable(row: asyncpg.Record | dict, *, action: str) -> N
 def require_cvm_owner_or_manager(row: asyncpg.Record | dict, current_user: CurrentUser) -> None:
     if row["owner_id"] != current_user.id and "CVM_MANAGE" not in current_user.permissions:
         raise api_error(404, "NOT_FOUND", "resource not found")
+
+
+def require_cvm_update_supported(row: asyncpg.Record | dict) -> None:
+    if dict(row).get("error_reason") != LEGACY_SECURITY_CVM_REBIND_MARKER:
+        return
+    raise api_error(
+        409,
+        "CONFLICT",
+        "Umbra cannot manage this preserved legacy CVM; use the pre-Umbra control plane to terminate or decommission it, then launch a replacement under Umbra. `umbra cvm update` is not a recovery path",
+        {
+            "state": "legacy_cvm_replacement_required",
+            "error_reason": LEGACY_SECURITY_CVM_REBIND_MARKER,
+        },
+    )
 
 
 def require_matching_etag(current: str, if_match: str | None) -> None:
@@ -1308,6 +1322,7 @@ def render_dev_cvm_compose_config(resolved: dict[str, object]) -> str:
             "      NPM_CONFIG_AUDIT: \"false\"",
             "      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: \"1\"",
             "      PYTHONDONTWRITEBYTECODE: \"1\"",
+            "      SECURITY_CVM_FQDN: ${SECURITY_CVM_FQDN}",
             "      SECURITY_CVM_CA_CERT_B64: ${SECURITY_CVM_CA_CERT_B64}",
             "      AUTHORIZED_SSH_KEYS_B64: ${AUTHORIZED_SSH_KEYS_B64}",
             "      SANDBOX_ENV_PLACEHOLDERS_B64: ${SANDBOX_ENV_PLACEHOLDERS_B64}",
@@ -1320,7 +1335,7 @@ def render_dev_cvm_compose_config(resolved: dict[str, object]) -> str:
             "      - dev-cursor-server:/home/dev/.cursor-server",
             "      - dev-vscode-server:/home/dev/.vscode-server",
             "      - dev-docker-data:/var/lib/docker",
-            "      - cvm-ca:/var/lib/concrete-ca:ro",
+            "      - cvm-ca:/var/lib/umbra-ca:ro",
             "    expose:",
             "      - \"22\"",
             "    healthcheck:",
@@ -1334,7 +1349,7 @@ def render_dev_cvm_compose_config(resolved: dict[str, object]) -> str:
             "",
             "  dev-egress-forwarder:",
             f"    image: {image}",
-            "    entrypoint: [\"concrete-dev-egress-forwarder\"]",
+            "    entrypoint: [\"umbra-dev-egress-forwarder\"]",
             "    read_only: true",
             "    tmpfs:",
             "      - /tmp",
@@ -1352,7 +1367,7 @@ def render_dev_cvm_compose_config(resolved: dict[str, object]) -> str:
             "      DEV_CVM_CONTROL_TOKEN: ${DEV_CVM_CONTROL_TOKEN}",
             "      CONSOLE_URL: ${CONSOLE_URL:-}",
             "    volumes:",
-            "      - cvm-ca:/var/lib/concrete-ca",
+            "      - cvm-ca:/var/lib/umbra-ca",
             "    expose:",
             "      - \"3128\"",
             "    networks:",
@@ -1361,7 +1376,7 @@ def render_dev_cvm_compose_config(resolved: dict[str, object]) -> str:
             "",
             "  dev-tunnel:",
             f"    image: {image}",
-            "    entrypoint: [\"concrete-dev-tunnel\"]",
+            "    entrypoint: [\"umbra-dev-tunnel\"]",
             "    read_only: true",
             "    tmpfs:",
             "      - /tmp",
@@ -1495,7 +1510,7 @@ def render_security_cvm_compose_config(resolved: dict[str, str]) -> str:
             "services:",
             "  mitmproxy:",
             f"    image: {image}",
-            "    command: [\"concrete-security-mitmproxy\"]",
+            "    command: [\"umbra-security-mitmproxy\"]",
             "    read_only: true",
             "    tmpfs:",
             "      - /tmp",
@@ -1523,7 +1538,7 @@ def render_security_cvm_compose_config(resolved: dict[str, str]) -> str:
             "",
             "  proxy-tunnel:",
             f"    image: {image}",
-            "    command: [\"concrete-security-proxy-tunnel\"]",
+            "    command: [\"umbra-security-proxy-tunnel\"]",
             "    read_only: true",
             "    tmpfs:",
             "      - /tmp",
@@ -1537,8 +1552,8 @@ def render_security_cvm_compose_config(resolved: dict[str, str]) -> str:
             "      SC_PROXY_TUNNEL_PORT: \"8082\"",
             "      SC_PROXY_TUNNEL_UPSTREAM_HOST: mitmproxy",
             "      SC_PROXY_TUNNEL_UPSTREAM_PORT: \"8080\"",
-            "      SC_PROXY_TUNNEL_PATH: /concrete/proxy",
-            "      SC_PROXY_TUNNEL_UPGRADE: concrete-proxy",
+            "      SC_PROXY_TUNNEL_PATH: /umbra/proxy",
+            "      SC_PROXY_TUNNEL_UPGRADE: umbra-proxy",
             "    expose:",
             "      - \"8082\"",
             "    networks:",
@@ -4635,6 +4650,7 @@ async def update_cvm(
             require_cvm_owner_or_manager(cvm, current_user)
             if if_match is not None:
                 require_matching_etag(cvm_etag(cvm), if_match)
+            require_cvm_update_supported(cvm)
             await ensure_no_active_operation(conn, target_id=cvm_id, state=cvm["state"])
             if cvm["state"] not in {"RUNNING", "STOPPED", "FAILED"}:
                 raise api_error(
@@ -5052,7 +5068,7 @@ async def lock_cvm_for_lifecycle_action(
 ) -> asyncpg.Record:
     row = await conn.fetchrow(
         """
-        SELECT id, entity_id, owner_id, state::text AS state, metadata, policy_version, updated_at
+        SELECT id, entity_id, owner_id, state::text AS state, metadata, policy_version, error_reason, updated_at
         FROM cvms
         WHERE id = $1
           AND entity_id = $2

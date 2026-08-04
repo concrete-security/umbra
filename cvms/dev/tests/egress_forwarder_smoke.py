@@ -10,8 +10,8 @@ from pathlib import Path
 
 
 def load_forwarder_module():
-    path = Path(__file__).resolve().parents[1] / "user-sandbox" / "concrete-dev-egress-forwarder.py"
-    spec = importlib.util.spec_from_file_location("concrete_dev_egress_forwarder", path)
+    path = Path(__file__).resolve().parents[1] / "user-sandbox" / "umbra-dev-egress-forwarder.py"
+    spec = importlib.util.spec_from_file_location("umbra_dev_egress_forwarder", path)
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
@@ -20,11 +20,11 @@ def load_forwarder_module():
 
 async def fake_security_cvm(reader, writer):
     upgrade = await reader.readuntil(b"\r\n\r\n")
-    assert b"GET /concrete/proxy HTTP/1.1" in upgrade
+    assert b"GET /umbra/proxy HTTP/1.1" in upgrade
     assert b"Host: sc.example.com" in upgrade
-    assert b"Upgrade: concrete-proxy\r\n" in upgrade
+    assert b"Upgrade: umbra-proxy\r\n" in upgrade
     assert b"Proxy-Authorization" not in upgrade
-    writer.write(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: concrete-proxy\r\nConnection: Upgrade\r\n\r\n")
+    writer.write(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: umbra-proxy\r\nConnection: Upgrade\r\n\r\n")
     await writer.drain()
     request = await reader.readuntil(b"\r\n\r\n")
     assert b"CONNECT example.com:443 HTTP/1.1" in request
@@ -41,9 +41,9 @@ async def fake_security_cvm(reader, writer):
 
 async def fake_security_cvm_http(reader, writer):
     upgrade = await reader.readuntil(b"\r\n\r\n")
-    assert b"GET /concrete/proxy HTTP/1.1" in upgrade
+    assert b"GET /umbra/proxy HTTP/1.1" in upgrade
     assert b"Proxy-Authorization" not in upgrade
-    writer.write(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: concrete-proxy\r\nConnection: Upgrade\r\n\r\n")
+    writer.write(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: umbra-proxy\r\nConnection: Upgrade\r\n\r\n")
     await writer.drain()
 
     request = await reader.readuntil(b"\r\n\r\n")
@@ -66,9 +66,9 @@ async def fake_security_cvm_http(reader, writer):
 
 async def fake_security_cvm_blocked_connect(reader, writer):
     upgrade = await reader.readuntil(b"\r\n\r\n")
-    assert b"GET /concrete/proxy HTTP/1.1" in upgrade
+    assert b"GET /umbra/proxy HTTP/1.1" in upgrade
     assert b"Proxy-Authorization" not in upgrade
-    writer.write(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: concrete-proxy\r\nConnection: Upgrade\r\n\r\n")
+    writer.write(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: umbra-proxy\r\nConnection: Upgrade\r\n\r\n")
     await writer.drain()
 
     request = await reader.readuntil(b"\r\n\r\n")
@@ -76,13 +76,13 @@ async def fake_security_cvm_blocked_connect(reader, writer):
     assert b"Proxy-Authorization: Bearer real-proxy-token\r\n" in request
 
     body = (
-        b"Concrete network restriction: this request was blocked by the profile policy assigned "
-        b"to this Dev CVM.\nThis is a Concrete policy decision, not a network or server failure.\n"
+        b"Umbra network restriction: this request was blocked by the profile policy assigned "
+        b"to this Dev CVM.\nThis is an Umbra policy decision, not a network or server failure.\n"
     )
     writer.write(
         b"HTTP/1.1 403 Forbidden\r\n"
         b"Content-Type: text/plain; charset=utf-8\r\n"
-        b"X-Concrete-Blocked: true\r\n"
+        b"X-Umbra-Blocked: true\r\n"
         b"Content-Length: "
         + str(len(body)).encode("ascii")
         + b"\r\n\r\n"
@@ -321,8 +321,8 @@ async def smoke():
         await writer.drain()
         response = await reader.read()
         assert b"HTTP/1.1 403 Forbidden" in response
-        assert b"X-Concrete-Blocked: true" in response
-        assert b"Concrete network restriction" in response
+        assert b"X-Umbra-Blocked: true" in response
+        assert b"Umbra network restriction" in response
         assert b"profile policy assigned to this Dev CVM" in response
         writer.close()
         await writer.wait_closed()
@@ -404,17 +404,158 @@ def ca_distribution_smoke():
     )
     assert forwarder.extract_validated_ca("nope", "sc.example.com") is None
 
-    # write_ca_distribution: atomic publish, change detection, world-readable mode.
+    # The first boot seeds launch-bound CA + metadata without clobbering a
+    # persisted authenticated rotation when the forwarder restarts.
     with tempfile.TemporaryDirectory() as temp:
         path = Path(temp) / "shared" / "security-cvm-ca.pem"
-        config = SimpleNamespace(ca_distribution_path=path)
-        assert forwarder.write_ca_distribution(config, pem) is True
+        binding_path = Path(temp) / "shared" / "security-cvm-ca.json"
+        launch_path = Path(temp) / "run" / "security-cvm-ca.pem"
+        launch_path.parent.mkdir(parents=True)
+        launch_path.write_text(pem, encoding="utf-8")
+        config = SimpleNamespace(
+            security_cvm_fqdn="sc.example.com",
+            ca_cert_path=launch_path,
+            ca_distribution_path=path,
+            ca_distribution_binding_path=binding_path,
+        )
+
+        forwarder.seed_ca_distribution(config)
         assert path.read_text(encoding="utf-8") == pem
         assert stat.S_IMODE(path.stat().st_mode) == 0o444
+        binding = json.loads(binding_path.read_text(encoding="utf-8"))
+        assert binding == {
+            "security_cvm_fqdn": "sc.example.com",
+            "ca_cert_sha256": sha,
+            "launch_ca_cert_sha256": sha,
+        }
+        assert stat.S_IMODE(binding_path.stat().st_mode) == 0o444
+        assert forwarder.read_ca_distribution(config) == ("valid", pem.encode("utf-8"))
+
         assert forwarder.write_ca_distribution(config, pem) is False  # unchanged → no rewrite
         rotated = "-----BEGIN CERTIFICATE-----\nMIIBrotatedCA\n-----END CERTIFICATE-----\n"
         assert forwarder.write_ca_distribution(config, rotated) is True
         assert path.read_text(encoding="utf-8") == rotated
+        forwarder.seed_ca_distribution(config)
+        assert path.read_text(encoding="utf-8") == rotated  # restart must not roll back to launch CA
+
+        # A refreshed aTLS policy is bound to the latest CA accepted through
+        # the authenticated runtime path, not forever to the launch CA.
+        policy = {
+            "type": "dstack_tdx",
+            "expected_bootchain": {"mrtd": "a" * 96},
+            "app_compose": {"docker_compose_file": "services: {}\n"},
+            "os_image_hash": "b" * 64,
+        }
+        payload = json.dumps(
+            {
+                "security_cvm_fqdn": "sc.example.com",
+                "ca_cert_sha256": hashlib.sha256(rotated.encode("utf-8")).hexdigest(),
+                "atls_policy": policy,
+            }
+        ).encode("utf-8")
+
+        class FakeResponse:
+            status = 200
+
+            @staticmethod
+            def read(_limit):
+                return payload
+
+        class FakeConnection:
+            def __init__(self, host, port, timeout):
+                assert (host, port, timeout) == ("console.example.com", 443, 5)
+
+            def request(self, method, request_path, headers):
+                assert (method, request_path) == ("GET", "/internal/dev-control/security-cvm-atls-policy")
+                assert headers["Authorization"] == "Bearer dev-control-token"
+
+            @staticmethod
+            def getresponse():
+                return FakeResponse()
+
+            @staticmethod
+            def close():
+                pass
+
+        refresh_config = SimpleNamespace(
+            console_url="https://console.example.com",
+            dev_control_token="dev-control-token",
+            security_cvm_fqdn="sc.example.com",
+            ca_cert_path=launch_path,
+            ca_distribution_path=path,
+            ca_distribution_binding_path=binding_path,
+            atls_policy_refresh_path=Path(temp) / "run" / "security-cvm.atls-policy.refresh.json",
+        )
+        original_connection = forwarder.http.client.HTTPSConnection
+        forwarder.http.client.HTTPSConnection = FakeConnection
+        try:
+            refreshed = forwarder.fetch_refreshed_atls_policy(refresh_config)
+            assert refreshed is not None
+            assert json.loads(refreshed.policy_path.read_text(encoding="utf-8")) == policy
+
+            # A candidate that does not match the most recently accepted CA
+            # remains fail-closed.
+            assert forwarder.write_ca_distribution(config, pem) is True
+            assert forwarder.fetch_refreshed_atls_policy(refresh_config) is None
+        finally:
+            forwarder.http.client.HTTPSConnection = original_connection
+
+        # Partial/corrupt persisted state is never replaced from immutable
+        # launch material. Only a fresh authenticated CA response (represented
+        # by write_ca_distribution) may repair it.
+        path.unlink()
+        path.write_bytes(b"not a certificate")
+        forwarder.seed_ca_distribution(config)
+        assert path.read_bytes() == b"not a certificate"
+        assert forwarder.read_ca_distribution(config) == ("invalid", None)
+        assert forwarder.write_ca_distribution(config, rotated) is True
+        assert forwarder.read_ca_distribution(config) == ("valid", rotated.encode("utf-8"))
+
+        class UnreadablePath:
+            @staticmethod
+            def lstat():
+                raise PermissionError("denied")
+
+        unreadable_config = SimpleNamespace(
+            ca_distribution_path=UnreadablePath(),
+            ca_distribution_binding_path=UnreadablePath(),
+        )
+        assert forwarder.read_ca_distribution(unreadable_config) == ("invalid", None)
+
+        # A full update that changes launch CA but retains the SC FQDN is a new
+        # binding, not an ordinary restart. Rebase instead of re-trusting the
+        # persisted CA from the previous launch baseline.
+        updated_launch_pem = "-----BEGIN CERTIFICATE-----\nMIIBupdatedLaunchCA\n-----END CERTIFICATE-----\n"
+        updated_launch_path = Path(temp) / "run" / "security-cvm-updated-launch-ca.pem"
+        updated_launch_path.write_text(updated_launch_pem, encoding="utf-8")
+        updated_config = SimpleNamespace(
+            security_cvm_fqdn="sc.example.com",
+            ca_cert_path=updated_launch_path,
+            ca_distribution_path=path,
+            ca_distribution_binding_path=binding_path,
+        )
+        assert forwarder.read_ca_distribution(updated_config) == ("foreign", None)
+        forwarder.seed_ca_distribution(updated_config)
+        assert forwarder.read_ca_distribution(updated_config) == (
+            "valid",
+            updated_launch_pem.encode("utf-8"),
+        )
+
+        # A full CVM update may keep the named volume while changing the
+        # launch-bound SC FQDN. A valid foreign sidecar is not trusted; current
+        # attested launch material replaces it for the new binding.
+        next_pem = "-----BEGIN CERTIFICATE-----\nMIIBnextCA\n-----END CERTIFICATE-----\n"
+        next_launch_path = Path(temp) / "run" / "security-cvm-next-ca.pem"
+        next_launch_path.write_text(next_pem, encoding="utf-8")
+        next_config = SimpleNamespace(
+            security_cvm_fqdn="sc-next.example.com",
+            ca_cert_path=next_launch_path,
+            ca_distribution_path=path,
+            ca_distribution_binding_path=binding_path,
+        )
+        assert forwarder.read_ca_distribution(next_config) == ("foreign", None)
+        forwarder.seed_ca_distribution(next_config)
+        assert forwarder.read_ca_distribution(next_config) == ("valid", next_pem.encode("utf-8"))
 
     print("ca_distribution_smoke: OK")
 

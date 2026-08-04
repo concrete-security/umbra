@@ -7,9 +7,9 @@ import re
 import time
 from typing import Callable, Mapping
 
-from concrete_security_cvm.control import ControlMap, DevCVMControlEntry
-from concrete_security_cvm.policy import PolicyValidationError
-from concrete_security_cvm.traffic import TrafficLogRecord
+from umbra_security_cvm.control import ControlMap, DevCVMControlEntry
+from umbra_security_cvm.policy import PolicyValidationError
+from umbra_security_cvm.traffic import TrafficLogRecord
 
 
 DLP_SCAN_BODY_LIMIT_BYTES = 10 * 1024 * 1024

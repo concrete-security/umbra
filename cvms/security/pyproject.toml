@@ -1,11 +1,11 @@
 [project]
-name = "concrete-security-cvm"
+name = "umbra-security-cvm"
 version = "0.1.0"
-description = "Concrete Security CVM services"
+description = "Umbra Security CVM services"
 readme = "README.md"
 requires-python = ">=3.12"
-authors = [{ name = "Concrete Security maintainers" }]
-maintainers = [{ name = "Concrete Security maintainers" }]
+authors = [{ name = "Umbra Security maintainers" }]
+maintainers = [{ name = "Umbra Security maintainers" }]
 license = "LicenseRef-Proprietary"
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -23,12 +23,6 @@ dependencies = [
     "httpx>=0.27,<1",
 ]
 
-[project.urls]
-Homepage = "https://github.com/concrete-security/concrete"
-Documentation = "https://github.com/concrete-security/concrete/tree/main/docs"
-Repository = "https://github.com/concrete-security/concrete"
-Support = "https://github.com/concrete-security/concrete/issues"
-
 [dependency-groups]
 dev = ["pytest>=8,<9"]
 
@@ -36,17 +30,17 @@ dev = ["pytest>=8,<9"]
 mitmproxy = ["mitmproxy>=11,<12"]
 
 [project.scripts]
-concrete-security-mitmproxy = "concrete_security_cvm.mitmproxy_runtime:main"
-concrete-security-management = "concrete_security_cvm.management_http:main"
-concrete-security-runtime = "concrete_security_cvm.runtime:main"
-concrete-security-proxy-tunnel = "concrete_security_cvm.proxy_tunnel:main"
+umbra-security-mitmproxy = "umbra_security_cvm.mitmproxy_runtime:main"
+umbra-security-management = "umbra_security_cvm.management_http:main"
+umbra-security-runtime = "umbra_security_cvm.runtime:main"
+umbra-security-proxy-tunnel = "umbra_security_cvm.proxy_tunnel:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/concrete_security_cvm"]
+packages = ["src/umbra_security_cvm"]
 
 [tool.hatch.build.targets.sdist]
 exclude = [

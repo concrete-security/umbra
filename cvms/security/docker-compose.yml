@@ -1,7 +1,7 @@
 services:
   mitmproxy:
     image: "${SECURITY_CVM_IMAGE_REF:?set SECURITY_CVM_IMAGE_REF to a digest-pinned GHCR image}"
-    command: ["concrete-security-mitmproxy"]
+    command: ["umbra-security-mitmproxy"]
     read_only: true
     tmpfs:
       - /tmp
@@ -29,7 +29,7 @@ services:
 
   proxy-tunnel:
     image: "${SECURITY_CVM_IMAGE_REF:?set SECURITY_CVM_IMAGE_REF to a digest-pinned GHCR image}"
-    command: ["concrete-security-proxy-tunnel"]
+    command: ["umbra-security-proxy-tunnel"]
     read_only: true
     tmpfs:
       - /tmp
@@ -43,8 +43,8 @@ services:
       SC_PROXY_TUNNEL_PORT: "8082"
       SC_PROXY_TUNNEL_UPSTREAM_HOST: mitmproxy
       SC_PROXY_TUNNEL_UPSTREAM_PORT: "8080"
-      SC_PROXY_TUNNEL_PATH: /concrete/proxy
-      SC_PROXY_TUNNEL_UPGRADE: concrete-proxy
+      SC_PROXY_TUNNEL_PATH: /umbra/proxy
+      SC_PROXY_TUNNEL_UPGRADE: umbra-proxy
     expose:
       - "8082"
     networks:
