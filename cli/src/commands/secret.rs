@@ -306,7 +306,7 @@ mod tests {
     #[test]
     fn host_pattern_grammar_matches_shared_vector() {
         // Cross-language verdict vector for the host-binding grammar. The Console's
-        // `valid_secret_host_pattern` (console/src/concrete_console/profile_secrets.py)
+        // `valid_secret_host_pattern` (console/src/umbra_console/profile_secrets.py)
         // is authoritative; the function above is a client-side pre-flight mirror.
         // The SAME fixture is asserted by the Python test
         // `test_host_pattern_shared_vector` (console/tests/test_profile_secrets.py),
@@ -344,7 +344,7 @@ mod tests {
 
     #[test]
     fn secret_value_file_trims_only_trailing_newlines() {
-        let dir = std::env::temp_dir().join(format!("concrete-secret-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("umbra-secret-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).expect("temp dir created");
         let path = dir.join("value.txt");
         std::fs::write(&path, "  xoxp token with spaces \r\n\n").expect("value written");
@@ -357,7 +357,7 @@ mod tests {
 
     #[test]
     fn secret_value_file_rejects_empty() {
-        let dir = std::env::temp_dir().join(format!("concrete-secret-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("umbra-secret-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).expect("temp dir created");
         let path = dir.join("empty.txt");
         std::fs::write(&path, "\n").expect("value written");

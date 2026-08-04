@@ -253,7 +253,7 @@ fn fetch_keys(
 /// Result of attempting to fetch the entity's Security CVM. The caller may
 /// lack the `SECURITY_CVM_CONFIGURE` permission required by the Console
 /// endpoint (console.md section 3.7); in that case the CLI MUST silently
-/// omit the Security CVM section from `concrete status` instead of failing
+/// omit the Security CVM section from `umbra status` instead of failing
 /// the whole command. See cli-style.md section 7.10.
 enum SecurityCvmFetch {
     /// The endpoint returned the SC record.
@@ -425,8 +425,7 @@ mod tests {
     /// A `ResolvedConfig` on a throwaway config dir with the given `--profile`
     /// flags — no Console needed, `optional_profile_filter` only reads local state.
     fn config_with_profile_flags(flags: &[&str]) -> ResolvedConfig {
-        let dir =
-            std::env::temp_dir().join(format!("concrete-status-test-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("umbra-status-test-{}", uuid::Uuid::new_v4()));
         ResolvedConfig::resolve(crate::config::ConfigOverrides {
             config_dir: Some(dir),
             profile: flags.iter().map(|s| s.to_string()).collect(),

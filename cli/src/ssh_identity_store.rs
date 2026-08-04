@@ -64,7 +64,7 @@ mod tests {
 
     #[test]
     fn write_identity_merges_existing_entries() {
-        let dir = std::env::temp_dir().join(format!("concrete-ssh-store-{}", Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("umbra-ssh-store-{}", Uuid::new_v4()));
         fs::create_dir_all(&dir).expect("temp dir created");
 
         write_identity(&dir, "key-1", Path::new("/tmp/key-1")).expect("first key written");

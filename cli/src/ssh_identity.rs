@@ -16,9 +16,9 @@ pub fn default_ssh_key_paths(ssh_dir: &Path) -> Result<(PathBuf, PathBuf), (Exit
     }
     for index in 0..100 {
         let name = if index == 0 {
-            "concrete_ed25519".to_string()
+            "umbra_ed25519".to_string()
         } else {
-            format!("concrete_ed25519_{index}")
+            format!("umbra_ed25519_{index}")
         };
         let private_key = ssh_dir.join(&name);
         let public_key = ssh_dir.join(format!("{name}.pub"));
@@ -213,7 +213,7 @@ mod tests {
 
     #[test]
     fn default_ssh_key_paths_prefers_id_ed25519_when_unused() {
-        let dir = std::env::temp_dir().join(format!("concrete-cvm-key-test-{}", Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("umbra-cvm-key-test-{}", Uuid::new_v4()));
         fs::create_dir_all(&dir).expect("temp dir created");
 
         let (private_key, public_key) = default_ssh_key_paths(&dir).expect("key paths resolved");
@@ -225,21 +225,21 @@ mod tests {
 
     #[test]
     fn default_ssh_key_paths_does_not_target_existing_public_key_without_private_key() {
-        let dir = std::env::temp_dir().join(format!("concrete-cvm-key-test-{}", Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("umbra-cvm-key-test-{}", Uuid::new_v4()));
         fs::create_dir_all(&dir).expect("temp dir created");
         fs::write(dir.join("id_ed25519.pub"), "ssh-ed25519 existing\n")
             .expect("public key written");
 
         let (private_key, public_key) = default_ssh_key_paths(&dir).expect("key paths resolved");
 
-        assert_eq!(private_key, dir.join("concrete_ed25519"));
-        assert_eq!(public_key, dir.join("concrete_ed25519.pub"));
+        assert_eq!(private_key, dir.join("umbra_ed25519"));
+        assert_eq!(public_key, dir.join("umbra_ed25519.pub"));
         fs::remove_dir_all(dir).expect("temp dir removed");
     }
 
     #[test]
     fn discover_private_key_matches_local_public_key_fingerprint() {
-        let dir = std::env::temp_dir().join(format!("concrete-ssh-id-test-{}", Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("umbra-ssh-id-test-{}", Uuid::new_v4()));
         fs::create_dir_all(&dir).expect("temp dir created");
         let private_key = dir.join("id_ed25519");
         let public_key = dir.join("id_ed25519.pub");
@@ -264,7 +264,7 @@ mod tests {
 
     #[test]
     fn discover_private_key_skips_malformed_public_keys() {
-        let dir = std::env::temp_dir().join(format!("concrete-ssh-id-test-{}", Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("umbra-ssh-id-test-{}", Uuid::new_v4()));
         fs::create_dir_all(&dir).expect("temp dir created");
         fs::write(dir.join("broken.pub"), "not an ssh public key\n").expect("broken key written");
         let private_key = dir.join("id_ed25519");
@@ -291,7 +291,7 @@ mod tests {
 
     #[test]
     fn resolve_session_identity_ignores_stale_default_identity() {
-        let dir = std::env::temp_dir().join(format!("concrete-ssh-id-test-{}", Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("umbra-ssh-id-test-{}", Uuid::new_v4()));
         fs::create_dir_all(&dir).expect("temp dir created");
         let stale_private_key = dir.join("stale_ed25519");
         Command::new("ssh-keygen")
@@ -329,7 +329,7 @@ mod tests {
 
     #[test]
     fn resolve_session_identity_uses_matching_default_identity() {
-        let dir = std::env::temp_dir().join(format!("concrete-ssh-id-test-{}", Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("umbra-ssh-id-test-{}", Uuid::new_v4()));
         fs::create_dir_all(&dir).expect("temp dir created");
         let private_key = dir.join("default_ed25519");
         let public_key = dir.join("default_ed25519.pub");
@@ -355,7 +355,7 @@ mod tests {
 
     #[test]
     fn resolve_session_identity_returns_none_without_local_match() {
-        let dir = std::env::temp_dir().join(format!("concrete-ssh-id-test-{}", Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("umbra-ssh-id-test-{}", Uuid::new_v4()));
         fs::create_dir_all(&dir).expect("temp dir created");
 
         let resolved = resolve_session_identity_in(

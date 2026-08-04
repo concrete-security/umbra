@@ -13,19 +13,19 @@ use crate::{
 };
 
 /// The user-facing skill shipped to AI coding agents, embedded at build time.
-/// This file is generated from `skills/concrete-cli/SKILL.md` by
+/// This file is generated from `skills/umbra-cli/SKILL.md` by
 /// `ops/cli-release/render-skill.py` (run via `make skill`); edit that crib, not
 /// the packaged asset. Keeping the asset inside `cli/` makes `cargo package`
 /// self-contained.
-const SKILL_BODY: &str = include_str!("../../assets/concrete-cli/SKILL.md");
+const SKILL_BODY: &str = include_str!("../../assets/umbra-cli/SKILL.md");
 
 /// Folder name the skill is installed under in every agent's skills directory.
-const SKILL_NAME: &str = "concrete-cli";
+const SKILL_NAME: &str = "umbra-cli";
 
 /// A coding agent we know how to install the skill for. `detect_home` is a
 /// directory under `$HOME` whose presence means the agent is installed;
 /// `skill_parents` are the directories under `$HOME` that the agent scans for
-/// skill folders (we drop a `concrete-cli` link into each).
+/// skill folders (we drop a `umbra-cli` link into each).
 struct Agent {
     key: &'static str,
     name: &'static str,
@@ -116,7 +116,7 @@ pub fn install_on_login(config: &ResolvedConfig, quiet: bool) {
         eprintln!(
             "{}",
             style::info_line(&format!(
-                "installed concrete-cli skill for {} - restart your agent session to load it",
+                "installed umbra-cli skill for {} - restart your agent session to load it",
                 linked.join(", ")
             ))
         );

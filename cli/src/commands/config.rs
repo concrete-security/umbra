@@ -134,7 +134,7 @@ fn config_entries(config: &ResolvedConfig) -> Vec<ConfigEntry> {
         ),
         string_entry(
             "install_base_url",
-            Some(config.install_base_url.clone()),
+            config.install_base_url.clone(),
             config.install_base_url_source,
         ),
         bool_entry(

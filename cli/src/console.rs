@@ -46,7 +46,7 @@ pub(crate) fn console_session(
 /// Used by every commands file that calls the Console. The poll-loop callers
 /// (`operation.rs::fetch_operation`) implicitly hit the `"poll operation"`
 /// branch of [`operation_debug::log_poll_decode_failure`] when the body fails
-/// to decode and the `CONCRETE_DEBUG_POLL` env var is set.
+/// to decode and the `UMBRA_DEBUG_POLL` env var is set.
 pub(crate) fn read_json_response<T: DeserializeOwned>(
     response: Response,
     action: &str,
@@ -450,7 +450,7 @@ pub(crate) fn console_error_envelope(body: &str) -> Option<(String, Option<Strin
     }
 
     // Special case for launch/attach refusals over per-user secret references:
-    // name the secrets so the fix is one `concrete secret set` away.
+    // name the secrets so the fix is one `umbra secret set` away.
     if let Some(errors) = details
         .and_then(|details| details.get("errors"))
         .and_then(|errors| errors.as_array())
@@ -470,7 +470,7 @@ pub(crate) fn console_error_envelope(body: &str) -> Option<(String, Option<Strin
             names.dedup();
             return Some((
                 format!(
-                    "{message} (user secrets: {}; run `concrete secret set <NAME> --host <HOST>` as the CVM owner)",
+                    "{message} (user secrets: {}; run `umbra secret set <NAME> --host <HOST>` as the CVM owner)",
                     names.join(", ")
                 ),
                 code,
@@ -490,7 +490,7 @@ pub(crate) fn console_error_envelope(body: &str) -> Option<(String, Option<Strin
                 validation_type,
                 "unknown_instance_type" | "instance_type_not_launchable"
             ) {
-                format!("{message}; run `concrete cvm instance-types` for more information")
+                format!("{message}; run `umbra cvm instance-types` for more information")
             } else {
                 format!("{message} ({validation_type})")
             }
@@ -566,7 +566,7 @@ mod tests {
             let (message, _code) = console_error_envelope(&body).expect("envelope parses");
             assert_eq!(
                 message,
-                "bad type; run `concrete cvm instance-types` for more information"
+                "bad type; run `umbra cvm instance-types` for more information"
             );
         }
     }
@@ -577,7 +577,7 @@ mod tests {
         let (message, code) = console_error_envelope(body).expect("envelope parses");
         assert_eq!(
             message,
-            "profiles reference user secrets that are missing or not host-authorized (user secrets: gh-token, slack-user-token; run `concrete secret set <NAME> --host <HOST>` as the CVM owner)"
+            "profiles reference user secrets that are missing or not host-authorized (user secrets: gh-token, slack-user-token; run `umbra secret set <NAME> --host <HOST>` as the CVM owner)"
         );
         assert_eq!(code.as_deref(), Some("VALIDATION_ERROR"));
     }

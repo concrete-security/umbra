@@ -55,7 +55,7 @@ pub(crate) fn fake_authenticated_session() -> Session {
 /// valid session already written to its (temp) config dir. The fixture for
 /// driving whole commands (`alias::run`) against the mock Console.
 pub(crate) fn authenticated_config(mock: &MockConsole) -> crate::config::ResolvedConfig {
-    let dir = std::env::temp_dir().join(format!("concrete-cmd-test-{}", uuid::Uuid::new_v4()));
+    let dir = std::env::temp_dir().join(format!("umbra-cmd-test-{}", uuid::Uuid::new_v4()));
     crate::session::write_atomic(&dir, &fake_authenticated_session()).expect("write session");
     crate::config::ResolvedConfig::resolve(crate::config::ConfigOverrides {
         config_dir: Some(dir),
@@ -65,7 +65,7 @@ pub(crate) fn authenticated_config(mock: &MockConsole) -> crate::config::Resolve
 }
 
 /// A temp config directory holding a valid session for `mock`, ready to be passed
-/// as `concrete --config`. The fixture for driving the real binary from an
+/// as `umbra --config`. The fixture for driving the real binary from an
 /// integration test; in-crate tests use [`authenticated_config`] instead (same
 /// directory, wrapped in a resolved config).
 pub fn temp_config_with_session(mock: &MockConsole) -> std::path::PathBuf {
@@ -192,8 +192,8 @@ impl MockConsole {
 
     /// `GET /api/v1/cvms[?state=<state>]` — the caller's CVMs, each returned
     /// `running`, for exactly ONE request form: `Some("alive")` is what `alias prune`
-    /// reconciles against, `Some("running")` what a fleet `concrete ps` asks for, and
-    /// `None` the bare path `concrete cvm list` sends (no `state` param — the Console
+    /// reconciles against, `Some("running")` what a fleet `umbra ps` asks for, and
+    /// `None` the bare path `umbra cvm list` sends (no `state` param — the Console
     /// applies its own `alive` default, `docs/specs/console.md` §3.6).
     ///
     /// One form per call ON PURPOSE. Registering several at once would let a command

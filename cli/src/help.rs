@@ -1,17 +1,17 @@
-//! Grouped, per-level `concrete` help rendering.
+//! Grouped, per-level `umbra` help rendering.
 //!
 //! clap v4 lists every subcommand flat under one `Commands:` heading, repeats
 //! every `global` flag in every subcommand's help, and cannot show a per-command
 //! usage synopsis inside the commands list. This module replaces the help body
 //! for three command shapes so each level shows exactly the right options:
 //!
-//! - **root** (`concrete --help`): subcommands bucketed into titled [`GROUPS`],
+//! - **root** (`umbra --help`): subcommands bucketed into titled [`GROUPS`],
 //!   then a `Global options:` block listing the shared flags.
-//! - **group** (`concrete cvm --help`, any command with subcommands): a
+//! - **group** (`umbra cvm --help`, any command with subcommands): a
 //!   multi-line `Usage:` block listing every subcommand's invocation form (with
 //!   its own args), then a `Commands:` list of name + description. Per-option
 //!   detail lives at the leaf level.
-//! - **leaf** (`concrete ssh --help`, `concrete cvm list --help`): an
+//! - **leaf** (`umbra ssh --help`, `umbra cvm list --help`): an
 //!   `Examples:` block, then hand-rendered `Arguments:` / `Options:` blocks
 //!   showing ONLY the command's own args — each with a short description plus a
 //!   `Default:` line and `[values: …]` where they apply.
@@ -73,7 +73,7 @@ fn paint(style: Style, text: &str) -> String {
     }
 }
 
-/// Ordered, titled groups for the top-level `concrete --help`. Every declared
+/// Ordered, titled groups for the top-level `umbra --help`. Every declared
 /// subcommand MUST appear in exactly one group (guarded by
 /// `test_help_level_1_root_matches_declared_success`, which checks the rendered
 /// help lists exactly the declared commands).
@@ -107,7 +107,7 @@ const GROUPS: &[(&str, &[&str])] = &[
 ];
 
 /// Runnable examples shown in a leaf command's `Examples:` block, keyed by the
-/// command path below `concrete` (space-joined; e.g. `"cvm launch"`). An
+/// command path below `umbra` (space-joined; e.g. `"cvm launch"`). An
 /// arg-bearing leaf MUST have an entry so its `Examples:` block renders (guarded
 /// by `test_help_level_3_leaves_have_usage_and_examples_success`).
 const EXAMPLES: &[(&str, &[&str])] = &[
@@ -115,298 +115,286 @@ const EXAMPLES: &[(&str, &[&str])] = &[
     (
         "ssh",
         &[
-            "concrete ssh",
-            "concrete ssh <CVM_ID|alias>",
-            "concrete ssh --name build",
+            "umbra ssh",
+            "umbra ssh <CVM_ID|alias>",
+            "umbra ssh --name build",
         ],
     ),
     (
         "code",
-        &[
-            "concrete code <CVM_ID|alias> --workspace ~/repo",
-            "concrete code",
-        ],
+        &["umbra code <CVM_ID|alias> --workspace ~/repo", "umbra code"],
     ),
     (
         "cursor",
         &[
-            "concrete cursor <CVM_ID|alias> --workspace ~/repo",
-            "concrete cursor",
+            "umbra cursor <CVM_ID|alias> --workspace ~/repo",
+            "umbra cursor",
         ],
     ),
     (
         "claude",
         &[
-            "concrete claude --workspace ~/repo",
-            "concrete claude --name review",
+            "umbra claude --workspace ~/repo",
+            "umbra claude --name review",
         ],
     ),
-    ("codex", &["concrete codex --workspace ~/repo"]),
-    ("ps", &["concrete ps", "concrete ps <CVM_ID|alias>"]),
+    ("codex", &["umbra codex --workspace ~/repo"]),
+    ("ps", &["umbra ps", "umbra ps <CVM_ID|alias>"]),
     (
         "attach",
         &[
-            "concrete attach <SESSION|alias>",
-            "concrete attach <SESSION|alias> --cvm <CVM_ID|alias>",
+            "umbra attach <SESSION|alias>",
+            "umbra attach <SESSION|alias> --cvm <CVM_ID|alias>",
         ],
     ),
-    ("kill", &["concrete kill <SESSION|alias>"]),
-    ("tunnel", &["concrete tunnel <FQDN>"]),
+    ("kill", &["umbra kill <SESSION|alias>"]),
+    ("tunnel", &["umbra tunnel <FQDN>"]),
     (
         "traffic-logs",
         &[
-            "concrete traffic-logs --cvm <CVM_ID>",
-            "concrete traffic-logs --from 2026-07-01T00:00:00Z",
+            "umbra traffic-logs --cvm <CVM_ID>",
+            "umbra traffic-logs --from 2026-07-01T00:00:00Z",
         ],
     ),
     (
         "reconcile",
-        &["concrete reconcile", "concrete reconcile --no-orphans"],
+        &["umbra reconcile", "umbra reconcile --no-orphans"],
     ),
     (
         "completions",
-        &["concrete completions bash", "concrete completions zsh"],
+        &["umbra completions bash", "umbra completions zsh"],
     ),
     (
         "update",
         &[
-            "concrete update",
-            "concrete update --check",
-            "concrete update --version 0.4.0",
+            "umbra update",
+            "umbra update --check",
+            "umbra update --version 0.4.0",
         ],
     ),
     // `cvm` group leaves.
     (
         "cvm list",
         &[
-            "concrete cvm list --state running",
-            "concrete cvm list --state all",
-            "concrete cvm list",
+            "umbra cvm list --state running",
+            "umbra cvm list --state all",
+            "umbra cvm list",
         ],
     ),
     (
         "cvm instance-types",
         &[
-            "concrete cvm instance-types --refresh",
-            "concrete cvm instance-types",
+            "umbra cvm instance-types --refresh",
+            "umbra cvm instance-types",
         ],
     ),
     (
         "cvm launch",
         &[
-            "concrete cvm launch --instance-type tdx.cpx41 --region eu-west-3",
-            "concrete cvm launch --ssh-key <KEY_ID> --alias mybox",
-            "concrete cvm launch --no-wait",
-            "concrete cvm launch",
+            "umbra cvm launch --instance-type tdx.cpx41 --region eu-west-3",
+            "umbra cvm launch --ssh-key <KEY_ID> --alias mybox",
+            "umbra cvm launch --no-wait",
+            "umbra cvm launch",
         ],
     ),
     (
         "cvm attach",
-        &["concrete cvm attach <CVM_ID|alias> --profile <PROFILE_ID>"],
+        &["umbra cvm attach <CVM_ID|alias> --profile <PROFILE_ID>"],
     ),
     (
         "cvm detach",
-        &["concrete cvm detach <CVM_ID|alias> --profile <PROFILE_ID>"],
+        &["umbra cvm detach <CVM_ID|alias> --profile <PROFILE_ID>"],
     ),
-    ("cvm start", &["concrete cvm start <CVM_ID|alias>"]),
-    ("cvm stop", &["concrete cvm stop <CVM_ID|alias>"]),
-    ("cvm update", &["concrete cvm update <CVM_ID|alias>"]),
+    ("cvm start", &["umbra cvm start <CVM_ID|alias>"]),
+    ("cvm stop", &["umbra cvm stop <CVM_ID|alias>"]),
+    ("cvm update", &["umbra cvm update <CVM_ID|alias>"]),
     (
         "cvm terminate",
         &[
-            "concrete cvm terminate <CVM_ID|alias> --no-wait",
-            "concrete cvm terminate <CVM_ID|alias>",
+            "umbra cvm terminate <CVM_ID|alias> --no-wait",
+            "umbra cvm terminate <CVM_ID|alias>",
         ],
     ),
     // `auth` group.
     (
         "auth login",
         &[
-            "concrete auth login",
-            "concrete auth login https://console.example.com",
-            "concrete auth login --device",
+            "umbra auth login",
+            "umbra auth login https://console.example.com",
+            "umbra auth login --device",
         ],
     ),
     // `security-cvm` group.
     (
         "security-cvm launch",
         &[
-            "concrete security-cvm launch",
-            "concrete security-cvm launch --instance-type tdx.medium --region eu-west-3",
+            "umbra security-cvm launch",
+            "umbra security-cvm launch --instance-type tdx.medium --region eu-west-3",
         ],
     ),
-    ("security-cvm update", &["concrete security-cvm update"]),
+    ("security-cvm update", &["umbra security-cvm update"]),
     (
         "security-cvm attestation",
         &[
-            "concrete security-cvm attestation",
-            "concrete security-cvm attestation --probe",
+            "umbra security-cvm attestation",
+            "umbra security-cvm attestation --probe",
         ],
     ),
     // `user` group.
     (
         "user add",
         &[
-            "concrete user add alice@example.com --permission CVM_LAUNCH",
-            "concrete user add alice@example.com --name Alice",
+            "umbra user add alice@example.com --permission CVM_LAUNCH",
+            "umbra user add alice@example.com --name Alice",
         ],
     ),
     (
         "user list",
         &[
-            "concrete user list",
-            "concrete user list --status active",
-            "concrete user list --assigned yes",
+            "umbra user list",
+            "umbra user list --status active",
+            "umbra user list --assigned yes",
         ],
     ),
-    ("user show", &["concrete user show <USER_ID>"]),
-    ("user deactivate", &["concrete user deactivate <USER_ID>"]),
-    ("user reactivate", &["concrete user reactivate <USER_ID>"]),
-    ("user erase", &["concrete user erase <USER_ID>"]),
+    ("user show", &["umbra user show <USER_ID>"]),
+    ("user deactivate", &["umbra user deactivate <USER_ID>"]),
+    ("user reactivate", &["umbra user reactivate <USER_ID>"]),
+    ("user erase", &["umbra user erase <USER_ID>"]),
     (
         "user permissions list",
-        &["concrete user permissions list <USER_ID>"],
+        &["umbra user permissions list <USER_ID>"],
     ),
     (
         "user permissions grant",
-        &["concrete user permissions grant <USER_ID> CVM_MANAGE"],
+        &["umbra user permissions grant <USER_ID> CVM_MANAGE"],
     ),
     (
         "user permissions revoke",
-        &["concrete user permissions revoke <USER_ID> CVM_MANAGE"],
+        &["umbra user permissions revoke <USER_ID> CVM_MANAGE"],
     ),
     // `profile` group.
     (
         "profile create",
         &[
-            "concrete profile create my-profile",
-            "concrete profile create my-profile --alias myprof",
+            "umbra profile create my-profile",
+            "umbra profile create my-profile --alias myprof",
         ],
     ),
     (
         "profile list",
-        &[
-            "concrete profile list",
-            "concrete profile list --assigned yes",
-        ],
+        &["umbra profile list", "umbra profile list --assigned yes"],
     ),
     (
         "profile configure",
         &[
-            "concrete profile configure --policy-file policy.json",
-            "concrete profile configure --name new-name",
+            "umbra profile configure --policy-file policy.json",
+            "umbra profile configure --name new-name",
         ],
     ),
     (
         "profile members add",
-        &["concrete profile members add <USER_ID>"],
+        &["umbra profile members add <USER_ID>"],
     ),
     (
         "profile members remove",
-        &["concrete profile members remove <USER_ID>"],
+        &["umbra profile members remove <USER_ID>"],
     ),
     // `key` group.
     (
         "key add",
         &[
-            "concrete key add --label laptop --file ~/.ssh/id_ed25519.pub",
-            "concrete key add --label laptop --alias laptop",
+            "umbra key add --label laptop --file ~/.ssh/id_ed25519.pub",
+            "umbra key add --label laptop --alias laptop",
         ],
     ),
-    ("key remove", &["concrete key remove <KEY_ID>"]),
+    ("key remove", &["umbra key remove <KEY_ID>"]),
     // `secret` group. Values come from stdin or --value-file, never argv.
     (
         "secret set",
         &[
-            "concrete secret set slack-user-token --host slack.com --host '*.slack.com'",
-            "concrete secret set gh-pat --host api.github.com --value-file ./pat.txt",
+            "umbra secret set slack-user-token --host slack.com --host '*.slack.com'",
+            "umbra secret set gh-pat --host api.github.com --value-file ./pat.txt",
         ],
     ),
-    (
-        "secret remove",
-        &["concrete secret remove slack-user-token"],
-    ),
+    ("secret remove", &["umbra secret remove slack-user-token"]),
     // `quota` group.
     (
         "quota get",
-        &["concrete quota get", "concrete quota get --user <USER_ID>"],
+        &["umbra quota get", "umbra quota get --user <USER_ID>"],
     ),
     (
         "quota set",
         &[
-            "concrete quota set dev_cvms 10",
-            "concrete quota set dev_cvms 10 --user <USER_ID>",
+            "umbra quota set dev_cvms 10",
+            "umbra quota set dev_cvms 10 --user <USER_ID>",
         ],
     ),
-    ("quota clear", &["concrete quota clear dev_cvms"]),
+    ("quota clear", &["umbra quota clear dev_cvms"]),
     // `entity` group.
     (
         "entity add",
-        &["concrete entity add example.com --name Example"],
+        &["umbra entity add example.com --name Example"],
     ),
-    ("entity list", &["concrete entity list"]),
+    ("entity list", &["umbra entity list"]),
     // `audit` group.
     (
         "audit events",
         &[
-            "concrete audit events --limit 20",
-            "concrete audit events --action CVM_LAUNCHED",
-            "concrete audit events --actor <USER_ID>",
+            "umbra audit events --limit 20",
+            "umbra audit events --action CVM_LAUNCHED",
+            "umbra audit events --actor <USER_ID>",
         ],
     ),
     (
         "audit export",
         &[
-            "concrete audit export --format ndjson",
-            "concrete audit export --format csv --output audit.csv",
+            "umbra audit export --format ndjson",
+            "umbra audit export --format csv --output audit.csv",
         ],
     ),
     // `alias` group.
-    ("alias cvm", &["concrete alias cvm <CVM_ID> myvm"]),
+    ("alias cvm", &["umbra alias cvm <CVM_ID> myvm"]),
     (
         "alias profile",
-        &["concrete alias profile <PROFILE_ID> myprof"],
+        &["umbra alias profile <PROFILE_ID> myprof"],
     ),
-    ("alias ssh-key", &["concrete alias ssh-key <KEY_ID> laptop"]),
+    ("alias ssh-key", &["umbra alias ssh-key <KEY_ID> laptop"]),
     (
         "alias session",
         &[
-            "concrete alias session <SESSION> mysess",
-            "concrete alias session <SESSION> mysess --cvm <CVM_ID|alias>",
+            "umbra alias session <SESSION> mysess",
+            "umbra alias session <SESSION> mysess --cvm <CVM_ID|alias>",
         ],
     ),
-    ("alias rm", &["concrete alias rm myvm"]),
+    ("alias rm", &["umbra alias rm myvm"]),
     (
         "alias rename",
         &[
-            "concrete alias rename oldname newname",
-            "concrete alias rename mysess newsess --identity-file ~/.ssh/id_ed25519",
+            "umbra alias rename oldname newname",
+            "umbra alias rename mysess newsess --identity-file ~/.ssh/id_ed25519",
         ],
     ),
     (
         "alias prune",
-        &["concrete alias prune", "concrete alias prune --dry-run"],
+        &["umbra alias prune", "umbra alias prune --dry-run"],
     ),
     // `config` group.
     // `skill` group.
     (
         "skill install",
-        &[
-            "concrete skill install",
-            "concrete skill install --agents claude",
-        ],
+        &["umbra skill install", "umbra skill install --agents claude"],
     ),
     // `admin` group.
     (
         "admin sessions revoke",
         &[
-            "concrete admin sessions revoke --user <USER_ID>",
-            "concrete admin sessions revoke --entity <ENTITY_ID>",
+            "umbra admin sessions revoke --user <USER_ID>",
+            "umbra admin sessions revoke --entity <ENTITY_ID>",
         ],
     ),
     (
         "admin keys rotate",
-        &["concrete admin keys rotate --new-kid <KID>"],
+        &["umbra admin keys rotate --new-kid <KID>"],
     ),
 ];
 
@@ -471,7 +459,7 @@ const CONTAINER_TEMPLATE: &str =
 /// single-line usage is omitted.
 const GROUP_TEMPLATE: &str = "{about-with-newline}\n{before-help}{after-help}";
 
-/// Build the `concrete` command with per-level help applied. Parsing behaviour
+/// Build the `umbra` command with per-level help applied. Parsing behaviour
 /// is unchanged — this only customises help rendering.
 pub fn command() -> Command {
     let root_meta = Cli::command();
@@ -618,7 +606,7 @@ fn arg_token(arg: &Arg) -> String {
 }
 
 /// The bracketed argument tokens for a subcommand's synopsis (positionals then
-/// options then essential-global extras), excluding the `concrete <path>` prefix.
+/// options then essential-global extras), excluding the `umbra <path>` prefix.
 /// The shared `CvmTarget` exposes the same target twice — a positional `cvm_id`
 /// and an equivalent `--cvm` flag. When the positional is present the `--cvm`
 /// flag is redundant, so it is shown only once (as the positional) everywhere.
@@ -654,11 +642,11 @@ fn synopsis_tokens(cmd: &Command, path: &str) -> Vec<String> {
     tokens
 }
 
-/// Lay out a synopsis over one or more lines: `concrete <path>` plus its tokens,
+/// Lay out a synopsis over one or more lines: `umbra <path>` plus its tokens,
 /// wrapped at [`MAX_WIDTH`]; continuation lines align under the first argument
-/// (just past the `concrete <path> ` prefix). Returns each line already indented.
+/// (just past the `umbra <path> ` prefix). Returns each line already indented.
 fn render_synopsis(cmd: &Command, path: &str, first_indent: usize) -> Vec<String> {
-    let prefix = format!("concrete {path}");
+    let prefix = format!("umbra {path}");
     // Continuation lines line up under the first token, right after the prefix.
     let cont_indent = first_indent + prefix.len() + 1;
     let mut lines = Vec::new();
@@ -844,13 +832,13 @@ fn render_group_body(cmd: &Command, path: &str) -> String {
         .filter(|sub| sub.get_name() != "help")
         .collect();
 
-    // Usage block: `concrete <path> <COMMAND>`, then a synopsis per subcommand
-    // aligned under the first `concrete` (past the `Usage: ` heading).
+    // Usage block: `umbra <path> <COMMAND>`, then a synopsis per subcommand
+    // aligned under the first `umbra` (past the `Usage: ` heading).
     let usage_indent = "Usage: ".len();
     let mut out = format!(
         "{} {}\n",
         paint(heading_style(), "Usage:"),
-        paint(about_style(), &format!("concrete {path} <COMMAND>"))
+        paint(about_style(), &format!("umbra {path} <COMMAND>"))
     );
     for sub in &children {
         let sub_path = format!("{path} {}", sub.get_name());
@@ -1097,10 +1085,10 @@ mod tests {
         }
     }
 
-    /// Renders the `--help` text of a command path below `concrete`.
+    /// Renders the `--help` text of a command path below `umbra`.
     /// e.g.
-    ///   helper_render_help(&[])                -> `concrete --help`
-    ///   helper_render_help(&["cvm", "launch"]) -> `concrete cvm launch --help`
+    ///   helper_render_help(&[])                -> `umbra --help`
+    ///   helper_render_help(&["cvm", "launch"]) -> `umbra cvm launch --help`
     fn helper_render_help(path: &[&str]) -> String {
         fn descend(cmd: &Command, path: &[&str]) -> Command {
             match path.split_first() {
@@ -1138,7 +1126,7 @@ mod tests {
             .collect()
     }
 
-    /// Pins that `concrete --help` (level 1) lists exactly the declared commands
+    /// Pins that `umbra --help` (level 1) lists exactly the declared commands
     /// and global flags — each with its declared description — so the rendered
     /// help can never drift from the command tree without this test failing.
     #[test]
@@ -1166,7 +1154,7 @@ mod tests {
             })
             .collect();
 
-        // 2. What `concrete --help` actually renders, parsed back out.
+        // 2. What `umbra --help` actually renders, parsed back out.
         // Root help = the grouped commands, then the `Global options:` block.
         let help_output = command().render_help().to_string();
         let lines: Vec<&str> = help_output.lines().collect();
@@ -1242,7 +1230,7 @@ mod tests {
             .collect();
 
         for (name, declared) in &groups {
-            // 2. Render `concrete <group> --help` and parse its Commands block.
+            // 2. Render `umbra <group> --help` and parse its Commands block.
             let help = helper_render_help(&[name.as_str()]);
             let lines: Vec<&str> = help.lines().collect();
             let commands_start = lines
@@ -1326,7 +1314,7 @@ mod tests {
                 {
                     continue;
                 }
-                // Render `concrete <group> <sub> --help`; it must show Usage + Examples.
+                // Render `umbra <group> <sub> --help`; it must show Usage + Examples.
                 let help = helper_render_help(&[group_name.as_str(), sub_name]);
                 assert!(
                     help.lines().any(|line| line.starts_with("Usage:")),

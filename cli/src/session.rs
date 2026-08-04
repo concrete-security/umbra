@@ -105,7 +105,7 @@ mod tests {
     use super::*;
 
     fn temp_config_dir() -> PathBuf {
-        std::env::temp_dir().join(format!("concrete-cli-test-{}", uuid::Uuid::new_v4()))
+        std::env::temp_dir().join(format!("umbra-cli-test-{}", uuid::Uuid::new_v4()))
     }
 
     fn sample_session() -> Session {

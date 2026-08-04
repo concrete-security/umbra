@@ -1,6 +1,6 @@
 //! Filesystem primitives shared across the CLI's local-state writers.
 //!
-//! The CLI persists several small files under `~/.concrete` (config, session,
+//! The CLI persists several small files under `~/.umbra` (config, session,
 //! aliases, SSH identities, per-CVM state, aTLS policy). They all need the same
 //! fail-closed write: create the file owner-only, never follow a symlink, and
 //! replace the target atomically so a concurrent reader never sees a partial or
@@ -35,7 +35,7 @@ pub(crate) fn write_atomic_file(path: &Path, data: &[u8], mode: u32) -> io::Resu
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
-        .unwrap_or("concrete");
+        .unwrap_or("umbra");
     let tmp = parent.join(format!(".{name}.{}.tmp", std::process::id()));
 
     let mut options = OpenOptions::new();
@@ -60,7 +60,7 @@ mod tests {
     /// relies on. Also checks the temp file is not left behind.
     #[test]
     fn write_atomic_file_replaces_and_restricts_success() {
-        let dir = std::env::temp_dir().join(format!("concrete-fsutil-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("umbra-fsutil-{}", uuid::Uuid::new_v4()));
         let target = dir.join("state.toml");
         write_atomic_file(&target, b"old", 0o600).expect("first write");
         write_atomic_file(&target, b"new", 0o600).expect("replacing write");
@@ -88,7 +88,7 @@ mod tests {
     #[test]
     fn write_atomic_file_rejects_symlinked_temp_failure() {
         use std::os::unix::fs::symlink;
-        let dir = std::env::temp_dir().join(format!("concrete-fsutil-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("umbra-fsutil-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).expect("temp dir");
         let target = dir.join("state.toml");
         // Reproduce write_atomic_file's temp name and pre-plant a symlink there,

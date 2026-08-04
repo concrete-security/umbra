@@ -312,7 +312,7 @@ fn print_launch_result(result: &SecurityCvmProvisionResult, json_output: bool) {
                 "ca export token",
                 format!("{}  (save now -- not recoverable)", result.ca_export_token),
             )
-            .next_step("concrete cvm launch --profile <profile-id> --ssh-key <key-id>");
+            .next_step("umbra cvm launch --profile <profile-id> --ssh-key <key-id>");
         if let Some(token) = &result.ingest_token {
             confirm = confirm.field("ingest token", token.clone());
         }
@@ -338,7 +338,7 @@ fn print_update_result(result: &SecurityCvmUpdateResult, json_output: bool) {
                     "dev cvms requiring update",
                     result.dev_cvms_requiring_update.join(", "),
                 )
-                .next_step("run concrete cvm update <cvm-id> for each listed Dev CVM");
+                .next_step("run umbra cvm update <cvm-id> for each listed Dev CVM");
         }
         println!("{}", style::render_confirm(&confirm));
     }

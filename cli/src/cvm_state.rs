@@ -56,7 +56,7 @@ mod tests {
 
     impl TempDir {
         fn new() -> Self {
-            let path = env::temp_dir().join(format!("concrete-cvm-state-{}", Uuid::new_v4()));
+            let path = env::temp_dir().join(format!("umbra-cvm-state-{}", Uuid::new_v4()));
             fs::create_dir_all(&path).unwrap();
             Self(path)
         }

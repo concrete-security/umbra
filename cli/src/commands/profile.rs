@@ -111,7 +111,7 @@ fn create(config: &ResolvedConfig, args: ProfileCreateArgs, json_output: bool) -
         let confirm = style::ConfirmBlock::new("created", "profile", profile.name.clone())
             .field("id", profile.id.clone())
             .next_step(format!(
-                "concrete profile members add <user-id> --profile {}",
+                "umbra profile members add <user-id> --profile {}",
                 profile.id
             ));
         println!("{}", style::render_confirm(&confirm));
@@ -593,7 +593,7 @@ fn print_member_output(
         .field("user id", user_id)
         .field("profile id", profile_id)
         .next_step(format!(
-            "concrete cvm launch --profile {profile_id} --ssh-key <key-id>"
+            "umbra cvm launch --profile {profile_id} --ssh-key <key-id>"
         ));
         println!("{}", style::render_confirm(&confirm));
     } else {
@@ -628,7 +628,7 @@ mod tests {
 
     #[test]
     fn read_policy_rejects_non_object_json() {
-        let path = std::env::temp_dir().join(format!("concrete-policy-{}.json", Uuid::new_v4()));
+        let path = std::env::temp_dir().join(format!("umbra-policy-{}.json", Uuid::new_v4()));
         fs::write(&path, "[]").expect("test policy file written");
 
         let err = read_policy(Some(&path)).expect_err("array policy is rejected");

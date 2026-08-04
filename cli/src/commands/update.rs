@@ -1,21 +1,21 @@
-//! `concrete update` -- self-update from the published release channel -- plus
+//! `umbra update` -- self-update from the published release channel -- plus
 //! the passive new-version check every other command surfaces.
 //!
 //! The install service (the same origin the verified installer uses) serves
-//! `/releases/concrete-cli/<version|latest>/<target>/concrete` with a sibling
-//! `concrete.sha256`, version-root `concrete-cli.intoto.jsonl`, and
-//! `/releases/concrete-cli/latest/version` with the latest published version
-//! string. `concrete update` downloads the immutable versioned artifact for
+//! `/releases/umbra-cli/<version|latest>/<target>/umbra` with a sibling
+//! `umbra.sha256`, version-root `umbra-cli.intoto.jsonl`, and
+//! `/releases/umbra-cli/latest/version` with the latest published version
+//! string. `umbra update` downloads the immutable versioned artifact for
 //! this build's target triple, verifies its checksum and signed SLSA
 //! provenance, exec-checks the staged binary, and atomically renames it over
 //! the running executable.
 //!
 //! The passive check keeps a small cache file (`update-check.json`) in the
 //! config directory, refreshed at most once per [`CHECK_INTERVAL`] by a
-//! detached re-invocation of `concrete update --refresh-cache`, and prints a
+//! detached re-invocation of `umbra update --refresh-cache`, and prints a
 //! one-line stderr notice when the cache shows a newer published release.
 //! Both halves are contract-bound by `docs/specs/cli.md` (section 3.6
-//! `concrete update`, section 4.4 `update-check.json`).
+//! `umbra update`, section 4.4 `update-check.json`).
 
 use std::{
     cmp::Ordering,
@@ -46,11 +46,11 @@ const BUILD_TARGET: &str = env!("BUILD_TARGET");
 /// Fixed release identity enforced by both the bootstrap installer and
 /// self-update. The release workflow is `workflow_dispatch` on `main`, so its
 /// signed provenance is branch- and input-bound rather than tag-triggered.
-const SLSA_SOURCE_REPO: &str = "github.com/concrete-security/concrete";
+const SLSA_SOURCE_REPO: &str = "github.com/umbra-security/umbra";
 const SLSA_SOURCE_BRANCH: &str = "main";
 const SLSA_WORKFLOW_INPUT: &str = "dry_run=false";
 const SLSA_BUILDER_ID: &str = "https://github.com/slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@refs/tags/v2.1.0";
-const SLSA_VERIFIER_ENV: &str = "CONCRETE_SLSA_VERIFIER";
+const SLSA_VERIFIER_ENV: &str = "UMBRA_SLSA_VERIFIER";
 
 /// Cache file for the passive new-version check, under the config directory.
 const CACHE_FILE: &str = "update-check.json";
@@ -60,7 +60,7 @@ const CHECK_INTERVAL: chrono::Duration = chrono::Duration::hours(24);
 
 /// Environment marker distinguishing the detached background worker from the
 /// intermediate stage of the double-spawn (see [`run_refresh_cache`]).
-const WORKER_ENV: &str = "CONCRETE_UPDATE_CHECK_WORKER";
+const WORKER_ENV: &str = "UMBRA_UPDATE_CHECK_WORKER";
 
 /// Timeouts for the small version-metadata probe and the binary download.
 const PROBE_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -97,7 +97,12 @@ fn perform(
     config: &ResolvedConfig,
     json_output: bool,
 ) -> Result<ExitStatus, (ExitStatus, String)> {
-    let base_url = config.install_base_url.as_str();
+    let base_url = config.install_base_url.as_deref().ok_or_else(|| {
+        (
+            ExitStatus::Usage,
+            "[usage] missing install_base_url; set UMBRA_INSTALL_BASE_URL or config.toml install_base_url to an approved HTTPS install origin".to_string(),
+        )
+    })?;
     validate_install_base_url(base_url)?;
 
     let requested = match &args.version {
@@ -181,12 +186,12 @@ fn perform(
     };
     let client = http_client(DOWNLOAD_TIMEOUT)?;
     let artifact_url =
-        format!("{base_url}/releases/concrete-cli/{version_segment}/{BUILD_TARGET}/concrete");
+        format!("{base_url}/releases/umbra-cli/{version_segment}/{BUILD_TARGET}/umbra");
     let bytes = download(&client, &artifact_url)?.ok_or_else(|| {
         (
             ExitStatus::Error,
             format!(
-                "[error] no published concrete binary for {BUILD_TARGET} at version {version_segment}"
+                "[error] no published umbra binary for {BUILD_TARGET} at version {version_segment}"
             ),
         )
     })?;
@@ -201,18 +206,18 @@ fn perform(
     if actual_digest != expected_digest {
         return Err((
             ExitStatus::Error,
-            "[error] checksum mismatch for the downloaded concrete binary; retry later and report if it persists"
+            "[error] checksum mismatch for the downloaded umbra binary; retry later and report if it persists"
                 .to_string(),
         ));
     }
 
     let provenance_url =
-        format!("{base_url}/releases/concrete-cli/{version_segment}/concrete-cli.intoto.jsonl");
+        format!("{base_url}/releases/umbra-cli/{version_segment}/umbra-cli.intoto.jsonl");
     let provenance = download(&client, &provenance_url)?.ok_or_else(|| {
         (
             ExitStatus::Error,
             format!(
-                "[error] the install service did not publish SLSA provenance for concrete {version_segment}"
+                "[error] the install service did not publish SLSA provenance for umbra {version_segment}"
             ),
         )
     })?;
@@ -251,7 +256,7 @@ fn perform(
     } else {
         let confirm = style::ConfirmBlock::new(
             "updated",
-            "concrete",
+            "umbra",
             format!("{CURRENT_VERSION} -> {reported_version}"),
         )
         .field("path", exe_path.display().to_string())
@@ -261,7 +266,7 @@ fn perform(
     Ok(ExitStatus::Ok)
 }
 
-/// `concrete update --check`: report whether a newer release is published,
+/// `umbra update --check`: report whether a newer release is published,
 /// without installing anything.
 fn check_only(
     requested: &Requested,
@@ -287,9 +292,9 @@ fn check_only(
                 print_check_json("update_available", Some(latest));
             } else {
                 let confirm =
-                    style::ConfirmBlock::new("update available:", "concrete", latest.clone())
+                    style::ConfirmBlock::new("update available:", "umbra", latest.clone())
                         .field("installed", CURRENT_VERSION)
-                        .next_step("concrete update");
+                        .next_step("umbra update");
                 println!("{}", style::render_confirm(&confirm));
             }
             Ok(ExitStatus::Ok)
@@ -320,7 +325,7 @@ fn report_up_to_date(json_output: bool) -> ExitStatus {
         // `--version` pin, where "latest" was never probed.
         print_check_json("up_to_date", None);
     } else {
-        let confirm = style::ConfirmBlock::new("up to date:", "concrete", CURRENT_VERSION);
+        let confirm = style::ConfirmBlock::new("up to date:", "umbra", CURRENT_VERSION);
         println!("{}", style::render_confirm(&confirm));
     }
     ExitStatus::Ok
@@ -331,7 +336,7 @@ fn report_ahead(latest: &str, json_output: bool) -> ExitStatus {
         print_check_json("ahead", Some(latest));
     } else {
         let confirm =
-            style::ConfirmBlock::new("ahead of latest release:", "concrete", CURRENT_VERSION)
+            style::ConfirmBlock::new("ahead of latest release:", "umbra", CURRENT_VERSION)
                 .field("latest published", latest.to_string())
                 .field(
                     "note",
@@ -423,7 +428,7 @@ fn http_client(timeout: Duration) -> Result<reqwest::blocking::Client, (ExitStat
                 )),
             }
         }))
-        .user_agent(format!("concrete-cli/{CURRENT_VERSION} ({BUILD_TARGET})"))
+        .user_agent(format!("umbra-cli/{CURRENT_VERSION} ({BUILD_TARGET})"))
         .build()
         .map_err(|err| {
             (
@@ -474,13 +479,13 @@ fn download(
     Ok(Some(bytes.to_vec()))
 }
 
-/// Fetch `/releases/concrete-cli/latest/version`. `Ok(None)` when the install
+/// Fetch `/releases/umbra-cli/latest/version`. `Ok(None)` when the install
 /// service predates the version-metadata file (404).
 fn fetch_latest_version(
     client: &reqwest::blocking::Client,
     base_url: &str,
 ) -> Result<Option<String>, (ExitStatus, String)> {
-    let url = format!("{base_url}/releases/concrete-cli/latest/version");
+    let url = format!("{base_url}/releases/umbra-cli/latest/version");
     let Some(bytes) = download(client, &url)? else {
         return Ok(None);
     };
@@ -619,11 +624,9 @@ struct StagedBinary {
 
 impl StagedBinary {
     fn create(dir: &Path) -> Result<Self, (ExitStatus, String)> {
-        let path = dir.join(format!(".concrete-update.{}.tmp", std::process::id()));
-        let provenance_path = dir.join(format!(
-            ".concrete-update.{}.intoto.jsonl",
-            std::process::id()
-        ));
+        let path = dir.join(format!(".umbra-update.{}.tmp", std::process::id()));
+        let provenance_path =
+            dir.join(format!(".umbra-update.{}.intoto.jsonl", std::process::id()));
         let mut options = fs::OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -632,7 +635,7 @@ impl StagedBinary {
             (
                 ExitStatus::Error,
                 format!(
-                    "[error] cannot write to {}: {err} -- re-run with sufficient privileges, or use the verified installer in docs/quick-start.md with CONCRETE_INSTALL_BIN_DIR set to a writable directory",
+                    "[error] cannot write to {}: {err} -- re-run with sufficient privileges, or use the verified installer in docs/quick-start.md with UMBRA_INSTALL_BIN_DIR set to a writable directory",
                     dir.display()
                 ),
             )
@@ -720,7 +723,7 @@ impl StagedBinary {
             return Err((
                 ExitStatus::Error,
                 format!(
-                    "[error] SLSA provenance verification failed for the downloaded concrete binary (verifier exited with {})",
+                    "[error] SLSA provenance verification failed for the downloaded umbra binary (verifier exited with {})",
                     output.status
                 ),
             ));
@@ -772,7 +775,7 @@ fn exec_check(path: &Path) -> Result<String, (ExitStatus, String)> {
             ),
         ));
     }
-    // clap prints `concrete <version>`.
+    // clap prints `umbra <version>`.
     String::from_utf8_lossy(&output.stdout)
         .split_whitespace()
         .last()
@@ -844,7 +847,7 @@ fn passive_check_enabled(config: &ResolvedConfig) -> bool {
 /// cache is stale. Called by `lib.rs` before eligible commands run; never
 /// blocks on the network.
 pub(crate) fn maybe_spawn_background_refresh(config: &ResolvedConfig) {
-    if !passive_check_enabled(config) {
+    if config.install_base_url.is_none() || !passive_check_enabled(config) {
         return;
     }
     let now = Utc::now();
@@ -890,7 +893,7 @@ pub(crate) fn maybe_spawn_background_refresh(config: &ResolvedConfig) {
     }
 }
 
-/// The hidden `concrete update --refresh-cache` entrypoint. Two stages so no
+/// The hidden `umbra update --refresh-cache` entrypoint. Two stages so no
 /// process is left for the interactive parent to reap: the first invocation
 /// re-spawns itself with [`WORKER_ENV`] set and exits immediately (its parent
 /// wait()s those few milliseconds); the orphaned worker is reparented to init
@@ -923,13 +926,16 @@ fn run_refresh_cache(config: &ResolvedConfig) -> ExitStatus {
 /// would let a network attacker advertise a version and drive the user into an
 /// update, so a non-https base URL simply yields no notice.
 fn refresh_cache_now(config: &ResolvedConfig) {
-    if validate_install_base_url(&config.install_base_url).is_err() {
+    let Some(base_url) = config.install_base_url.as_deref() else {
+        return;
+    };
+    if validate_install_base_url(base_url).is_err() {
         return;
     }
     let Ok(client) = http_client(PROBE_TIMEOUT) else {
         return;
     };
-    if let Ok(Some(version)) = fetch_latest_version(&client, &config.install_base_url) {
+    if let Ok(Some(version)) = fetch_latest_version(&client, base_url) {
         let _ = write_cache(&config.config_dir, Some(&version));
     }
 }
@@ -1113,9 +1119,9 @@ mod tests {
     }
 
     /// A throwaway config dir, so a cache test never touches the real
-    /// `~/.concrete`. Mirrors `config::tests::temp_config_dir`.
+    /// `~/.umbra`. Mirrors `config::tests::temp_config_dir`.
     fn temp_config_dir() -> PathBuf {
-        std::env::temp_dir().join(format!("concrete-update-test-{}", uuid::Uuid::new_v4()))
+        std::env::temp_dir().join(format!("umbra-update-test-{}", uuid::Uuid::new_v4()))
     }
 
     #[cfg(unix)]
@@ -1148,6 +1154,30 @@ set -eu
         path
     }
 
+    /// No public install origin is assumed before launch approval, so an
+    /// explicit update must fail before constructing an HTTP client.
+    #[test]
+    fn perform_missing_install_origin_failure() {
+        let mut config = ResolvedConfig::resolve(crate::config::ConfigOverrides {
+            config_dir: Some(temp_config_dir()),
+            ..Default::default()
+        });
+        config.install_base_url = None;
+        config.install_base_url_source = crate::config::ConfigSource::Missing;
+        let args = UpdateArgs {
+            check: true,
+            version: None,
+            refresh_cache: false,
+        };
+
+        let (status, message) = perform(&args, &config, false)
+            .expect_err("update without an approved install origin must fail");
+
+        assert!(matches!(status, ExitStatus::Usage));
+        assert!(message.contains("missing install_base_url"));
+        assert!(message.contains("UMBRA_INSTALL_BASE_URL"));
+    }
+
     /// An override must name the trusted executable absolutely; a relative
     /// value could otherwise resolve differently after a directory change.
     #[cfg(unix)]
@@ -1168,7 +1198,7 @@ set -eu
     fn resolve_slsa_verifier_relative_path_shadow_failure() {
         let cwd = env::current_dir().expect("current directory available");
         let relative_dir = PathBuf::from(format!(
-            ".concrete-update-resolver-test-{}",
+            ".umbra-update-resolver-test-{}",
             uuid::Uuid::new_v4()
         ));
         let dir = cwd.join(&relative_dir);
@@ -1201,8 +1231,8 @@ set -eu
     /// Transport rule for the release channel: https anywhere, plaintext only
     /// for loopback (local mirrors and the release-tree tests).
     #[rstest]
-    #[case::https("https://install.concrete-security.com")]
-    #[case::https_with_path("https://mirror.example.com/concrete")]
+    #[case::https("https://install.example.com")]
+    #[case::https_with_path("https://mirror.example.com/umbra")]
     #[case::loopback_v4("http://127.0.0.1:18923")]
     #[case::loopback_v4_other("http://127.0.0.2:8080")]
     #[case::loopback_v6("http://[::1]:18923")]
@@ -1219,12 +1249,12 @@ set -eu
     /// binary and its checksum, so it must be refused -- as must a look-alike
     /// loopback name, a non-http(s) scheme, and anything unparseable.
     #[rstest]
-    #[case::plaintext_remote("http://install.concrete-security.com")]
+    #[case::plaintext_remote("http://install.example.com")]
     #[case::loopback_lookalike("http://127.0.0.1.evil.example.com")]
     #[case::localhost_lookalike("http://localhost.evil.example.com")]
     #[case::file_scheme("file:///tmp/payload")]
     #[case::ftp_scheme("ftp://install.example.com")]
-    #[case::not_a_url("install.concrete-security.com")]
+    #[case::not_a_url("install.example.com")]
     #[case::empty("")]
     fn validate_install_base_url_plaintext_or_bad_scheme_failure(#[case] base_url: &str) {
         let (status, message) = validate_install_base_url(base_url)
@@ -1354,7 +1384,7 @@ set -eu
     fn checksum_file_parses_sha256sum_format() {
         let digest = "a".repeat(64);
         assert_eq!(
-            parse_checksum_file(format!("{digest}  concrete\n").as_bytes()).unwrap(),
+            parse_checksum_file(format!("{digest}  umbra\n").as_bytes()).unwrap(),
             digest
         );
         assert_eq!(
@@ -1362,7 +1392,7 @@ set -eu
             digest
         );
         assert!(parse_checksum_file(b"").is_err());
-        assert!(parse_checksum_file(b"deadbeef  concrete").is_err());
+        assert!(parse_checksum_file(b"deadbeef  umbra").is_err());
         assert!(parse_checksum_file(&[0xff, 0xfe]).is_err());
     }
 
@@ -1398,11 +1428,11 @@ set -eu
         let dir = temp_config_dir();
         fs::create_dir_all(&dir).expect("test dir created");
         let verifier = fake_verifier(&dir);
-        let trusted_path = dir.join("concrete");
+        let trusted_path = dir.join("umbra");
         fs::write(&trusted_path, b"trusted current binary").expect("trusted binary written");
         let execution_marker = dir.join("malicious-executed");
         let malicious = format!("#!/bin/sh\ntouch '{}'\n", execution_marker.display());
-        let checksum = format!("{}  concrete\n", sha256_hex(malicious.as_bytes()));
+        let checksum = format!("{}  umbra\n", sha256_hex(malicious.as_bytes()));
         assert_eq!(
             parse_checksum_file(checksum.as_bytes()).expect("matching checksum parsed"),
             sha256_hex(malicious.as_bytes())

@@ -49,9 +49,9 @@ pub(crate) fn select_cvm(
         .next()
         .ok_or_else(|| {
             if fallback.is_empty() {
-                "[usage] this command requires an explicit CVM id; pass <CVM_ID> or --cvm (it will not use CONCRETE_DEFAULT_CVM or default_cvm)".to_string()
+                "[usage] this command requires an explicit CVM id; pass <CVM_ID> or --cvm (it will not use UMBRA_DEFAULT_CVM or default_cvm)".to_string()
             } else {
-                "[usage] missing CVM id; pass <CVM_ID> or set --cvm, CONCRETE_DEFAULT_CVM, or default_cvm".to_string()
+                "[usage] missing CVM id; pass <CVM_ID> or set --cvm, UMBRA_DEFAULT_CVM, or default_cvm".to_string()
             }
         })?;
     alias::resolve_or_passthrough(config, alias::AliasKind::Cvm, raw)
@@ -63,11 +63,10 @@ mod tests {
     use crate::config::{ConfigOverrides, ResolvedConfig};
 
     /// A `ResolvedConfig` whose `default_cvm` is set directly, using a throwaway
-    /// config dir so `resolve()` never reads the real `~/.concrete` and the result
-    /// is independent of ambient `CONCRETE_DEFAULT_CVM`.
+    /// config dir so `resolve()` never reads the real `~/.umbra` and the result
+    /// is independent of ambient `UMBRA_DEFAULT_CVM`.
     fn config_with_default(default_cvm: Option<&str>) -> ResolvedConfig {
-        let dir =
-            std::env::temp_dir().join(format!("concrete-resolve-test-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("umbra-resolve-test-{}", uuid::Uuid::new_v4()));
         let mut config = ResolvedConfig::resolve(ConfigOverrides {
             config_dir: Some(dir),
             ..Default::default()

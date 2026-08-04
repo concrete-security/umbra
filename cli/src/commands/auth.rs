@@ -452,7 +452,7 @@ fn handle_loopback_callback(
     let response = if result.is_ok() {
         loopback_response(
             "200 OK",
-            "Authentication complete. Return to the Concrete CLI.",
+            "Authentication complete. Return to the Umbra CLI.",
         )
     } else {
         loopback_response(
@@ -746,7 +746,7 @@ fn refresh_existing_session(config: &ResolvedConfig) -> Result<Session, (ExitSta
     let refresh_token = Zeroizing::new(session.refresh_token.clone().ok_or_else(|| {
         (
             ExitStatus::AuthRequired,
-            "[auth_required] no refresh token stored; run concrete auth login".to_string(),
+            "[auth_required] no refresh token stored; run umbra auth login".to_string(),
         )
     })?);
     match session.refresh_expires_at {
@@ -754,7 +754,7 @@ fn refresh_existing_session(config: &ResolvedConfig) -> Result<Session, (ExitSta
         _ => {
             return Err((
                 ExitStatus::AuthRequired,
-                "[auth_required] refresh token expired; run concrete auth login".to_string(),
+                "[auth_required] refresh token expired; run umbra auth login".to_string(),
             ))
         }
     }
@@ -793,7 +793,7 @@ fn refresh_token_pair(
     if response.status() == reqwest::StatusCode::UNAUTHORIZED {
         return Err((
             ExitStatus::AuthRequired,
-            "[auth_required] refresh token rejected; run concrete auth login".to_string(),
+            "[auth_required] refresh token rejected; run umbra auth login".to_string(),
         ));
     }
     if !response.status().is_success() {
@@ -970,7 +970,7 @@ fn maybe_offer_skill(config: &ResolvedConfig, json_output: bool) {
     match config.skill_auto_install {
         // Opted in earlier: refresh quietly so a CLI upgrade propagates.
         Some(true) => skill::install_on_login(config, true),
-        // Opted out earlier (or CONCRETE_NO_SKILL): do nothing.
+        // Opted out earlier (or UMBRA_NO_SKILL): do nothing.
         Some(false) => {}
         // Not asked yet: prompt once, but only in an interactive text session
         // with at least one agent to install for.
@@ -983,7 +983,7 @@ fn maybe_offer_skill(config: &ResolvedConfig, json_output: bool) {
                 return;
             }
             let yes = prompt_yes_no(&format!(
-                "Install the Concrete skill for {}? It teaches the AI agent how to drive this CLI.",
+                "Install the Umbra skill for {}? It teaches the AI agent how to drive this CLI.",
                 agents.join(", ")
             ));
             // Record the answer so the prompt never reappears.

@@ -426,7 +426,7 @@ mod tests {
 
     #[test]
     fn key_add_identity_infers_sibling_private_key() {
-        let dir = std::env::temp_dir().join(format!("concrete-key-add-{}", Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("umbra-key-add-{}", Uuid::new_v4()));
         fs::create_dir_all(&dir).expect("temp dir created");
         let private_key = dir.join("work_ed25519");
         let public_key_path = dir.join("work_ed25519.pub");
@@ -451,7 +451,7 @@ mod tests {
 
     #[test]
     fn key_add_identity_rejects_explicit_mismatch() {
-        let dir = std::env::temp_dir().join(format!("concrete-key-add-{}", Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("umbra-key-add-{}", Uuid::new_v4()));
         fs::create_dir_all(&dir).expect("temp dir created");
         let first_private_key = dir.join("first_ed25519");
         let first_public_key = dir.join("first_ed25519.pub");
@@ -532,7 +532,7 @@ mod tests {
     /// we get past local validation) must leave the store empty.
     #[test]
     fn test_key_add_alias_failure() {
-        let dir = std::env::temp_dir().join(format!("concrete-key-add-fail-{}", Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("umbra-key-add-fail-{}", Uuid::new_v4()));
         fs::create_dir_all(&dir).expect("temp dir created");
         let private_key = dir.join("id_ed25519");
         Command::new("ssh-keygen")

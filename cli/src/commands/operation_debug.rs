@@ -15,7 +15,7 @@ pub(crate) fn log_poll_decode_failure<T: std::fmt::Display>(action: &str, body: 
 }
 
 fn poll_debug_enabled() -> bool {
-    match std::env::var("CONCRETE_DEBUG_POLL") {
+    match std::env::var("UMBRA_DEBUG_POLL") {
         Ok(value) => matches!(
             value.trim().to_ascii_lowercase().as_str(),
             "1" | "true" | "yes" | "on"

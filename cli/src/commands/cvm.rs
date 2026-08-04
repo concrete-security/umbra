@@ -1093,14 +1093,14 @@ fn write_public_key_file(path: &Path, data: &[u8]) -> Result<(), (ExitStatus, St
 fn default_ssh_key_comment(config: &ResolvedConfig) -> String {
     if let Ok(user) = env::var("USER") {
         if !user.is_empty() {
-            return format!("{user}@concrete");
+            return format!("{user}@umbra");
         }
     }
     config
         .console_url
         .as_deref()
-        .map(|value| format!("concrete:{value}"))
-        .unwrap_or_else(|| "concrete".to_string())
+        .map(|value| format!("umbra:{value}"))
+        .unwrap_or_else(|| "umbra".to_string())
 }
 
 fn optional_profile_filter(config: &ResolvedConfig) -> Result<Option<String>, String> {
@@ -1356,7 +1356,7 @@ fn write_policy_file_after_update(
         return Ok((target, PolicyWriteStatus::ReplacedAfterConfirmation));
     }
     Err(format!(
-        "[error] Dev CVM update succeeded, but the local aTLS policy file was not changed. The new policy changes the measurement this CLI trusts. Current policy: {}. Re-run `concrete cvm update {}` from an interactive terminal and answer yes if you trust the new measurement.",
+        "[error] Dev CVM update succeeded, but the local aTLS policy file was not changed. The new policy changes the measurement this CLI trusts. Current policy: {}. Re-run `umbra cvm update {}` from an interactive terminal and answer yes if you trust the new measurement.",
         target.display(),
         cvm_id
     ))
@@ -1425,7 +1425,7 @@ fn prompt_replace_policy(cvm_id: &str, target: &Path) -> Result<bool, String> {
     eprintln!(
         "{}",
         style::info_line(
-            "Your local policy file is the golden measurement this CLI trusts, so Concrete will not replace it automatically."
+            "Your local policy file is the golden measurement this CLI trusts, so Umbra will not replace it automatically."
         )
     );
     eprint!(
@@ -1572,7 +1572,7 @@ fn print_launch_result(cvm: Cvm, policy_file: PathBuf, alias: Option<&str>, json
             .field("state", cvm.state.clone())
             .field("alias", alias.unwrap_or("-").to_string())
             .field("policy file", policy_file.display().to_string())
-            .next_step(format!("concrete ssh {target}"));
+            .next_step(format!("umbra ssh {target}"));
         println!("{}", style::render_confirm(&confirm));
     }
 }
@@ -1606,7 +1606,7 @@ fn print_update_result(
             .field("state", cvm.state.clone())
             .field("policy file", policy_file.display().to_string())
             .field("policy status", policy_status.as_str())
-            .next_step(format!("concrete ssh {cvm_id}"));
+            .next_step(format!("umbra ssh {cvm_id}"));
         println!("{}", style::render_confirm(&confirm));
     }
 }
@@ -1761,7 +1761,7 @@ mod tests {
 
     #[test]
     fn update_policy_refuses_to_overwrite_changed_local_trust_in_json_mode() {
-        let dir = std::env::temp_dir().join(format!("concrete-cvm-policy-test-{}", Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("umbra-cvm-policy-test-{}", Uuid::new_v4()));
         let cvm_id = "00000000-0000-4000-8000-000000000001";
         let old_hash = "a".repeat(64);
         let new_hash = "b".repeat(64);
@@ -1786,7 +1786,7 @@ mod tests {
 
     #[test]
     fn update_policy_accepts_unchanged_local_trust() {
-        let dir = std::env::temp_dir().join(format!("concrete-cvm-policy-test-{}", Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("umbra-cvm-policy-test-{}", Uuid::new_v4()));
         let cvm_id = "00000000-0000-4000-8000-000000000001";
         write_policy_file(
             &dir,
@@ -1859,7 +1859,7 @@ mod tests {
 
     #[test]
     fn write_public_key_file_refuses_to_overwrite() {
-        let dir = std::env::temp_dir().join(format!("concrete-cvm-key-test-{}", Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("umbra-cvm-key-test-{}", Uuid::new_v4()));
         fs::create_dir_all(&dir).expect("temp dir created");
         let path = dir.join("id_ed25519.pub");
         fs::write(&path, "ssh-ed25519 existing\n").expect("public key written");
@@ -2065,7 +2065,7 @@ mod tests {
     #[test]
     fn test_profile_flag_resolves_alias_success() {
         const PROFILE_ID: &str = "16286507-f87f-449e-a229-be04067fc23c";
-        let dir = std::env::temp_dir().join(format!("concrete-profile-alias-{}", Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("umbra-profile-alias-{}", Uuid::new_v4()));
         let config = ResolvedConfig::resolve(crate::config::ConfigOverrides {
             config_dir: Some(dir),
             profile: vec!["team-prod".into()],

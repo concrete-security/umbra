@@ -1,41 +1,41 @@
 //! The `alias` cell of the read views, exercised through whole commands.
 //!
-//! These drive the REAL `concrete` binary as a child process against an in-process
+//! These drive the REAL `umbra` binary as a child process against an in-process
 //! mock Console, so one test covers the whole chain: argv parsing → config/session
 //! resolution → Console call → alias-store load → cell source → card render →
 //! payload on stdout → exit code.
 //!
 //! They live in `tests/` rather than beside the code for one reason: only an
-//! integration test gets `CARGO_BIN_EXE_concrete`, which Cargo guarantees is BUILT
+//! integration test gets `CARGO_BIN_EXE_umbra`, which Cargo guarantees is BUILT
 //! and UP TO DATE. A `cargo test` of the library alone never produces
-//! `target/debug/concrete`, so an in-crate version of these tests failed on a clean
+//! `target/debug/umbra`, so an in-crate version of these tests failed on a clean
 //! checkout (CI) and — worse — passed against a stale binary, testing code that was
 //! no longer the source.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use concrete_cli::test_support::{
+use rstest::rstest;
+use umbra_cli::test_support::{
     corrupt_alias_store, seed_resource_alias, temp_config_with_session, MockConsole, Presence,
 };
-use rstest::rstest;
 
 // Real UUIDs: the CLI validates the shape of an id before using it.
 const CVM_ID: &str = "9a7f6b4a-1111-2222-3333-444444444444";
 const PROFILE_ID: &str = "16286507-f87f-449e-a229-be04067fc23c";
 const KEY_ID: &str = "3c4c2b64-b059-41a6-b925-3e4816ffee60";
 
-/// Run `concrete <args>` against `config_dir` and `console_url`, returning its exit
+/// Run `umbra <args>` against `config_dir` and `console_url`, returning its exit
 /// code, stdout and stderr.
 ///
-/// The child inherits nothing that could steer it: every `CONCRETE_*` variable is
-/// removed, so a developer shell holding `CONCRETE_OUTPUT=json` or
-/// `CONCRETE_DEFAULT_PROFILE=…` cannot turn these tests red (or green) for the wrong
+/// The child inherits nothing that could steer it: every `UMBRA_*` variable is
+/// removed, so a developer shell holding `UMBRA_OUTPUT=json` or
+/// `UMBRA_DEFAULT_PROFILE=…` cannot turn these tests red (or green) for the wrong
 /// reason. stderr is returned, not dropped, so a failing assertion can show why.
 fn run_cli(config_dir: &Path, console_url: &str, args: &[&str]) -> (i32, String, String) {
-    let mut command = Command::new(Path::new(env!("CARGO_BIN_EXE_concrete")));
+    let mut command = Command::new(Path::new(env!("CARGO_BIN_EXE_umbra")));
     for (key, _) in std::env::vars_os() {
-        if key.to_string_lossy().starts_with("CONCRETE_") {
+        if key.to_string_lossy().starts_with("UMBRA_") {
             command.env_remove(key);
         }
     }
@@ -46,7 +46,7 @@ fn run_cli(config_dir: &Path, console_url: &str, args: &[&str]) -> (i32, String,
         .arg(console_url)
         .args(args)
         .output()
-        .expect("run the concrete binary");
+        .expect("run the umbra binary");
     (
         output.status.code().unwrap_or(-1),
         String::from_utf8_lossy(&output.stdout).into_owned(),

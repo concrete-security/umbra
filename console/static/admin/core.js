@@ -2,7 +2,7 @@ window.Admin = {
   STORAGE_KEY: "concrete_admin_session",
   ENTITY_KEY: "concrete_admin_entity",
   OPS_KEY: "concrete_admin_ops",
-  OAUTH_CLIENT_ID: "concrete-cli-v1",
+  OAUTH_CLIENT_ID: "umbra-cli-v1",
   PKCE_KEY: "concrete_admin_pkce",
   P: {
     PLATFORM: "PLATFORM_OPERATOR",

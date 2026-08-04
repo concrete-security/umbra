@@ -755,7 +755,7 @@ mod tests {
     /// A `ResolvedConfig` on a throwaway config dir with the given `--profile`
     /// flags — no Console needed, `profile_flags` only reads local state.
     fn config_with_profile_flags(flags: &[&str]) -> crate::config::ResolvedConfig {
-        let dir = std::env::temp_dir().join(format!("concrete-user-test-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("umbra-user-test-{}", uuid::Uuid::new_v4()));
         crate::config::ResolvedConfig::resolve(crate::config::ConfigOverrides {
             config_dir: Some(dir),
             profile: flags.iter().map(|s| s.to_string()).collect(),

@@ -412,37 +412,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "concrete-cli"
-version = "0.3.0-beta.3"
-dependencies = [
- "anstyle",
- "atlas-rs",
- "base64 0.22.1",
- "chrono",
- "clap",
- "clap_complete",
- "concrete-cli",
- "getrandom 0.3.4",
- "home",
- "libc",
- "reqwest",
- "rstest",
- "rustls",
- "serde",
- "serde_json",
- "sha1",
- "sha2",
- "tokio",
- "tokio-rustls",
- "toml",
- "url",
- "uuid",
- "webbrowser",
- "webpki-roots 0.26.11",
- "zeroize",
-]
-
-[[package]]
 name = "console_log"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2931,6 +2900,37 @@ name = "typenum"
 version = "1.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40ce102ab67701b8526c123c1bab5cbe42d7040ccfd0f64af1a385808d2f43de"
+
+[[package]]
+name = "umbra-cli"
+version = "0.3.0-beta.3"
+dependencies = [
+ "anstyle",
+ "atlas-rs",
+ "base64 0.22.1",
+ "chrono",
+ "clap",
+ "clap_complete",
+ "getrandom 0.3.4",
+ "home",
+ "libc",
+ "reqwest",
+ "rstest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha1",
+ "sha2",
+ "tokio",
+ "tokio-rustls",
+ "toml",
+ "umbra-cli",
+ "url",
+ "uuid",
+ "webbrowser",
+ "webpki-roots 0.26.11",
+ "zeroize",
+]
 
 [[package]]
 name = "unicode-ident"

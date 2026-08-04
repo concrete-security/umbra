@@ -8,11 +8,6 @@ use serde::Deserialize;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
-/// Default base URL of the install service that hosts published CLI release
-/// artifacts (`/releases/concrete-cli/...`). Used by `concrete update` and the
-/// passive new-version check.
-pub const DEFAULT_INSTALL_BASE_URL: &str = "https://install.concrete-security.com";
-
 #[derive(Debug, Default, Deserialize)]
 struct ConfigFile {
     console_url: Option<String>,
@@ -85,9 +80,9 @@ pub struct ResolvedConfig {
     pub log_level: String,
     pub log_level_source: ConfigSource,
     /// Whether `auth login` should install the agent skill: `Some(true)` opted
-    /// in, `Some(false)` opted out (or `CONCRETE_NO_SKILL`), `None` not asked.
+    /// in, `Some(false)` opted out (or `UMBRA_NO_SKILL`), `None` not asked.
     pub skill_auto_install: Option<bool>,
-    pub install_base_url: String,
+    pub install_base_url: Option<String>,
     pub install_base_url_source: ConfigSource,
     pub no_update_check: bool,
     pub no_update_check_source: ConfigSource,
@@ -133,7 +128,7 @@ impl ResolvedConfig {
     pub fn resolve(overrides: ConfigOverrides) -> Self {
         let (config_dir, config_dir_source) = if let Some(value) = overrides.config_dir {
             (value, ConfigSource::Flag)
-        } else if let Some(value) = env::var_os("CONCRETE_CONFIG_DIR").map(PathBuf::from) {
+        } else if let Some(value) = env::var_os("UMBRA_CONFIG_DIR").map(PathBuf::from) {
             (value, ConfigSource::Env)
         } else {
             (default_config_dir(), ConfigSource::Default)
@@ -141,7 +136,7 @@ impl ResolvedConfig {
         let file = read_config_file(&config_dir).unwrap_or_default();
         let (console_url, console_url_source) = if let Some(value) = overrides.console_url {
             (Some(value), ConfigSource::Flag)
-        } else if let Some(value) = env::var("CONCRETE_CONSOLE_URL")
+        } else if let Some(value) = env::var("UMBRA_CONSOLE_URL")
             .ok()
             .filter(|value| !value.is_empty())
         {
@@ -157,10 +152,9 @@ impl ResolvedConfig {
         // target flag resolved at the command layer (see commands::select_cvm),
         // which sits above this default. So `default_cvm` only carries the env var
         // and config-file layers.
-        let (default_cvm, default_cvm_source) = if let Some(value) =
-            env::var("CONCRETE_DEFAULT_CVM")
-                .ok()
-                .filter(|value| !value.is_empty())
+        let (default_cvm, default_cvm_source) = if let Some(value) = env::var("UMBRA_DEFAULT_CVM")
+            .ok()
+            .filter(|value| !value.is_empty())
         {
             (Some(value), ConfigSource::Env)
         } else if let Some(value) = file.default_cvm {
@@ -170,7 +164,7 @@ impl ResolvedConfig {
         };
 
         let (default_ssh_identity, default_ssh_identity_source) = if let Some(value) =
-            env::var("CONCRETE_DEFAULT_SSH_IDENTITY")
+            env::var("UMBRA_DEFAULT_SSH_IDENTITY")
                 .ok()
                 .filter(|value| !value.is_empty())
         {
@@ -185,7 +179,7 @@ impl ResolvedConfig {
             (Some(overrides.profile[0].clone()), ConfigSource::Flag)
         } else if overrides.profile.len() > 1 {
             (None, ConfigSource::Flag)
-        } else if let Some(value) = env::var("CONCRETE_DEFAULT_PROFILE")
+        } else if let Some(value) = env::var("UMBRA_DEFAULT_PROFILE")
             .ok()
             .filter(|value| !value.is_empty())
         {
@@ -198,7 +192,7 @@ impl ResolvedConfig {
 
         let (atls_policy, atls_policy_source) = if let Some(value) = overrides.atls_policy {
             (Some(value), ConfigSource::Flag)
-        } else if let Some(value) = env::var_os("CONCRETE_ATLS_POLICY").map(PathBuf::from) {
+        } else if let Some(value) = env::var_os("UMBRA_ATLS_POLICY").map(PathBuf::from) {
             (Some(value), ConfigSource::Env)
         } else if let Some(value) = file.atls_policy {
             (Some(value), ConfigSource::File)
@@ -209,7 +203,7 @@ impl ResolvedConfig {
         let (atls_policy_insecure_skip, atls_policy_insecure_skip_source) =
             if overrides.insecure_skip_atls_policy {
                 (true, ConfigSource::Flag)
-            } else if let Some(value) = env_bool("CONCRETE_ATLS_POLICY_INSECURE_SKIP") {
+            } else if let Some(value) = env_bool("UMBRA_ATLS_POLICY_INSECURE_SKIP") {
                 (value, ConfigSource::Env)
             } else if let Some(value) = file.atls_policy_insecure_skip {
                 (value, ConfigSource::File)
@@ -218,7 +212,7 @@ impl ResolvedConfig {
             };
 
         let (default_instance_type, default_instance_type_source) = if let Some(value) =
-            env::var("CONCRETE_DEFAULT_INSTANCE_TYPE")
+            env::var("UMBRA_DEFAULT_INSTANCE_TYPE")
                 .ok()
                 .filter(|value| !value.is_empty())
         {
@@ -229,7 +223,7 @@ impl ResolvedConfig {
             (None, ConfigSource::Missing)
         };
         let (default_region, default_region_source) = if let Some(value) =
-            env::var("CONCRETE_DEFAULT_REGION")
+            env::var("UMBRA_DEFAULT_REGION")
                 .ok()
                 .filter(|value| !value.is_empty())
         {
@@ -241,7 +235,7 @@ impl ResolvedConfig {
         };
 
         let (oidc_client_id, oidc_client_id_source) = if let Some(value) =
-            env::var("CONCRETE_OIDC_CLIENT_ID")
+            env::var("UMBRA_OIDC_CLIENT_ID")
                 .ok()
                 .filter(|value| !value.is_empty())
         {
@@ -249,10 +243,10 @@ impl ResolvedConfig {
         } else if let Some(value) = file.oidc_client_id {
             (value, ConfigSource::File)
         } else {
-            ("concrete-cli-v1".to_string(), ConfigSource::Default)
+            ("umbra-cli-v1".to_string(), ConfigSource::Default)
         };
         let (oidc_provider, oidc_provider_source) = if let Some(value) =
-            env::var("CONCRETE_OIDC_PROVIDER")
+            env::var("UMBRA_OIDC_PROVIDER")
                 .ok()
                 .filter(|value| !value.is_empty())
         {
@@ -265,7 +259,7 @@ impl ResolvedConfig {
 
         let (request_id, request_id_source) = if let Some(value) = overrides.request_id {
             (value, ConfigSource::Flag)
-        } else if let Some(value) = env::var("CONCRETE_REQUEST_ID")
+        } else if let Some(value) = env::var("UMBRA_REQUEST_ID")
             .ok()
             .filter(|value| !value.is_empty())
         {
@@ -278,7 +272,7 @@ impl ResolvedConfig {
 
         let (force, force_source) = if overrides.force {
             (true, ConfigSource::Flag)
-        } else if let Some(value) = env_bool("CONCRETE_FORCE") {
+        } else if let Some(value) = env_bool("UMBRA_FORCE") {
             (value, ConfigSource::Env)
         } else if let Some(value) = file.force {
             (value, ConfigSource::File)
@@ -288,7 +282,7 @@ impl ResolvedConfig {
 
         let (output, output_source) = if overrides.json {
             (OutputFormat::Json, ConfigSource::Flag)
-        } else if let Some(value) = env::var("CONCRETE_OUTPUT")
+        } else if let Some(value) = env::var("UMBRA_OUTPUT")
             .ok()
             .filter(|value| !value.is_empty())
         {
@@ -307,7 +301,7 @@ impl ResolvedConfig {
 
         let (no_color, no_color_source) = if overrides.no_color {
             (true, ConfigSource::Flag)
-        } else if let Some(value) = env_bool("CONCRETE_NO_COLOR") {
+        } else if let Some(value) = env_bool("UMBRA_NO_COLOR") {
             (value, ConfigSource::Env)
         } else if env::var_os("NO_COLOR").is_some() {
             (true, ConfigSource::Env)
@@ -322,7 +316,7 @@ impl ResolvedConfig {
                 verbose_log_level(overrides.verbose).to_string(),
                 ConfigSource::Flag,
             )
-        } else if let Some(value) = env::var("CONCRETE_LOG_LEVEL")
+        } else if let Some(value) = env::var("UMBRA_LOG_LEVEL")
             .ok()
             .filter(|value| !value.is_empty())
         {
@@ -333,29 +327,30 @@ impl ResolvedConfig {
             ("warn".to_string(), ConfigSource::Default)
         };
 
-        // CONCRETE_NO_SKILL=1 is a hard opt-out; otherwise the persisted answer
+        // UMBRA_NO_SKILL=1 is a hard opt-out; otherwise the persisted answer
         // from the first `auth login` prompt decides (None until first asked).
-        let skill_auto_install = if env_bool("CONCRETE_NO_SKILL") == Some(true) {
+        let skill_auto_install = if env_bool("UMBRA_NO_SKILL") == Some(true) {
             Some(false)
         } else {
             file.skill_auto_install.as_deref().and_then(parse_bool)
         };
 
         let (install_base_url, install_base_url_source) = if let Some(value) =
-            env::var("CONCRETE_INSTALL_BASE_URL")
+            env::var("UMBRA_INSTALL_BASE_URL")
                 .ok()
                 .filter(|value| !value.is_empty())
         {
-            (value, ConfigSource::Env)
+            (Some(value), ConfigSource::Env)
         } else if let Some(value) = file.install_base_url {
-            (value, ConfigSource::File)
+            (Some(value), ConfigSource::File)
         } else {
-            (DEFAULT_INSTALL_BASE_URL.to_string(), ConfigSource::Default)
+            (None, ConfigSource::Missing)
         };
-        let install_base_url = install_base_url.trim_end_matches('/').to_string();
+        let install_base_url =
+            install_base_url.map(|value| value.trim_end_matches('/').to_string());
 
         let (no_update_check, no_update_check_source) =
-            if let Some(value) = env_bool("CONCRETE_NO_UPDATE_CHECK") {
+            if let Some(value) = env_bool("UMBRA_NO_UPDATE_CHECK") {
                 (value, ConfigSource::Env)
             } else if let Some(value) = file.no_update_check {
                 (value, ConfigSource::File)
@@ -407,7 +402,8 @@ impl ResolvedConfig {
 
     pub fn require_console_url(&self) -> Result<&str, String> {
         self.console_url.as_deref().ok_or_else(|| {
-            "[usage] missing console_url; set --console-url, CONCRETE_CONSOLE_URL, or config.toml".to_string()
+            "[usage] missing console_url; set --console-url, UMBRA_CONSOLE_URL, or config.toml"
+                .to_string()
         })
     }
 
@@ -419,7 +415,7 @@ impl ResolvedConfig {
             );
         }
         self.profile.as_deref().ok_or_else(|| {
-            "[usage] missing profile; set --profile, CONCRETE_DEFAULT_PROFILE, or config.toml default_profile".to_string()
+            "[usage] missing profile; set --profile, UMBRA_DEFAULT_PROFILE, or config.toml default_profile".to_string()
         })
     }
 }
@@ -472,7 +468,7 @@ fn read_config_file(config_dir: &Path) -> Option<ConfigFile> {
 fn default_config_dir() -> PathBuf {
     home::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".concrete")
+        .join(".umbra")
 }
 
 fn env_bool(name: &str) -> Option<bool> {
@@ -513,7 +509,7 @@ mod tests {
     use std::fs;
 
     fn temp_config_dir() -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("concrete-config-test-{}", uuid::Uuid::new_v4()))
+        std::env::temp_dir().join(format!("umbra-config-test-{}", uuid::Uuid::new_v4()))
     }
 
     #[test]

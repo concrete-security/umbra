@@ -4,9 +4,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "concrete",
+    name = "umbra",
     version,
-    about = "Command-line client for the Concrete platform",
+    about = "Command-line client for the Umbra platform",
     subcommand_required = true,
     arg_required_else_help = true
 )]
@@ -23,7 +23,7 @@ pub struct Cli {
     #[arg(long, global = true, hide = true)]
     pub json: bool,
 
-    /// Use a different Concrete config directory.
+    /// Use a different Umbra config directory.
     #[arg(long, global = true, hide = true)]
     pub config: Option<PathBuf>,
 
@@ -136,7 +136,7 @@ pub enum Command {
     #[command(subcommand)]
     SecurityCvm(SecurityCvmCommand),
 
-    /// Install the Concrete skill for local AI coding agents.
+    /// Install the Umbra skill for local AI coding agents.
     #[command(subcommand)]
     Skill(SkillCommand),
 
@@ -156,7 +156,7 @@ pub enum Command {
         target: String,
     },
 
-    /// Update the concrete binary to the latest published release.
+    /// Update the umbra binary to the latest published release.
     #[command(visible_alias = "upgrade")]
     Update(UpdateArgs),
 
@@ -342,7 +342,7 @@ pub struct EntityListArgs {
     pub cursor: Option<String>,
 }
 
-/// The `concrete cvm` subcommands. Each variant is one subcommand.
+/// The `umbra cvm` subcommands. Each variant is one subcommand.
 #[derive(Subcommand, Debug)]
 pub enum CvmCommand {
     /// List Dev CVMs visible to the current user.
@@ -385,9 +385,9 @@ pub enum CvmCommand {
     Terminate(CvmTerminateArgs),
 }
 
-/// Arguments for the `concrete cvm list` subcommand. The `--state` flag is
-/// optional: `concrete cvm list` lists all non-terminated CVMs, while
-/// `concrete cvm list --state <STATE>` keeps only CVMs in that state.
+/// Arguments for the `umbra cvm list` subcommand. The `--state` flag is
+/// optional: `umbra cvm list` lists all non-terminated CVMs, while
+/// `umbra cvm list --state <STATE>` keeps only CVMs in that state.
 #[derive(clap::Args, Debug)]
 pub struct CvmListArgs {
     /// Show only CVMs in this lifecycle state. Default: alive (non-terminated).
@@ -395,7 +395,7 @@ pub struct CvmListArgs {
     pub state: Option<CvmStateFilter>,
 }
 
-/// Arguments for the `concrete cvm instance-types` subcommand. The normal read
+/// Arguments for the `umbra cvm instance-types` subcommand. The normal read
 /// is served from the Console catalog cache; `--refresh` asks the Console to
 /// perform one explicit provider refresh (slower, may fail) before answering.
 #[derive(clap::Args, Debug)]
@@ -417,7 +417,7 @@ pub fn wire<T: ValueEnum>(value: T) -> String {
         .to_owned()
 }
 
-/// States accepted by the `concrete cvm list --state` flag.
+/// States accepted by the `umbra cvm list --state` flag.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum CvmStateFilter {
     Provisioning,
@@ -431,8 +431,8 @@ pub enum CvmStateFilter {
     All,
 }
 
-/// Values accepted by the `--assigned` flag on `concrete profile list` and
-/// `concrete user list`. Shared because both filter on membership.
+/// Values accepted by the `--assigned` flag on `umbra profile list` and
+/// `umbra user list`. Shared because both filter on membership.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum Assigned {
     Yes,
@@ -449,7 +449,7 @@ pub struct CvmLaunchArgs {
     #[arg(long)]
     pub alias: Option<String>,
 
-    /// Instance type (vCPU/RAM); see `concrete cvm instance-types`.
+    /// Instance type (vCPU/RAM); see `umbra cvm instance-types`.
     #[arg(long)]
     pub instance_type: Option<String>,
 
@@ -486,7 +486,7 @@ pub struct CvmUpdateArgs {
 /// The Dev CVM a verb acts on: positional `<CVM_ID>` or `--cvm` (the positional
 /// wins). Flattened into every verb that targets a single CVM so `<id>` and `--cvm`
 /// mean the same thing everywhere. What "omitted" means is per-verb: most fall back
-/// to `CONCRETE_DEFAULT_CVM`/`default_cvm`, `stop`/`terminate` require an explicit
+/// to `UMBRA_DEFAULT_CVM`/`default_cvm`, `stop`/`terminate` require an explicit
 /// id, and `ps` lists every running CVM.
 #[derive(clap::Args, Debug)]
 pub struct CvmTarget {
@@ -531,7 +531,7 @@ pub struct SshArgs {
     #[arg(long)]
     pub command: Option<String>,
 
-    /// Assign a local alias to the started session (see `concrete alias`).
+    /// Assign a local alias to the started session (see `umbra alias`).
     #[arg(long)]
     pub alias: Option<String>,
 }
@@ -619,7 +619,7 @@ pub struct SessionTargetArgs {
     pub identity_file: Option<PathBuf>,
 }
 
-/// `concrete alias <kind> ...` — give a short local name to a long identifier
+/// `umbra alias <kind> ...` — give a short local name to a long identifier
 /// and use it anywhere the CLI expects that identifier.
 #[derive(clap::Subcommand, Debug)]
 pub enum AliasCommand {
@@ -660,7 +660,7 @@ pub struct AliasResourceArgs {
 
 #[derive(clap::Args, Debug)]
 pub struct AliasSessionArgs {
-    /// dtach session name as reported by concrete ps.
+    /// dtach session name as reported by umbra ps.
     pub name: String,
 
     /// Alias to assign.
@@ -716,7 +716,7 @@ pub enum KeyCommand {
 
     /// Deregister an SSH public key.
     Remove {
-        /// Key UUID from `concrete key list`.
+        /// Key UUID from `umbra key list`.
         key_id: String,
     },
 }
@@ -735,7 +735,7 @@ pub struct KeyAddArgs {
     #[arg(long)]
     pub identity_file: Option<PathBuf>,
 
-    /// Assign a local alias to the registered key (see `concrete alias`).
+    /// Assign a local alias to the registered key (see `umbra alias`).
     #[arg(long)]
     pub alias: Option<String>,
 }
@@ -751,7 +751,7 @@ pub enum SecretCommand {
 
     /// Delete a named secret.
     Remove {
-        /// Secret name from `concrete secret list`.
+        /// Secret name from `umbra secret list`.
         name: String,
     },
 }
@@ -790,9 +790,9 @@ pub enum ProfileCommand {
     Members(ProfileMembersCommand),
 }
 
-/// Arguments for the `concrete profile list` subcommand. The `--assigned` flag
-/// is optional: `concrete profile list` lists every visible profile, while
-/// `concrete profile list --assigned <yes|no>` keeps only the profiles you are
+/// Arguments for the `umbra profile list` subcommand. The `--assigned` flag
+/// is optional: `umbra profile list` lists every visible profile, while
+/// `umbra profile list --assigned <yes|no>` keeps only the profiles you are
 /// (or are not) a member of.
 #[derive(clap::Args, Debug)]
 pub struct ProfileListArgs {
@@ -810,7 +810,7 @@ pub struct ProfileCreateArgs {
     #[arg(long)]
     pub description: Option<String>,
 
-    /// Assign a local alias to the created profile (see `concrete alias`).
+    /// Assign a local alias to the created profile (see `umbra alias`).
     #[arg(long)]
     pub alias: Option<String>,
 }
@@ -912,7 +912,7 @@ pub enum SecurityCvmCommand {
 
 #[derive(clap::Args, Debug)]
 pub struct SecurityCvmLaunchArgs {
-    /// Instance type (vCPU/RAM); see `concrete cvm instance-types`.
+    /// Instance type (vCPU/RAM); see `umbra cvm instance-types`.
     #[arg(long)]
     pub instance_type: Option<String>,
 
@@ -939,7 +939,7 @@ pub struct SecurityCvmAttestationArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum SkillCommand {
-    /// Install the Concrete skill for local AI coding agents.
+    /// Install the Umbra skill for local AI coding agents.
     Install(SkillInstallArgs),
 }
 
@@ -1029,8 +1029,8 @@ pub enum UserCommand {
     Permissions(UserPermissionsCommand),
 }
 
-/// Arguments for the `concrete user list` subcommand. Both flags are optional
-/// and combine: `concrete user list` lists all non-erased users, `--status`
+/// Arguments for the `umbra user list` subcommand. Both flags are optional
+/// and combine: `umbra user list` lists all non-erased users, `--status`
 /// keeps only users in that account status, and `--assigned` keeps only users
 /// who belong to at least one profile (or to none).
 #[derive(clap::Args, Debug)]
@@ -1044,7 +1044,7 @@ pub struct UserListArgs {
     pub assigned: Option<Assigned>,
 }
 
-/// Account statuses accepted by the `concrete user list --status` flag.
+/// Account statuses accepted by the `umbra user list --status` flag.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum UserStatus {
     Active,
@@ -1147,7 +1147,7 @@ mod tests {
 
     #[test]
     fn session_verbs_accept_positional_and_flag_target() {
-        let ssh = match Cli::try_parse_from(["concrete", "ssh", "cvm-1"])
+        let ssh = match Cli::try_parse_from(["umbra", "ssh", "cvm-1"])
             .unwrap()
             .command
         {
@@ -1157,7 +1157,7 @@ mod tests {
         assert_eq!(ssh.target.cvm_id.as_deref(), Some("cvm-1"));
         assert_eq!(ssh.target.cvm.as_deref(), None);
 
-        let ssh = match Cli::try_parse_from(["concrete", "ssh", "--cvm", "cvm-2"])
+        let ssh = match Cli::try_parse_from(["umbra", "ssh", "--cvm", "cvm-2"])
             .unwrap()
             .command
         {
@@ -1170,7 +1170,7 @@ mod tests {
 
     #[test]
     fn code_verb_gained_positional_target() {
-        let code = match Cli::try_parse_from(["concrete", "code", "cvm-1"])
+        let code = match Cli::try_parse_from(["umbra", "code", "cvm-1"])
             .unwrap()
             .command
         {
@@ -1182,7 +1182,7 @@ mod tests {
 
     #[test]
     fn cvm_lifecycle_verbs_take_optional_positional() {
-        match Cli::try_parse_from(["concrete", "cvm", "start", "cvm-1"])
+        match Cli::try_parse_from(["umbra", "cvm", "start", "cvm-1"])
             .unwrap()
             .command
         {
@@ -1194,7 +1194,7 @@ mod tests {
         // A destructive verb still parses with no id; the explicit-id requirement
         // is enforced at run time by `select_cvm` with an empty fallback, not by
         // the parser.
-        match Cli::try_parse_from(["concrete", "cvm", "stop"])
+        match Cli::try_parse_from(["umbra", "cvm", "stop"])
             .unwrap()
             .command
         {
@@ -1209,7 +1209,7 @@ mod tests {
     #[test]
     fn traffic_logs_keeps_independent_cvm_filters() {
         match Cli::try_parse_from([
-            "concrete",
+            "umbra",
             "traffic-logs",
             "--cvm",
             "cvm-1",
@@ -1230,12 +1230,12 @@ mod tests {
     #[test]
     fn cvm_flag_is_not_global() {
         // --cvm is scoped to CVM-targeting verbs, so a non-targeting command rejects it.
-        assert!(Cli::try_parse_from(["concrete", "status", "--cvm", "cvm-1"]).is_err());
+        assert!(Cli::try_parse_from(["umbra", "status", "--cvm", "cvm-1"]).is_err());
     }
 
     #[test]
     fn update_verb_parses_flags_and_alias() {
-        match Cli::try_parse_from(["concrete", "update"]).unwrap().command {
+        match Cli::try_parse_from(["umbra", "update"]).unwrap().command {
             Command::Update(args) => {
                 assert!(!args.check);
                 assert_eq!(args.version, None);
@@ -1243,14 +1243,14 @@ mod tests {
             }
             other => panic!("expected update, got {other:?}"),
         }
-        match Cli::try_parse_from(["concrete", "upgrade", "--check"])
+        match Cli::try_parse_from(["umbra", "upgrade", "--check"])
             .unwrap()
             .command
         {
             Command::Update(args) => assert!(args.check),
             other => panic!("expected update via upgrade alias, got {other:?}"),
         }
-        match Cli::try_parse_from(["concrete", "update", "--version", "0.4.0"])
+        match Cli::try_parse_from(["umbra", "update", "--version", "0.4.0"])
             .unwrap()
             .command
         {
@@ -1258,8 +1258,6 @@ mod tests {
             other => panic!("expected update, got {other:?}"),
         }
         // --check asks about the latest release; a pinned --version conflicts.
-        assert!(
-            Cli::try_parse_from(["concrete", "update", "--check", "--version", "0.4.0"]).is_err()
-        );
+        assert!(Cli::try_parse_from(["umbra", "update", "--check", "--version", "0.4.0"]).is_err());
     }
 }

@@ -417,7 +417,7 @@ pub fn run_ps(args: SessionListArgs, config: &ResolvedConfig, json_output: bool)
 }
 
 /// Resolve a session target — an alias or a raw session name — into the
-/// concrete `(session_name, cvm_id)` to act on. A session alias carries its own
+/// umbra `(session_name, cvm_id)` to act on. A session alias carries its own
 /// CVM, so it works without `--cvm`; an explicit `--cvm` overrides it (with a
 /// warning), and a raw name resolves the CVM the usual way (`--cvm`/default,
 /// alias-aware via [`select_cvm`]).
@@ -442,7 +442,7 @@ fn resolve_session_target(
                     // Show the stored CVM by its alias when it has one (readable).
                     let stored = aliases.cvm_display(&entry.cvm);
                     crate::style::eprintln_warn(&format!(
-                        "[warn] alias {target} targets CVM {stored}; --cvm forces {overridden}. See `concrete alias list`."
+                        "[warn] alias {target} targets CVM {stored}; --cvm forces {overridden}. See `umbra alias list`."
                     ));
                 }
                 overridden
@@ -531,7 +531,7 @@ fn finish_kill(
     ExitStatus::Ok
 }
 
-/// The live dtach session names on `cvm_id`. Used by `concrete alias session`
+/// The live dtach session names on `cvm_id`. Used by `umbra alias session`
 /// to fail-fast before recording an alias — both to confirm the target session
 /// exists and to reject an alias that would shadow a real session name. Reuses
 /// the same SSH `ps` probe as [`run_ps`].
@@ -713,7 +713,7 @@ fn build_ssh(
         return Err((
             ExitStatus::Error,
             format!(
-                "[error] Dev CVM {} needs an update after the Security CVM changed. Run `concrete cvm update {}`; if the local aTLS policy changes, the CLI will ask before replacing your trusted measurement.",
+                "[error] Dev CVM {} needs an update after the Security CVM changed. Run `umbra cvm update {}`; if the local aTLS policy changes, the CLI will ask before replacing your trusted measurement.",
                 cvm.id, cvm.id
             ),
         ));
@@ -1021,9 +1021,9 @@ fn editor_host_alias(cvm_id: &str) -> String {
         .collect();
     let suffix = suffix.trim_matches('-');
     if suffix.is_empty() {
-        "concrete-cvm".to_string()
+        "umbra-cvm".to_string()
     } else {
-        format!("concrete-{suffix}")
+        format!("umbra-{suffix}")
     }
 }
 
@@ -1362,8 +1362,8 @@ mod tests {
     #[test]
     fn per_cvm_policy_path_uses_config_cvms_dir() {
         assert_eq!(
-            per_cvm_policy_path(Path::new("/tmp/concrete"), "cvm-1"),
-            PathBuf::from("/tmp/concrete/cvms/cvm-1.atls-policy.json")
+            per_cvm_policy_path(Path::new("/tmp/umbra"), "cvm-1"),
+            PathBuf::from("/tmp/umbra/cvms/cvm-1.atls-policy.json")
         );
     }
 
@@ -1372,8 +1372,8 @@ mod tests {
         let prepared = PreparedSsh {
             cvm_id: "cvm-1".to_string(),
             fqdn: "cvm.example.com".to_string(),
-            proxy_command: "concrete tunnel cvm.example.com".to_string(),
-            identity_file: Some(PathBuf::from("/tmp/concrete-key")),
+            proxy_command: "umbra tunnel cvm.example.com".to_string(),
+            identity_file: Some(PathBuf::from("/tmp/umbra-key")),
         };
         let ssh = base_ssh_command(&prepared, false);
         let args: Vec<String> = ssh
@@ -1384,9 +1384,7 @@ mod tests {
         assert!(args
             .windows(2)
             .any(|pair| pair == ["-o", "IdentitiesOnly=yes"]));
-        assert!(args
-            .windows(2)
-            .any(|pair| pair == ["-i", "/tmp/concrete-key"]));
+        assert!(args.windows(2).any(|pair| pair == ["-i", "/tmp/umbra-key"]));
     }
 
     #[test]
@@ -1394,11 +1392,11 @@ mod tests {
         let prepared = PreparedSsh {
             cvm_id: "cvm-1".to_string(),
             fqdn: "cvm.example.com".to_string(),
-            proxy_command: "concrete tunnel cvm.example.com".to_string(),
+            proxy_command: "umbra tunnel cvm.example.com".to_string(),
             identity_file: None,
         };
-        let config = render_editor_ssh_config("concrete-cvm-1", &prepared).unwrap();
-        assert!(config.contains("Host concrete-cvm-1"));
+        let config = render_editor_ssh_config("umbra-cvm-1", &prepared).unwrap();
+        assert!(config.contains("Host umbra-cvm-1"));
         assert!(config.contains("HostName cvm.example.com"));
         assert!(config.contains("BatchMode yes"));
         assert!(!config.contains("IdentityFile"));
@@ -1410,17 +1408,17 @@ mod tests {
         let prepared = PreparedSsh {
             cvm_id: "cvm-1".to_string(),
             fqdn: "cvm.example.com".to_string(),
-            proxy_command: "concrete tunnel cvm.example.com".to_string(),
-            identity_file: Some(PathBuf::from("/home/u/.ssh/concrete_dev_ed25519")),
+            proxy_command: "umbra tunnel cvm.example.com".to_string(),
+            identity_file: Some(PathBuf::from("/home/u/.ssh/umbra_dev_ed25519")),
         };
-        let config = render_editor_ssh_config("concrete-cvm-1", &prepared).unwrap();
-        assert!(config.contains("IdentityFile \"/home/u/.ssh/concrete_dev_ed25519\""));
+        let config = render_editor_ssh_config("umbra-cvm-1", &prepared).unwrap();
+        assert!(config.contains("IdentityFile \"/home/u/.ssh/umbra_dev_ed25519\""));
         assert!(config.contains("IdentitiesOnly yes"));
     }
 
     #[test]
     fn stored_identity_resolves_by_installed_key_id() {
-        let dir = std::env::temp_dir().join(format!("concrete-ssh-store-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("umbra-ssh-store-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).expect("temp dir created");
         let private_key = dir.join("registered_ed25519");
         let public_key = dir.join("registered_ed25519.pub");
@@ -1460,14 +1458,14 @@ mod tests {
         // `ps --identity-file <path>` validates the key up front, so a missing
         // path is a usage error rather than a per-CVM probe error that exits 0.
         let (status, message) =
-            ssh_identity::resolve_explicit_identity(Path::new("/nonexistent/concrete-key"))
+            ssh_identity::resolve_explicit_identity(Path::new("/nonexistent/umbra-key"))
                 .expect_err("missing identity file is rejected");
         assert!(matches!(status, ExitStatus::Usage));
         assert!(message.contains("identity file"));
     }
 
     #[test]
-    fn test_concrete_ps_explicit_unreachable_failure() {
+    fn test_umbra_ps_explicit_unreachable_failure() {
         // An explicit single target whose probe failed propagates that probe's
         // exit status (caller then prints the error and skips the listing).
         let groups: Vec<PsGroup> = vec![(
@@ -1487,10 +1485,7 @@ mod tests {
     #[case::fleet_single_fail(false, vec![("cvm-a".into(), Err((ExitStatus::Error, "aTLS handshake failed".into())))])]
     // Explicit target that succeeded: nothing to propagate.
     #[case::explicit_ok(true, vec![("cvm-a".into(), Ok(vec![]))])]
-    fn test_concrete_ps_no_propagation_success(
-        #[case] explicit: bool,
-        #[case] groups: Vec<PsGroup>,
-    ) {
+    fn test_umbra_ps_no_propagation_success(#[case] explicit: bool, #[case] groups: Vec<PsGroup>) {
         // These are the cases where `ps` prints the listing and exits 0.
         assert!(ps_failure_to_propagate(explicit, &groups).is_none());
     }
@@ -1584,25 +1579,25 @@ mod tests {
     fn editor_host_alias_sanitizes_cvm_ids() {
         assert_eq!(
             editor_host_alias("9a7f6b4a-1111-2222-3333-444444444444"),
-            "concrete-9a7f6b4a-1111-2222-3333-444444444444"
+            "umbra-9a7f6b4a-1111-2222-3333-444444444444"
         );
-        assert_eq!(editor_host_alias("../bad id"), "concrete-bad-id");
-        assert_eq!(editor_host_alias("///"), "concrete-cvm");
+        assert_eq!(editor_host_alias("../bad id"), "umbra-bad-id");
+        assert_eq!(editor_host_alias("///"), "umbra-cvm");
     }
 
     #[test]
     fn editor_remote_uri_targets_dev_home_without_workspace() {
         assert_eq!(
-            editor_remote_uri("concrete-cvm-1", None),
-            "vscode-remote://ssh-remote+concrete-cvm-1/home/dev"
+            editor_remote_uri("umbra-cvm-1", None),
+            "vscode-remote://ssh-remote+umbra-cvm-1/home/dev"
         );
     }
 
     #[test]
     fn editor_remote_uri_appends_workspace_path() {
         assert_eq!(
-            editor_remote_uri("concrete-cvm-1", Some("~/workspaces/myrepo")),
-            "vscode-remote://ssh-remote+concrete-cvm-1/home/dev/workspaces/myrepo"
+            editor_remote_uri("umbra-cvm-1", Some("~/workspaces/myrepo")),
+            "vscode-remote://ssh-remote+umbra-cvm-1/home/dev/workspaces/myrepo"
         );
     }
 
@@ -1625,7 +1620,7 @@ mod tests {
     #[test]
     fn test_kill_prune_success() {
         const CVM_ID: &str = "9a7f6b4a-1111-2222-3333-444444444444";
-        let dir = std::env::temp_dir().join(format!("concrete-kill-test-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("umbra-kill-test-{}", uuid::Uuid::new_v4()));
         let config = ResolvedConfig::resolve(crate::config::ConfigOverrides {
             config_dir: Some(dir),
             ..Default::default()
@@ -1664,7 +1659,7 @@ mod tests {
     #[test]
     fn test_resolve_session_target_non_canonical_success() {
         const CVM_ID: &str = "9a7f6b4a-1111-2222-3333-444444444444";
-        let dir = std::env::temp_dir().join(format!("concrete-target-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("umbra-target-{}", uuid::Uuid::new_v4()));
         let config = ResolvedConfig::resolve(crate::config::ConfigOverrides {
             config_dir: Some(dir),
             ..Default::default()
@@ -1690,8 +1685,7 @@ mod tests {
     #[test]
     fn test_record_launch_alias_second_name_failure() {
         const CVM_ID: &str = "9a7f6b4a-1111-2222-3333-444444444444";
-        let dir =
-            std::env::temp_dir().join(format!("concrete-launch-alias-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("umbra-launch-alias-{}", uuid::Uuid::new_v4()));
         let config = ResolvedConfig::resolve(crate::config::ConfigOverrides {
             config_dir: Some(dir),
             ..Default::default()

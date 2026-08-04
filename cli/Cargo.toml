@@ -1,24 +1,21 @@
 [package]
-name = "concrete-cli"
+name = "umbra-cli"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license-file.workspace = true
-repository.workspace = true
-homepage.workspace = true
-documentation.workspace = true
 rust-version.workspace = true
 keywords.workspace = true
 categories.workspace = true
-description = "Command-line client for the Concrete platform"
+description = "Command-line client for the Umbra platform"
 readme = "README.md"
 
 [[bin]]
-name = "concrete"
+name = "umbra"
 path = "src/main.rs"
 
 [lib]
-name = "concrete_cli"
+name = "umbra_cli"
 path = "src/lib.rs"
 
 [dependencies]
@@ -55,7 +52,7 @@ zeroize = { version = "1", features = ["derive"] }
 test-support = []
 
 [dev-dependencies]
-concrete-cli = { path = ".", features = ["test-support"] }
+umbra-cli = { path = ".", features = ["test-support"] }
 rstest = { version = "0.23", default-features = false }
 
 [build-dependencies]

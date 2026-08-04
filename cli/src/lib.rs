@@ -93,7 +93,7 @@ pub fn run() -> ExitCode {
         cli::Command::Completions { shell } => {
             let mut command = cli::Cli::command();
             let mut output = Vec::new();
-            clap_complete::generate(shell, &mut command, "concrete", &mut output);
+            clap_complete::generate(shell, &mut command, "umbra", &mut output);
             match io::stdout().write_all(&output) {
                 Ok(()) => ExitStatus::Ok,
                 Err(err) if err.kind() == ErrorKind::BrokenPipe => ExitStatus::Ok,

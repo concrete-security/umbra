@@ -29,7 +29,7 @@ def oidc_test_settings() -> OidcSettings:
         google_device_client_id="google-device-client",
         google_device_client_secret="device-secret",
         console_url="https://console.example.com",
-        client_allowlist=frozenset({"concrete-cli-v1"}),
+        client_allowlist=frozenset({"umbra-cli-v1"}),
         authorize_url="https://accounts.example/authorize",
         token_url="https://accounts.example/token",
         device_code_url="https://accounts.example/device",
@@ -124,7 +124,7 @@ def test_oidc_settings_refuses_endpoint_override_without_debug_flag(monkeypatch)
     monkeypatch.setenv("GOOGLE_OIDC_CLIENT_ID", "google-client")
     monkeypatch.setenv("GOOGLE_OIDC_CLIENT_SECRET", "secret")
     monkeypatch.setenv("CONSOLE_URL", "https://console.example.com")
-    monkeypatch.setenv("OIDC_CLIENT_ALLOWLIST", "concrete-cli-v1")
+    monkeypatch.setenv("OIDC_CLIENT_ALLOWLIST", "umbra-cli-v1")
     monkeypatch.setenv("GOOGLE_TOKEN_URL", "https://idp.invalid/token")
     monkeypatch.setenv("OIDC_OVERRIDES_ALLOWED", "false")
 
@@ -287,7 +287,7 @@ def test_oidc_settings_resolves_device_client(
     monkeypatch.setenv("GOOGLE_OIDC_CLIENT_ID", "web-id")
     monkeypatch.setenv("GOOGLE_OIDC_CLIENT_SECRET", "web-secret")
     monkeypatch.setenv("CONSOLE_URL", "https://console.example.com")
-    monkeypatch.setenv("OIDC_CLIENT_ALLOWLIST", "concrete-cli-v1")
+    monkeypatch.setenv("OIDC_CLIENT_ALLOWLIST", "umbra-cli-v1")
     monkeypatch.delenv("GOOGLE_OIDC_DEVICE_CLIENT_ID", raising=False)
     monkeypatch.delenv("GOOGLE_OIDC_DEVICE_CLIENT_SECRET", raising=False)
     for override in ("GOOGLE_TOKEN_URL", "GOOGLE_DEVICE_CODE_URL", "GOOGLE_JWKS_URL"):
