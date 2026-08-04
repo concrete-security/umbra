@@ -14,7 +14,7 @@ COPY atlas-verify/Cargo.toml ./Cargo.toml
 COPY atlas-verify/Cargo.lock ./Cargo.lock
 COPY atlas-verify/src ./src
 RUN cargo build --release --locked \
-    && install -m 0755 target/release/concrete-atlas-verify /concrete-atlas-verify
+    && install -m 0755 target/release/umbra-atlas-verify /umbra-atlas-verify
 
 FROM python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de AS console-base
 
@@ -62,9 +62,9 @@ RUN uv sync --frozen --no-dev --no-editable
 
 # Attestation verifier invoked by the Console via ATLAS_VERIFIER_CMD. Baked into the
 # image (no host bind-mount) so it ships with the Console and its glibc matches.
-COPY --from=atlas-verify-builder /concrete-atlas-verify /usr/local/bin/concrete-atlas-verify
+COPY --from=atlas-verify-builder /umbra-atlas-verify /usr/local/bin/umbra-atlas-verify
 
 EXPOSE 8000
 
 ENTRYPOINT ["/entrypoint.sh"]
-CMD ["uvicorn", "concrete_console.app:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]
+CMD ["uvicorn", "umbra_console.app:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]

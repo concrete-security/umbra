@@ -10,7 +10,7 @@
           ${ids.map((id) => `
             <li class="flex items-center justify-between gap-2 text-xs">
               <span class="font-mono text-ink-dim break-all">${UI.escapeHtml(id)}</span>
-              <span>${UI.copyButton(`concrete cvm update ${id}`, "Copy CLI command")}</span>
+              <span>${UI.copyButton(`umbra cvm update ${id}`, "Copy CLI command")}</span>
             </li>
           `).join("")}
         </ul>

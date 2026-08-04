@@ -340,7 +340,7 @@
   async function handleRowAction(action, cvm) {
     if (action === "open") return A.Drawer.openCvm(cvm, "summary");
     if (action === "copy-id") { navigator.clipboard?.writeText(cvm.id); return A.UI.toast("CVM ID copied", "ok"); }
-    if (action === "copy-ssh") { navigator.clipboard?.writeText(`concrete ssh ${cvm.id}`); return A.UI.toast("SSH command copied", "ok"); }
+    if (action === "copy-ssh") { navigator.clipboard?.writeText(`umbra ssh ${cvm.id}`); return A.UI.toast("SSH command copied", "ok"); }
     if (action === "start") return runCvmAction(cvm, "start", "Start CVM", "Boot this CVM and reconnect its profile bindings.");
     if (action === "stop") return runCvmAction(cvm, "stop", "Stop CVM", "Suspend this CVM. Disk state is preserved. You can restart it later.");
     if (action === "update") return runCvmAction(cvm, "update", updateActionLabel(cvm), updateConfirmBody(cvm));

@@ -5,8 +5,8 @@ import pytest
 import jwt
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from concrete_console.crypto import pkce_s256
-from concrete_console.oidc import (
+from umbra_console.crypto import pkce_s256
+from umbra_console.oidc import (
     IdpOAuthError,
     OidcSettings,
     _at_hash,
@@ -85,7 +85,7 @@ def install_jwks(monkeypatch, jwks):
     async def fake_load_google_jwks(*, settings=None, force=False):
         return jwks
 
-    monkeypatch.setattr("concrete_console.oidc.load_google_jwks", fake_load_google_jwks)
+    monkeypatch.setattr("umbra_console.oidc.load_google_jwks", fake_load_google_jwks)
 
 
 class RecordingResponse:
@@ -172,7 +172,7 @@ def test_google_id_token_rejects_non_base64url_segments_before_jwks(monkeypatch)
     async def fail_load_google_jwks(*, settings=None, force=False):
         raise AssertionError("invalid token shape should fail before JWKS lookup")
 
-    monkeypatch.setattr("concrete_console.oidc.load_google_jwks", fail_load_google_jwks)
+    monkeypatch.setattr("umbra_console.oidc.load_google_jwks", fail_load_google_jwks)
 
     with pytest.raises(jwt.InvalidTokenError, match="invalid token shape"):
         import asyncio
@@ -263,7 +263,7 @@ def test_device_poll_preserves_idp_pending_error(monkeypatch) -> None:
         async def post(self, *args, **kwargs):
             return FakeResponse()
 
-    monkeypatch.setattr("concrete_console.oidc.httpx.AsyncClient", FakeClient)
+    monkeypatch.setattr("umbra_console.oidc.httpx.AsyncClient", FakeClient)
 
     with pytest.raises(IdpOAuthError) as exc:
         import asyncio
@@ -308,7 +308,7 @@ def test_start_device_flow_uses_device_client(monkeypatch) -> None:
     settings = oidc_test_settings()
     captured: list[dict] = []
     monkeypatch.setattr(
-        "concrete_console.oidc.httpx.AsyncClient",
+        "umbra_console.oidc.httpx.AsyncClient",
         recording_client(captured, response=RecordingResponse(body={"device_code": "dc"})),
     )
 
@@ -325,7 +325,7 @@ def test_poll_device_code_uses_device_client(monkeypatch) -> None:
     settings = oidc_test_settings()
     captured: list[dict] = []
     monkeypatch.setattr(
-        "concrete_console.oidc.httpx.AsyncClient",
+        "umbra_console.oidc.httpx.AsyncClient",
         recording_client(captured, response=RecordingResponse(body={"id_token": "tok", "access_token": "at"})),
     )
 
@@ -343,7 +343,7 @@ def test_exchange_authorization_code_uses_web_client(monkeypatch) -> None:
     settings = oidc_test_settings()
     captured: list[dict] = []
     monkeypatch.setattr(
-        "concrete_console.oidc.httpx.AsyncClient",
+        "umbra_console.oidc.httpx.AsyncClient",
         recording_client(captured, response=RecordingResponse(body={"id_token": "tok"})),
     )
 

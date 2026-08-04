@@ -5,8 +5,8 @@ import json
 from types import SimpleNamespace
 from uuid import UUID
 
-from concrete_console import attestation
-from concrete_console import scheduler
+from umbra_console import attestation
+from umbra_console import scheduler
 
 
 class FakeConn:
@@ -87,7 +87,7 @@ def test_pending_operation_start_progress_ignores_unknown_kind() -> None:
 
 
 def test_provider_error_log_fields_truncates_output() -> None:
-    from concrete_console.tee_provider import CvmProviderError
+    from umbra_console.tee_provider import CvmProviderError
 
     output = "x" * (scheduler.PROVIDER_ERROR_OUTPUT_LOG_LIMIT + 1)
     fields = scheduler.provider_error_log_fields(CvmProviderError("cli_failed", provider="phala", output=output))
@@ -100,7 +100,7 @@ def test_provider_error_log_fields_truncates_output() -> None:
 
 
 def test_shade_error_is_transient_connect_failure() -> None:
-    from concrete_console.shade_provider.shade import ShadeError
+    from umbra_console.shade_provider.shade import ShadeError
 
     transient = ShadeError(
         "cli_failed",
@@ -115,7 +115,7 @@ def test_shade_error_is_transient_connect_failure() -> None:
 
 
 def test_generate_policy_with_connect_retries_eventually_succeeds(monkeypatch) -> None:
-    from concrete_console.shade_provider.shade import ShadeError
+    from umbra_console.shade_provider.shade import ShadeError
 
     attempts = {"count": 0}
     sleeps: list[float] = []
@@ -151,7 +151,7 @@ def test_generate_policy_with_connect_retries_eventually_succeeds(monkeypatch) -
 
 
 def test_shade_error_log_fields_truncates_output() -> None:
-    from concrete_console.shade_provider.shade import ShadeError
+    from umbra_console.shade_provider.shade import ShadeError
 
     output = "x" * (scheduler.PROVIDER_ERROR_OUTPUT_LOG_LIMIT + 1)
     fields = scheduler.shade_error_log_fields(ShadeError("cli_failed", field="policy", output=output))
@@ -178,6 +178,13 @@ def test_provider_update_timeout_validates_bounds(monkeypatch) -> None:
         assert "between 300 and 1800" in str(exc)
     else:
         raise AssertionError("expected invalid provider update timeout")
+
+
+def test_keep_failed_cvm_resources_umbra_env_success(monkeypatch) -> None:
+    """The debug cleanup guard reads the Umbra-prefixed configuration."""
+    monkeypatch.setenv("UMBRA_KEEP_FAILED_CVM", "1")
+
+    assert scheduler.keep_failed_cvm_resources() is True
 
 
 def test_claim_active_operations_uses_skip_locked() -> None:
@@ -409,7 +416,7 @@ def test_execute_audit_export_operation_materializes_artifact_and_result(monkeyp
     async def fake_insert_audit_event(_conn, **kwargs):
         conn.audit_calls.append(kwargs)
 
-    monkeypatch.setenv("AUDIT_EXPORT_BUCKET", "file:///tmp/concrete-audit-exports")
+    monkeypatch.setenv("AUDIT_EXPORT_BUCKET", "file:///tmp/umbra-audit-exports")
     monkeypatch.setenv("CONSOLE_URL", "https://console.example.com")
     monkeypatch.setattr(scheduler, "get_pool", fake_get_pool)
     monkeypatch.setattr(scheduler, "write_audit_export_artifact", fake_write_artifact)
@@ -417,7 +424,7 @@ def test_execute_audit_export_operation_materializes_artifact_and_result(monkeyp
 
     asyncio.run(scheduler.execute_audit_export_operation(conn.operation_id))
 
-    assert written[0][0] == "file:///tmp/concrete-audit-exports"
+    assert written[0][0] == "file:///tmp/umbra-audit-exports"
     assert written[0][1] == "audit-exports/00000000-0000-4000-8000-000000000030.ndjson"
     assert written[0][2].row_count == 1
     assert conn.audit_calls[0]["action"] == "AUDIT_EXPORT_ISSUED"
@@ -727,7 +734,7 @@ def test_build_cvm_launch_env_binds_runtime_material(monkeypatch) -> None:
         launch_snapshot(),
         public_keys=["ssh-ed25519 zzz label-z", "ssh-ed25519 aaa label-a"],
         profile_rows=[
-            {"policy": {"sandbox_env": {"ZED": "last", "AWS_ACCESS_KEY_ID": "concrete-proxy-injected"}}}
+            {"policy": {"sandbox_env": {"ZED": "last", "AWS_ACCESS_KEY_ID": "umbra-proxy-injected"}}}
         ],
         proxy_token="proxy-plaintext",
         dev_control_token="dev-control-plaintext",
@@ -740,7 +747,7 @@ def test_build_cvm_launch_env_binds_runtime_material(monkeypatch) -> None:
     assert env["SECURITY_CVM_PROXY_TOKEN"] == "proxy-plaintext"
     assert env["DEV_CVM_CONTROL_TOKEN"] == "dev-control-plaintext"
     assert decode_env(env["AUTHORIZED_SSH_KEYS_B64"]) == authorized_keys
-    assert decode_env(env["SANDBOX_ENV_PLACEHOLDERS_B64"]) == "AWS_ACCESS_KEY_ID=concrete-proxy-injected\nZED=last\n"
+    assert decode_env(env["SANDBOX_ENV_PLACEHOLDERS_B64"]) == "AWS_ACCESS_KEY_ID=umbra-proxy-injected\nZED=last\n"
     assert decode_env(env["SECURITY_CVM_CA_CERT_B64"]) == ca_cert
     assert json.loads(decode_env(env["SECURITY_CVM_ATLS_POLICY_B64"])) == security_atls_policy()
     assert env["CONSOLE_URL"] == ""
@@ -862,7 +869,7 @@ def test_build_cvm_policy_bundle_uses_shade_policy_and_binding() -> None:
     assert bundle["issued_at"].endswith("Z")
 
 
-def test_cvm_launch_provider_name_is_concrete_scoped() -> None:
+def test_cvm_launch_provider_name_is_managed_scoped() -> None:
     assert (
         scheduler.cvm_launch_provider_name(UUID("00000000-0000-4000-8000-123456789abc"))
         == "concrete-v0-cvm-0000000000004000"
@@ -881,7 +888,7 @@ def test_render_dev_cvm_shade_config_routes_tunnel_websocket() -> None:
     assert "websocket: true" in shade
 
 
-def test_security_cvm_provider_name_is_concrete_scoped() -> None:
+def test_security_cvm_provider_name_is_managed_scoped() -> None:
     assert (
         scheduler.security_cvm_provider_name(UUID("00000000-0000-4000-8000-123456789abc"))
         == "concrete-v0-sc-0000000000004000"
@@ -1139,8 +1146,8 @@ def test_execute_security_cvm_phala_deploy_materializes_env_and_metadata(monkeyp
             "ca_export_token_hash": "c" * 64,
         },
     )
-    monkeypatch.setattr("concrete_console.shade_provider.shade.ShadeClient", FakeShadeClient)
-    monkeypatch.setattr("concrete_console.tee_provider.phala.PhalaClient", FakePhalaClient)
+    monkeypatch.setattr("umbra_console.shade_provider.shade.ShadeClient", FakeShadeClient)
+    monkeypatch.setattr("umbra_console.tee_provider.phala.PhalaClient", FakePhalaClient)
     monkeypatch.setattr(scheduler, "insert_audit_event", fake_insert_audit_event)
 
     asyncio.run(scheduler.execute_security_cvm_phala_deploy_operation(UUID("00000000-0000-4000-8000-000000000030")))
@@ -1236,8 +1243,8 @@ def test_execute_cvm_launch_phala_deploy_persists_hash_only(monkeypatch) -> None
             return SimpleNamespace(app_id="app-123", gateway_host="gateway.example.com", status="RUNNING")
 
     monkeypatch.setattr(scheduler, "get_pool", fake_get_pool)
-    monkeypatch.setattr("concrete_console.shade_provider.shade.ShadeClient", FakeShadeClient)
-    monkeypatch.setattr("concrete_console.tee_provider.phala.PhalaClient", FakePhalaClient)
+    monkeypatch.setattr("umbra_console.shade_provider.shade.ShadeClient", FakeShadeClient)
+    monkeypatch.setattr("umbra_console.tee_provider.phala.PhalaClient", FakePhalaClient)
 
     asyncio.run(scheduler.execute_cvm_launch_phala_deploy_operation(UUID("00000000-0000-4000-8000-000000000030")))
 
@@ -1329,8 +1336,8 @@ def test_execute_cvm_update_persists_thin_pending_policy_bundle(monkeypatch) -> 
         "dev_cvm_update_material",
         lambda: {"compose_config": "services:\n  app:\n    image: updated-source\n", "expected_image_measurement": "b" * 96},
     )
-    monkeypatch.setattr("concrete_console.shade_provider.shade.ShadeClient", FakeShadeClient)
-    monkeypatch.setattr("concrete_console.tee_provider.cvm_provider_from_settings", lambda timeout_seconds=None: FakeProvider())
+    monkeypatch.setattr("umbra_console.shade_provider.shade.ShadeClient", FakeShadeClient)
+    monkeypatch.setattr("umbra_console.tee_provider.cvm_provider_from_settings", lambda timeout_seconds=None: FakeProvider())
 
     asyncio.run(scheduler.execute_cvm_update_phala_operation(UUID("00000000-0000-4000-8000-000000000030")))
 
@@ -1372,7 +1379,7 @@ def test_execute_cvm_update_await_provider_running_checks_compose_hash(monkeypat
             return scheduler.pending_update_deploy_compose_sha256(metadata)
 
     monkeypatch.setattr(scheduler, "get_pool", fake_get_pool)
-    monkeypatch.setattr("concrete_console.tee_provider.cvm_provider_from_settings", lambda timeout_seconds=None: FakeProvider())
+    monkeypatch.setattr("umbra_console.tee_provider.cvm_provider_from_settings", lambda timeout_seconds=None: FakeProvider())
 
     asyncio.run(scheduler.execute_cvm_update_await_provider_running_operation(UUID("00000000-0000-4000-8000-000000000030")))
 
@@ -1407,7 +1414,7 @@ def test_execute_cvm_update_await_provider_running_fails_on_stale_compose_after_
         return None
 
     monkeypatch.setattr(scheduler, "get_pool", fake_get_pool)
-    monkeypatch.setattr("concrete_console.tee_provider.cvm_provider_from_settings", lambda timeout_seconds=None: FakeProvider())
+    monkeypatch.setattr("umbra_console.tee_provider.cvm_provider_from_settings", lambda timeout_seconds=None: FakeProvider())
     monkeypatch.setattr(scheduler, "insert_audit_event", fake_insert_audit_event)
 
     asyncio.run(scheduler.execute_cvm_update_await_provider_running_operation(UUID("00000000-0000-4000-8000-000000000030")))
@@ -1462,7 +1469,7 @@ def test_materialize_security_cvm_shade_policy_regenerates_not_stale(monkeypatch
             }
         )
 
-    monkeypatch.setattr("concrete_console.shade_provider.shade.ShadeClient", FakeShadeClient)
+    monkeypatch.setattr("umbra_console.shade_provider.shade.ShadeClient", FakeShadeClient)
     monkeypatch.setattr(scheduler, "generate_policy_with_connect_retries", fake_generate)
     monkeypatch.setattr(scheduler, "security_cvm_attestation_timeout_seconds", lambda: 30)
 
@@ -1691,7 +1698,7 @@ def test_reconcile_dev_cvm_provider_drift_marks_failed(monkeypatch) -> None:
     async def fake_insert_audit_event(_conn, **kwargs):
         conn.audit_calls.append(kwargs)
 
-    monkeypatch.setattr("concrete_console.tee_provider.phala.PhalaClient", FakePhalaClient)
+    monkeypatch.setattr("umbra_console.tee_provider.phala.PhalaClient", FakePhalaClient)
     monkeypatch.setattr(scheduler, "insert_audit_event", fake_insert_audit_event)
 
     advanced = asyncio.run(scheduler.reconcile_dev_cvm_provider_drift(conn))
@@ -1702,7 +1709,7 @@ def test_reconcile_dev_cvm_provider_drift_marks_failed(monkeypatch) -> None:
     assert "o.status IN ('pending', 'running')" in conn.fetch_calls[0]
     update_calls = [args for query, args in conn.execute_calls if "UPDATE cvms" in query]
     assert update_calls == [(cvm_id, "FAILED", "PHALA_OBSERVED_FAILED")]
-    assert conn.audit_calls[0]["actor_email"] == "reconciler@concrete.system"
+    assert conn.audit_calls[0]["actor_email"] == "reconciler@umbra.invalid"
     assert conn.audit_calls[0]["action"] == "CVM_FAILED"
     assert conn.audit_calls[0]["after"]["error_reason"] == "PHALA_OBSERVED_FAILED"
     assert conn.audit_calls[0]["after"]["source"] == "reconciler"
@@ -1735,7 +1742,7 @@ def test_reconcile_security_cvm_provider_drift_marks_stopped(monkeypatch) -> Non
     async def fake_insert_audit_event(_conn, **kwargs):
         conn.audit_calls.append(kwargs)
 
-    monkeypatch.setattr("concrete_console.tee_provider.phala.PhalaClient", FakePhalaClient)
+    monkeypatch.setattr("umbra_console.tee_provider.phala.PhalaClient", FakePhalaClient)
     monkeypatch.setattr(scheduler, "insert_audit_event", fake_insert_audit_event)
 
     advanced = asyncio.run(scheduler.reconcile_security_cvm_provider_drift(conn))
@@ -1872,7 +1879,7 @@ def test_run_cvm_launch_attestation_verifier_persists_report_and_audit(monkeypat
         conn.audit_calls.append(kwargs)
 
     monkeypatch.setattr(scheduler, "get_pool", fake_get_pool)
-    monkeypatch.setattr("concrete_console.shade_provider.shade.ShadeClient", FakeShadeClient)
+    monkeypatch.setattr("umbra_console.shade_provider.shade.ShadeClient", FakeShadeClient)
     monkeypatch.setattr(attestation.AtlasVerifierClient, "from_settings", classmethod(lambda cls: FakeVerifier()))
     monkeypatch.setattr(scheduler, "insert_audit_event", fake_insert_audit_event)
 
@@ -1970,7 +1977,7 @@ def test_run_cvm_update_attestation_verifier_generates_full_pending_policy(monke
         conn.audit_calls.append(kwargs)
 
     monkeypatch.setattr(scheduler, "get_pool", fake_get_pool)
-    monkeypatch.setattr("concrete_console.shade_provider.shade.ShadeClient", FakeShadeClient)
+    monkeypatch.setattr("umbra_console.shade_provider.shade.ShadeClient", FakeShadeClient)
     monkeypatch.setattr(attestation.AtlasVerifierClient, "from_settings", classmethod(lambda cls: FakeVerifier()))
     monkeypatch.setattr(scheduler, "insert_audit_event", fake_insert_audit_event)
 
@@ -2171,7 +2178,7 @@ def test_cleanup_orphan_dns_records_uses_component_zones(monkeypatch) -> None:
             calls.append((self.zone_id_key, record_id))
 
     monkeypatch.setattr(
-        "concrete_console.dns_provider.cloudflare.CloudflareClient.from_settings",
+        "umbra_console.dns_provider.cloudflare.CloudflareClient.from_settings",
         classmethod(lambda cls, *, zone_id_key="CLOUDFLARE_ZONE_ID": FakeCloudflareClient(zone_id_key)),
     )
 
@@ -2648,7 +2655,7 @@ def test_run_cvm_launch_attestation_verifier_skips_advance_on_zero_rows(monkeypa
         conn.audit_calls.append(kwargs)
 
     monkeypatch.setattr(scheduler, "get_pool", fake_get_pool)
-    monkeypatch.setattr("concrete_console.shade_provider.shade.ShadeClient", FakeShadeClient)
+    monkeypatch.setattr("umbra_console.shade_provider.shade.ShadeClient", FakeShadeClient)
     monkeypatch.setattr(attestation.AtlasVerifierClient, "from_settings", classmethod(lambda cls: FakeVerifier()))
     monkeypatch.setattr(scheduler, "insert_audit_event", fake_insert_audit_event)
 

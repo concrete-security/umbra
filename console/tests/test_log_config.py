@@ -2,8 +2,8 @@ import json
 import logging
 import re
 
-from concrete_console.log_config import redact_log_values
-from concrete_console.metrics import prometheus_text
+from umbra_console.log_config import redact_log_values
+from umbra_console.metrics import prometheus_text
 
 
 class NamedLogger:
@@ -67,7 +67,7 @@ def test_redaction_uses_configured_secret_values(monkeypatch) -> None:
 
 
 def test_redaction_emits_alarm_log(caplog) -> None:
-    with caplog.at_level(logging.ERROR, logger="concrete_console.redaction"):
+    with caplog.at_level(logging.ERROR, logger="umbra_console.redaction"):
         redact_log_values(
             NamedLogger("test.redaction.alarm"),
             "info",
@@ -85,7 +85,7 @@ def test_redaction_emits_alarm_log(caplog) -> None:
 
 def _metric_value(source: str) -> int:
     match = re.search(
-        rf'concrete_console_redacted_value_in_log_total\{{source="{re.escape(source)}"\}} (\d+)',
+        rf'umbra_console_redacted_value_in_log_total\{{source="{re.escape(source)}"\}} (\d+)',
         prometheus_text(),
     )
     return int(match.group(1)) if match else 0

@@ -10,9 +10,9 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 from fastapi import HTTPException
 from pydantic import ValidationError
 
-from concrete_console import attestation
-from concrete_console import routes as routes_module
-from concrete_console.routes import (
+from umbra_console import attestation
+from umbra_console import routes as routes_module
+from umbra_console.routes import (
     AdminKeysRotate,
     AdminReconcile,
     AssignedFilter,
@@ -64,10 +64,10 @@ from concrete_console.routes import (
     validate_profile_policy,
     validate_reconcile_dependencies,
 )
-from concrete_console.dns_provider.cloudflare import CloudflareError
-from concrete_console.profile_secrets import encrypt_profile_secret_value, encrypt_user_secret_value
-from concrete_console.tee_provider.phala import PhalaError
-from concrete_console.routes_internal import (
+from umbra_console.dns_provider.cloudflare import CloudflareError
+from umbra_console.profile_secrets import encrypt_profile_secret_value, encrypt_user_secret_value
+from umbra_console.tee_provider.phala import PhalaError
+from umbra_console.routes_internal import (
     TrafficLogBatch,
     TrafficLogIn,
     enforce_traffic_log_volume_limit,
@@ -189,7 +189,7 @@ def test_apply_provider_cvm_lifecycle_action_calls_phala(monkeypatch) -> None:
 
     fake = FakePhalaClient()
     monkeypatch.setattr(
-        "concrete_console.tee_provider.phala.PhalaClient.from_settings",
+        "umbra_console.tee_provider.phala.PhalaClient.from_settings",
         classmethod(lambda cls, *, timeout_seconds=None: calls.append(("timeout", timeout_seconds)) or fake),
     )
 
@@ -214,7 +214,7 @@ def test_apply_provider_cvm_lifecycle_action_wraps_phala_error(monkeypatch) -> N
 
     fake = FailingPhalaClient()
     monkeypatch.setattr(
-        "concrete_console.tee_provider.phala.PhalaClient.from_settings",
+        "umbra_console.tee_provider.phala.PhalaClient.from_settings",
         classmethod(lambda cls, *, timeout_seconds=None: fake),
     )
 
@@ -240,7 +240,7 @@ def test_terminate_provider_security_cvm_calls_phala_delete(monkeypatch) -> None
 
     fake = FakePhalaClient()
     monkeypatch.setattr(
-        "concrete_console.tee_provider.phala.PhalaClient.from_settings",
+        "umbra_console.tee_provider.phala.PhalaClient.from_settings",
         classmethod(lambda cls, *, timeout_seconds=None: fake),
     )
 
@@ -256,7 +256,7 @@ def test_terminate_provider_security_cvm_wraps_phala_error(monkeypatch) -> None:
 
     fake = FailingPhalaClient()
     monkeypatch.setattr(
-        "concrete_console.tee_provider.phala.PhalaClient.from_settings",
+        "umbra_console.tee_provider.phala.PhalaClient.from_settings",
         classmethod(lambda cls, *, timeout_seconds=None: fake),
     )
 
@@ -277,7 +277,7 @@ def test_deprovision_security_cvm_dns_records_uses_security_zone(monkeypatch) ->
 
     fake = FakeCloudflareClient()
     monkeypatch.setattr(
-        "concrete_console.dns_provider.cloudflare.CloudflareClient.from_settings",
+        "umbra_console.dns_provider.cloudflare.CloudflareClient.from_settings",
         classmethod(
             lambda cls, *, zone_id_key="CLOUDFLARE_ZONE_ID": calls.append(("zone", zone_id_key)) or fake
         ),
@@ -309,7 +309,7 @@ def test_deprovision_security_cvm_dns_records_keeps_failed_record_ids(monkeypatc
 
     fake = FakeCloudflareClient()
     monkeypatch.setattr(
-        "concrete_console.dns_provider.cloudflare.CloudflareClient.from_settings",
+        "umbra_console.dns_provider.cloudflare.CloudflareClient.from_settings",
         classmethod(lambda cls, *, zone_id_key="CLOUDFLARE_ZONE_ID": fake),
     )
 
@@ -406,7 +406,7 @@ def test_cvm_create_rejects_duplicate_profile_ids() -> None:
         (CvmStateFilter.all, [], []),
         # terminated: drop the live-row clause (it is soft-deleted) and match it.
         (CvmStateFilter.terminated, ["c.state = $2"], ["TERMINATED"]),
-        # Concrete states: live rows + state match; value UPPERCASE and bound at
+        # Explicit states: live rows + state match; value UPPERCASE and bound at
         # $2 (never interpolated -- asserting the exact clause proves it).
         (CvmStateFilter.provisioning, ["c.deleted_at IS NULL", "c.state = $2"], ["PROVISIONING"]),
         (CvmStateFilter.running, ["c.deleted_at IS NULL", "c.state = $2"], ["RUNNING"]),
@@ -1047,7 +1047,7 @@ def test_run_security_cvm_attestation_probe_persists_success(monkeypatch) -> Non
     monkeypatch.setattr(attestation.AtlasVerifierClient, "from_settings", classmethod(lambda cls: FakeVerifier()))
     monkeypatch.setattr(routes_module, "insert_audit_event", fake_insert_audit_event)
     monkeypatch.setattr(
-        "concrete_console.scheduler.materialize_security_cvm_shade_policy_for_attestation",
+        "umbra_console.scheduler.materialize_security_cvm_shade_policy_for_attestation",
         fake_materialize,
     )
 
@@ -1096,7 +1096,7 @@ def test_run_security_cvm_attestation_probe_reports_drift_without_update(monkeyp
     monkeypatch.setattr(attestation.AtlasVerifierClient, "from_settings", classmethod(lambda cls: FakeVerifier()))
     monkeypatch.setattr(routes_module, "insert_audit_event", fake_insert_audit_event)
     monkeypatch.setattr(
-        "concrete_console.scheduler.materialize_security_cvm_shade_policy_for_attestation",
+        "umbra_console.scheduler.materialize_security_cvm_shade_policy_for_attestation",
         fake_materialize,
     )
 
@@ -1345,6 +1345,7 @@ def test_validate_profile_policy_rejects_bad_sandbox_env() -> None:
                 "sandbox_env": {
                     "1BAD": "value",
                     "PATH": "/tmp/bin",
+                    "CONCRETE_RUNTIME": "reserved",
                     "TOKEN": "sk-" + "a" * 32,
                 }
             }
@@ -1645,7 +1646,7 @@ def test_validate_profile_policy_rejects_malformed_value_from(value_from) -> Non
 
 
 def test_validate_profile_policy_bounds_value_from_template_residual() -> None:
-    from concrete_console.routes import POLICY_MAX_RENDERED_SECRET_LEN, USER_SECRET_VALUE_MAX_LEN
+    from umbra_console.routes import POLICY_MAX_RENDERED_SECRET_LEN, USER_SECRET_VALUE_MAX_LEN
 
     # Residual = the template with "${secret}" removed. For value_from entries the
     # value is unknown at authoring time, so the residual is capped so that even a
@@ -1682,11 +1683,11 @@ def test_value_from_render_caps_line_up_with_sc_rendered_cap(monkeypatch) -> Non
     *inclusive*: a maximal value + maximal residual renders to exactly the cap and
     is NOT omitted."""
     monkeypatch.setenv("SECRET_INJECTION_KEK_B64", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
-    from concrete_console.profile_secrets import (
+    from umbra_console.profile_secrets import (
         SECRET_INJECTION_RENDERED_MAX_LEN,
         expand_policy_secret_values_for_owner,
     )
-    from concrete_console.routes import POLICY_MAX_RENDERED_SECRET_LEN, USER_SECRET_VALUE_MAX_LEN
+    from umbra_console.routes import POLICY_MAX_RENDERED_SECRET_LEN, USER_SECRET_VALUE_MAX_LEN
 
     # The console validator cap and the materializer cap are the same number, and
     # it is the SC's literal 8192. (The SC value is not importable here; if it ever
@@ -2321,7 +2322,7 @@ def test_merge_profile_policies_field_typed(monkeypatch) -> None:
                     "allowed_destinations": [{"id": "anthropic", "host": "api.anthropic.com"}],
                     "blocked_destinations": [{"id": "admin", "host": "admin.example.com"}],
                     "secret_patterns": [{"id": "openai", "pattern": "sk-[A-Za-z0-9]+"}],
-                    "sandbox_env": {"ANTHROPIC_API_KEY": "concrete-proxy-injected"},
+                    "sandbox_env": {"ANTHROPIC_API_KEY": "umbra-proxy-injected"},
                 },
             },
             {
@@ -2336,7 +2337,7 @@ def test_merge_profile_policies_field_typed(monkeypatch) -> None:
                             "value_template": "Bearer ${secret}",
                         }
                     ],
-                    "sandbox_env": {"OPENAI_API_KEY": "concrete-proxy-injected"},
+                    "sandbox_env": {"OPENAI_API_KEY": "umbra-proxy-injected"},
                 },
                 "secret_material": {"anthropic-key": ciphertext},
             },
@@ -2359,8 +2360,8 @@ def test_merge_profile_policies_field_typed(monkeypatch) -> None:
             }
         ],
         "sandbox_env": [
-            {"name": "ANTHROPIC_API_KEY", "value": "concrete-proxy-injected"},
-            {"name": "OPENAI_API_KEY", "value": "concrete-proxy-injected"},
+            {"name": "ANTHROPIC_API_KEY", "value": "umbra-proxy-injected"},
+            {"name": "OPENAI_API_KEY", "value": "umbra-proxy-injected"},
         ],
     }
 
@@ -2634,7 +2635,7 @@ def test_operation_result_for_read_discloses_once_then_scrubs_db(monkeypatch) ->
     does not linger at rest (security hardening — operation_resource_for_read)."""
     import json
 
-    from concrete_console.auth import CurrentUser
+    from umbra_console.auth import CurrentUser
 
     actor_id = UUID("00000000-0000-4000-8000-000000000051")
     entity_id = UUID("00000000-0000-4000-8000-000000000001")
@@ -2738,7 +2739,7 @@ def test_launch_rejects_unknown_instance_type_with_valid_set_and_catalog(monkeyp
     assert catalog["source"] == "bootstrap_fallback"
     assert "stale" in catalog and "fetched_at" in catalog
     assert "refresh_in_progress" in catalog and "last_refresh_error" in catalog
-    assert "concrete cvm instance-types" in details["hint"]
+    assert "umbra cvm instance-types" in details["hint"]
 
 
 def test_launch_accepts_a_cataloged_cpu_instance_type(monkeypatch) -> None:
@@ -2794,7 +2795,7 @@ def test_launch_validation_never_calls_the_provider(monkeypatch) -> None:
     def forbidden(*args, **kwargs):
         raise AssertionError("launch validation must not construct a provider client")
 
-    import concrete_console.instance_types as instance_types_module
+    import umbra_console.instance_types as instance_types_module
 
     monkeypatch.setattr(instance_types_module.CvmProvider, "from_settings", forbidden)
 
@@ -2804,7 +2805,7 @@ def test_launch_validation_never_calls_the_provider(monkeypatch) -> None:
 
 
 def test_get_instance_types_serves_cache_and_flags_default(monkeypatch) -> None:
-    import concrete_console.instance_types as instance_types_module
+    import umbra_console.instance_types as instance_types_module
 
     service = instance_types_module.InstanceTypeCatalogService()
     monkeypatch.setattr(instance_types_module, "_service", service)
@@ -2821,7 +2822,7 @@ def test_get_instance_types_serves_cache_and_flags_default(monkeypatch) -> None:
 
 
 def test_get_instance_types_stale_read_spawns_a_single_background_refresh(monkeypatch) -> None:
-    import concrete_console.instance_types as instance_types_module
+    import umbra_console.instance_types as instance_types_module
 
     service = instance_types_module.InstanceTypeCatalogService()
     monkeypatch.setattr(instance_types_module, "_service", service)
@@ -2840,7 +2841,7 @@ def test_get_instance_types_stale_read_spawns_a_single_background_refresh(monkey
 
 
 def test_get_instance_types_refresh_true_fetches_inline_and_degrades(monkeypatch) -> None:
-    import concrete_console.instance_types as instance_types_module
+    import umbra_console.instance_types as instance_types_module
 
     service = instance_types_module.InstanceTypeCatalogService()
     monkeypatch.setattr(instance_types_module, "_service", service)
@@ -2899,7 +2900,7 @@ class UserSecretConn:
 
 
 def _secret_user():
-    from concrete_console.auth import CurrentUser
+    from umbra_console.auth import CurrentUser
 
     return CurrentUser(
         id=UUID("00000000-0000-4000-8000-000000000077"),
@@ -3341,7 +3342,7 @@ def _scan_payload_for_key(value, key):
 
 def test_list_sc_control_cvms_emits_per_owner_hydrated_wire_shape(monkeypatch) -> None:
     monkeypatch.setenv("SECRET_INJECTION_KEK_B64", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
-    from concrete_console.routes_internal import list_sc_control_cvms
+    from umbra_console.routes_internal import list_sc_control_cvms
 
     rows = [
         _sc_control_row("00000000-0000-4000-8000-0000000000a1", "alice", "a" * 64),

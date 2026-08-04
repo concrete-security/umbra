@@ -32,7 +32,7 @@
       body.innerHTML = UI.emptyV2({
         icon: "key",
         title: "No SSH keys registered",
-        body: "Add an SSH key from the CLI (concrete key add) so you can connect to this CVM once it boots.",
+        body: "Add an SSH key from the CLI (umbra key add) so you can connect to this CVM once it boots.",
       });
       const okBtn = overlay.querySelector("[data-dlg-ok]");
       if (okBtn) okBtn.disabled = true;
@@ -67,7 +67,7 @@
           <header class="mb-2 flex items-center gap-2">
             <span class="flex h-6 w-6 items-center justify-center rounded-md bg-accent/10 text-accent">${UI.icon("key", "h-3.5 w-3.5")}</span>
             <h4 class="text-sm font-semibold text-ink">SSH keys</h4>
-            ${UI.helpHint("Public keys that will be authorized inside the CVM. Use 'concrete ssh' or any standard SSH client to connect.")}
+            ${UI.helpHint("Public keys that will be authorized inside the CVM. Use 'umbra ssh' or any standard SSH client to connect.")}
           </header>
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-2" data-keys>
             ${keys.map((k) => `

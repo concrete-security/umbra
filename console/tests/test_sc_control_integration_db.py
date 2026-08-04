@@ -26,7 +26,7 @@ The whole ``entries`` wire-shape contract (each entry's keys are exactly
 is asserted end to end, because the Security CVM's policy parser rejects unknown
 injection fields (``deny_all``) — no key may appear or disappear.
 
-**Opt-in.** Set ``CONCRETE_TEST_DATABASE_URL`` to a Postgres DSN whose role may
+**Opt-in.** Set ``UMBRA_TEST_DATABASE_URL`` to a Postgres DSN whose role may
 ``CREATE DATABASE``; the test creates and drops a uniquely-named throwaway
 database per run, so existing app data is never touched. Without the env var the
 module skips, so the default DB-less ``make test`` gate stays green. Boot an
@@ -50,7 +50,7 @@ import asyncpg
 from asyncpg import exceptions as pg_errors
 
 CONSOLE_DIR = Path(__file__).resolve().parents[1]
-DSN_ENV = "CONCRETE_TEST_DATABASE_URL"
+DSN_ENV = "UMBRA_TEST_DATABASE_URL"
 # 32-byte all-zero KEK, base64url without padding — identical to the fixture the
 # fake-connection tests use, so seed ciphertext round-trips under the same key.
 KEK_B64 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
@@ -171,7 +171,7 @@ def _scan_payload_for_key(value, key) -> bool:
 
 
 async def _seed(conn: asyncpg.Connection) -> None:
-    from concrete_console.profile_secrets import encrypt_profile_secret_value, encrypt_user_secret_value
+    from umbra_console.profile_secrets import encrypt_profile_secret_value, encrypt_user_secret_value
 
     await conn.execute(
         "INSERT INTO entities (id, name, domain) VALUES ($1, $2, $3)",
@@ -383,7 +383,7 @@ def _assert_wire_shape_and_merge(body: dict, response: SimpleNamespace) -> None:
 
 
 async def _run_assertions(db_dsn: str) -> None:
-    from concrete_console.routes_internal import list_sc_control_cvms
+    from umbra_console.routes_internal import list_sc_control_cvms
 
     pool = await asyncpg.create_pool(_asyncpg_form(db_dsn), min_size=1, max_size=4)
     try:
@@ -410,7 +410,7 @@ def test_sc_control_query_and_migration_against_real_postgres(monkeypatch) -> No
     monkeypatch.setenv("SECRET_INJECTION_KEK_B64", KEK_B64)
     base = _base_dsn()
     assert base is not None  # guarded by pytestmark
-    dbname = f"concrete_itest_{uuid.uuid4().hex}"
+    dbname = f"umbra_itest_{uuid.uuid4().hex}"
 
     asyncio.run(_admin_execute(base, f'CREATE DATABASE "{dbname}"'))
     child_dsn = _with_database(base, dbname)

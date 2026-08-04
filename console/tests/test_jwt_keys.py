@@ -7,7 +7,7 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519, rsa
 
-from concrete_console.jwt_keys import JwtManager, JwtSettings
+from umbra_console.jwt_keys import JwtManager, JwtSettings
 
 
 def b64url(data: bytes) -> str:

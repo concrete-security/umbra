@@ -1,9 +1,9 @@
 window.Admin = {
-  STORAGE_KEY: "concrete_admin_session",
-  ENTITY_KEY: "concrete_admin_entity",
-  OPS_KEY: "concrete_admin_ops",
+  STORAGE_KEY: "umbra_admin_session",
+  ENTITY_KEY: "umbra_admin_entity",
+  OPS_KEY: "umbra_admin_ops",
   OAUTH_CLIENT_ID: "umbra-cli-v1",
-  PKCE_KEY: "concrete_admin_pkce",
+  PKCE_KEY: "umbra_admin_pkce",
   P: {
     PLATFORM: "PLATFORM_OPERATOR",
     AUDIT: "AUDIT_VIEW",

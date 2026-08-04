@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from concrete_console.shade_provider.shade import ShadeClient, ShadeError, scrub_output
+from umbra_console.shade_provider.shade import ShadeClient, ShadeError, scrub_output
 
 
 def run(awaitable):
@@ -24,7 +24,7 @@ SHADE_DIR = {json.dumps(str(shade_dir))}
 args = sys.argv[1:]
 entry = {{
     "args": args,
-    "leaked_secret": "CONCRETE_SHOULD_NOT_LEAK" in os.environ,
+    "leaked_secret": "UMBRA_SHOULD_NOT_LEAK" in os.environ,
     "uv_cache_dir": os.environ.get("UV_CACHE_DIR"),
     "uv_project_environment": os.environ.get("UV_PROJECT_ENVIRONMENT"),
 }}
@@ -79,7 +79,7 @@ def test_build_invokes_shade_build_with_private_staging(monkeypatch, tmp_path: P
     log_path = tmp_path / "uv.log"
     uv_path = tmp_path / "uv"
     write_fake_uv(uv_path, shade_dir=shade_dir, log_path=log_path)
-    monkeypatch.setenv("CONCRETE_SHOULD_NOT_LEAK", "secret")
+    monkeypatch.setenv("UMBRA_SHOULD_NOT_LEAK", "secret")
 
     client = ShadeClient(shade_dir=shade_dir, uv_bin=str(uv_path))
     result = run(
@@ -107,7 +107,7 @@ def test_build_allows_writable_uv_cache_and_project_environment(monkeypatch, tmp
     write_fake_uv(uv_path, shade_dir=shade_dir, log_path=log_path)
     monkeypatch.setenv("UV_CACHE_DIR", str(uv_cache_dir))
     monkeypatch.setenv("UV_PROJECT_ENVIRONMENT", str(uv_env))
-    monkeypatch.setenv("CONCRETE_SHOULD_NOT_LEAK", "secret")
+    monkeypatch.setenv("UMBRA_SHOULD_NOT_LEAK", "secret")
 
     client = ShadeClient(shade_dir=shade_dir, uv_bin=str(uv_path))
     run(client.build(shade_config_yaml="app:\n  name: app\n", app_compose_yaml="services: {}\n"))
@@ -178,13 +178,13 @@ def test_cli_failure_raises_shade_error(tmp_path: Path) -> None:
 
 
 def test_scrub_output_redacts_secret_like_values(monkeypatch) -> None:
-    monkeypatch.setenv("CONCRETE_API_TOKEN", "super-secret-token")
+    monkeypatch.setenv("UMBRA_API_TOKEN", "super-secret-token")
 
-    scrubbed = scrub_output('CONCRETE_API_TOKEN=super-secret-token {"access_token":"other-secret"}')
+    scrubbed = scrub_output('UMBRA_API_TOKEN=super-secret-token {"access_token":"other-secret"}')
 
     assert "super-secret-token" not in scrubbed
     assert "other-secret" not in scrubbed
-    assert "CONCRETE_API_TOKEN=[redacted]" in scrubbed
+    assert "UMBRA_API_TOKEN=[redacted]" in scrubbed
     assert '"access_token":"[redacted]"' in scrubbed
 
 

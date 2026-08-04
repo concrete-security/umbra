@@ -1,6 +1,6 @@
 import pytest
 
-from concrete_console.bootstrap import email_domain, write_session_file
+from umbra_console.bootstrap import email_domain, write_session_file
 
 
 def test_email_domain_lowercases_domain() -> None:

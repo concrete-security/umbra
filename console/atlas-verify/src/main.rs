@@ -1,5 +1,5 @@
-//! concrete-atlas-verify — out-of-process attestation verifier invoked by the Console
-//! via `ATLAS_VERIFIER_CMD` (see console/src/concrete_console/attestation.py).
+//! umbra-atlas-verify — out-of-process attestation verifier invoked by the Console
+//! via `ATLAS_VERIFIER_CMD` (see console/src/umbra_console/attestation.py).
 //!
 //! Contract (must match AtlasVerifierClient):
 //!   stdin : {"kind":"dev_cvm"|"security_cvm","fqdn":"<host>","policy":{...}}
@@ -84,7 +84,7 @@ async fn run() -> Result<String, CliError> {
 
     if request.kind != "dev_cvm" && request.kind != "security_cvm" {
         return Err(
-            CliError::new(ATTESTATION_QUOTE_INVALID, "kind_invalid").detail("kind", request.kind),
+            CliError::new(ATTESTATION_QUOTE_INVALID, "kind_invalid").detail("kind", request.kind)
         );
     }
     let fqdn = request.fqdn.trim();

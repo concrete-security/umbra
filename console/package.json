@@ -1,5 +1,5 @@
 {
-  "name": "concrete-console-phala-cli",
+  "name": "umbra-console-phala-cli",
   "private": true,
   "version": "0.0.0",
   "description": "Private Console build manifest for the pinned Phala CLI and dashboard assets; not a publishable package",

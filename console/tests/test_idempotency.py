@@ -1,4 +1,4 @@
-from concrete_console.idempotency import advisory_lock_key, entity_launch_lock_key, request_body_sha256
+from umbra_console.idempotency import advisory_lock_key, entity_launch_lock_key, request_body_sha256
 
 
 def test_request_body_sha256_hashes_raw_body() -> None:

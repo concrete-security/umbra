@@ -18,7 +18,7 @@ target_metadata = None
 def database_url() -> str:
     return os.environ.get(
         "DATABASE_URL",
-        "postgresql+asyncpg://concrete:concrete@console-db:5432/concrete",
+        "postgresql+asyncpg://umbra:umbra@console-db:5432/umbra",
     )
 
 

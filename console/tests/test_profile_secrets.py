@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 from cryptography.exceptions import InvalidTag
 
-from concrete_console.profile_secrets import (
+from umbra_console.profile_secrets import (
     decrypt_profile_secret_value,
     decrypt_user_secret_value,
     encrypt_profile_secret_value,

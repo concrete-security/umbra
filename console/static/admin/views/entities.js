@@ -61,7 +61,7 @@
       : UI.emptyV2({ icon: "entity", title: "No entities match", body: "Try a different search." });
 
     panel.innerHTML =
-      UI.pageHeader("Entities", "Every tenant on this Concrete deployment. Open an entity to view stats, manage quotas, audit activity, and see its Security CVM.", {
+      UI.pageHeader("Entities", "Every tenant on this Umbra deployment. Open an entity to view stats, manage quotas, audit activity, and see its Security CVM.", {
         icon: "entity",
         actions: `<button type="button" class="btn btn-primary" id="entity-create">${UI.icon("plus", "h-4 w-4")} Create entity</button>`,
       }) +
@@ -92,7 +92,7 @@
   function openCreate() {
     UI.dialog({
       title: "Create entity",
-      subtitle: "A new tenant on this Concrete deployment. The domain controls which users can join via SSO.",
+      subtitle: "A new tenant on this Umbra deployment. The domain controls which users can join via SSO.",
       primary: { label: "Create entity", run: doCreate },
       body: `
         <div class="space-y-3">

@@ -1,0 +1,1 @@
+"""Umbra Console package."""

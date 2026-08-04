@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
-from concrete_console.resources import (
+from umbra_console.resources import (
     cvm_resource,
     entity_quota_resource,
     operation_resource,
@@ -127,7 +127,7 @@ def test_profile_resource_strips_secret_injection_values() -> None:
                 "debug_value": "should-not-be-public",
             }
         ],
-        "sandbox_env": {"ANTHROPIC_API_KEY": "concrete-proxy-injected"},
+        "sandbox_env": {"ANTHROPIC_API_KEY": "umbra-proxy-injected"},
     }
 
     resource = profile_resource(

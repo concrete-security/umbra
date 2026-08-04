@@ -1,1 +1,0 @@
-"""Concrete Console package."""

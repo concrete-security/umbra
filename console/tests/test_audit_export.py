@@ -2,7 +2,7 @@ import asyncio
 from datetime import datetime, timezone
 from uuid import UUID
 
-from concrete_console.audit_export import (
+from umbra_console.audit_export import (
     audit_export_object_key,
     audit_export_storage_uri,
     csv_safe_cell,
@@ -119,7 +119,7 @@ def test_postgres_export_store_writes_and_reads_artifact(monkeypatch) -> None:
         assert timeout == 5.0
         return FakeConn()
 
-    from concrete_console import audit_export
+    from umbra_console import audit_export
 
     monkeypatch.setattr(audit_export.asyncpg, "connect", connect)
     bucket = "postgresql://export:secret@db.example/audit?table=exports"

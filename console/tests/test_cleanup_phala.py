@@ -5,7 +5,7 @@ from io import StringIO
 
 import pytest
 
-from concrete_console.cleanup_phala import PhalaCleanupError, delete_concrete_cvms
+from umbra_console.cleanup_phala import PhalaCleanupError, delete_managed_cvms
 
 
 class FakePhalaClient:
@@ -24,7 +24,7 @@ def run(awaitable):
     return asyncio.run(awaitable)
 
 
-def test_delete_concrete_cvms_deletes_only_concrete_prefix_rows() -> None:
+def test_delete_managed_cvms_deletes_only_managed_prefix_rows() -> None:
     client = FakePhalaClient(
         [
             {"name": "concrete-v0-cvm-owned", "id": "app-1"},
@@ -34,7 +34,7 @@ def test_delete_concrete_cvms_deletes_only_concrete_prefix_rows() -> None:
     )
     output = StringIO()
 
-    summary = run(delete_concrete_cvms(client, out=output))
+    summary = run(delete_managed_cvms(client, out=output))
 
     assert summary.deleted == 2
     assert client.deleted == ["app-1", "app-3"]
@@ -42,19 +42,19 @@ def test_delete_concrete_cvms_deletes_only_concrete_prefix_rows() -> None:
     assert "concrete-v0-cvm-owned" in output.getvalue()
 
 
-def test_delete_concrete_cvms_reports_empty_scope() -> None:
+def test_delete_managed_cvms_reports_empty_scope() -> None:
     client = FakePhalaClient([])
     output = StringIO()
 
-    summary = run(delete_concrete_cvms(client, out=output))
+    summary = run(delete_managed_cvms(client, out=output))
 
     assert summary.deleted == 0
     assert client.deleted == []
     assert "no concrete-v0 Phala CVMs found" in output.getvalue()
 
 
-def test_delete_concrete_cvms_requires_app_id_for_owned_rows() -> None:
+def test_delete_managed_cvms_requires_app_id_for_owned_rows() -> None:
     client = FakePhalaClient([{"name": "concrete-v0-cvm-owned"}])
 
     with pytest.raises(PhalaCleanupError):
-        run(delete_concrete_cvms(client))
+        run(delete_managed_cvms(client))

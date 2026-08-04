@@ -5,8 +5,8 @@ from datetime import datetime, timezone
 import pytest
 from fastapi import HTTPException
 
-from concrete_console.audit import EMPTY_HASH, audit_row_hash, redact_email_payload
-from concrete_console.routes import parse_audit_cursor
+from umbra_console.audit import EMPTY_HASH, audit_row_hash, redact_email_payload
+from umbra_console.routes import parse_audit_cursor
 
 
 def test_audit_hash_matches_insert_payload_shape() -> None:
@@ -106,8 +106,8 @@ def test_redact_user_audit_trail_rehashes_unchanged_rows_after_a_change(monkeypa
     """Regression for 34a6b3f: `_json_payload`'s def line was consumed by the
     re-anchor edit, so any redaction reaching an unchanged row (or finishing at
     all) raised NameError and 500'd the GDPR erase path."""
-    import concrete_console.audit_anchor as audit_anchor_module
-    from concrete_console.audit import redact_user_audit_trail
+    import umbra_console.audit_anchor as audit_anchor_module
+    from umbra_console.audit import redact_user_audit_trail
 
     reanchors = []
 
@@ -157,8 +157,8 @@ def test_redact_user_audit_trail_rehashes_unchanged_rows_after_a_change(monkeypa
 
 
 def test_redact_user_audit_trail_no_matches_is_a_noop(monkeypatch) -> None:
-    import concrete_console.audit_anchor as audit_anchor_module
-    from concrete_console.audit import redact_user_audit_trail
+    import umbra_console.audit_anchor as audit_anchor_module
+    from umbra_console.audit import redact_user_audit_trail
 
     async def fail_reanchor(conn, *, first_redacted_seq):
         raise AssertionError("re-anchor must not run when nothing changed")

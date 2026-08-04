@@ -7,9 +7,9 @@ from pathlib import Path
 
 import pytest
 
-import concrete_console.instance_types as instance_types
-import concrete_console.tee_provider.phala as phala
-from concrete_console.instance_types import (
+import umbra_console.instance_types as instance_types
+import umbra_console.tee_provider.phala as phala
+from umbra_console.instance_types import (
     ERROR_KIND_PROVIDER_UNREACHABLE,
     ERROR_KIND_SCHEMA_DRIFT,
     REFRESH_INTERVAL_SECONDS,
@@ -22,11 +22,11 @@ from concrete_console.instance_types import (
     catalog_from_db_row,
     catalog_from_provider_types,
 )
-from concrete_console.tee_provider import (
+from umbra_console.tee_provider import (
     instance_type_hourly_rate,
     instance_type_vcpu,
 )
-from concrete_console.tee_provider.phala import (
+from umbra_console.tee_provider.phala import (
     PhalaError,
     instance_types_from_payload,
     normalize_memory_gb,
@@ -69,7 +69,7 @@ def service(monkeypatch) -> InstanceTypeCatalogService:
     No DB and no network are touched."""
     fake = FakePhalaClient()
     monkeypatch.setattr(
-        "concrete_console.tee_provider.phala.PhalaClient.from_settings",
+        "umbra_console.tee_provider.phala.PhalaClient.from_settings",
         classmethod(lambda cls, *, timeout_seconds=None: fake),
     )
 
@@ -1095,7 +1095,7 @@ def test_parse_caps_flood(monkeypatch) -> None:
     the cap -- so the generator bails at the cap instead of materializing the whole
     family (the call count would be 3x the cap if it scanned everything)."""
 
-    from concrete_console.tee_provider import MAX_INSTANCE_TYPE_ENTRIES
+    from umbra_console.tee_provider import MAX_INSTANCE_TYPE_ENTRIES
 
     calls = {"n": 0}
     real_parse_item = phala.parse_instance_type_item

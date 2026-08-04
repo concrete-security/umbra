@@ -6,17 +6,14 @@
 name = "atlas-verify-cli"
 version = "0.1.0"
 edition = "2021"
-authors = ["Concrete Security maintainers"]
+authors = ["Umbra maintainers"]
 license = "Proprietary"
-repository = "https://github.com/concrete-security/concrete"
-homepage = "https://github.com/concrete-security/concrete"
-documentation = "https://github.com/concrete-security/concrete/tree/main/docs"
 publish = false
 
 [workspace]
 
 [[bin]]
-name = "concrete-atlas-verify"
+name = "umbra-atlas-verify"
 path = "src/main.rs"
 
 [dependencies]

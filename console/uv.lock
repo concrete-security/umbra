@@ -175,7 +175,7 @@ wheels = [
 ]
 
 [[package]]
-name = "concrete-console"
+name = "umbra-console"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

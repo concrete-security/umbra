@@ -19,7 +19,7 @@ import shutil
 
 import pytest
 
-from concrete_console.tee_provider.phala import PhalaClient, PhalaError
+from umbra_console.tee_provider.phala import PhalaClient, PhalaError
 
 # Sample provider output (CPU types) FakePhalaClient returns on a successful fetch.
 PROVIDER_TYPES = [

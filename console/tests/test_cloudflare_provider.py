@@ -4,7 +4,7 @@ import json
 import httpx
 import pytest
 
-from concrete_console.dns_provider.cloudflare import (
+from umbra_console.dns_provider.cloudflare import (
     CLOUDFLARE_API_BASE,
     CloudflareClient,
     CloudflareError,

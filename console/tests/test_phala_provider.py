@@ -5,12 +5,12 @@ import textwrap
 
 import pytest
 
-from concrete_console.tee_provider import (
+from umbra_console.tee_provider import (
     MAX_INSTANCE_TYPES_RESPONSE_BYTES,
     CvmProvider,
     CvmProviderError,
 )
-from concrete_console.tee_provider.phala import (
+from umbra_console.tee_provider.phala import (
     PHALA_COMPOSE_FILE_HASH_HELPER,
     PhalaClient,
     PhalaError,
@@ -369,7 +369,7 @@ def test_compose_file_hash_helper_reads_provider_compose_file() -> None:
     assert "docker_compose_file" in PHALA_COMPOSE_FILE_HASH_HELPER
 
 
-def test_deploy_rejects_non_concrete_name(tmp_path) -> None:
+def test_deploy_rejects_non_managed_name(tmp_path) -> None:
     cli = write_fake_cli(tmp_path, "raise SystemExit('should not run')\n")
     client = PhalaClient(cli_path=str(cli), api_token="phala-token")
 
@@ -456,7 +456,7 @@ def test_get_raises_not_found(tmp_path) -> None:
         run(client.info("app-123"))
 
 
-def test_list_filters_to_concrete_v0_names(tmp_path) -> None:
+def test_list_filters_to_managed_v0_names(tmp_path) -> None:
     cli = write_fake_cli(
         tmp_path,
         """

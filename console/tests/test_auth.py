@@ -8,14 +8,14 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from concrete_console import auth as auth_module
-from concrete_console.auth import CurrentUser, require_current_user
-from concrete_console.app import app
-from concrete_console.db import get_pool
-from concrete_console.crypto import sha256_hex
-from concrete_console.internal_auth import parse_service_bearer_authorization, require_dev_cvm_control_principal
-from concrete_console import routes_auth
-from concrete_console.routes_auth import (
+from umbra_console import auth as auth_module
+from umbra_console.auth import CurrentUser, require_current_user
+from umbra_console.app import app
+from umbra_console.db import get_pool
+from umbra_console.crypto import sha256_hex
+from umbra_console.internal_auth import parse_service_bearer_authorization, require_dev_cvm_control_principal
+from umbra_console import routes_auth
+from umbra_console.routes_auth import (
     DevicePollRequest,
     DeviceStartRequest,
     RefreshRequest,

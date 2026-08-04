@@ -7,11 +7,11 @@ from fastapi import HTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.testclient import TestClient
 
-from concrete_console import audit_anchor
-from concrete_console import app as app_module
-from concrete_console import readiness
-from concrete_console import scheduler
-from concrete_console.app import app
+from umbra_console import audit_anchor
+from umbra_console import app as app_module
+from umbra_console import readiness
+from umbra_console import scheduler
+from umbra_console.app import app
 
 
 def test_healthz() -> None:
@@ -645,5 +645,5 @@ def test_metrics_exposes_prometheus_text(monkeypatch) -> None:
 
     assert response.status_code == 200
     assert "text/plain" in response.headers["content-type"]
-    assert "concrete_console_requests_total" in response.text
-    assert "concrete_console_request_duration_seconds" in response.text
+    assert "umbra_console_requests_total" in response.text
+    assert "umbra_console_request_duration_seconds" in response.text

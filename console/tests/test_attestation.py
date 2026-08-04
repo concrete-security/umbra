@@ -5,7 +5,7 @@ from uuid import UUID
 
 import pytest
 
-from concrete_console.attestation import (
+from umbra_console.attestation import (
     AtlasVerifierClient,
     ATLAS_VERIFIER_CMD_ENV,
     AttestationVerifierError,
