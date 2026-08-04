@@ -102,7 +102,7 @@
           </div>
           <div>
             <label class="field-label">Domain <span class="text-err">*</span></label>
-            <input id="ec-domain" class="input" placeholder="acme.com" autocomplete="off">
+            <input id="ec-domain" class="input" placeholder="example.com" autocomplete="off">
             <span class="field-hint">Users with email at this domain can be invited.</span>
           </div>
         </div>`,

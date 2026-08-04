@@ -287,7 +287,7 @@
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label class="field-label">Email <span class="text-err">*</span></label>
-              <input id="iv-email" class="input" type="email" placeholder="alice@acme.com" autocomplete="off">
+              <input id="iv-email" class="input" type="email" placeholder="alice@example.com" autocomplete="off">
             </div>
             <div>
               <label class="field-label">Display name</label>
