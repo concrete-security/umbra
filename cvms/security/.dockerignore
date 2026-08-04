@@ -3,3 +3,6 @@
 __pycache__/
 *.py[cod]
 docker-compose.shade.yml
+target/
+pkg/
+dist/

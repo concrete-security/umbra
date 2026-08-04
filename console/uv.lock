@@ -185,9 +185,14 @@ dependencies = [
     { name = "google-re2" },
     { name = "httpx" },
     { name = "pyjwt", extra = ["crypto"] },
-    { name = "pytest" },
     { name = "structlog" },
     { name = "uvicorn", extra = ["standard"] },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "pyyaml" },
 ]
 
 [package.metadata]
@@ -198,9 +203,14 @@ requires-dist = [
     { name = "google-re2", specifier = ">=1,<2" },
     { name = "httpx", specifier = ">=0.27,<1" },
     { name = "pyjwt", extras = ["crypto"], specifier = ">=2.10,<3" },
-    { name = "pytest", specifier = ">=8,<9" },
     { name = "structlog", specifier = ">=25,<26" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30,<1" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=8,<9" },
+    { name = "pyyaml", specifier = ">=6,<7" },
 ]
 
 [[package]]

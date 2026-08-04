@@ -36,7 +36,7 @@ pub fn default_ssh_key_paths(ssh_dir: &Path) -> Result<(PathBuf, PathBuf), (Exit
 }
 
 pub fn discover_private_key_for_fingerprints(fingerprints: &[String]) -> Option<PathBuf> {
-    let ssh_dir = dirs::home_dir()?.join(".ssh");
+    let ssh_dir = home::home_dir()?.join(".ssh");
     discover_private_key_for_fingerprints_in(&ssh_dir, fingerprints)
 }
 
@@ -82,7 +82,7 @@ pub fn resolve_session_identity(
         return resolve_explicit_identity(path).map(Some);
     }
     Ok(resolve_session_identity_in(
-        dirs::home_dir().map(|home| home.join(".ssh")).as_deref(),
+        home::home_dir().map(|home| home.join(".ssh")).as_deref(),
         config.default_ssh_identity.as_deref(),
         installed_key_fingerprints,
     ))

@@ -470,7 +470,7 @@ fn read_config_file(config_dir: &Path) -> Option<ConfigFile> {
 }
 
 fn default_config_dir() -> PathBuf {
-    dirs::home_dir()
+    home::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".concrete")
 }

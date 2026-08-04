@@ -2,7 +2,19 @@
   "name": "concrete-console-phala-cli",
   "private": true,
   "version": "0.0.0",
+  "description": "Private Console build manifest for the pinned Phala CLI and dashboard assets; not a publishable package",
+  "license": "UNLICENSED",
+  "files": [],
+  "scripts": {
+    "build:webapp": "tailwindcss -c tailwind.config.js -i static/admin/tailwind.in.css -o static/admin/tailwind.css --minify && printf '\\n' >> static/admin/tailwind.css"
+  },
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
-    "phala": "1.1.18"
+    "phala": "1.1.19"
+  },
+  "devDependencies": {
+    "tailwindcss": "3.4.13"
   }
 }

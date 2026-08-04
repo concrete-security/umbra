@@ -1,4 +1,6 @@
-FROM rust:1-bookworm AS atls-connect-builder
+FROM rust:1-bookworm@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa AS rust-base
+
+FROM rust-base AS atls-connect-builder
 
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
@@ -7,16 +9,36 @@ COPY cvms/dev/user-sandbox/atls-connect/Cargo.toml cvms/dev/user-sandbox/atls-co
 COPY cvms/dev/user-sandbox/atls-connect/src cvms/dev/user-sandbox/atls-connect/src
 RUN cargo build --locked --release -p concrete-atls-connect --target-dir /tmp/atls-connect-target
 
-FROM ghcr.io/astral-sh/uv:0.7.8 AS uv
+FROM ghcr.io/astral-sh/uv:0.7.8@sha256:0178a92d156b6f6dbe60e3b52b33b421021f46d634aa9f81f42b91445bb81cdf AS uv
 
-FROM ubuntu:24.04
+FROM ubuntu:24.04@sha256:561618e2c15bf2397621dd04f96926663a3b5616c189cf7e38db7e82f5c538ea
+
+# Ubuntu's minimal rootfs has no CA bundle, but the immutable archive is HTTPS.
+# Bootstrap trust from another immutable base; the snapshot-pinned
+# ca-certificates package replaces it during the first install.
+COPY --from=rust-base /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+
+# Canonical retains Ubuntu snapshots for at least two years. Advance this only
+# after rebuilding and exercising the sandbox image; it deliberately freezes
+# all packages from the Ubuntu archive while Docker's separate repository is
+# version-pinned below.
+ARG UBUNTU_SNAPSHOT=20260731T000000Z
+ARG DOCKER_GPG_SHA256=1500c1f56fa9e26b9b8f42452a553675796ade0807cdce11975eb98170b3a570
+ARG DOCKER_CE_VERSION=5:29.7.1-1~ubuntu.24.04~noble
+ARG CONTAINERD_VERSION=2.2.6-1~ubuntu.24.04~noble
+ARG DOCKER_BUILDX_VERSION=0.36.0-1~ubuntu.24.04~noble
+ARG DOCKER_COMPOSE_VERSION=5.4.0-1~ubuntu.24.04~noble
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-RUN apt-get update \
+RUN sed -i \
+      -e "s|http://archive.ubuntu.com/ubuntu|https://snapshot.ubuntu.com/ubuntu/${UBUNTU_SNAPSHOT}|g" \
+      -e "s|http://security.ubuntu.com/ubuntu|https://snapshot.ubuntu.com/ubuntu/${UBUNTU_SNAPSHOT}|g" \
+      /etc/apt/sources.list.d/ubuntu.sources \
+    && apt-get update \
     && apt-get install -y --no-install-recommends \
       ca-certificates \
       curl \
@@ -40,23 +62,33 @@ RUN apt-get update \
     && rm -f /usr/lib/python*/EXTERNALLY-MANAGED
 
 RUN install -m 0755 -d /etc/apt/keyrings \
-    && curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
-      | gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
+    && curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /tmp/docker.asc \
+    && echo "${DOCKER_GPG_SHA256}  /tmp/docker.asc" | sha256sum -c - \
+    && gpg --batch --dearmor -o /etc/apt/keyrings/docker.gpg /tmp/docker.asc \
+    && rm /tmp/docker.asc \
     && chmod a+r /etc/apt/keyrings/docker.gpg \
     && arch="$(dpkg --print-architecture)" \
-    && echo "deb [arch=${arch} signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu noble stable" \
-      >/etc/apt/sources.list.d/docker.list \
+    && { \
+      echo "Types: deb"; \
+      echo "URIs: https://download.docker.com/linux/ubuntu"; \
+      echo "Suites: noble"; \
+      echo "Components: stable"; \
+      echo "Architectures: ${arch}"; \
+      echo "Signed-By: /etc/apt/keyrings/docker.gpg"; \
+      echo "Snapshot: no"; \
+    } >/etc/apt/sources.list.d/docker.sources \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
-      docker-ce \
-      docker-ce-cli \
-      containerd.io \
-      docker-buildx-plugin \
-      docker-compose-plugin \
+      "docker-ce=${DOCKER_CE_VERSION}" \
+      "docker-ce-cli=${DOCKER_CE_VERSION}" \
+      "containerd.io=${CONTAINERD_VERSION}" \
+      "docker-buildx-plugin=${DOCKER_BUILDX_VERSION}" \
+      "docker-compose-plugin=${DOCKER_COMPOSE_VERSION}" \
     && rm -rf /var/lib/apt/lists/*
 
 COPY cvms/dev/user-sandbox/docker-daemon.json /etc/docker/daemon.json
 COPY cvms/dev/user-sandbox/tool-versions.env /tmp/tool-versions.env
+COPY cvms/dev/user-sandbox/codex-package ./tmp/codex-package
 COPY --from=uv /uv /uvx /bin/
 
 RUN set -a \
@@ -80,9 +112,11 @@ RUN set -a \
     && tar -xzf /tmp/gh.tar.gz -C /tmp \
     && install -m 0755 "/tmp/gh_${GH_VERSION}_linux_amd64/bin/gh" /usr/local/bin/gh \
     && rm -rf /tmp/gh.tar.gz "/tmp/gh_${GH_VERSION}_linux_amd64" \
-    && NPM_CONFIG_IGNORE_SCRIPTS=true NPM_CONFIG_AUDIT=false \
-      npm install -g "@openai/codex@${CODEX_VERSION}" --ignore-scripts \
-    && rm -f /usr/local/bin/codex \
+    && test "$(node -p "require('/tmp/codex-package/package-lock.json').packages['node_modules/@openai/codex'].version")" = "${CODEX_VERSION}" \
+    && npm ci --prefix /tmp/codex-package --omit=dev --ignore-scripts --no-audit --no-fund \
+    && install -d /usr/local/lib/concrete/codex \
+    && mv /tmp/codex-package/node_modules /usr/local/lib/concrete/codex/node_modules \
+    && rm -rf /tmp/codex-package \
     && rm /tmp/tool-versions.env
 
 # OpenSSH rejects shadow entries that start with "!" before public-key auth.

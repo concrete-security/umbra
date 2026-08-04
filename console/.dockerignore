@@ -5,3 +5,10 @@ atlas-verify/target
 __pycache__
 *.pyc
 npm-debug.log*
+pkg/
+browser-harness/.auth/
+browser-harness/output/
+browser-harness/playwright-report/
+browser-harness/test-results/
+# Built deterministically from tailwind.in.css in Docker's webapp-builder.
+static/admin/tailwind.css

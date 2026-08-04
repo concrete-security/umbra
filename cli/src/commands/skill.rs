@@ -125,7 +125,7 @@ pub fn install_on_login(config: &ResolvedConfig, quiet: bool) {
 
 /// Display names of agents detected on this machine (their home dir exists).
 pub fn detected_agents() -> Vec<&'static str> {
-    let Some(home) = dirs::home_dir() else {
+    let Some(home) = home::home_dir() else {
         return Vec::new();
     };
     AGENTS
@@ -139,7 +139,7 @@ pub fn detected_agents() -> Vec<&'static str> {
 /// reported to stderr; the returned `ExitStatus` distinguishes usage from
 /// runtime failures for the command path.
 fn perform(agents: Option<&str>, config: &ResolvedConfig) -> Result<Performed, ExitStatus> {
-    let Some(home) = dirs::home_dir() else {
+    let Some(home) = home::home_dir() else {
         style::eprintln_error("[error] could not resolve home directory");
         return Err(ExitStatus::Error);
     };

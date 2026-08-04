@@ -1,0 +1,8 @@
+{
+  "name": "concrete-dev-cvm-codex",
+  "private": true,
+  "version": "0.0.0",
+  "dependencies": {
+    "@openai/codex": "0.131.0"
+  }
+}

@@ -4,12 +4,33 @@ version = "0.1.0"
 description = "Concrete Security CVM services"
 readme = "README.md"
 requires-python = ">=3.12"
+authors = [{ name = "Concrete Security maintainers" }]
+maintainers = [{ name = "Concrete Security maintainers" }]
+license = "LicenseRef-Proprietary"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: No Input/Output (Daemon)",
+    "Intended Audience :: System Administrators",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Internet :: Proxy Servers",
+    "Topic :: Security",
+]
 dependencies = [
     "cryptography>=42,<47",
     "google-re2>=1,<2",
     "httpx>=0.27,<1",
-    "pytest>=8,<9",
 ]
+
+[project.urls]
+Homepage = "https://github.com/concrete-security/concrete"
+Documentation = "https://github.com/concrete-security/concrete/tree/main/docs"
+Repository = "https://github.com/concrete-security/concrete"
+Support = "https://github.com/concrete-security/concrete/issues"
+
+[dependency-groups]
+dev = ["pytest>=8,<9"]
 
 [project.optional-dependencies]
 mitmproxy = ["mitmproxy>=11,<12"]
@@ -26,3 +47,11 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/concrete_security_cvm"]
+
+[tool.hatch.build.targets.sdist]
+exclude = [
+    "/.venv/**",
+    "/**/__pycache__/**",
+    "/**/*.py[cod]",
+    "/node_modules/**",
+]

@@ -4,6 +4,19 @@ version = "0.1.0"
 description = "Concrete Console backend"
 readme = "README.md"
 requires-python = ">=3.12"
+authors = [{ name = "Concrete Security maintainers" }]
+maintainers = [{ name = "Concrete Security maintainers" }]
+license = "LicenseRef-Proprietary"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Web Environment",
+    "Framework :: FastAPI",
+    "Intended Audience :: System Administrators",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Systems Administration",
+]
 dependencies = [
     "alembic>=1.13,<2",
     "asyncpg>=0.29,<1",
@@ -11,10 +24,18 @@ dependencies = [
     "google-re2>=1,<2",
     "httpx>=0.27,<1",
     "pyjwt[crypto]>=2.10,<3",
-    "pytest>=8,<9",
     "structlog>=25,<26",
     "uvicorn[standard]>=0.30,<1",
 ]
+
+[project.urls]
+Homepage = "https://github.com/concrete-security/concrete"
+Documentation = "https://github.com/concrete-security/concrete/tree/main/docs"
+Repository = "https://github.com/concrete-security/concrete"
+Support = "https://github.com/concrete-security/concrete/issues"
+
+[dependency-groups]
+dev = ["pytest>=8,<9", "pyyaml>=6,<7"]
 
 [build-system]
 requires = ["hatchling"]
@@ -22,3 +43,11 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/concrete_console"]
+
+[tool.hatch.build.targets.sdist]
+exclude = [
+    "/.venv/**",
+    "/**/__pycache__/**",
+    "/**/*.py[cod]",
+    "/node_modules/**",
+]

@@ -775,7 +775,9 @@ def test_build_cvm_launch_env_omits_security_cvm_connect_host() -> None:
     assert "SECURITY_CVM_CONNECT_HOST" not in env
 
 
-def test_dstack_docker_pull_env_uses_private_registry_credentials() -> None:
+def test_dstack_docker_pull_env_private_credentials_success() -> None:
+    """Explicit private-registry credentials are forwarded as one complete set."""
+
     assert scheduler.dstack_docker_pull_env(
         {
             "DSTACK_DOCKER_REGISTRY": "ghcr.io",
@@ -791,18 +793,32 @@ def test_dstack_docker_pull_env_uses_private_registry_credentials() -> None:
     }
 
 
-def test_dstack_docker_pull_env_falls_back_to_ghcr_credentials() -> None:
+def test_dstack_docker_pull_env_ignores_publisher_credentials_success() -> None:
+    """Host-side image publishing credentials are never baked into a CVM."""
+
     assert scheduler.dstack_docker_pull_env(
         {
             "DOCKER_REGISTRY": "ghcr.io",
             "GHCR_USER": "github-user",
             "GHCR_TOKEN": "github-token",
         }
-    ) == {
-        "DSTACK_DOCKER_REGISTRY": "https://ghcr.io",
-        "DSTACK_DOCKER_USERNAME": "github-user",
-        "DSTACK_DOCKER_PASSWORD": "github-token",
-    }
+    ) == {}
+
+
+def test_dstack_docker_pull_env_partial_credentials_failure() -> None:
+    """A partial private-registry login fails before a CVM is provisioned."""
+
+    try:
+        scheduler.dstack_docker_pull_env(
+            {
+                "DSTACK_DOCKER_REGISTRY": "ghcr.io",
+                "DSTACK_DOCKER_USERNAME": "github-user",
+            }
+        )
+    except RuntimeError as error:
+        assert "must be configured together" in str(error)
+    else:
+        raise AssertionError("partial private-registry credentials were accepted")
 
 
 def test_build_cvm_policy_bundle_uses_shade_policy_and_binding() -> None:

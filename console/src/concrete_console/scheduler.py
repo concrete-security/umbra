@@ -3532,16 +3532,21 @@ def build_security_cvm_provision_env(snapshot: Any, *, ingest_token: str, ca_exp
 
 def dstack_docker_pull_env(raw: dict[str, str] | None = None) -> dict[str, str]:
     raw = load_settings().raw if raw is None else raw
-    registry = raw.get("DSTACK_DOCKER_REGISTRY", "").strip() or raw.get("DOCKER_REGISTRY", "").strip()
-    username = raw.get("DSTACK_DOCKER_USERNAME", "").strip() or raw.get("GHCR_USER", "").strip()
-    password = raw.get("DSTACK_DOCKER_PASSWORD", "").strip() or raw.get("GHCR_TOKEN", "").strip()
-    env: dict[str, str] = {}
-    if registry:
-        env["DSTACK_DOCKER_REGISTRY"] = phala_docker_registry_value(registry)
-    if username and password:
-        env["DSTACK_DOCKER_USERNAME"] = username
-        env["DSTACK_DOCKER_PASSWORD"] = password
-    return env
+    registry = raw.get("DSTACK_DOCKER_REGISTRY", "").strip()
+    username = raw.get("DSTACK_DOCKER_USERNAME", "").strip()
+    password = raw.get("DSTACK_DOCKER_PASSWORD", "").strip()
+    if not any((registry, username, password)):
+        return {}
+    if not all((registry, username, password)):
+        raise RuntimeError(
+            "DSTACK_DOCKER_REGISTRY, DSTACK_DOCKER_USERNAME, and "
+            "DSTACK_DOCKER_PASSWORD must be configured together"
+        )
+    return {
+        "DSTACK_DOCKER_REGISTRY": phala_docker_registry_value(registry),
+        "DSTACK_DOCKER_USERNAME": username,
+        "DSTACK_DOCKER_PASSWORD": password,
+    }
 
 
 def phala_docker_registry_value(registry: str) -> str:

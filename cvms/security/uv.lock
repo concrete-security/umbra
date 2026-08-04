@@ -244,6 +244,10 @@ dependencies = [
     { name = "cryptography" },
     { name = "google-re2" },
     { name = "httpx" },
+]
+
+[package.dev-dependencies]
+dev = [
     { name = "pytest" },
 ]
 
@@ -258,9 +262,11 @@ requires-dist = [
     { name = "google-re2", specifier = ">=1,<2" },
     { name = "httpx", specifier = ">=0.27,<1" },
     { name = "mitmproxy", marker = "extra == 'mitmproxy'", specifier = ">=11,<12" },
-    { name = "pytest", specifier = ">=8,<9" },
 ]
 provides-extras = ["mitmproxy"]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pytest", specifier = ">=8,<9" }]
 
 [[package]]
 name = "cryptography"

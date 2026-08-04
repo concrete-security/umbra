@@ -6,7 +6,11 @@
 name = "atlas-verify-cli"
 version = "0.1.0"
 edition = "2021"
-license = "MIT"
+authors = ["Concrete Security maintainers"]
+license = "Proprietary"
+repository = "https://github.com/concrete-security/concrete"
+homepage = "https://github.com/concrete-security/concrete"
+documentation = "https://github.com/concrete-security/concrete/tree/main/docs"
 publish = false
 
 [workspace]

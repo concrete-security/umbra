@@ -950,7 +950,7 @@ fn create_launch_key(
 fn ensure_default_ssh_keypair(
     config: &ResolvedConfig,
 ) -> Result<(PathBuf, String), (ExitStatus, String)> {
-    let home = dirs::home_dir().ok_or_else(|| {
+    let home = home::home_dir().ok_or_else(|| {
         (
             ExitStatus::Error,
             "[error] failed to locate home directory for SSH key generation".to_string(),

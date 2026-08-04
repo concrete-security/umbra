@@ -16,7 +16,7 @@ docker run --rm --entrypoint bash "${IMAGE_TAG}" -lc '
   done
   test -x /usr/local/lib/concrete/claude.real
   test -s /usr/local/lib/concrete/claude.version
-  test -f /usr/local/lib/node_modules/@openai/codex/bin/codex.js
+  test -f /usr/local/lib/concrete/codex/node_modules/@openai/codex/bin/codex.js
   shadow_password="$(getent shadow dev | cut -d: -f2)"
   case "${shadow_password}" in
     ""|!*)

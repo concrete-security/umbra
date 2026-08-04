@@ -1,12 +1,14 @@
 //! `concrete update` -- self-update from the published release channel -- plus
 //! the passive new-version check every other command surfaces.
 //!
-//! The install service (the same origin the curl installer uses) serves
+//! The install service (the same origin the verified installer uses) serves
 //! `/releases/concrete-cli/<version|latest>/<target>/concrete` with a sibling
-//! `concrete.sha256`, and `/releases/concrete-cli/latest/version` with the
-//! latest published version string. `concrete update` downloads the artifact
-//! for this build's target triple, verifies its checksum, exec-checks the
-//! staged binary, and atomically renames it over the running executable.
+//! `concrete.sha256`, version-root `concrete-cli.intoto.jsonl`, and
+//! `/releases/concrete-cli/latest/version` with the latest published version
+//! string. `concrete update` downloads the immutable versioned artifact for
+//! this build's target triple, verifies its checksum and signed SLSA
+//! provenance, exec-checks the staged binary, and atomically renames it over
+//! the running executable.
 //!
 //! The passive check keeps a small cache file (`update-check.json`) in the
 //! config directory, refreshed at most once per [`CHECK_INTERVAL`] by a
@@ -40,6 +42,15 @@ use std::os::unix::process::CommandExt;
 
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const BUILD_TARGET: &str = env!("BUILD_TARGET");
+
+/// Fixed release identity enforced by both the bootstrap installer and
+/// self-update. The release workflow is `workflow_dispatch` on `main`, so its
+/// signed provenance is branch- and input-bound rather than tag-triggered.
+const SLSA_SOURCE_REPO: &str = "github.com/concrete-security/concrete";
+const SLSA_SOURCE_BRANCH: &str = "main";
+const SLSA_WORKFLOW_INPUT: &str = "dry_run=false";
+const SLSA_BUILDER_ID: &str = "https://github.com/slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@refs/tags/v2.1.0";
+const SLSA_VERIFIER_ENV: &str = "CONCRETE_SLSA_VERIFIER";
 
 /// Cache file for the passive new-version check, under the config directory.
 const CACHE_FILE: &str = "update-check.json";
@@ -79,10 +90,6 @@ enum Requested {
     Pinned(String),
     /// The latest published release, as reported by the version endpoint.
     Latest(String),
-    /// The latest published release, but the install service predates the
-    /// version-metadata endpoint (404). Fall back to comparing artifact
-    /// checksums against the running binary.
-    LatestUnknown,
 }
 
 fn perform(
@@ -95,21 +102,27 @@ fn perform(
 
     let requested = match &args.version {
         Some(version) => {
-            if Version::parse(version).is_none() {
+            let Some(version) = canonical_release_version(version) else {
                 return Err((
                     ExitStatus::Usage,
                     format!(
-                        "[usage] --version must be a semantic version like 1.2.3, got {version}"
+                        "[usage] --version must be a canonical semantic version like 1.2.3 or 1.2.3-beta.1, got {version}"
                     ),
                 ));
-            }
-            Requested::Pinned(version.clone())
+            };
+            Requested::Pinned(version)
         }
         None => {
             let probe = http_client(PROBE_TIMEOUT)?;
             match fetch_latest_version(&probe, base_url)? {
                 Some(version) => Requested::Latest(version),
-                None => Requested::LatestUnknown,
+                None => {
+                    return Err((
+                        ExitStatus::Error,
+                        "[error] the install service did not publish version metadata; self-update requires an immutable versioned artifact -- use the verified installer in docs/quick-start.md"
+                            .to_string(),
+                    ))
+                }
             }
         }
     };
@@ -142,10 +155,10 @@ fn perform(
                     return Ok(report_up_to_date(json_output));
                 }
             }
-            Requested::LatestUnknown => {}
         }
     }
 
+    let slsa_verifier = resolve_slsa_verifier()?;
     let exe_path = current_exe_resolved()?;
     let exe_dir = exe_path
         .parent()
@@ -165,7 +178,6 @@ fn perform(
 
     let version_segment = match &requested {
         Requested::Pinned(version) | Requested::Latest(version) => version.as_str(),
-        Requested::LatestUnknown => "latest",
     };
     let client = http_client(DOWNLOAD_TIMEOUT)?;
     let artifact_url =
@@ -194,37 +206,31 @@ fn perform(
         ));
     }
 
-    // Without version metadata, "up to date" means "the published artifact is
-    // byte-identical to the binary that is running".
-    if matches!(requested, Requested::LatestUnknown) && !config.force {
-        let current_bytes = fs::read(&exe_path).map_err(|err| {
-            (
-                ExitStatus::Error,
-                format!("[error] failed to read {}: {err}", exe_path.display()),
-            )
-        })?;
-        if sha256_hex(&current_bytes) == actual_digest {
-            // The published latest is this very binary, so the running
-            // version is authoritative for the passive-check cache.
-            let _ = write_cache(&config.config_dir, Some(CURRENT_VERSION));
-            return Ok(report_up_to_date(json_output));
-        }
-    }
+    let provenance_url =
+        format!("{base_url}/releases/concrete-cli/{version_segment}/concrete-cli.intoto.jsonl");
+    let provenance = download(&client, &provenance_url)?.ok_or_else(|| {
+        (
+            ExitStatus::Error,
+            format!(
+                "[error] the install service did not publish SLSA provenance for concrete {version_segment}"
+            ),
+        )
+    })?;
 
     staged.fill(&bytes)?;
+    staged.verify_slsa(&provenance, &slsa_verifier)?;
     // Run the staged binary before touching the live one so a download that
     // cannot execute here (wrong libc, wrong arch) aborts with the current
     // install intact.
     let reported_version = exec_check(staged.path())?;
-    if let Requested::Pinned(expected) | Requested::Latest(expected) = &requested {
-        if &reported_version != expected {
-            return Err((
-                ExitStatus::Error,
-                format!(
-                    "[error] downloaded binary reports version {reported_version} but the release channel promised {expected}; the install service looks out of sync -- retry later"
-                ),
-            ));
-        }
+    let (Requested::Pinned(expected) | Requested::Latest(expected)) = &requested;
+    if &reported_version != expected {
+        return Err((
+            ExitStatus::Error,
+            format!(
+                "[error] downloaded binary reports version {reported_version} but the release channel promised {expected}; the install service looks out of sync -- retry later"
+            ),
+        ));
     }
     staged.install_over(&exe_path)?;
 
@@ -264,13 +270,6 @@ fn check_only(
 ) -> Result<ExitStatus, (ExitStatus, String)> {
     let latest = match requested {
         Requested::Latest(latest) => latest,
-        Requested::LatestUnknown => {
-            return Err((
-                ExitStatus::Error,
-                "[error] the install service did not publish version metadata; run `concrete update` to update by artifact checksum"
-                    .to_string(),
-            ))
-        }
         // clap declares the conflict; keep a typed error rather than a panic
         // in case the parser surface ever drifts.
         Requested::Pinned(_) => {
@@ -317,8 +316,8 @@ fn print_check_json(status: &str, latest: Option<&str>) {
 
 fn report_up_to_date(json_output: bool) -> ExitStatus {
     if json_output {
-        // No latest_version claim: this path is also reached from a --version
-        // pin and the checksum fallback, where "latest" was never probed.
+        // No latest_version claim: this path is also reached from a
+        // `--version` pin, where "latest" was never probed.
         print_check_json("up_to_date", None);
     } else {
         let confirm = style::ConfirmBlock::new("up to date:", "concrete", CURRENT_VERSION);
@@ -347,16 +346,13 @@ fn report_ahead(latest: &str, json_output: bool) -> ExitStatus {
 // HTTP
 // =========================================================================
 
-/// Reject an install base URL that could hand us an unauthenticated binary.
+/// Reject a remote install base URL without authenticated transport.
 ///
-/// The artifact and its `.sha256` are served by the same origin, so the checksum
-/// only proves the transfer was not corrupted -- it cannot prove the bytes came
-/// from us. TLS is therefore the *only* thing standing between `concrete update`
-/// and attacker-supplied code that this command then executes and installs as
-/// the user's `concrete`. Over plaintext, anyone on the network path (rogue
-/// Wi-Fi, ARP/DNS spoofing, a hostile egress proxy) can serve both the payload
-/// and a matching checksum; the passive version probe makes it worse by letting
-/// them *advertise* a new version to trigger the update.
+/// SLSA verification independently authenticates the release source, build
+/// identity, and artifact digest, but HTTPS still protects version metadata,
+/// availability, and download privacy. Over plaintext, a network attacker can
+/// suppress or replay version advertisements even though they cannot make an
+/// unsigned binary pass provenance verification.
 ///
 /// So: `https` for anything remote. Plaintext is allowed only when the host is
 /// loopback, where there is no network path to intercept -- that keeps local
@@ -375,7 +371,7 @@ fn validate_install_base_url(base_url: &str) -> Result<(), (ExitStatus, String)>
         "http" => Err((
             ExitStatus::Usage,
             format!(
-                "[usage] refusing to fetch a release binary over plaintext http from {base_url}; the published checksum comes from the same origin, so only https can prove the download is genuine -- use an https install_base_url (plaintext is allowed for loopback hosts only)"
+                "[usage] refusing to fetch release metadata and artifacts over plaintext http from {base_url}; use an https install_base_url (plaintext is allowed for loopback hosts only)"
             ),
         )),
         other => Err((
@@ -383,6 +379,18 @@ fn validate_install_base_url(base_url: &str) -> Result<(), (ExitStatus, String)>
             format!("[usage] install_base_url must use https, got scheme {other}: {base_url}"),
         )),
     }
+}
+
+/// Redirects may retain authenticated HTTPS transport. Plaintext is accepted
+/// only when the request itself started on loopback HTTP and stays on loopback;
+/// a remote HTTPS endpoint cannot redirect the updater into plaintext or SSRF a
+/// local HTTP service.
+fn redirect_target_allowed(initial: &Url, next: &Url) -> bool {
+    next.scheme() == "https"
+        || (initial.scheme() == "http"
+            && is_loopback(initial)
+            && next.scheme() == "http"
+            && is_loopback(next))
 }
 
 /// Whether the URL's host is loopback. Matches on the parsed host so a
@@ -402,6 +410,19 @@ fn http_client(timeout: Duration) -> Result<reqwest::blocking::Client, (ExitStat
     reqwest::blocking::Client::builder()
         .connect_timeout(PROBE_CONNECT_TIMEOUT)
         .timeout(timeout)
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() > 10 {
+                return attempt.error(io::Error::other("too many release-service redirects"));
+            }
+            match attempt.previous().first() {
+                Some(initial) if redirect_target_allowed(initial, attempt.url()) => {
+                    attempt.follow()
+                }
+                _ => attempt.error(io::Error::other(
+                    "release-service redirect would weaken transport authentication",
+                )),
+            }
+        }))
         .user_agent(format!("concrete-cli/{CURRENT_VERSION} ({BUILD_TARGET})"))
         .build()
         .map_err(|err| {
@@ -475,13 +496,13 @@ fn fetch_latest_version(
         .unwrap_or("")
         .trim()
         .to_string();
-    if Version::parse(&text).is_none() {
+    let Some(version) = canonical_release_version(&text) else {
         return Err((
             ExitStatus::Error,
             "[error] the install service returned an unrecognized version string".to_string(),
         ));
-    }
-    Ok(Some(text))
+    };
+    Ok(Some(version))
 }
 
 /// Extract the digest from an `sha256sum`-format checksum file: first
@@ -504,6 +525,66 @@ fn parse_checksum_file(bytes: &[u8]) -> Result<String, (ExitStatus, String)> {
 // =========================================================================
 // Local install
 // =========================================================================
+
+/// Resolve the preinstalled verifier without a shell. An explicit override is
+/// an absolute executable path; the default search accepts only absolute PATH
+/// entries, so a repository-controlled current directory can never shadow the
+/// trusted tool.
+fn resolve_slsa_verifier() -> Result<PathBuf, (ExitStatus, String)> {
+    let explicit = env::var_os(SLSA_VERIFIER_ENV).filter(|value| !value.is_empty());
+    resolve_slsa_verifier_from(explicit, env::var_os("PATH"))
+}
+
+/// Pure resolver seam: keeping environment reads outside makes the trust-path
+/// rules testable without process-global environment mutation races.
+fn resolve_slsa_verifier_from(
+    explicit: Option<std::ffi::OsString>,
+    search_path: Option<std::ffi::OsString>,
+) -> Result<PathBuf, (ExitStatus, String)> {
+    let candidate = if let Some(value) = explicit {
+        let path = PathBuf::from(value);
+        if !path.is_absolute() {
+            return Err((
+                ExitStatus::Error,
+                format!("[error] {SLSA_VERIFIER_ENV} must be an absolute executable path"),
+            ));
+        }
+        Some(path)
+    } else {
+        search_path.and_then(|path| {
+            env::split_paths(&path)
+                .filter(|dir| dir.is_absolute())
+                .map(|dir| dir.join("slsa-verifier"))
+                .find(|candidate| executable_file(candidate))
+        })
+    };
+
+    candidate.filter(|path| executable_file(path)).ok_or_else(|| {
+        (
+            ExitStatus::Error,
+            format!(
+                "[error] slsa-verifier is required for self-update; install the pinned verifier described in docs/quick-start.md or set {SLSA_VERIFIER_ENV} to its absolute executable path"
+            ),
+        )
+    })
+}
+
+fn executable_file(path: &Path) -> bool {
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
 
 /// The running executable with symlinks resolved. Installer shims symlink a
 /// PATH-visible name at the real binary; replacing the resolved target keeps
@@ -532,12 +613,17 @@ fn current_exe_resolved() -> Result<PathBuf, (ExitStatus, String)> {
 /// install completed.
 struct StagedBinary {
     path: PathBuf,
+    provenance_path: PathBuf,
     installed: bool,
 }
 
 impl StagedBinary {
     fn create(dir: &Path) -> Result<Self, (ExitStatus, String)> {
         let path = dir.join(format!(".concrete-update.{}.tmp", std::process::id()));
+        let provenance_path = dir.join(format!(
+            ".concrete-update.{}.intoto.jsonl",
+            std::process::id()
+        ));
         let mut options = fs::OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -546,13 +632,14 @@ impl StagedBinary {
             (
                 ExitStatus::Error,
                 format!(
-                    "[error] cannot write to {}: {err} -- re-run with sufficient privileges, or reinstall with the curl installer and CONCRETE_INSTALL_BIN_DIR set to a writable directory",
+                    "[error] cannot write to {}: {err} -- re-run with sufficient privileges, or use the verified installer in docs/quick-start.md with CONCRETE_INSTALL_BIN_DIR set to a writable directory",
                     dir.display()
                 ),
             )
         })?;
         Ok(Self {
             path,
+            provenance_path,
             installed: false,
         })
     }
@@ -584,6 +671,63 @@ impl StagedBinary {
         })
     }
 
+    /// Verify the staged binary against signed release provenance before it is
+    /// ever executed or moved over the trusted running binary.
+    fn verify_slsa(&self, provenance: &[u8], verifier: &Path) -> Result<(), (ExitStatus, String)> {
+        let write = || -> io::Result<()> {
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            options.mode(0o600);
+            let mut file = options.open(&self.provenance_path)?;
+            file.write_all(provenance)?;
+            file.sync_all()
+        };
+        write().map_err(|err| {
+            (
+                ExitStatus::Error,
+                format!(
+                    "[error] failed to stage SLSA provenance at {}: {err}",
+                    self.provenance_path.display()
+                ),
+            )
+        })?;
+
+        let output = Command::new(verifier)
+            .arg("verify-artifact")
+            .arg(&self.path)
+            .arg("--provenance-path")
+            .arg(&self.provenance_path)
+            .arg("--source-uri")
+            .arg(SLSA_SOURCE_REPO)
+            .arg("--source-branch")
+            .arg(SLSA_SOURCE_BRANCH)
+            .arg("--build-workflow-input")
+            .arg(SLSA_WORKFLOW_INPUT)
+            .arg("--builder-id")
+            .arg(SLSA_BUILDER_ID)
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|err| {
+                (
+                    ExitStatus::Error,
+                    format!(
+                        "[error] cannot run slsa-verifier ({err}); install the pinned verifier described in docs/quick-start.md or set {SLSA_VERIFIER_ENV} to its executable path"
+                    ),
+                )
+            })?;
+        if !output.status.success() {
+            return Err((
+                ExitStatus::Error,
+                format!(
+                    "[error] SLSA provenance verification failed for the downloaded concrete binary (verifier exited with {})",
+                    output.status
+                ),
+            ));
+        }
+        Ok(())
+    }
+
     fn install_over(&mut self, target: &Path) -> Result<(), (ExitStatus, String)> {
         fs::rename(&self.path, target).map_err(|err| {
             (
@@ -598,6 +742,7 @@ impl StagedBinary {
 
 impl Drop for StagedBinary {
     fn drop(&mut self) {
+        let _ = fs::remove_file(&self.provenance_path);
         if !self.installed {
             let _ = fs::remove_file(&self.path);
         }
@@ -816,6 +961,17 @@ fn compare_versions(a: &str, b: &str) -> Option<Ordering> {
     Some(Version::parse(a)?.cmp(&Version::parse(b)?))
 }
 
+/// A release path and the binary's reported version must use one canonical
+/// spelling. The comparison parser is deliberately more tolerant for the
+/// compile-time current version, but user/mirror input cannot retain a `v`
+/// prefix, whitespace, or build metadata that would make URL and identity
+/// checks disagree.
+fn canonical_release_version(input: &str) -> Option<String> {
+    let parsed = Version::parse(input)?;
+    let canonical = parsed.canonical();
+    (input == canonical).then_some(canonical)
+}
+
 /// Minimal semantic version for release-channel comparisons:
 /// `MAJOR.MINOR.PATCH` with an optional pre-release suffix ordered per semver
 /// precedence; build metadata (`+...`) is ignored. Parsing returns `None` for
@@ -842,6 +998,13 @@ enum PreId {
 }
 
 impl Version {
+    fn parse_numeric_identifier(input: &str) -> Option<u64> {
+        if input.is_empty() || (input.len() > 1 && input.starts_with('0')) {
+            return None;
+        }
+        input.parse::<u64>().ok()
+    }
+
     fn parse(input: &str) -> Option<Self> {
         let input = input.trim();
         let input = input.strip_prefix('v').unwrap_or(input);
@@ -851,9 +1014,9 @@ impl Version {
             None => (input, None),
         };
         let mut parts = core.split('.');
-        let major = parts.next()?.parse::<u64>().ok()?;
-        let minor = parts.next()?.parse::<u64>().ok()?;
-        let patch = parts.next()?.parse::<u64>().ok()?;
+        let major = Self::parse_numeric_identifier(parts.next()?)?;
+        let minor = Self::parse_numeric_identifier(parts.next()?)?;
+        let patch = Self::parse_numeric_identifier(parts.next()?)?;
         if parts.next().is_some() {
             return None;
         }
@@ -871,10 +1034,11 @@ impl Version {
                         {
                             return None;
                         }
-                        Some(match id.parse::<u64>() {
-                            Ok(number) => PreId::Num(number),
-                            Err(_) => PreId::Alpha(id.to_string()),
-                        })
+                        if id.chars().all(|character| character.is_ascii_digit()) {
+                            Some(PreId::Num(Self::parse_numeric_identifier(id)?))
+                        } else {
+                            Some(PreId::Alpha(id.to_string()))
+                        }
                     })
                     .collect::<Option<Vec<_>>>()?;
                 PreRelease::Pre(ids)
@@ -884,6 +1048,24 @@ impl Version {
             release: (major, minor, patch),
             pre,
         })
+    }
+
+    fn canonical(&self) -> String {
+        let (major, minor, patch) = self.release;
+        let mut version = format!("{major}.{minor}.{patch}");
+        if let PreRelease::Pre(identifiers) = &self.pre {
+            version.push('-');
+            for (index, identifier) in identifiers.iter().enumerate() {
+                if index > 0 {
+                    version.push('.');
+                }
+                match identifier {
+                    PreId::Num(number) => version.push_str(&number.to_string()),
+                    PreId::Alpha(text) => version.push_str(text),
+                }
+            }
+        }
+        version
     }
 }
 
@@ -936,6 +1118,86 @@ mod tests {
         std::env::temp_dir().join(format!("concrete-update-test-{}", uuid::Uuid::new_v4()))
     }
 
+    #[cfg(unix)]
+    fn fake_verifier(dir: &Path) -> PathBuf {
+        let path = dir.join("slsa-verifier");
+        fs::write(
+            &path,
+            format!(
+                r#"#!/bin/sh
+set -eu
+[ "$#" -eq 12 ]
+[ "$1" = verify-artifact ]
+[ -s "$2" ]
+[ "$3" = --provenance-path ]
+[ "$(cat "$4")" = signed-provenance ]
+[ "$5" = --source-uri ]
+[ "$6" = {SLSA_SOURCE_REPO} ]
+[ "$7" = --source-branch ]
+[ "$8" = {SLSA_SOURCE_BRANCH} ]
+[ "$9" = --build-workflow-input ]
+[ "${{10}}" = {SLSA_WORKFLOW_INPUT} ]
+[ "${{11}}" = --builder-id ]
+[ "${{12}}" = {SLSA_BUILDER_ID} ]
+"#
+            ),
+        )
+        .expect("fake verifier written");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
+            .expect("fake verifier executable");
+        path
+    }
+
+    /// An override must name the trusted executable absolutely; a relative
+    /// value could otherwise resolve differently after a directory change.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_slsa_verifier_relative_override_failure() {
+        let (status, message) =
+            resolve_slsa_verifier_from(Some(std::ffi::OsString::from("tools/slsa-verifier")), None)
+                .expect_err("relative verifier override rejected");
+
+        assert!(matches!(status, ExitStatus::Error));
+        assert!(message.contains("absolute executable path"));
+    }
+
+    /// Relative PATH entries are ignored even when they contain an executable,
+    /// so a repository-controlled directory cannot shadow the trusted tool.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_slsa_verifier_relative_path_shadow_failure() {
+        let cwd = env::current_dir().expect("current directory available");
+        let relative_dir = PathBuf::from(format!(
+            ".concrete-update-resolver-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let dir = cwd.join(&relative_dir);
+        fs::create_dir_all(&dir).expect("relative test directory created");
+        fake_verifier(&dir);
+
+        let result = resolve_slsa_verifier_from(None, Some(relative_dir.into_os_string()));
+
+        fs::remove_dir_all(&dir).expect("relative test directory removed");
+        let (status, message) = result.expect_err("relative PATH verifier ignored");
+        assert!(matches!(status, ExitStatus::Error));
+        assert!(message.contains("slsa-verifier is required"));
+    }
+
+    /// An absolute executable supplied by the trusted bootstrap is accepted.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_slsa_verifier_absolute_executable_success() {
+        let dir = temp_config_dir();
+        fs::create_dir_all(&dir).expect("test dir created");
+        let verifier = fake_verifier(&dir);
+
+        let resolved = resolve_slsa_verifier_from(Some(verifier.clone().into_os_string()), None)
+            .expect("absolute executable accepted");
+
+        assert_eq!(resolved, verifier);
+        fs::remove_dir_all(&dir).expect("test dir removed");
+    }
+
     /// Transport rule for the release channel: https anywhere, plaintext only
     /// for loopback (local mirrors and the release-tree tests).
     #[rstest]
@@ -971,6 +1233,35 @@ mod tests {
         assert!(message.starts_with("[usage]"));
     }
 
+    /// Redirects preserve HTTPS, while an explicitly local HTTP mirror may
+    /// redirect only to another loopback HTTP endpoint.
+    #[rstest]
+    #[case::https("https://install.example/start", "https://cdn.example/artifact")]
+    #[case::loopback_http("http://localhost/start", "http://127.0.0.1/artifact")]
+    #[case::loopback_to_https("http://localhost/start", "https://cdn.example/artifact")]
+    fn redirect_target_authenticated_transport_success(#[case] initial: &str, #[case] next: &str) {
+        assert!(redirect_target_allowed(
+            &Url::parse(initial).expect("initial URL parsed"),
+            &Url::parse(next).expect("redirect URL parsed")
+        ));
+    }
+
+    /// A redirect cannot downgrade remote HTTPS or escape the loopback-only
+    /// plaintext carve-out.
+    #[rstest]
+    #[case::remote_downgrade("https://install.example/start", "http://cdn.example/artifact")]
+    #[case::https_to_loopback_http("https://install.example/start", "http://127.0.0.1/artifact")]
+    #[case::loopback_to_remote_http("http://localhost/start", "http://cdn.example/artifact")]
+    fn redirect_target_unauthenticated_transport_failure(
+        #[case] initial: &str,
+        #[case] next: &str,
+    ) {
+        assert!(!redirect_target_allowed(
+            &Url::parse(initial).expect("initial URL parsed"),
+            &Url::parse(next).expect("redirect URL parsed")
+        ));
+    }
+
     #[test]
     fn version_parse_accepts_release_and_prerelease() {
         assert_eq!(
@@ -1000,14 +1291,38 @@ mod tests {
             "1",
             "1.2",
             "1.2.3.4",
+            "01.2.3",
+            "1.02.3",
+            "1.2.03",
             "1.2.x",
             "latest",
             "1.2.3-",
+            "1.2.3-01",
             "1.2.3-a..b",
             "1.2.3-a_b",
         ] {
             assert!(Version::parse(input).is_none(), "{input} should not parse");
         }
+    }
+
+    /// Canonical stable and prerelease spellings can safely identify both the
+    /// immutable URL and the version reported by the verified binary.
+    #[rstest]
+    #[case::stable("1.2.3")]
+    #[case::prerelease("0.3.0-beta.3")]
+    fn canonical_release_version_success(#[case] input: &str) {
+        assert_eq!(canonical_release_version(input).as_deref(), Some(input));
+    }
+
+    /// Alternate spellings and build metadata are rejected so an accepted pin
+    /// cannot download one path and compare against a different identity.
+    #[rstest]
+    #[case::v_prefix("v1.2.3")]
+    #[case::whitespace(" 1.2.3 ")]
+    #[case::build_metadata("1.2.3+build.7")]
+    #[case::leading_zero("01.2.3")]
+    fn canonical_release_version_failure(#[case] input: &str) {
+        assert!(canonical_release_version(input).is_none());
     }
 
     #[test]
@@ -1049,6 +1364,90 @@ mod tests {
         assert!(parse_checksum_file(b"").is_err());
         assert!(parse_checksum_file(b"deadbeef  concrete").is_err());
         assert!(parse_checksum_file(&[0xff, 0xfe]).is_err());
+    }
+
+    /// The verifier receives every fixed release-identity constraint and a
+    /// valid attestation permits the already-staged binary to proceed.
+    #[cfg(unix)]
+    #[test]
+    fn verify_slsa_release_identity_success() {
+        let dir = temp_config_dir();
+        fs::create_dir_all(&dir).expect("test dir created");
+        let verifier = fake_verifier(&dir);
+        let mut staged = StagedBinary::create(&dir).expect("binary staged");
+        staged.fill(b"authenticated binary").expect("binary filled");
+        let provenance_path = staged.provenance_path.clone();
+
+        staged
+            .verify_slsa(b"signed-provenance", &verifier)
+            .expect("fixed SLSA policy accepted");
+
+        drop(staged);
+        assert!(!provenance_path.exists(), "provenance temp file removed");
+        fs::remove_dir_all(&dir).expect("test dir removed");
+    }
+
+    /// A same-origin payload with a matching checksum remains untrusted when
+    /// provenance is missing, malformed, or for another build identity.
+    #[cfg(unix)]
+    #[rstest]
+    #[case::missing(b"")]
+    #[case::malformed(b"not-json")]
+    #[case::wrong_identity(b"signed-for-another-build")]
+    fn verify_slsa_untrusted_provenance_failure(#[case] provenance: &[u8]) {
+        let dir = temp_config_dir();
+        fs::create_dir_all(&dir).expect("test dir created");
+        let verifier = fake_verifier(&dir);
+        let trusted_path = dir.join("concrete");
+        fs::write(&trusted_path, b"trusted current binary").expect("trusted binary written");
+        let execution_marker = dir.join("malicious-executed");
+        let malicious = format!("#!/bin/sh\ntouch '{}'\n", execution_marker.display());
+        let checksum = format!("{}  concrete\n", sha256_hex(malicious.as_bytes()));
+        assert_eq!(
+            parse_checksum_file(checksum.as_bytes()).expect("matching checksum parsed"),
+            sha256_hex(malicious.as_bytes())
+        );
+        let mut staged = StagedBinary::create(&dir).expect("binary staged");
+        staged
+            .fill(malicious.as_bytes())
+            .expect("malicious binary staged");
+
+        let (status, message) = staged
+            .verify_slsa(provenance, &verifier)
+            .expect_err("untrusted provenance rejected");
+
+        assert!(matches!(status, ExitStatus::Error));
+        assert!(message.contains("SLSA provenance verification failed"));
+        assert_eq!(
+            fs::read(&trusted_path).expect("trusted binary readable"),
+            b"trusted current binary"
+        );
+        assert!(
+            !execution_marker.exists(),
+            "staged payload was not executed"
+        );
+        drop(staged);
+        fs::remove_dir_all(&dir).expect("test dir removed");
+    }
+
+    /// A missing verifier fails closed before an unverified staged binary can
+    /// execute or replace the running binary.
+    #[cfg(unix)]
+    #[test]
+    fn verify_slsa_missing_verifier_failure() {
+        let dir = temp_config_dir();
+        fs::create_dir_all(&dir).expect("test dir created");
+        let mut staged = StagedBinary::create(&dir).expect("binary staged");
+        staged.fill(b"unverified binary").expect("binary filled");
+
+        let (status, message) = staged
+            .verify_slsa(b"signed-provenance", &dir.join("missing-verifier"))
+            .expect_err("missing verifier rejected");
+
+        assert!(matches!(status, ExitStatus::Error));
+        assert!(message.contains("cannot run slsa-verifier"));
+        drop(staged);
+        fs::remove_dir_all(&dir).expect("test dir removed");
     }
 
     #[test]

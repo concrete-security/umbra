@@ -1,8 +1,13 @@
 [package]
 name = "concrete-atls-connect"
 version = "0.1.0"
-edition = "2021"
-license = "Proprietary"
+edition.workspace = true
+authors.workspace = true
+license-file.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+rust-version.workspace = true
 publish = false
 description = "Dev CVM aTLS loopback relay helper"
 
