@@ -85,9 +85,11 @@ services:
     environment:
       DEV_CVM_SSH_HOST: user-sandbox
       DEV_CVM_SSH_PORT: "22"
-    depends_on:
-      user-sandbox:
-        condition: service_healthy
+    # Deliberately not gated on user-sandbox health: the tunnel dials the
+    # sandbox per connection and reports connection_error until it is up,
+    # while shade's nginx needs this upstream resolvable immediately —
+    # otherwise nginx crash-loops through certbot's whole retry budget and
+    # the CVM never obtains its certificate (first live canary, 2026-08-05).
     expose:
       - "8090"
     networks:
