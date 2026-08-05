@@ -36,7 +36,7 @@ CSV_COLUMNS = (
 )
 DANGEROUS_CSV_PREFIXES = ("=", "+", "-", "@", "|", "\t", "\r", "\n")
 POSTGRES_SCHEMES = {"postgres", "postgresql"}
-DEFAULT_POSTGRES_EXPORT_TABLE = "concrete_audit_export_artifacts"
+DEFAULT_POSTGRES_EXPORT_TABLE = "umbra_audit_export_artifacts"
 POSTGRES_EXPORT_TIMEOUT_SECONDS = 5.0
 SQL_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
 

@@ -1788,7 +1788,8 @@ def test_validate_profile_policy_still_bounds_inline_rendered_value() -> None:
     )
 
 
-def test_replace_profile_secret_material_encrypts_values(monkeypatch) -> None:
+def test_replace_profile_secret_material_encrypts_values_success(monkeypatch) -> None:
+    """Profile replacement persists only a fresh encrypted v2 envelope."""
     class FakeConn:
         def __init__(self) -> None:
             self.calls = []
@@ -1815,7 +1816,7 @@ def test_replace_profile_secret_material_encrypts_values(monkeypatch) -> None:
     assert "INSERT INTO profile_secret_material" in conn.calls[1][0]
     assert conn.calls[1][1][0:2] == (profile_id, "anthropic-key")
     ciphertext = conn.calls[1][1][2]
-    assert ciphertext.startswith("v1:")
+    assert ciphertext.startswith("v2:")
     assert "sk-ant-real" not in ciphertext
 
 
@@ -3020,7 +3021,8 @@ def test_put_user_secret_updates_existing_despite_cap(monkeypatch) -> None:
     assert result["name"] == "slack-user-token"
 
 
-def test_put_user_secret_encrypts_and_never_returns_value(monkeypatch) -> None:
+def test_put_user_secret_encrypts_without_returning_value_success(monkeypatch) -> None:
+    """A user-secret write persists v2 ciphertext and returns metadata only."""
     monkeypatch.setenv("SECRET_INJECTION_KEK_B64", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
     events = _capture_audit(monkeypatch)
     conn = UserSecretConn()
@@ -3035,7 +3037,7 @@ def test_put_user_secret_encrypts_and_never_returns_value(monkeypatch) -> None:
     )
 
     ciphertext = conn.insert_args[2]
-    assert ciphertext.startswith("v1:")
+    assert ciphertext.startswith("v2:")
     assert "xoxp-plaintext" not in ciphertext
     assert set(result) == {"name", "allowed_hosts", "created_at", "updated_at"}
     assert result["allowed_hosts"] == ["api.slack.com", "*.slack.com"]

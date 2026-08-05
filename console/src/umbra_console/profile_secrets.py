@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import os
 import re
 from typing import Any, Callable
@@ -11,7 +12,8 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from umbra_console.config import load_settings
 
 SECRET_INJECTION_KEK_ENV = "SECRET_INJECTION_KEK_B64"
-SECRET_INJECTION_ENVELOPE_VERSION = "v1"
+SECRET_INJECTION_ENVELOPE_VERSION = "v2"
+SECRET_INJECTION_LEGACY_ENVELOPE_VERSION = "v1"
 SECRET_INJECTION_NONCE_BYTES = 12
 SECRET_INJECTION_KEY_BYTES = 32
 SECRET_INJECTION_RENDERED_MAX_LEN = 8192
@@ -45,19 +47,35 @@ def check_secret_injection_kek() -> None:
 
 
 def encrypt_profile_secret_value(*, profile_id: Any, injection_id: str, value: str) -> str:
-    return _encrypt_secret_value(aad=_secret_aad(profile_id, injection_id), value=value)
+    return _encrypt_secret_value(
+        aad=_secret_aad(profile_id, injection_id, SECRET_INJECTION_ENVELOPE_VERSION),
+        value=value,
+    )
 
 
 def decrypt_profile_secret_value(*, profile_id: Any, injection_id: str, ciphertext: str) -> str:
-    return _decrypt_secret_value(aad=_secret_aad(profile_id, injection_id), ciphertext=ciphertext)
+    version = _secret_envelope_version(ciphertext)
+    return _decrypt_secret_value(
+        aad=_secret_aad(profile_id, injection_id, version),
+        ciphertext=ciphertext,
+        version=version,
+    )
 
 
 def encrypt_user_secret_value(*, user_id: Any, name: str, value: str) -> str:
-    return _encrypt_secret_value(aad=_user_secret_aad(user_id, name), value=value)
+    return _encrypt_secret_value(
+        aad=_user_secret_aad(user_id, name, SECRET_INJECTION_ENVELOPE_VERSION),
+        value=value,
+    )
 
 
 def decrypt_user_secret_value(*, user_id: Any, name: str, ciphertext: str) -> str:
-    return _decrypt_secret_value(aad=_user_secret_aad(user_id, name), ciphertext=ciphertext)
+    version = _secret_envelope_version(ciphertext)
+    return _decrypt_secret_value(
+        aad=_user_secret_aad(user_id, name, version),
+        ciphertext=ciphertext,
+        version=version,
+    )
 
 
 def split_profile_policy_secret_values(policy: dict[str, Any]) -> tuple[dict[str, Any], dict[str, str]]:
@@ -353,15 +371,13 @@ def _encrypt_secret_value(*, aad: bytes, value: str) -> str:
     return f"{SECRET_INJECTION_ENVELOPE_VERSION}:{payload}"
 
 
-def _decrypt_secret_value(*, aad: bytes, ciphertext: str) -> str:
-    prefix = f"{SECRET_INJECTION_ENVELOPE_VERSION}:"
-    if not ciphertext.startswith(prefix):
-        raise ValueError("unsupported profile secret ciphertext envelope")
+def _decrypt_secret_value(*, aad: bytes, ciphertext: str, version: str) -> str:
+    prefix = f"{version}:"
     encoded = ciphertext.removeprefix(prefix)
     try:
         padded = encoded + "=" * (-len(encoded) % 4)
-        payload = base64.urlsafe_b64decode(padded.encode("ascii"))
-    except (UnicodeEncodeError, ValueError) as exc:
+        payload = base64.b64decode(padded.encode("ascii"), altchars=b"-_", validate=True)
+    except (binascii.Error, UnicodeEncodeError, ValueError) as exc:
         raise ValueError("invalid profile secret ciphertext envelope") from exc
     if len(payload) <= SECRET_INJECTION_NONCE_BYTES:
         raise ValueError("invalid profile secret ciphertext payload")
@@ -371,16 +387,34 @@ def _decrypt_secret_value(*, aad: bytes, ciphertext: str) -> str:
     return plaintext.decode("utf-8")
 
 
+def _secret_envelope_version(ciphertext: str) -> str:
+    version, separator, _ = ciphertext.partition(":")
+    if not separator or version not in {
+        SECRET_INJECTION_LEGACY_ENVELOPE_VERSION,
+        SECRET_INJECTION_ENVELOPE_VERSION,
+    }:
+        raise ValueError("unsupported secret ciphertext envelope")
+    return version
+
+
 def _valid_dns_name(host: str) -> bool:
     labels = host.split(".")
     return len(labels) >= 2 and all(SECRET_HOST_DNS_LABEL_RE.fullmatch(label) for label in labels)
 
 
-def _secret_aad(profile_id: Any, injection_id: str) -> bytes:
-    return f"concrete.profile_secret_material.{SECRET_INJECTION_ENVELOPE_VERSION}:{profile_id}:{injection_id}".encode(
-        "utf-8"
+def _secret_aad(profile_id: Any, injection_id: str, version: str) -> bytes:
+    domain = (
+        "concrete.profile_secret_material.v1"
+        if version == SECRET_INJECTION_LEGACY_ENVELOPE_VERSION
+        else "umbra.profile_secret_material.v2"
     )
+    return f"{domain}:{profile_id}:{injection_id}".encode("utf-8")
 
 
-def _user_secret_aad(user_id: Any, name: str) -> bytes:
-    return f"concrete.user_secret_material.{SECRET_INJECTION_ENVELOPE_VERSION}:{user_id}:{name}".encode("utf-8")
+def _user_secret_aad(user_id: Any, name: str, version: str) -> bytes:
+    domain = (
+        "concrete.user_secret_material.v1"
+        if version == SECRET_INJECTION_LEGACY_ENVELOPE_VERSION
+        else "umbra.user_secret_material.v2"
+    )
+    return f"{domain}:{user_id}:{name}".encode("utf-8")

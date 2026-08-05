@@ -1,6 +1,8 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from umbra_console import audit_anchor
 
 
@@ -24,14 +26,38 @@ class FakeConn:
         return "INSERT 0 1"
 
 
-def test_postgres_anchor_target_strips_credentials_from_public_uri() -> None:
-    target = audit_anchor.parse_postgres_anchor_target(
-        "postgresql://anchor:secret@db.example:5432/audit?sslmode=require&table=anchors"
-    )
+@pytest.mark.parametrize(
+    ("target_uri", "expected_dsn", "expected_table", "expected_public_uri"),
+    [
+        pytest.param(
+            "postgresql://anchor:secret@db.example:5432/audit?sslmode=require&table=anchors",
+            "postgresql://anchor:secret@db.example:5432/audit?sslmode=require",
+            "anchors",
+            "postgresql://db.example:5432/audit?table=anchors",
+            id="explicit-table",
+        ),
+        pytest.param(
+            "postgresql://anchor:secret@db.example:5432/audit?sslmode=require",
+            "postgresql://anchor:secret@db.example:5432/audit?sslmode=require",
+            "umbra_audit_anchors",
+            "postgresql://db.example:5432/audit?table=umbra_audit_anchors",
+            id="umbra-default",
+        ),
+    ],
+)
+def test_postgres_anchor_target_parsing_success(
+    target_uri: str,
+    expected_dsn: str,
+    expected_table: str,
+    expected_public_uri: str,
+) -> None:
+    """Parsing keeps credentials private and selects explicit or Umbra tables."""
 
-    assert target.dsn == "postgresql://anchor:secret@db.example:5432/audit?sslmode=require"
-    assert target.table == "anchors"
-    assert target.public_uri == "postgresql://db.example:5432/audit?table=anchors"
+    target = audit_anchor.parse_postgres_anchor_target(target_uri)
+
+    assert target.dsn == expected_dsn
+    assert target.table == expected_table
+    assert target.public_uri == expected_public_uri
 
 
 def test_anchor_payload_digest_uses_canonical_json() -> None:

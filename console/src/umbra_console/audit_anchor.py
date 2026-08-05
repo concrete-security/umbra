@@ -17,7 +17,7 @@ from umbra_console.db import get_pool
 from umbra_console.log_config import logger
 
 log = logger()
-DEFAULT_POSTGRES_ANCHOR_TABLE = "concrete_audit_anchors"
+DEFAULT_POSTGRES_ANCHOR_TABLE = "umbra_audit_anchors"
 POSTGRES_ANCHOR_WRITE_TIMEOUT_SECONDS = 5.0
 POSTGRES_SCHEMES = {"postgres", "postgresql"}
 ANCHOR_TABLE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")

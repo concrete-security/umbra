@@ -7,12 +7,11 @@ stack to a throwaway database and runs the *actual* ``list_sc_control_cvms``
 query. It exists to cover the two runtime surfaces the fake-connection tests
 cannot reach:
 
-1. **Migration ``0026_user_secret_material``** — that ``CREATE TABLE
-   user_secret_material`` (with the ``ciphertext LIKE 'v1:%'`` and
-   ``jsonb_typeof(allowed_hosts) = 'array'`` CHECKs) and the two
-   ``ALTER TYPE audit_action ADD VALUE`` statements actually apply on top of
-   0025, inside Alembic's per-migration transaction, on the deployment's
-   Postgres. ``make check`` only runs ``alembic heads`` (graph, not upgrade).
+1. **Secret-material migrations** — that ``0026_user_secret_material`` creates
+   its table and ``0028_secret_envelope_v2`` broadens both ciphertext CHECKs to
+   accept v1/v2 while rejecting unsupported prefixes. The v2 downgrade also
+   refuses to strand existing v2 rows behind v1-only constraints. ``make
+   check`` only runs ``alembic heads`` (graph, not upgrade).
 
 2. **``list_sc_control_cvms``** — that the added ``c.owner_id`` in the
    SELECT/GROUP BY plus the correlated ``owner_secret_material`` subquery are
@@ -39,9 +38,11 @@ import os
 import subprocess
 import sys
 import uuid
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 import pytest
@@ -94,19 +95,54 @@ async def _admin_execute(base_dsn: str, sql: str, *args) -> None:
         await conn.close()
 
 
-def _alembic_upgrade_head(db_dsn: str) -> subprocess.CompletedProcess:
+async def _admin_fetchval(base_dsn: str, sql: str, *args) -> Any:
+    """Fetch one scalar value from a throwaway database."""
+    conn = await asyncpg.connect(_asyncpg_form(base_dsn))
+    try:
+        return await conn.fetchval(sql, *args)
+    finally:
+        await conn.close()
+
+
+def _run_alembic(db_dsn: str, *args: str) -> subprocess.CompletedProcess:
+    """Run Alembic against the caller's throwaway database."""
     env = dict(os.environ)
     env["DATABASE_URL"] = _sqlalchemy_form(db_dsn)
     # Mirrors the real deploy path (console/entrypoint.sh: `alembic upgrade head`)
     # and `make check` (`cd console && python -m alembic ...`): alembic.ini and the
     # `alembic/` script dir are resolved relative to the console working directory.
     return subprocess.run(
-        [sys.executable, "-m", "alembic", "upgrade", "head"],
+        [sys.executable, "-m", "alembic", *args],
         cwd=str(CONSOLE_DIR),
         env=env,
         capture_output=True,
         text=True,
     )
+
+
+@pytest.fixture
+def migrated_database() -> Iterator[str]:
+    """Create, migrate, and finally drop one uniquely named test database."""
+    base = _base_dsn()
+    assert base is not None  # guarded by pytestmark
+    dbname = f"umbra_itest_{uuid.uuid4().hex}"
+
+    asyncio.run(_admin_execute(base, f'CREATE DATABASE "{dbname}"'))
+    child_dsn = _with_database(base, dbname)
+    try:
+        proc = _run_alembic(child_dsn, "upgrade", "head")
+        assert proc.returncode == 0, f"alembic upgrade head failed:\n{proc.stdout}\n{proc.stderr}"
+        yield child_dsn
+    finally:
+        asyncio.run(
+            _admin_execute(
+                base,
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                "WHERE datname = $1 AND pid <> pg_backend_pid()",
+                dbname,
+            )
+        )
+        asyncio.run(_admin_execute(base, f'DROP DATABASE IF EXISTS "{dbname}"'))
 
 
 # --- Seed identifiers and policies ---------------------------------------------
@@ -254,8 +290,17 @@ async def _seed(conn: asyncpg.Connection) -> None:
         await conn.execute("INSERT INTO cvm_profiles (cvm_id, profile_id) VALUES ($1, $2)", cid, pid)
 
 
+async def _seed_database(db_dsn: str) -> None:
+    """Seed one freshly migrated throwaway database."""
+    conn = await asyncpg.connect(_asyncpg_form(db_dsn))
+    try:
+        await _seed(conn)
+    finally:
+        await conn.close()
+
+
 async def _assert_migration_ddl(conn: asyncpg.Connection) -> None:
-    """Migration 0026 applied its enum extension and both table CHECKs."""
+    """Migrations 0026/0028 applied their enum extension and table CHECKs."""
     labels = {
         row["enumlabel"]
         for row in await conn.fetch(
@@ -264,15 +309,25 @@ async def _assert_migration_ddl(conn: asyncpg.Connection) -> None:
     }
     assert {"USER_SECRET_SET", "USER_SECRET_DELETED"} <= labels
 
-    # CHECK (ciphertext LIKE 'v1:%') — a non-v1 envelope is rejected.
+    # Both tables accepted the v2 rows inserted by _seed while still rejecting
+    # unsupported envelope prefixes.
     with pytest.raises(pg_errors.CheckViolationError):
         async with conn.transaction():
             await conn.execute(
                 "INSERT INTO user_secret_material (user_id, name, ciphertext, allowed_hosts) VALUES ($1, $2, $3, $4::jsonb)",
                 OWNER_FULL,
                 "ddl-bad-ciphertext",
-                "plaintext-not-v1",
+                "v3:unsupported",
                 json.dumps(["api.slack.com"]),
+            )
+
+    with pytest.raises(pg_errors.CheckViolationError):
+        async with conn.transaction():
+            await conn.execute(
+                "INSERT INTO profile_secret_material (profile_id, injection_id, ciphertext) VALUES ($1, $2, $3)",
+                PROF_GITHUB,
+                "ddl-bad-ciphertext",
+                "v3:unsupported",
             )
 
     # CHECK (jsonb_typeof(allowed_hosts) = 'array') — a non-array is rejected
@@ -326,8 +381,8 @@ async def _assert_owner_material_aggregation(conn: asyncpg.Connection) -> None:
     assert set(full) == {"slack-user-token", "github-pat"}
     assert full["slack-user-token"]["allowed_hosts"] == ["api.slack.com"]
     assert full["github-pat"]["allowed_hosts"] == ["*.github.com"]
-    assert full["slack-user-token"]["ciphertext"].startswith("v1:")
-    assert full["github-pat"]["ciphertext"].startswith("v1:")
+    assert full["slack-user-token"]["ciphertext"].startswith("v2:")
+    assert full["github-pat"]["ciphertext"].startswith("v2:")
 
 
 def _assert_wire_shape_and_merge(body: dict, response: SimpleNamespace) -> None:
@@ -406,25 +461,78 @@ async def _run_assertions(db_dsn: str) -> None:
         await pool.close()
 
 
-def test_sc_control_query_and_migration_against_real_postgres(monkeypatch) -> None:
+def test_sc_control_query_and_migration_real_postgres_success(monkeypatch, migrated_database: str) -> None:
+    """The head schema and SC-control query work together on real Postgres."""
     monkeypatch.setenv("SECRET_INJECTION_KEK_B64", KEK_B64)
-    base = _base_dsn()
-    assert base is not None  # guarded by pytestmark
-    dbname = f"umbra_itest_{uuid.uuid4().hex}"
+    asyncio.run(_run_assertions(migrated_database))
 
-    asyncio.run(_admin_execute(base, f'CREATE DATABASE "{dbname}"'))
-    child_dsn = _with_database(base, dbname)
-    try:
-        proc = _alembic_upgrade_head(child_dsn)
-        assert proc.returncode == 0, f"alembic upgrade head failed:\n{proc.stdout}\n{proc.stderr}"
-        asyncio.run(_run_assertions(child_dsn))
-    finally:
-        asyncio.run(
-            _admin_execute(
-                base,
-                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-                "WHERE datname = $1 AND pid <> pg_backend_pid()",
-                dbname,
+
+@pytest.mark.parametrize(
+    ("v2_table", "delete_sql", "expected_profile_rows", "expected_user_rows"),
+    [
+        pytest.param(
+            "profile_secret_material",
+            "DELETE FROM user_secret_material",
+            1,
+            0,
+            id="profile",
+        ),
+        pytest.param(
+            "user_secret_material",
+            "DELETE FROM profile_secret_material",
+            0,
+            2,
+            id="user",
+        ),
+    ],
+)
+def test_secret_envelope_v2_downgrade_with_v2_rows_failure(
+    monkeypatch,
+    migrated_database: str,
+    v2_table: str,
+    delete_sql: str,
+    expected_profile_rows: int,
+    expected_user_rows: int,
+) -> None:
+    """Downgrade aborts transactionally instead of stranding existing v2 rows."""
+    monkeypatch.setenv("SECRET_INJECTION_KEK_B64", KEK_B64)
+    asyncio.run(_seed_database(migrated_database))
+    asyncio.run(_admin_execute(migrated_database, delete_sql))
+
+    downgrade = _run_alembic(migrated_database, "downgrade", "0027_traffic_logs_decision")
+
+    assert downgrade.returncode != 0
+    output = downgrade.stdout + downgrade.stderr
+    assert f"{v2_table} contains v2 rows" in output
+    version = asyncio.run(_admin_fetchval(migrated_database, "SELECT version_num FROM alembic_version"))
+    profile_rows = asyncio.run(_admin_fetchval(migrated_database, "SELECT count(*) FROM profile_secret_material"))
+    user_rows = asyncio.run(_admin_fetchval(migrated_database, "SELECT count(*) FROM user_secret_material"))
+    assert version == "0028_secret_envelope_v2"
+    assert profile_rows == expected_profile_rows
+    assert user_rows == expected_user_rows
+
+
+def test_secret_envelope_v2_downgrade_with_v1_rows_success(monkeypatch, migrated_database: str) -> None:
+    """Downgrade preserves legacy rows and restores the v1-only constraints."""
+    monkeypatch.setenv("SECRET_INJECTION_KEK_B64", KEK_B64)
+    asyncio.run(_seed_database(migrated_database))
+    asyncio.run(_admin_execute(migrated_database, "UPDATE profile_secret_material SET ciphertext = 'v1:legacy'"))
+    asyncio.run(_admin_execute(migrated_database, "UPDATE user_secret_material SET ciphertext = 'v1:legacy'"))
+
+    downgrade = _run_alembic(migrated_database, "downgrade", "0027_traffic_logs_decision")
+
+    assert downgrade.returncode == 0, f"alembic downgrade failed:\n{downgrade.stdout}\n{downgrade.stderr}"
+    version = asyncio.run(_admin_fetchval(migrated_database, "SELECT version_num FROM alembic_version"))
+    assert version == "0027_traffic_logs_decision"
+    for table in ("profile_secret_material", "user_secret_material"):
+        all_v1 = asyncio.run(_admin_fetchval(migrated_database, f"SELECT bool_and(ciphertext LIKE 'v1:%') FROM {table}"))
+        constraint = asyncio.run(
+            _admin_fetchval(
+                migrated_database,
+                "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = $1",
+                f"{table}_ciphertext_check",
             )
         )
-        asyncio.run(_admin_execute(base, f'DROP DATABASE IF EXISTS "{dbname}"'))
+        assert all_v1 is True
+        assert "v1:%" in constraint
+        assert "v2:%" not in constraint

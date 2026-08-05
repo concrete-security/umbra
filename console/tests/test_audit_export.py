@@ -2,6 +2,8 @@ import asyncio
 from datetime import datetime, timezone
 from uuid import UUID
 
+import pytest
+
 from umbra_console.audit_export import (
     audit_export_object_key,
     audit_export_storage_uri,
@@ -87,14 +89,38 @@ def test_audit_export_storage_uri_derives_supported_backend_locations(tmp_path) 
     )
 
 
-def test_postgres_export_target_strips_credentials_from_public_uri() -> None:
-    target = postgres_export_target(
-        "postgresql://export:secret@db.example:5432/audit?sslmode=require&table=exports"
-    )
+@pytest.mark.parametrize(
+    ("bucket_uri", "expected_dsn", "expected_table", "expected_public_uri"),
+    [
+        pytest.param(
+            "postgresql://export:secret@db.example:5432/audit?sslmode=require&table=exports",
+            "postgresql://export:secret@db.example:5432/audit?sslmode=require",
+            "exports",
+            "postgresql://db.example:5432/audit?table=exports",
+            id="explicit-table",
+        ),
+        pytest.param(
+            "postgresql://export:secret@db.example:5432/audit?sslmode=require",
+            "postgresql://export:secret@db.example:5432/audit?sslmode=require",
+            "umbra_audit_export_artifacts",
+            "postgresql://db.example:5432/audit?table=umbra_audit_export_artifacts",
+            id="umbra-default",
+        ),
+    ],
+)
+def test_postgres_export_target_parsing_success(
+    bucket_uri: str,
+    expected_dsn: str,
+    expected_table: str,
+    expected_public_uri: str,
+) -> None:
+    """Parsing keeps credentials private and selects explicit or Umbra tables."""
 
-    assert target.dsn == "postgresql://export:secret@db.example:5432/audit?sslmode=require"
-    assert target.table == "exports"
-    assert target.public_uri == "postgresql://db.example:5432/audit?table=exports"
+    target = postgres_export_target(bucket_uri)
+
+    assert target.dsn == expected_dsn
+    assert target.table == expected_table
+    assert target.public_uri == expected_public_uri
 
 
 def test_postgres_export_store_writes_and_reads_artifact(monkeypatch) -> None:

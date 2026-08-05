@@ -1,8 +1,10 @@
+import base64
 import json
 from pathlib import Path
 
 import pytest
 from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from umbra_console.profile_secrets import (
     decrypt_profile_secret_value,
@@ -22,7 +24,18 @@ from umbra_console.profile_secrets import (
 TEST_KEK = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 
 
-def test_profile_secret_values_are_encrypted_and_bound_to_profile(monkeypatch) -> None:
+def _ciphertext_for_aad(*, version: str, aad: str, value: str = "secret") -> str:
+    """Create a test envelope independently from the production AAD helpers."""
+    nonce = b"\x01" * 12
+    padded_kek = TEST_KEK + "=" * (-len(TEST_KEK) % 4)
+    key = base64.urlsafe_b64decode(padded_kek.encode("ascii"))
+    encrypted = AESGCM(key).encrypt(nonce, value.encode("utf-8"), aad.encode("utf-8"))
+    payload = base64.urlsafe_b64encode(nonce + encrypted).decode("ascii").rstrip("=")
+    return f"{version}:{payload}"
+
+
+def test_profile_secret_values_v2_encryption_success(monkeypatch) -> None:
+    """Fresh profile writes use v2 and the Umbra profile AAD exactly."""
     monkeypatch.setenv("SECRET_INJECTION_KEK_B64", TEST_KEK)
 
     ciphertext = encrypt_profile_secret_value(
@@ -31,12 +44,34 @@ def test_profile_secret_values_are_encrypted_and_bound_to_profile(monkeypatch) -
         value="sk-ant-real-secret",
     )
 
+    assert ciphertext.startswith("v2:")
     assert "sk-ant-real-secret" not in ciphertext
     assert decrypt_profile_secret_value(
         profile_id="profile-a",
         injection_id="anthropic-key",
         ciphertext=ciphertext,
     ) == "sk-ant-real-secret"
+
+    encoded = ciphertext.removeprefix("v2:")
+    padded = encoded + "=" * (-len(encoded) % 4)
+    payload = base64.urlsafe_b64decode(padded.encode("ascii"))
+    plaintext = AESGCM(base64.urlsafe_b64decode(TEST_KEK + "=")).decrypt(
+        payload[:12],
+        payload[12:],
+        b"umbra.profile_secret_material.v2:profile-a:anthropic-key",
+    )
+    assert plaintext == b"sk-ant-real-secret"
+
+
+def test_profile_secret_values_wrong_profile_failure(monkeypatch) -> None:
+    """The v2 profile AAD prevents a ciphertext from crossing profile ids."""
+    monkeypatch.setenv("SECRET_INJECTION_KEK_B64", TEST_KEK)
+    ciphertext = encrypt_profile_secret_value(
+        profile_id="profile-a",
+        injection_id="anthropic-key",
+        value="sk-ant-real-secret",
+    )
+
     with pytest.raises(InvalidTag):
         decrypt_profile_secret_value(
             profile_id="profile-b",
@@ -137,29 +172,153 @@ def _scan_for_key(value, key):
     return False
 
 
-def test_user_secret_values_are_encrypted_and_bound_to_user_and_name(monkeypatch) -> None:
+def test_user_secret_values_v2_encryption_success(monkeypatch) -> None:
+    """Fresh user-secret writes use v2 and the Umbra user-secret AAD exactly."""
     monkeypatch.setenv("SECRET_INJECTION_KEK_B64", TEST_KEK)
 
     ciphertext = encrypt_user_secret_value(user_id="user-a", name="slack-user-token", value="xoxp-alice")
 
+    assert ciphertext.startswith("v2:")
     assert "xoxp-alice" not in ciphertext
     assert (
         decrypt_user_secret_value(user_id="user-a", name="slack-user-token", ciphertext=ciphertext)
         == "xoxp-alice"
     )
-    with pytest.raises(InvalidTag):
-        decrypt_user_secret_value(user_id="user-b", name="slack-user-token", ciphertext=ciphertext)
-    with pytest.raises(InvalidTag):
-        decrypt_user_secret_value(user_id="user-a", name="other-name", ciphertext=ciphertext)
+
+    encoded = ciphertext.removeprefix("v2:")
+    padded = encoded + "=" * (-len(encoded) % 4)
+    payload = base64.urlsafe_b64decode(padded.encode("ascii"))
+    plaintext = AESGCM(base64.urlsafe_b64decode(TEST_KEK + "=")).decrypt(
+        payload[:12],
+        payload[12:],
+        b"umbra.user_secret_material.v2:user-a:slack-user-token",
+    )
+    assert plaintext == b"xoxp-alice"
 
 
-def test_user_and_profile_secret_aads_are_distinct_families(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("user_id", "name"),
+    [
+        pytest.param("user-b", "slack-user-token", id="user"),
+        pytest.param("user-a", "other-name", id="name"),
+    ],
+)
+def test_user_secret_values_wrong_binding_failure(monkeypatch, user_id, name) -> None:
+    """The v2 user-secret AAD binds both the owner and the secret name."""
+    monkeypatch.setenv("SECRET_INJECTION_KEK_B64", TEST_KEK)
+    ciphertext = encrypt_user_secret_value(user_id="user-a", name="slack-user-token", value="xoxp-alice")
+
+    with pytest.raises(InvalidTag):
+        decrypt_user_secret_value(user_id=user_id, name=name, ciphertext=ciphertext)
+
+
+def test_user_and_profile_secret_aads_are_distinct_families_failure(monkeypatch) -> None:
+    """Profile ciphertext cannot be decrypted through the user-secret domain."""
     monkeypatch.setenv("SECRET_INJECTION_KEK_B64", TEST_KEK)
 
     profile_ciphertext = encrypt_profile_secret_value(profile_id="x", injection_id="y", value="secret")
 
     with pytest.raises(InvalidTag):
         decrypt_user_secret_value(user_id="x", name="y", ciphertext=profile_ciphertext)
+
+
+@pytest.mark.parametrize(
+    ("decrypt", "kwargs", "aad"),
+    [
+        pytest.param(
+            decrypt_profile_secret_value,
+            {"profile_id": "profile-a", "injection_id": "anthropic-key"},
+            "concrete.profile_secret_material.v1:profile-a:anthropic-key",
+            id="profile",
+        ),
+        pytest.param(
+            decrypt_user_secret_value,
+            {"user_id": "user-a", "name": "slack-user-token"},
+            "concrete.user_secret_material.v1:user-a:slack-user-token",
+            id="user",
+        ),
+    ],
+)
+def test_secret_values_legacy_v1_reads_success(monkeypatch, decrypt, kwargs, aad) -> None:
+    """Legacy v1 rows remain readable only under their historical AAD."""
+    monkeypatch.setenv("SECRET_INJECTION_KEK_B64", TEST_KEK)
+    ciphertext = _ciphertext_for_aad(version="v1", aad=aad, value="legacy-secret")
+
+    assert decrypt(**kwargs, ciphertext=ciphertext) == "legacy-secret"
+
+
+@pytest.mark.parametrize(
+    ("decrypt", "kwargs", "version", "wrong_aad"),
+    [
+        pytest.param(
+            decrypt_profile_secret_value,
+            {"profile_id": "profile-a", "injection_id": "anthropic-key"},
+            "v1",
+            "umbra.profile_secret_material.v1:profile-a:anthropic-key",
+            id="profile-v1-umbra",
+        ),
+        pytest.param(
+            decrypt_user_secret_value,
+            {"user_id": "user-a", "name": "slack-user-token"},
+            "v1",
+            "umbra.user_secret_material.v1:user-a:slack-user-token",
+            id="user-v1-umbra",
+        ),
+    ],
+)
+def test_secret_values_cross_version_aad_fallback_failure(
+    monkeypatch,
+    decrypt,
+    kwargs,
+    version,
+    wrong_aad,
+) -> None:
+    """A valid tag under the wrong product/version AAD is never retried."""
+    monkeypatch.setenv("SECRET_INJECTION_KEK_B64", TEST_KEK)
+    ciphertext = _ciphertext_for_aad(version=version, aad=wrong_aad)
+
+    with pytest.raises(InvalidTag):
+        decrypt(**kwargs, ciphertext=ciphertext)
+
+
+@pytest.mark.parametrize(
+    "ciphertext",
+    [
+        pytest.param("", id="empty"),
+        pytest.param("v2", id="missing-separator"),
+        pytest.param("V2:payload", id="case-mismatch"),
+        pytest.param("v2beta:payload", id="prefix-extension"),
+        pytest.param("v3:payload", id="unknown-version"),
+        pytest.param("v2:not!base64", id="invalid-payload"),
+        pytest.param("v2:", id="empty-payload"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("decrypt", "kwargs"),
+    [
+        pytest.param(
+            decrypt_profile_secret_value,
+            {"profile_id": "profile-a", "injection_id": "anthropic-key"},
+            id="profile",
+        ),
+        pytest.param(
+            decrypt_user_secret_value,
+            {"user_id": "user-a", "name": "slack-user-token"},
+            id="user",
+        ),
+    ],
+)
+def test_secret_values_unsupported_or_malformed_envelope_failure(
+    monkeypatch,
+    decrypt,
+    kwargs,
+    ciphertext,
+) -> None:
+    """Only exact v1/v2 prefixes with well-formed payloads reach AES-GCM."""
+    monkeypatch.setenv("SECRET_INJECTION_KEK_B64", TEST_KEK)
+
+    with pytest.raises(ValueError):
+        decrypt(**kwargs, ciphertext=ciphertext)
 
 
 def test_host_pattern_shared_vector() -> None:
