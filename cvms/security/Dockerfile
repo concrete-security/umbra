@@ -19,16 +19,32 @@ RUN sed -i \
         build-essential \
         ca-certificates \
         libffi-dev \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf \
+        /var/lib/apt/lists/* \
+        /var/log/apt/* \
+        /var/log/alternatives.log \
+        /var/log/dpkg.log \
+        /var/cache/ldconfig/aux-cache
 
 RUN useradd --system --create-home --uid 10001 security-cvm
 COPY --from=uv /uv /uvx /bin/
 
+# Install without uv's build-host bookkeeping, which is nondeterministic by
+# construction: the global cache names archive buckets randomly, and installer
+# metadata records the install wall-clock time and build-container inode numbers
+# (`uv_cache.json`, hashed into `RECORD`). Runtime material — modules, entry
+# points, `METADATA`/`RECORD` — is unaffected. The digest-pinned uv above fixes
+# these flags; its build-environment lock files are litter, so each layer drops
+# the ones it created rather than leaving a later layer to whiteout them.
 COPY pyproject.toml README.md uv.lock ./
-RUN uv sync --frozen --no-dev --extra mitmproxy --no-install-project
+RUN uv sync --frozen --no-dev --extra mitmproxy --no-install-project \
+      --no-cache --no-installer-metadata \
+    && rm -rf /tmp/uv-*.lock
 COPY src ./src
 
-RUN uv sync --frozen --no-dev --extra mitmproxy --no-editable
+RUN uv sync --frozen --no-dev --extra mitmproxy --no-editable \
+      --no-cache --no-installer-metadata \
+    && rm -rf /tmp/uv-*.lock
 
 USER security-cvm
 

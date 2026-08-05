@@ -38,7 +38,12 @@ RUN sed -i \
     && printf '%s\n' 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99snapshot \
     && apt-get update \
     && apt-get install -y --no-install-recommends nodejs npm \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf \
+        /var/lib/apt/lists/* \
+        /var/log/apt/* \
+        /var/log/alternatives.log \
+        /var/log/dpkg.log \
+        /var/cache/ldconfig/aux-cache
 COPY --from=uv /uv /uvx /bin/
 
 # The dashboard source is reviewed in static/admin. Build its only generated
@@ -57,8 +62,17 @@ RUN npm run build:webapp \
 FROM console-base
 WORKDIR /app
 
+# Install without uv's build-host bookkeeping, which is nondeterministic by
+# construction: the global cache names archive buckets randomly, and installer
+# metadata records the install wall-clock time and build-container inode numbers
+# (`uv_cache.json`, hashed into `RECORD`). Runtime material — modules, entry
+# points, `METADATA`/`RECORD` — is unaffected. The digest-pinned uv above fixes
+# these flags; its build-environment lock files are litter, so each layer drops
+# the ones it created rather than leaving a later layer to whiteout them.
 COPY pyproject.toml README.md uv.lock alembic.ini ./
-RUN uv sync --frozen --no-dev --no-install-project
+RUN uv sync --frozen --no-dev --no-install-project \
+      --no-cache --no-installer-metadata \
+    && rm -rf /tmp/uv-*.lock
 COPY --from=webapp-builder /build/node_modules ./node_modules
 RUN ln -sf /app/node_modules/.bin/phala /usr/local/bin/phala \
     && ln -sf /app/node_modules/.bin/phala /usr/bin/phala
@@ -69,7 +83,9 @@ COPY --from=webapp-builder /build/static/admin/tailwind.css ./static/admin/tailw
 COPY tests ./tests
 COPY entrypoint.sh /entrypoint.sh
 
-RUN uv sync --frozen --no-dev --no-editable
+RUN uv sync --frozen --no-dev --no-editable \
+      --no-cache --no-installer-metadata \
+    && rm -rf /tmp/uv-*.lock
 
 # Attestation verifier invoked by the Console via ATLAS_VERIFIER_CMD. Baked into the
 # image (no host bind-mount) so it ships with the Console and its glibc matches.

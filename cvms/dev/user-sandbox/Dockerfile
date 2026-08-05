@@ -63,6 +63,7 @@ RUN sed -i \
       /var/log/apt/* \
       /var/log/alternatives.log \
       /var/log/dpkg.log \
+      /var/cache/ldconfig/aux-cache \
       /etc/ssh/ssh_host_* \
     && chage --lastday -1 sshd \
     && ln -sf /usr/bin/python3 /usr/bin/python \
@@ -96,6 +97,7 @@ RUN set -a \
       /var/log/apt/* \
       /var/log/alternatives.log \
       /var/log/dpkg.log \
+      /var/cache/ldconfig/aux-cache \
       /tmp/*.deb
 
 COPY cvms/dev/user-sandbox/docker-daemon.json /etc/docker/daemon.json
