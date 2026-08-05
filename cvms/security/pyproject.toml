@@ -4,9 +4,10 @@ version = "0.1.0"
 description = "Umbra Security CVM services"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
+keywords = ["confidential-computing", "developer-tools", "security", "runtime", "network-proxy"]
 authors = [{ name = "Umbra Security maintainers" }]
 maintainers = [{ name = "Umbra Security maintainers" }]
-license = "LicenseRef-Proprietary"
+license = "Apache-2.0"
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: No Input/Output (Daemon)",
@@ -22,6 +23,12 @@ dependencies = [
     "google-re2>=1,<2",
     "httpx>=0.27,<1",
 ]
+
+[project.urls]
+"Homepage" = "https://github.com/concrete-security/umbra"
+"Source" = "https://github.com/concrete-security/umbra"
+"Issue tracker" = "https://github.com/concrete-security/umbra/issues"
+"Documentation" = "https://github.com/concrete-security/umbra/blob/main/README.md"
 
 [dependency-groups]
 dev = ["pytest>=8,<9"]

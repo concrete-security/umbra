@@ -46,7 +46,7 @@ const BUILD_TARGET: &str = env!("BUILD_TARGET");
 /// Fixed release identity enforced by both the bootstrap installer and
 /// self-update. The release workflow is `workflow_dispatch` on `main`, so its
 /// signed provenance is branch- and input-bound rather than tag-triggered.
-const SLSA_SOURCE_REPO: &str = "github.com/umbra-security/umbra";
+const SLSA_SOURCE_REPO: &str = "github.com/concrete-security/umbra";
 const SLSA_SOURCE_BRANCH: &str = "main";
 const SLSA_WORKFLOW_INPUT: &str = "dry_run=false";
 const SLSA_BUILDER_ID: &str = "https://github.com/slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@refs/tags/v2.1.0";

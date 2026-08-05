@@ -4,9 +4,10 @@ version = "0.1.0"
 description = "Umbra Console backend"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
+keywords = ["confidential-computing", "developer-tools", "security", "cli", "runtime"]
 authors = [{ name = "Umbra maintainers" }]
 maintainers = [{ name = "Umbra maintainers" }]
-license = "LicenseRef-Proprietary"
+license = "Apache-2.0"
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Web Environment",
@@ -27,6 +28,12 @@ dependencies = [
     "structlog>=25,<26",
     "uvicorn[standard]>=0.30,<1",
 ]
+
+[project.urls]
+"Homepage" = "https://github.com/concrete-security/umbra"
+"Source" = "https://github.com/concrete-security/umbra"
+"Issue tracker" = "https://github.com/concrete-security/umbra/issues"
+"Documentation" = "https://github.com/concrete-security/umbra/blob/main/README.md"
 
 [dependency-groups]
 dev = ["pytest>=8,<9", "pyyaml>=6,<7"]
