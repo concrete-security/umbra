@@ -1387,9 +1387,11 @@ def render_dev_cvm_compose_config(resolved: dict[str, object]) -> str:
             "    environment:",
             "      DEV_CVM_SSH_HOST: user-sandbox",
             "      DEV_CVM_SSH_PORT: \"22\"",
-            "    depends_on:",
-            "      user-sandbox:",
-            "        condition: service_healthy",
+            # Deliberately not gated on user-sandbox health: the tunnel dials
+            # per connection, while shade's nginx needs this upstream
+            # resolvable immediately or it crash-loops through certbot's whole
+            # retry budget and the CVM never obtains its certificate
+            # (docs/specs/dev-cvm.md §7).
             "    expose:",
             "      - \"8090\"",
             "    networks:",
