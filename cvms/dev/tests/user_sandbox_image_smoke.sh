@@ -5,11 +5,12 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 IMAGE_TAG="umbra-dev-sandbox-smoke:check"
 
 docker build \
+  --platform linux/amd64 \
   --file "${ROOT}/cvms/dev/user-sandbox/Dockerfile" \
   --tag "${IMAGE_TAG}" \
   "${ROOT}"
 
-docker run --rm --entrypoint bash "${IMAGE_TAG}" -lc '
+docker run --rm --platform linux/amd64 --entrypoint bash "${IMAGE_TAG}" -lc '
   set -euo pipefail
   for cmd in claude codex node npm gh uv; do
     command -v "${cmd}" >/dev/null
@@ -24,6 +25,12 @@ docker run --rm --entrypoint bash "${IMAGE_TAG}" -lc '
       exit 1
       ;;
   esac
+  test -z "$(getent shadow dev | cut -d: -f3)"
+  test -z "$(getent shadow sshd | cut -d: -f3)"
+  if compgen -G "/etc/ssh/ssh_host_*" >/dev/null; then
+    echo "build-time SSH host keys must not be present in the image" >&2
+    exit 1
+  fi
   apt-config dump | grep -F '"'"'Acquire::http::Proxy "http://dev-egress-forwarder:3128";'"'"' >/dev/null
   apt-config dump | grep -F '"'"'Acquire::https::Proxy "http://dev-egress-forwarder:3128";'"'"' >/dev/null
   apt-config dump | grep -F '"'"'Acquire::https::CaInfo "/run/umbra/ca-bundle.pem";'"'"' >/dev/null
@@ -43,3 +50,8 @@ docker run --rm --entrypoint bash "${IMAGE_TAG}" -lc '
 '
 
 echo "user_sandbox_image_smoke: ok"
+
+if [ "${UMBRA_VERIFY_IMAGE_REPRODUCIBILITY:-0}" = 1 ]; then
+  bash "${ROOT}/ops/verify/verify-image-reproducibility.sh" \
+    dev-cvm cvms/dev/user-sandbox/Dockerfile .
+fi

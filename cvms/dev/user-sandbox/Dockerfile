@@ -1,3 +1,8 @@
+# syntax=docker/dockerfile:1.26.0@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+# BuildKit normalizes image metadata and generated layer timestamps to this
+# reviewed value. Release builds override it with the source commit timestamp.
+ARG SOURCE_DATE_EPOCH=0
+
 FROM rust:1-bookworm@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa AS rust-base
 
 FROM rust-base AS atls-connect-builder
@@ -9,7 +14,7 @@ COPY cvms/dev/user-sandbox/atls-connect/Cargo.toml cvms/dev/user-sandbox/atls-co
 COPY cvms/dev/user-sandbox/atls-connect/src cvms/dev/user-sandbox/atls-connect/src
 RUN cargo build --locked --release -p umbra-atls-connect --target-dir /tmp/atls-connect-target
 
-FROM ghcr.io/astral-sh/uv:0.7.8@sha256:0178a92d156b6f6dbe60e3b52b33b421021f46d634aa9f81f42b91445bb81cdf AS uv
+FROM ghcr.io/astral-sh/uv:0.12.1@sha256:cf4eedcaa81655197f625739489effcbe71b61ceb1506f332c3facae5deceded AS uv
 
 FROM ubuntu:24.04@sha256:561618e2c15bf2397621dd04f96926663a3b5616c189cf7e38db7e82f5c538ea
 
@@ -20,19 +25,16 @@ COPY --from=rust-base /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certi
 
 # Canonical retains Ubuntu snapshots for at least two years. Advance this only
 # after rebuilding and exercising the sandbox image; it deliberately freezes
-# all packages from the Ubuntu archive while Docker's separate repository is
-# version-pinned below.
+# all packages from the Ubuntu archive. Docker's exact amd64 package filenames
+# and content digests are pinned separately in tool-versions.env below.
 ARG UBUNTU_SNAPSHOT=20260731T000000Z
-ARG DOCKER_GPG_SHA256=1500c1f56fa9e26b9b8f42452a553675796ade0807cdce11975eb98170b3a570
-ARG DOCKER_CE_VERSION=5:29.7.1-1~ubuntu.24.04~noble
-ARG CONTAINERD_VERSION=2.2.6-1~ubuntu.24.04~noble
-ARG DOCKER_BUILDX_VERSION=0.36.0-1~ubuntu.24.04~noble
-ARG DOCKER_COMPOSE_VERSION=5.4.0-1~ubuntu.24.04~noble
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+COPY cvms/dev/user-sandbox/tool-versions.env /tmp/tool-versions.env
 
 RUN sed -i \
       -e "s|http://archive.ubuntu.com/ubuntu|https://snapshot.ubuntu.com/ubuntu/${UBUNTU_SNAPSHOT}|g" \
@@ -42,7 +44,6 @@ RUN sed -i \
     && apt-get install -y --no-install-recommends \
       ca-certificates \
       curl \
-      gnupg \
       openssh-server \
       dtach \
       git \
@@ -57,37 +58,47 @@ RUN sed -i \
       psmisc \
       lsof \
       sudo \
-    && rm -rf /var/lib/apt/lists/* \
+    && rm -rf \
+      /var/lib/apt/lists/* \
+      /var/log/apt/* \
+      /var/log/alternatives.log \
+      /var/log/dpkg.log \
+      /etc/ssh/ssh_host_* \
+    && chage --lastday -1 sshd \
     && ln -sf /usr/bin/python3 /usr/bin/python \
     && rm -f /usr/lib/python*/EXTERNALLY-MANAGED
 
-RUN install -m 0755 -d /etc/apt/keyrings \
-    && curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /tmp/docker.asc \
-    && echo "${DOCKER_GPG_SHA256}  /tmp/docker.asc" | sha256sum -c - \
-    && gpg --batch --dearmor -o /etc/apt/keyrings/docker.gpg /tmp/docker.asc \
-    && rm /tmp/docker.asc \
-    && chmod a+r /etc/apt/keyrings/docker.gpg \
-    && arch="$(dpkg --print-architecture)" \
-    && { \
-      echo "Types: deb"; \
-      echo "URIs: https://download.docker.com/linux/ubuntu"; \
-      echo "Suites: noble"; \
-      echo "Components: stable"; \
-      echo "Architectures: ${arch}"; \
-      echo "Signed-By: /etc/apt/keyrings/docker.gpg"; \
-      echo "Snapshot: no"; \
-    } >/etc/apt/sources.list.d/docker.sources \
+RUN set -a \
+    && . /tmp/tool-versions.env \
+    && set +a \
+    && test "$(dpkg --print-architecture)" = amd64 \
+    && curl -fsSL "${DOCKER_DEB_BASE_URL}/${DOCKER_CE_DEB}" -o /tmp/docker-ce.deb \
+    && curl -fsSL "${DOCKER_DEB_BASE_URL}/${DOCKER_CE_CLI_DEB}" -o /tmp/docker-ce-cli.deb \
+    && curl -fsSL "${DOCKER_DEB_BASE_URL}/${CONTAINERD_DEB}" -o /tmp/containerd.deb \
+    && curl -fsSL "${DOCKER_DEB_BASE_URL}/${DOCKER_BUILDX_DEB}" -o /tmp/docker-buildx.deb \
+    && curl -fsSL "${DOCKER_DEB_BASE_URL}/${DOCKER_COMPOSE_DEB}" -o /tmp/docker-compose.deb \
+    && printf '%s  %s\n' \
+      "${DOCKER_CE_SHA256}" /tmp/docker-ce.deb \
+      "${DOCKER_CE_CLI_SHA256}" /tmp/docker-ce-cli.deb \
+      "${CONTAINERD_SHA256}" /tmp/containerd.deb \
+      "${DOCKER_BUILDX_SHA256}" /tmp/docker-buildx.deb \
+      "${DOCKER_COMPOSE_SHA256}" /tmp/docker-compose.deb \
+      | sha256sum -c - \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
-      "docker-ce=${DOCKER_CE_VERSION}" \
-      "docker-ce-cli=${DOCKER_CE_VERSION}" \
-      "containerd.io=${CONTAINERD_VERSION}" \
-      "docker-buildx-plugin=${DOCKER_BUILDX_VERSION}" \
-      "docker-compose-plugin=${DOCKER_COMPOSE_VERSION}" \
-    && rm -rf /var/lib/apt/lists/*
+      /tmp/containerd.deb \
+      /tmp/docker-buildx.deb \
+      /tmp/docker-ce-cli.deb \
+      /tmp/docker-ce.deb \
+      /tmp/docker-compose.deb \
+    && rm -rf \
+      /var/lib/apt/lists/* \
+      /var/log/apt/* \
+      /var/log/alternatives.log \
+      /var/log/dpkg.log \
+      /tmp/*.deb
 
 COPY cvms/dev/user-sandbox/docker-daemon.json /etc/docker/daemon.json
-COPY cvms/dev/user-sandbox/tool-versions.env /tmp/tool-versions.env
 COPY cvms/dev/user-sandbox/codex-package ./tmp/codex-package
 COPY --from=uv /uv /uvx /bin/
 
@@ -116,7 +127,10 @@ RUN set -a \
     && npm ci --prefix /tmp/codex-package --omit=dev --ignore-scripts --no-audit --no-fund \
     && install -d /usr/local/lib/umbra/codex \
     && mv /tmp/codex-package/node_modules /usr/local/lib/umbra/codex/node_modules \
-    && rm -rf /tmp/codex-package \
+    && rm -rf \
+      /root/.npm \
+      /tmp/codex-package \
+      /tmp/node-compile-cache \
     && rm /tmp/tool-versions.env
 
 # OpenSSH rejects shadow entries that start with "!" before public-key auth.
@@ -124,6 +138,7 @@ RUN set -a \
 RUN groupadd --gid 1001 dev \
     && useradd --uid 1001 --gid 1001 --create-home --home-dir /home/dev --shell /bin/bash dev \
     && usermod --password '*' dev \
+    && chage --lastday -1 dev \
     && usermod -aG sudo,docker dev \
     && { \
       echo 'dev ALL=(ALL) NOPASSWD:ALL'; \
