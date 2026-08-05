@@ -456,7 +456,9 @@ def test_get_raises_not_found(tmp_path) -> None:
         run(client.info("app-123"))
 
 
-def test_list_filters_to_managed_v0_names(tmp_path) -> None:
+def test_list_filters_managed_v0_names_success(tmp_path) -> None:
+    """Only fully validated Umbra resource names enter managed inventory."""
+
     cli = write_fake_cli(
         tmp_path,
         """
@@ -466,7 +468,9 @@ def test_list_filters_to_managed_v0_names(tmp_path) -> None:
             "cvms": [
                 {"name": "umbra-v0-cvm-owned", "id": "app-1"},
                 {"name": "teammate-prod", "id": "app-2"},
-                {"name": "umbra-v0-sc-owned", "id": "app-3"}
+                {"name": "umbra-v0-sc-owned", "id": "app-3"},
+                {"name": "umbra-v0-cvm-owned\\nprovider-secret", "id": "app-4"},
+                {"name": "umbra-v0-unrecognized", "id": "app-5"}
             ]
         }))
         """,

@@ -60,12 +60,9 @@ pub(crate) fn read_json_response<T: DeserializeOwned>(
             format!("[error] failed to read {action} response: {err}"),
         )
     })?;
-    serde_json::from_slice::<T>(&body).map_err(|err| {
-        operation_debug::log_poll_decode_failure(action, &body, &err);
-        (
-            ExitStatus::Error,
-            format!("[error] malformed {action} response: {err}"),
-        )
+    serde_json::from_slice::<T>(&body).map_err(|_| {
+        operation_debug::log_poll_decode_failure(action, &body);
+        (ExitStatus::Error, malformed_response(action))
     })
 }
 
@@ -105,12 +102,9 @@ pub(crate) fn read_with_etag<T: DeserializeOwned>(
                 format!("[error] {action} response did not include ETag"),
             )
         })?;
-    let payload = response.json::<T>().map_err(|err| {
-        (
-            ExitStatus::Error,
-            format!("[error] malformed {action} response: {err}"),
-        )
-    })?;
+    let payload = response
+        .json::<T>()
+        .map_err(|_| (ExitStatus::Error, malformed_response(action)))?;
     Ok((payload, etag))
 }
 
@@ -147,6 +141,12 @@ pub(crate) fn retry_after(response: &Response) -> Duration {
         .and_then(|value| value.parse::<u64>().ok())
         .map(|seconds| Duration::from_secs(seconds.max(1)))
         .unwrap_or_else(|| Duration::from_secs(1))
+}
+
+/// Report a response-shape failure without reproducing attacker-controlled
+/// response values that a deserializer may embed in its display string.
+pub(crate) fn malformed_response(action: &str) -> String {
+    format!("[error] malformed {action} response")
 }
 
 /// Resolve an entity UUID to its display name (section 7.8). Returns `None`
@@ -652,5 +652,31 @@ mod tests {
         )
         .expect("a 200 body decodes");
         assert_eq!(value["ok"], serde_json::json!(true));
+    }
+
+    /// A hostile response value must not be reproduced by deserializer diagnostics.
+    #[test]
+    fn test_fetch_json_malformed_value_redaction_failure() {
+        use crate::test_support::{fake_authenticated_session, MockConsole};
+        let mock = MockConsole::start();
+        let session = fake_authenticated_session();
+        let secret_value = "must-not-appear-in-public-logs";
+        mock.reply_raw(
+            "/api/v1/malformed-probe",
+            200,
+            &serde_json::to_string(secret_value).expect("fixture serializes"),
+        );
+
+        let (_exit, message) = fetch_json::<bool>(
+            mock.base_url(),
+            &session,
+            "/api/v1/malformed-probe",
+            &[],
+            "probe",
+        )
+        .expect_err("a string cannot decode as a boolean");
+
+        assert_eq!(message, "[error] malformed probe response");
+        assert!(!message.contains(secret_value));
     }
 }

@@ -43,12 +43,13 @@ async def delete_managed_cvms(client: PhalaClient, *, out: TextIO = sys.stderr) 
             continue
         app_id = managed_cvm_app_id(row)
         if app_id is None:
-            raise PhalaCleanupError(f"managed Phala CVM {name} has no app id in list response")
+            raise PhalaCleanupError("managed Phala CVM list response has no valid app id")
         await client.delete(app_id)
         deleted += 1
-        print(f"clean-phala: deleted Phala CVM {name} ({app_id})", file=out)
     if deleted == 0:
         print("clean-phala: no umbra-v0 Phala CVMs found", file=out)
+    else:
+        print(f"clean-phala: deleted {deleted} Umbra-managed Phala CVM(s)", file=out)
     return CleanupSummary(deleted=deleted)
 
 
@@ -64,8 +65,6 @@ async def run() -> int:
         return 1
     except PhalaError as exc:
         print(f"clean-phala: Phala CVM cleanup failed: {exc.code}", file=sys.stderr)
-        if exc.output:
-            print(exc.output, file=sys.stderr)
         return 1
     return 0
 

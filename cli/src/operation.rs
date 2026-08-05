@@ -227,8 +227,7 @@ where
         .result
         .clone()
         .ok_or_else(|| format!("[error] {label} operation succeeded without result"))?;
-    serde_json::from_value::<T>(result)
-        .map_err(|err| format!("[error] malformed {label} result: {err}"))
+    serde_json::from_value::<T>(result).map_err(|_| format!("[error] malformed {label} result"))
 }
 
 /// Drive a just-submitted saga to its result: honor `--no-wait` (print the
@@ -333,6 +332,19 @@ mod tests {
             .expect("terminal succeeded extracts")
             .expect("some result");
         assert_eq!(value["id"], serde_json::json!("c1"));
+    }
+
+    /// A malformed terminal payload must not be copied into the CLI diagnostic.
+    #[test]
+    fn test_extract_operation_result_malformed_value_redaction_failure() {
+        let hostile_value = "operation-result-must-not-appear-in-diagnostics";
+        let operation = op("succeeded", Some(serde_json::json!(hostile_value)));
+
+        let message = extract_operation_result::<bool>(&operation, "CVM launch")
+            .expect_err("a string cannot decode as a boolean result");
+
+        assert_eq!(message, "[error] malformed CVM launch result");
+        assert!(!message.contains(hostile_value));
     }
 
     /// An already-terminal `failed` operation surfaces as an error (no poll).

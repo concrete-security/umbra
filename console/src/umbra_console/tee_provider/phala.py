@@ -585,7 +585,7 @@ def append_optional_arg(args: list[str], flag: str, value: str | None) -> None:
 def managed_cvm_name(row: dict[str, Any]) -> str | None:
     for key in ("name", "cvm_name", "cvmName"):
         value = row.get(key)
-        if isinstance(value, str) and value.startswith("umbra-v0-"):
+        if isinstance(value, str) and MANAGED_CVM_NAME_RE.fullmatch(value):
             return value
     return None
 

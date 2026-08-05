@@ -18,6 +18,7 @@ use crate::{
     cli::AuthCommand,
     commands::skill,
     config::{self, ConfigSource, ResolvedConfig},
+    console,
     exit::ExitStatus,
     session::{self, Entity, Session},
     style,
@@ -407,12 +408,9 @@ fn exchange_loopback_token(
             },
         ));
     }
-    response.json::<TokenPair>().map_err(|err| {
-        (
-            ExitStatus::Error,
-            format!("[error] malformed token response: {err}"),
-        )
-    })
+    response
+        .json::<TokenPair>()
+        .map_err(|_| (ExitStatus::Error, console::malformed_response("token")))
 }
 
 fn wait_for_loopback_code(
@@ -542,7 +540,7 @@ fn device_start(client: &Client, console_url: &str, provider: &str) -> Result<De
     }
     response
         .json::<DeviceStart>()
-        .map_err(|err| format!("[error] malformed device login response: {err}"))
+        .map_err(|_| console::malformed_response("device login"))
 }
 
 fn poll_device(
@@ -566,7 +564,7 @@ fn poll_device(
         if response.status().is_success() {
             return response
                 .json::<TokenPair>()
-                .map_err(|err| format!("[error] malformed token response: {err}"));
+                .map_err(|_| console::malformed_response("token"));
         }
         let status = response.status();
         let error = response.json::<OAuthError>().ok().map(|body| body.error);
@@ -619,12 +617,9 @@ fn complete_login(
             ),
         ));
     }
-    let me = me.json::<Me>().map_err(|err| {
-        (
-            ExitStatus::Error,
-            format!("[error] malformed /me response: {err}"),
-        )
-    })?;
+    let me = me
+        .json::<Me>()
+        .map_err(|_| (ExitStatus::Error, console::malformed_response("/me")))?;
     let now = Utc::now();
     let session = Session {
         access_token: token_pair.access_token,
@@ -805,12 +800,9 @@ fn refresh_token_pair(
             ),
         ));
     }
-    response.json::<TokenPair>().map_err(|err| {
-        (
-            ExitStatus::Error,
-            format!("[error] malformed refresh response: {err}"),
-        )
-    })
+    response
+        .json::<TokenPair>()
+        .map_err(|_| (ExitStatus::Error, console::malformed_response("refresh")))
 }
 
 fn logout(config: &ResolvedConfig, json_output: bool) -> ExitStatus {

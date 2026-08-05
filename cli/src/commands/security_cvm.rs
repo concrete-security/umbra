@@ -264,12 +264,9 @@ fn sc_read_json_response<T: for<'de> Deserialize<'de>>(
             Some(NO_SECURITY_CVM),
         ));
     }
-    response.json::<T>().map_err(|err| {
-        (
-            ExitStatus::Error,
-            format!("[error] malformed {action} response: {err}"),
-        )
-    })
+    response
+        .json::<T>()
+        .map_err(|_| (ExitStatus::Error, console::malformed_response(action)))
 }
 
 fn validate_launch_args(args: &SecurityCvmLaunchArgs) -> Result<(), String> {
