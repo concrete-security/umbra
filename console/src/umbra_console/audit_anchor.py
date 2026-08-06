@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import hashlib
-import json
 import re
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
@@ -293,7 +292,10 @@ async def write_postgres_anchor(
             payload["last_row_hash"],
             parse_iso_z(payload["anchored_at"]),
             payload["console_kid"],
-            json.dumps(payload, sort_keys=True, separators=(",", ":")),
+            # The stored bytes must be the bytes `payload_sha256` was taken over
+            # (`anchor_digest`), so serialize through the same JCS helper rather
+            # than a second, subtly different json.dumps.
+            canonical_json(payload),
             payload_sha256,
         )
     finally:

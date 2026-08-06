@@ -257,8 +257,11 @@ def _serialize_csv(records: list[dict[str, Any]]) -> bytes:
 
 
 def _serialize_ndjson(records: list[dict[str, Any]]) -> bytes:
+    # ensure_ascii=False for the same reason audit.canonical_json uses it: the
+    # export is the auditor's copy of rows hashed under JCS, so it carries the
+    # same UTF-8 form the API returns rather than a second \uXXXX-escaped one.
     lines = [
-        json.dumps(record, sort_keys=True, separators=(",", ":"), default=_json_default)
+        json.dumps(record, sort_keys=True, separators=(",", ":"), default=_json_default, ensure_ascii=False)
         for record in records
     ]
     return ("\n".join(lines) + ("\n" if lines else "")).encode("utf-8")
@@ -270,7 +273,7 @@ def _cell_text(value: Any) -> str:
     if isinstance(value, datetime):
         return value.isoformat().replace("+00:00", "Z")
     if isinstance(value, (dict, list)):
-        return json.dumps(value, sort_keys=True, separators=(",", ":"), default=_json_default)
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), default=_json_default, ensure_ascii=False)
     return str(value)
 
 

@@ -69,7 +69,23 @@ AUDIT_DESCRIPTIONS = {action: action.lower().replace("_", " ") for action in AUD
 
 
 def canonical_json(value: dict[str, Any]) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+    """JCS (RFC 8785) serialization of an audit hash input.
+
+    ``ensure_ascii=False`` is load-bearing, not cosmetic: JCS serializes strings
+    as ECMAScript ``JSON.stringify`` does, which emits non-ASCII characters as
+    raw UTF-8 and escapes only the control characters, quote and backslash.
+    Python's default ``ensure_ascii=True`` would emit ``\\uXXXX`` instead, so any
+    row carrying an accent, CJK text or an emoji would hash to a value no
+    JCS-conformant verifier — including this product's own CLI
+    (``cli/src/commands/audit.rs``) — can reproduce, and the audit log would
+    read as tampered at that row (`docs/specs/console.md` §11.6).
+
+    Rows written before this was fixed keep their historical escaped hash and
+    stay unverifiable by a conformant verifier. That is an accepted, documented
+    artifact of the pre-fix builds: their bytes are intact and their chain links
+    hold, but the stored ``row_hash`` is not recomputable under JCS.
+    """
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str, ensure_ascii=False)
 
 
 def audit_row_hash(row: dict[str, Any]) -> str:

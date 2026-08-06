@@ -5,8 +5,49 @@ from datetime import datetime, timezone
 import pytest
 from fastapi import HTTPException
 
-from umbra_console.audit import EMPTY_HASH, audit_row_hash, redact_email_payload
+from umbra_console.audit import EMPTY_HASH, audit_row_hash, canonical_json, redact_email_payload
 from umbra_console.routes import parse_audit_cursor
+
+# One row hashed under JCS (RFC 8785), carrying a Latin-1 accent, CJK text and an
+# astral-plane emoji (the case Python would emit as a \uXXXX surrogate pair).
+# Byte-for-byte identical to the fixture in cli/src/commands/audit.rs
+# (`audit_hash_non_ascii_matches_console_jcs_success`) — the two must agree or
+# `umbra audit events` reports a genuine row as tampered.
+NON_ASCII_ROW = {
+    "seq": 5791,
+    "id": "00000000-0000-4000-8000-000000000001",
+    "entity_id": "00000000-0000-4000-8000-000000000002",
+    "actor_id": "00000000-0000-4000-8000-000000000003",
+    "actor_email": "admin@example.com",
+    "action": "USER_REGISTERED",
+    "target_type": "user",
+    "target_id": "00000000-0000-4000-8000-000000000004",
+    "before": None,
+    "after": {"email": "user@example.com", "name": "José Ávila", "note": "テスト 😀"},
+    "ip_address": "203.0.113.10",
+    "description": "user registered",
+    "request_id": "request-1",
+    "timestamp": "2026-07-27T08:06:46.691850Z",
+    "prev_hash": EMPTY_HASH,
+}
+NON_ASCII_ROW_JCS = (
+    '{"action":"USER_REGISTERED","actor_email":"admin@example.com",'
+    '"actor_id":"00000000-0000-4000-8000-000000000003",'
+    '"after":{"email":"user@example.com","name":"José Ávila","note":"テスト 😀"},'
+    '"before":null,"description":"user registered",'
+    '"entity_id":"00000000-0000-4000-8000-000000000002",'
+    '"id":"00000000-0000-4000-8000-000000000001","ip_address":"203.0.113.10",'
+    f'"prev_hash":"{EMPTY_HASH}","request_id":"request-1","seq":5791,'
+    '"target_id":"00000000-0000-4000-8000-000000000004","target_type":"user",'
+    '"timestamp":"2026-07-27T08:06:46.691850Z"}'
+)
+NON_ASCII_ROW_HASH = "543b7c176ad5eb8a7acfa5f92a380cc41fa998283bf4e2566847a0dc0c803438"
+# What pre-fix builds stored for the same row: json.dumps' default
+# ensure_ascii=True escaped every non-ASCII character. Rows written before the
+# fix keep this hash and stay unverifiable by any JCS-conformant verifier — an
+# accepted, documented artifact (one row, seq 5791, on the first deployment),
+# not something to reproduce.
+NON_ASCII_ROW_PRE_FIX_ESCAPED_HASH = "08f2ca3aaac07e11870e92ad200f9bc8adeeb2a52a661cd62119ada6cb8db6e3"
 
 
 def test_audit_hash_matches_insert_payload_shape() -> None:
@@ -29,6 +70,19 @@ def test_audit_hash_matches_insert_payload_shape() -> None:
     }
 
     assert audit_row_hash(row) == audit_row_hash(dict(reversed(list(row.items()))))
+
+
+def test_audit_hash_non_ascii_jcs_success() -> None:
+    """Non-ASCII rows hash over raw UTF-8 (JCS/RFC 8785), never \\uXXXX escapes.
+
+    Pins the exact canonical byte sequence and digest so the Console keeps
+    agreeing with the CLI's serde-based verifier; the escaped form Python emits
+    by default made genuine rows read as tampered.
+    """
+    assert canonical_json(NON_ASCII_ROW) == NON_ASCII_ROW_JCS
+    assert "\\u" not in canonical_json(NON_ASCII_ROW)
+    assert audit_row_hash(NON_ASCII_ROW) == NON_ASCII_ROW_HASH
+    assert audit_row_hash(NON_ASCII_ROW) != NON_ASCII_ROW_PRE_FIX_ESCAPED_HASH
 
 
 def test_redact_email_payload_rewrites_nested_email_values() -> None:
