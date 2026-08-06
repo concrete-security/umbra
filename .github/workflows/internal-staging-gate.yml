@@ -1,0 +1,58 @@
+name: Internal staging gate
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  statuses: read
+
+jobs:
+  require-verified-staging-lock:
+    name: require verified staging lock
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require trusted internal staging result
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          EXPECTED_ACTOR: ${{ vars.UMBRA_INTERNAL_STATUS_ACTOR }}
+        run: |
+          set -euo pipefail
+          [[ "$HEAD_REPO" == "$GITHUB_REPOSITORY" && "$HEAD_REF" == dev ]] || {
+            echo "promotion PRs must originate from this repository's dev branch" >&2
+            exit 1
+          }
+          current_dev_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/dev" --jq .object.sha)"
+          [[ "$HEAD_SHA" == "$current_dev_sha" ]] || {
+            echo "promotion head is stale relative to refs/heads/dev" >&2
+            exit 1
+          }
+          [[ -n "$EXPECTED_ACTOR" ]] || {
+            echo "UMBRA_INTERNAL_STATUS_ACTOR is not configured" >&2
+            exit 1
+          }
+          status="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/status" \
+            --jq '[.statuses[] | select(.context == "umbra-internal/staging-verified")][0]')"
+          [[ "$(jq -r '.state // ""' <<<"$status")" == success ]] || {
+            echo "no successful internal staging status exists for this commit" >&2
+            exit 1
+          }
+          [[ "$(jq -r '.creator.login // ""' <<<"$status")" == "$EXPECTED_ACTOR" ]] || {
+            echo "staging status was not created by the configured internal actor" >&2
+            exit 1
+          }
+          target_url="$(jq -r '.target_url // ""' <<<"$status")"
+          [[ "$target_url" == https://github.com/concrete-security/umbra-internal/actions/runs/* ]] || {
+            echo "staging status does not link to the internal workflow" >&2
+            exit 1
+          }
+          description="$(jq -r '.description // ""' <<<"$status")"
+          [[ "$description" =~ ^success\ lock\ sha256:[0-9a-f]{12}$ ]] || {
+            echo "staging status does not identify a verified lock digest" >&2
+            exit 1
+          }
