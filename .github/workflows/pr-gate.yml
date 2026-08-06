@@ -1,0 +1,121 @@
+# Hermetic PR gate for the `dev` trunk.
+#
+# Every change reaches `dev` through a PR, and a PR cannot merge until both jobs
+# below are green (enforced by branch protection on `dev` — see docs/ci-cd.md).
+# Neither job touches live infrastructure (no Phala / Cloudflare / Console): they
+# are the same `make check` + `make test` an operator runs locally. `make check`
+# does build Docker images for its smoke tests, which the GitHub-hosted runner's
+# preinstalled Docker handles.
+name: PR gate
+
+on:
+  pull_request:
+    branches: [dev]
+
+# Newer pushes to the same PR supersede in-flight runs; safe here because these
+# jobs are hermetic and stateless (unlike the staging verify journey).
+concurrency:
+  group: pr-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: 'false'
+
+      # rust-toolchain.toml pins the channel + components; `rustup show` installs
+      # them on the runner's preinstalled rustup.
+      - name: Install pinned Rust toolchain
+        run: rustup show
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: 0.12.1
+          enable-cache: 'false'
+
+      - name: Install pinned Python
+        run: uv python install
+
+      - name: Enforce immutable Actions references
+        run: uv run --locked --project console python tools/check-github-actions.py
+
+      - name: Cache cargo and uv
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            ~/.cache/uv
+          key: pr-gate-${{ runner.os }}-${{ hashFiles('.python-version', 'Cargo.lock', 'rust-toolchain.toml', 'console/uv.lock', 'cvms/security/uv.lock') }}
+
+      - name: make check
+        run: make check
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: 'false'
+
+      - name: Install pinned Rust toolchain
+        run: rustup show
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: 0.12.1
+          enable-cache: 'false'
+
+      - name: Install pinned Python
+        run: uv python install
+
+      - name: Cache cargo and uv
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            ~/.cache/uv
+          key: pr-gate-test-${{ runner.os }}-${{ hashFiles('.python-version', 'Cargo.lock', 'rust-toolchain.toml', 'console/uv.lock', 'cvms/security/uv.lock') }}
+
+      - name: make test
+        run: make test
+
+  dco:
+    name: DCO sign-off
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout full pull request history
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: 'false'
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: 0.12.1
+          enable-cache: 'false'
+      - name: Install pinned Python
+        run: uv python install
+      - name: Verify every pull request commit is signed off
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: uv run --python "$(cat .python-version)" --no-project python tools/check-dco.py "${BASE_SHA}" "${HEAD_SHA}"

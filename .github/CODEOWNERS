@@ -1,0 +1,50 @@
+# Default ownership keeps every path reviewable even as the tree grows.
+* @concrete-security/maintainers
+
+# Repository automation, releases, deployment, and build inputs.
+/.github/ @concrete-security/maintainers
+/ops/ @concrete-security/maintainers
+/Makefile @concrete-security/maintainers
+/Dockerfile @concrete-security/maintainers
+/**/Dockerfile @concrete-security/maintainers
+/docker-compose.yml @concrete-security/maintainers
+/Cargo.toml @concrete-security/maintainers
+/Cargo.lock @concrete-security/maintainers
+/**/Cargo.toml @concrete-security/maintainers
+/**/Cargo.lock @concrete-security/maintainers
+/**/pyproject.toml @concrete-security/maintainers
+/**/uv.lock @concrete-security/maintainers
+/**/package.json @concrete-security/maintainers
+/**/package-lock.json @concrete-security/maintainers
+/install.sh @concrete-security/maintainers
+
+# Authentication, authorization, secrets, audit, and migrations.
+/console/alembic/ @concrete-security/maintainers
+/console/src/umbra_console/account_resolution.py @concrete-security/maintainers
+/console/src/umbra_console/auth.py @concrete-security/maintainers
+/console/src/umbra_console/crypto.py @concrete-security/maintainers
+/console/src/umbra_console/internal_auth.py @concrete-security/maintainers
+/console/src/umbra_console/jwt_keys.py @concrete-security/maintainers
+/console/src/umbra_console/oidc.py @concrete-security/maintainers
+/console/src/umbra_console/profile_secrets.py @concrete-security/maintainers
+/console/src/umbra_console/resources.py @concrete-security/maintainers
+/console/src/umbra_console/routes.py @concrete-security/maintainers
+/console/src/umbra_console/routes_auth.py @concrete-security/maintainers
+/console/src/umbra_console/routes_internal.py @concrete-security/maintainers
+/console/src/umbra_console/scheduler.py @concrete-security/maintainers
+/console/src/umbra_console/sessions.py @concrete-security/maintainers
+
+# Attestation, network enforcement, and runtime trust boundaries.
+/console/atlas-verify/ @concrete-security/maintainers
+/console/src/umbra_console/attestation.py @concrete-security/maintainers
+/console/src/umbra_console/dns_provider/ @concrete-security/maintainers
+/console/src/umbra_console/shade_provider/ @concrete-security/maintainers
+/console/src/umbra_console/tee_provider/ @concrete-security/maintainers
+/cvms/ @concrete-security/maintainers
+/cli/src/commands/auth.rs @concrete-security/maintainers
+/cli/src/commands/cvm.rs @concrete-security/maintainers
+/cli/src/commands/security_cvm.rs @concrete-security/maintainers
+/cli/src/commands/ssh.rs @concrete-security/maintainers
+/cli/src/commands/tunnel.rs @concrete-security/maintainers
+/cli/src/console.rs @concrete-security/maintainers
+/cli/src/session.rs @concrete-security/maintainers

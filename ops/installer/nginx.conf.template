@@ -1,0 +1,42 @@
+log_format umbra_installer '$remote_addr - $remote_user [$time_local] "$request_method $uri $server_protocol" '
+                              '$status $body_bytes_sent "$http_referer" "$http_user_agent"';
+
+server {
+    listen 8080;
+    server_name _;
+    access_log /var/log/nginx/access.log umbra_installer;
+
+    location = /healthz {
+        default_type text/plain;
+        return 200 "ok\n";
+        add_header Cache-Control "public, max-age=60";
+    }
+
+    location = /install.sh {
+        default_type text/x-shellscript;
+        charset utf-8;
+        alias /etc/umbra/installer/install.sh;
+        add_header Cache-Control "public, max-age=300";
+        add_header X-Content-Type-Options nosniff;
+    }
+
+    location = / {
+        default_type text/x-shellscript;
+        charset utf-8;
+        root /etc/umbra/installer;
+        try_files /install.sh =404;
+        add_header Cache-Control "public, max-age=300";
+        add_header X-Content-Type-Options nosniff;
+    }
+
+    location /releases/umbra-cli/ {
+        alias /opt/umbra/cli-releases/;
+        add_header Cache-Control "public, max-age=300";
+        add_header X-Content-Type-Options nosniff;
+    }
+
+    location / {
+        default_type text/plain;
+        return 404 "not found\n";
+    }
+}

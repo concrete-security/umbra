@@ -1,0 +1,13 @@
+# Gitleaks configuration for CI and release scans (extends the default rules).
+[extend]
+useDefault = true
+
+# Spec prose in the Console API error catalog pattern-matches generic-api-key
+# (`details.resource="user_secrets"` is a documented quota error field, not a
+# credential). Allow exactly that line shape in exactly that file.
+[allowlist]
+description = "Console spec quota-error prose that pattern-matches generic-api-key"
+paths = ['''docs/specs/console\.md''']
+regexTarget = "line"
+regexes = ['''details\.resource="user_secrets"''']
+condition = "AND"

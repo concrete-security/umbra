@@ -1,0 +1,98 @@
+name: umbra
+
+services:
+  console-db:
+    image: postgres:16@sha256:33f923b05f64ca54ac4401c01126a6b92afe839a0aa0a52bc5aeb5cc958e5f20
+    environment:
+      POSTGRES_DB: ${UMBRA_POSTGRES_DB:-umbra}
+      POSTGRES_USER: ${UMBRA_POSTGRES_USER:-umbra}
+      POSTGRES_PASSWORD: ${UMBRA_POSTGRES_PASSWORD:-umbra}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - console_db_data:/var/lib/postgresql/data
+
+  console:
+    build:
+      context: ./console
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://umbra:umbra@console-db:5432/umbra}
+      AUDIT_EXPORT_BUCKET: ${AUDIT_EXPORT_BUCKET:-}
+      UV_PROJECT_ENVIRONMENT: /tmp/umbra-shade-venv
+      # Publisher credentials are host-side, one-shot inputs. Explicitly blank
+      # legacy values that may still exist in an old generated .env.
+      GHCR_USER: ""
+      GHCR_TOKEN: ""
+      GH_TOKEN: ""
+    depends_on:
+      console-db:
+        condition: service_healthy
+    expose:
+      - "8000"
+    volumes:
+      - /etc/umbra:/etc/umbra:ro
+      - ${SHADE_DIR:-/opt/umbra/shade}:${SHADE_DIR:-/opt/umbra/shade}:ro
+      # umbra-atlas-verify is baked into the Console image (console/Dockerfile
+      # builder stage), so no host bind-mount is needed.
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2).read()",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  installer:
+    build:
+      context: ./ops/installer
+    environment:
+      INSTALL_HOST: ${INSTALL_HOST:-}
+      UMBRA_INSTALL_BASE_URL: ${UMBRA_INSTALL_BASE_URL:-}
+    expose:
+      - "8080"
+    volumes:
+      - ${UMBRA_CLI_RELEASE_DIR:-/opt/umbra/cli-releases}:/opt/umbra/cli-releases:ro
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "wget -q -O - http://127.0.0.1:8080/healthz | grep -q ok",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  reverse-proxy:
+    build:
+      context: ./ops/reverse-proxy
+    environment:
+      CONSOLE_HOST: ${CONSOLE_HOST}
+      INSTALL_HOST: ${INSTALL_HOST:-}
+      LETSENCRYPT_EMAIL: ${LETSENCRYPT_EMAIL}
+      LETSENCRYPT_STAGING: ${LETSENCRYPT_STAGING:-}
+    depends_on:
+      console:
+        condition: service_healthy
+      installer:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - console_letsencrypt:/etc/letsencrypt
+
+volumes:
+  console_db_data:
+    name: umbra_console_db_data
+  console_letsencrypt:
+    external: true
+    name: umbra_console_letsencrypt

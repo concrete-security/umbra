@@ -1,0 +1,85 @@
+version: 2
+
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      rust-dependencies:
+        patterns: ['*']
+
+  - package-ecosystem: rust-toolchain
+    directory: /
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: uv
+    directory: /console
+    schedule:
+      interval: weekly
+    groups:
+      console-python-dependencies:
+        patterns: ['*']
+
+  - package-ecosystem: uv
+    directory: /cvms/security
+    schedule:
+      interval: weekly
+    groups:
+      security-cvm-python-dependencies:
+        patterns: ['*']
+
+  - package-ecosystem: npm
+    directory: /console
+    schedule:
+      interval: weekly
+    groups:
+      console-javascript-dependencies:
+        patterns: ['*']
+
+  - package-ecosystem: npm
+    directory: /cvms/dev/user-sandbox/codex-package
+    schedule:
+      interval: weekly
+    groups:
+      dev-cvm-codex-dependencies:
+        patterns: ['*']
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns: ['*']
+
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: docker
+    directory: /console
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: docker
+    directory: /cvms/dev/user-sandbox
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: docker
+    directory: /cvms/security
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: docker
+    directory: /ops/installer
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: docker
+    directory: /ops/reverse-proxy
+    schedule:
+      interval: weekly

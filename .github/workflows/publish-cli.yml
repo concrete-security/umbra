@@ -1,0 +1,501 @@
+# Release umbra-cli to crates.io and GitHub
+#
+# How to release:
+#   1. Update version in Cargo.toml
+#   2. Commit and push the change
+#   3. Run this workflow with dry_run=false
+#
+# The workflow will:
+#   - Package the crate
+#   - Build Linux and macOS CLI binaries
+#   - Publish to crates.io
+#   - After crates.io succeeds, create git tag umbra-cli/<version> and a
+#     draft GitHub release
+#   - Attach the same-version binary bundle used by the curl-installer service
+#
+# Any failed release phase fails the workflow. GitHub publication follows
+# crates.io, and the installer sync consumes only successful workflow runs.
+
+name: Release Umbra CLI
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (validate only; do not publish or create a GitHub release)'
+        type: boolean
+        default: true
+
+env:
+  CRATE_BASE_DIR: ${{ github.workspace }}/cli
+  CARGO_TERM_COLOR: always
+
+jobs:
+  metadata:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      install_base_url: ${{ steps.release_identity.outputs.install_base_url }}
+    steps:
+      - name: Require approved Umbra release identity
+        id: release_identity
+        env:
+          APPROVED_REPOSITORY: ${{ vars.UMBRA_RELEASE_REPOSITORY }}
+          INSTALL_BASE_URL: ${{ vars.UMBRA_INSTALL_BASE_URL }}
+        run: |
+          set -euo pipefail
+          expected_repository="concrete-security/umbra"
+          if [ -z "${APPROVED_REPOSITORY}" ]; then
+            echo "::error::UMBRA_RELEASE_REPOSITORY is not approved for the release environment." >&2
+            exit 1
+          fi
+          if [ "${APPROVED_REPOSITORY}" != "${expected_repository}" ] || [ "${GITHUB_REPOSITORY}" != "${expected_repository}" ]; then
+            echo "::error::Umbra publication is locked to the approved ${expected_repository} repository; current=${GITHUB_REPOSITORY}, approved=${APPROVED_REPOSITORY}." >&2
+            exit 1
+          fi
+          if [ -z "${INSTALL_BASE_URL}" ]; then
+            echo "::error::UMBRA_INSTALL_BASE_URL is not approved for the release environment." >&2
+            exit 1
+          fi
+          if ! [[ "${INSTALL_BASE_URL}" =~ ^https://[0-9A-Za-z.-]+(:[0-9]+)?(/[0-9A-Za-z._~/-]+)?$ ]] || [[ "${INSTALL_BASE_URL}" == */ ]]; then
+            echo "::error::UMBRA_INSTALL_BASE_URL must be an approved HTTPS origin or path without a trailing slash." >&2
+            exit 1
+          fi
+          echo "install_base_url=${INSTALL_BASE_URL}" >> "${GITHUB_OUTPUT}"
+      - name: Require canonical release branch
+        run: |
+          if [ "${GITHUB_REF}" != "refs/heads/main" ]; then
+            echo "::error::CLI releases must run from refs/heads/main, not ${GITHUB_REF}." >&2
+            exit 1
+          fi
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: 'false'
+      - name: Read CLI version
+        id: version
+        run: |
+          version="$(cargo pkgid -p umbra-cli | sed 's/.*@//')"
+          test -n "$version"
+          if ! [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-([0-9A-Za-z-]+\.)*[0-9A-Za-z-]+)?$ ]]; then
+            echo "::error::CLI releases require canonical SemVer without build metadata: ${version}" >&2
+            exit 1
+          fi
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "tag=umbra-cli/${version}" >> "${GITHUB_OUTPUT}"
+
+  package:
+    needs: [metadata]
+    runs-on: ubuntu-latest
+    outputs:
+      hash: ${{ steps.hash.outputs.hash }}
+      checksum: ${{ steps.hash.outputs.checksum }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: 'false'
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: 0.12.1
+          enable-cache: 'false'
+      - name: Install pinned Python
+        run: uv python install
+      - name: Prepare package
+        run: |
+          cd ${{ env.CRATE_BASE_DIR }}
+          cargo package --locked
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: umbra-cli-crate
+          path: target/package/*.crate
+      - name: Generate hashes
+        id: hash
+        run: |
+          cd target/package
+          echo "hash=$(sha256sum ./*.crate | base64 -w0)" >> "${GITHUB_OUTPUT}"
+          echo "checksum=$(sha256sum ./*.crate | awk '{print $1}')" >> "${GITHUB_OUTPUT}"
+      - name: Generate target-specific CycloneDX SBOMs
+        run: |
+          set -euo pipefail
+          mkdir -p umbra-cli-sboms
+          for target in \
+            x86_64-unknown-linux-gnu \
+            aarch64-unknown-linux-gnu \
+            aarch64-apple-darwin
+          do
+            uv run --python "$(cat .python-version)" --no-project python tools/generate-cargo-sbom.py \
+              --package umbra-cli \
+              --target "${target}" \
+              --output "umbra-cli-sboms/umbra-cli-${target}.cdx.json"
+          done
+      - name: Upload CLI SBOMs
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: umbra-cli-sboms
+          path: umbra-cli-sboms/
+
+  binary-artifacts:
+    needs: [metadata]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-14
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: 'false'
+      - name: Install Rust target
+        run: rustup target add ${{ matrix.target }}
+      - name: Set reproducible build timestamp
+        shell: bash
+        run: echo "SOURCE_DATE_EPOCH=$(git show -s --format=%ct "${GITHUB_SHA}")" >> "${GITHUB_ENV}"
+      - name: Build CLI
+        run: cargo build --release --locked -p umbra-cli --target ${{ matrix.target }}
+      - name: Stage artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ needs.metadata.outputs.version }}"
+          target="${{ matrix.target }}"
+          mkdir -p "dist/${version}/${target}" "dist/latest/${target}"
+          cp "target/${target}/release/umbra" "dist/${version}/${target}/umbra"
+          cp "target/${target}/release/umbra" "dist/latest/${target}/umbra"
+          chmod 0755 "dist/${version}/${target}/umbra" "dist/latest/${target}/umbra"
+          # Version metadata consumed by `umbra update` and its passive
+          # new-version check: GET /releases/umbra-cli/latest/version.
+          printf '%s\n' "${version}" > "dist/${version}/version"
+          printf '%s\n' "${version}" > "dist/latest/version"
+          if command -v sha256sum >/dev/null 2>&1; then
+            (cd "dist/${version}/${target}" && sha256sum umbra > umbra.sha256)
+            (cd "dist/latest/${target}" && sha256sum umbra > umbra.sha256)
+          else
+            (cd "dist/${version}/${target}" && shasum -a 256 umbra > umbra.sha256)
+            (cd "dist/latest/${target}" && shasum -a 256 umbra > umbra.sha256)
+          fi
+      - name: Upload target artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: umbra-cli-${{ matrix.target }}
+          path: dist/
+
+  publish:
+    needs: [metadata, package, binary-artifacts]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      # Needed to create the tag and draft release after crates.io succeeds.
+      contents: write
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: 'false'
+
+      - name: Check existing crates.io version
+        if: ${{ !inputs.dry_run }}
+        id: crate
+        env:
+          EXPECTED_CHECKSUM: ${{ needs.package.outputs.checksum }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          set -euo pipefail
+          response_file="$(mktemp)"
+          trap 'rm -f "${response_file}"' EXIT
+          status="$(curl --silent --show-error --location \
+            --user-agent "umbra-release-workflow/${GITHUB_RUN_ID} (https://github.com/${GITHUB_REPOSITORY})" \
+            --output "${response_file}" --write-out '%{http_code}' \
+            "https://crates.io/api/v1/crates/umbra-cli/${VERSION}")"
+
+          case "${status}" in
+            200)
+              published_checksum="$(
+                jq -er '.version.checksum | select(type == "string" and length > 0)' "${response_file}"
+              )"
+              published_yanked="$(
+                jq -r '.version.yanked | if type == "boolean" then tostring else error("invalid yanked field") end' \
+                  "${response_file}"
+              )"
+              if [ "${published_yanked}" != "false" ]; then
+                echo "ERROR: crates.io umbra-cli ${VERSION} is yanked; unyank it before completing the GitHub release" >&2
+                exit 1
+              fi
+              if [ "${published_checksum}" != "${EXPECTED_CHECKSUM}" ]; then
+                echo "ERROR: crates.io already has umbra-cli ${VERSION} with different contents" >&2
+                exit 1
+              fi
+              echo "umbra-cli ${VERSION} is already published with the expected checksum"
+              echo "exists=true" >> "${GITHUB_OUTPUT}"
+              ;;
+            404)
+              echo "exists=false" >> "${GITHUB_OUTPUT}"
+              ;;
+            *)
+              echo "ERROR: crates.io version check returned HTTP ${status}" >&2
+              exit 1
+              ;;
+          esac
+
+      - uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+        if: ${{ inputs.dry_run || steps.crate.outputs.exists == 'false' }}
+        id: auth
+
+      - name: Publish crates.io package
+        if: ${{ inputs.dry_run || steps.crate.outputs.exists == 'false' }}
+        env:
+          DRY_RUN: ${{ inputs.dry_run && '--dry-run' || '' }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: |
+          cd ${{ env.CRATE_BASE_DIR }}
+          # The package job already performed Cargo's locked package verification;
+          # avoid executing build scripts while the short-lived registry token is
+          # present. DRY_RUN cannot be double quoted because an empty argument fails.
+          # shellcheck disable=SC2086
+          cargo publish --locked --no-verify ${DRY_RUN}
+
+      - name: Generate published package checksum
+        if: ${{ !inputs.dry_run && steps.crate.outputs.exists == 'false' }}
+        id: published_hash
+        run: cd target/package && echo "checksum=$(sha256sum ./*.crate | awk '{print $1}')" >> "${GITHUB_OUTPUT}"
+
+      - name: Compare package checksums
+        if: ${{ !inputs.dry_run && steps.crate.outputs.exists == 'false' && needs.package.outputs.checksum != steps.published_hash.outputs.checksum }}
+        run: |
+          echo "ERROR: Published crate hash does not match the packaged crate hash!"
+          exit 1
+
+      - name: Create draft release
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+          TAG: ${{ needs.metadata.outputs.tag }}
+        run: |
+          set -euo pipefail
+          echo "version: ${VERSION}"
+          echo "tag: ${TAG}"
+
+          remote_tag_sha="$(
+            git ls-remote origin "refs/tags/${TAG}" "refs/tags/${TAG}^{}" |
+              awk -v direct_ref="refs/tags/${TAG}" -v peeled_ref="refs/tags/${TAG}^{}" '
+                $2 == direct_ref { direct_sha = $1 }
+                $2 == peeled_ref { peeled_sha = $1 }
+                END {
+                  if (peeled_sha != "") {
+                    print peeled_sha
+                  } else if (direct_sha != "") {
+                    print direct_sha
+                  }
+                }
+              '
+          )"
+          if [ -n "${remote_tag_sha}" ]; then
+            if [ "${remote_tag_sha}" != "${GITHUB_SHA}" ]; then
+              echo "ERROR: tag ${TAG} points to ${remote_tag_sha}, expected ${GITHUB_SHA}" >&2
+              exit 1
+            fi
+            echo "tag ${TAG} already exists on the expected commit"
+          else
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f "ref=refs/tags/${TAG}" \
+              -f "sha=${GITHUB_SHA}" >/dev/null
+          fi
+
+          if gh release view "${TAG}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "release ${TAG} already exists"
+          else
+            gh release create --draft --repo "${{ github.repository }}" \
+              --verify-tag "${TAG}" \
+              --title "umbra-cli v${VERSION}" \
+              --notes "Published umbra-cli@${VERSION} to crates.io with prebuilt installer binaries"
+          fi
+
+  release-artifacts:
+    needs: [metadata, package, binary-artifacts, publish]
+    runs-on: ubuntu-latest
+    outputs:
+      subjects: ${{ steps.subjects.outputs.base64 }}
+    permissions:
+      # Needed to attach the binary bundle to the draft release.
+      contents: write
+      actions: read
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: 'false'
+      - name: Render canonical installer
+        env:
+          INSTALL_BASE_URL: ${{ needs.metadata.outputs.install_base_url }}
+          INSTALL_SOURCE_REPO: github.com/${{ github.repository }}
+        run: |
+          set -euo pipefail
+          sed \
+            -e "s|__UMBRA_INSTALL_BASE_URL__|${INSTALL_BASE_URL}|g" \
+            -e "s|__UMBRA_INSTALL_SOURCE_REPO__|${INSTALL_SOURCE_REPO}|g" \
+            ops/installer/install.sh > umbra-install.sh
+          chmod 0755 umbra-install.sh
+          sh -n umbra-install.sh
+      - name: Download target artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: umbra-cli-*-*-*
+          path: artifacts
+          merge-multiple: true
+      - name: Download crate artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: umbra-cli-crate
+          path: crate-artifact
+      - name: Download CLI SBOMs
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: umbra-cli-sboms
+          path: umbra-cli-sboms
+      - name: Assemble release tree
+        run: |
+          set -euo pipefail
+          mkdir -p release-tree
+          cp -a artifacts/. release-tree/
+          source_date_epoch="$(git show -s --format=%ct "${GITHUB_SHA}")"
+          tar --sort=name \
+            --mtime="@${source_date_epoch}" \
+            --owner=0 --group=0 --numeric-owner \
+            -C release-tree -cf - . \
+            | gzip -n > umbra-cli-release-tree.tar.gz
+      # An existing asset is never trusted as an input to provenance. Rebuild
+      # from this run's artifacts first, then require byte identity so a
+      # pre-seeded or mutated release can only fail the workflow.
+      - name: Compare immutable GitHub release tree
+        if: ${{ !inputs.dry_run }}
+        id: release_asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.metadata.outputs.tag }}
+        run: |
+          set -euo pipefail
+          asset_name="umbra-cli-release-tree.tar.gz"
+          asset_count="$(
+            gh release view "${TAG}" --repo "${{ github.repository }}" --json assets \
+              --jq "[.assets[] | select(.name == \"${asset_name}\")] | length"
+          )"
+          if [ "${asset_count}" = "0" ]; then
+            echo "exists=false" >> "${GITHUB_OUTPUT}"
+          elif [ "${asset_count}" = "1" ]; then
+            mkdir -p existing-release-assets
+            gh release download "${TAG}" --repo "${{ github.repository }}" \
+              --pattern "${asset_name}" \
+              --output "existing-release-assets/${asset_name}"
+            cmp umbra-cli-release-tree.tar.gz "existing-release-assets/${asset_name}" || {
+              echo "ERROR: immutable release asset ${asset_name} differs from this run" >&2
+              exit 1
+            }
+            echo "exists=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "ERROR: release ${TAG} has ${asset_count} assets named ${asset_name}" >&2
+            exit 1
+          fi
+      - name: Generate release checksums and provenance subjects
+        id: subjects
+        env:
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          set -euo pipefail
+          : > SHA256SUMS
+          sha256sum umbra-cli-release-tree.tar.gz >> SHA256SUMS
+          sha256sum umbra-install.sh >> SHA256SUMS
+          while IFS= read -r -d '' sbom; do
+            digest="$(sha256sum "${sbom}" | awk '{print $1}')"
+            printf '%s  %s\n' "${digest}" "$(basename "${sbom}")" >> SHA256SUMS
+          done < <(find umbra-cli-sboms -type f -name '*.cdx.json' -print0 | sort -z)
+          while IFS= read -r -d '' crate; do
+            digest="$(sha256sum "${crate}" | awk '{print $1}')"
+            printf '%s  %s\n' "${digest}" "$(basename "${crate}")" >> SHA256SUMS
+          done < <(find crate-artifact -type f -name '*.crate' -print0 | sort -z)
+          while IFS= read -r -d '' binary; do
+            digest="$(sha256sum "${binary}" | awk '{print $1}')"
+            printf '%s  %s\n' "${digest}" "${binary#release-tree/}" >> SHA256SUMS
+          done < <(find "release-tree/${VERSION}" -mindepth 2 -maxdepth 2 -type f -name umbra -print0 | sort -z)
+          LC_ALL=C sort -o SHA256SUMS SHA256SUMS
+          cp SHA256SUMS provenance-subjects.sha256
+          sha256sum SHA256SUMS >> provenance-subjects.sha256
+          echo "base64=$(base64 -w0 provenance-subjects.sha256)" >> "${GITHUB_OUTPUT}"
+      - name: Upload release tree artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: umbra-cli-release-tree
+          path: |
+            umbra-cli-release-tree.tar.gz
+            umbra-install.sh
+            umbra-cli-sboms/
+            SHA256SUMS
+      - name: Upload GitHub release asset
+        if: ${{ !inputs.dry_run && steps.release_asset.outputs.exists != 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.metadata.outputs.tag }}
+        run: gh release upload "${TAG}" umbra-cli-release-tree.tar.gz
+      - name: Upload immutable SBOM and checksum assets
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.metadata.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p existing-release-assets
+          for asset in SHA256SUMS umbra-install.sh umbra-cli-sboms/*.cdx.json; do
+            asset_name="$(basename "${asset}")"
+            asset_count="$(
+              gh release view "${TAG}" --repo "${{ github.repository }}" --json assets \
+                --jq "[.assets[] | select(.name == \"${asset_name}\")] | length"
+            )"
+            if [ "${asset_count}" = "0" ]; then
+              gh release upload "${TAG}" "${asset}"
+            elif [ "${asset_count}" = "1" ]; then
+              gh release download "${TAG}" --pattern "${asset_name}" \
+                --output "existing-release-assets/${asset_name}"
+              cmp "${asset}" "existing-release-assets/${asset_name}" || {
+                echo "ERROR: immutable release asset ${asset_name} differs from this run" >&2
+                exit 1
+              }
+            else
+              echo "ERROR: release ${TAG} has ${asset_count} assets named ${asset_name}" >&2
+              exit 1
+            fi
+          done
+
+  provenance:
+    if: ${{ !inputs.dry_run }}
+    needs: [metadata, release-artifacts]
+    # NOT pinned by commit hash (unlike every other `uses:` here): the SLSA
+    # generator reusable workflow MUST use the reviewed v2.1.0 semver tag.
+    # slsa-verifier reconstructs the trusted builder's ref from this tag, and
+    # the run fails if it is pinned to a SHA. This is the single documented
+    # exception to hash-pinning. Any version bump must update the checker, CLI
+    # updater, installer, tests, and builder-ID documentation atomically.
+    # https://github.com/slsa-framework/slsa-github-generator#referencing-slsa-builders-and-generators
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
+    permissions:
+      # Needed to detect the GitHub Actions environment and read build artifacts.
+      actions: read
+      # Needed to create the provenance via GitHub OIDC.
+      id-token: write
+      # Needed to attach signed provenance to the draft release.
+      contents: write
+    with:
+      base64-subjects: ${{ needs.release-artifacts.outputs.subjects }}
+      provenance-name: umbra-cli.intoto.jsonl
+      upload-assets: true
+      upload-tag-name: ${{ needs.metadata.outputs.tag }}
+      draft-release: 'true'
