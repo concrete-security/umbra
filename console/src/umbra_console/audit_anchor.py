@@ -10,19 +10,27 @@ from uuid import UUID, uuid4
 
 import asyncpg
 
-from umbra_console.audit import canonical_json
+from umbra_console.audit import AUDIT_CHAIN_LOCK_ID, EMPTY_HASH, audit_row_hash, canonical_json
 from umbra_console.config import load_settings
 from umbra_console.db import get_pool
 from umbra_console.log_config import logger
+from umbra_console.metrics import observe_audit_chain_verification_failure
+from umbra_console.resources import audit_event_resource, json_payload
 
 log = logger()
 DEFAULT_POSTGRES_ANCHOR_TABLE = "umbra_audit_anchors"
 POSTGRES_ANCHOR_WRITE_TIMEOUT_SECONDS = 5.0
 POSTGRES_SCHEMES = {"postgres", "postgresql"}
 ANCHOR_TABLE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
+AUDIT_CHAIN_REPLAY_INTERVAL_SECONDS = 86400
+_last_audit_chain_replay_wall: datetime | None = None
 
 
 class AuditAnchorError(RuntimeError):
+    pass
+
+
+class AuditChainVerificationError(RuntimeError):
     pass
 
 
@@ -106,6 +114,127 @@ async def check_audit_anchor_target() -> None:
     conn = await asyncpg.connect(postgres_target.dsn, timeout=0.5)
     try:
         await conn.execute(f"SELECT 1 FROM {quoted_identifier(postgres_target.table)} LIMIT 0")
+    finally:
+        await conn.close()
+
+
+async def maybe_verify_audit_chain(conn: Any, *, now: datetime | None = None) -> bool:
+    """Replay the complete global chain at most once daily per Console process."""
+
+    global _last_audit_chain_replay_wall
+    current = as_utc(now or datetime.now(timezone.utc))
+    if (
+        _last_audit_chain_replay_wall is not None
+        and (current - _last_audit_chain_replay_wall).total_seconds() < AUDIT_CHAIN_REPLAY_INTERVAL_SECONDS
+    ):
+        return False
+    locked = await conn.fetchval("SELECT pg_try_advisory_lock($1)", AUDIT_CHAIN_LOCK_ID)
+    if not locked:
+        return False
+    try:
+        try:
+            await verify_audit_chain(conn)
+        except Exception as exc:
+            observe_audit_chain_verification_failure()
+            log.error("audit_chain_verification_failed", error_type=type(exc).__name__)
+            raise
+        else:
+            log.info("audit_chain_verification_succeeded")
+        finally:
+            _last_audit_chain_replay_wall = current
+    finally:
+        await conn.execute("SELECT pg_advisory_unlock($1)", AUDIT_CHAIN_LOCK_ID)
+    return True
+
+
+async def verify_audit_chain(conn: Any) -> None:
+    """Replay all audit rows and correlate the latest local/external anchor."""
+
+    latest_anchor = await conn.fetchrow(
+        """
+        SELECT
+            id, last_seq, last_row_hash, external_anchor_uri, external_anchor_digest,
+            anchored_at
+        FROM audit_anchors
+        ORDER BY anchored_at DESC, last_seq DESC
+        LIMIT 1
+        """
+    )
+    rows = await conn.fetch(
+        """
+        SELECT
+            seq, id, entity_id, actor_id, actor_email, action, target_type, target_id,
+            before, after, ip_address, description, request_id, timestamp, prev_hash, row_hash
+        FROM audit_events
+        ORDER BY seq ASC
+        """
+    )
+    expected_prev_hash = EMPTY_HASH
+    anchor_seq = int(row_value(latest_anchor, "last_seq")) if latest_anchor is not None else None
+    anchor_seen = latest_anchor is None
+    for row in rows:
+        event = audit_event_resource(row)
+        stored_row_hash = str(event.pop("row_hash"))
+        seq = int(event["seq"])
+        if event["prev_hash"] != expected_prev_hash:
+            raise AuditChainVerificationError(f"audit chain link mismatch at seq {seq}")
+        if audit_row_hash(event) != stored_row_hash:
+            raise AuditChainVerificationError(f"audit row hash mismatch at seq {seq}")
+        if seq == anchor_seq:
+            if stored_row_hash != str(row_value(latest_anchor, "last_row_hash")):
+                raise AuditChainVerificationError(f"audit anchor hash mismatch at seq {seq}")
+            anchor_seen = True
+        expected_prev_hash = stored_row_hash
+    if not anchor_seen:
+        raise AuditChainVerificationError(f"audit anchor row missing at seq {anchor_seq}")
+    if latest_anchor is not None:
+        await verify_external_anchor(latest_anchor)
+
+
+async def verify_external_anchor(local_anchor: Any) -> None:
+    target_value = configured_anchor_target()
+    if not target_value:
+        return
+    target = parse_postgres_anchor_target(target_value)
+    anchor_id = row_value(local_anchor, "id")
+    external_anchor = await read_postgres_anchor(target, anchor_id=anchor_id)
+    if external_anchor is None:
+        raise AuditChainVerificationError("external audit anchor is missing")
+    external_console_kid = row_value(external_anchor, "console_kid")
+    if not isinstance(external_console_kid, str):
+        raise AuditChainVerificationError("external audit anchor console_kid is invalid")
+    external_payload = anchor_payload(
+        last_seq=int(row_value(external_anchor, "last_seq")),
+        last_row_hash=str(row_value(external_anchor, "last_row_hash")),
+        anchored_at=as_utc(row_value(external_anchor, "anchored_at")),
+        console_kid=external_console_kid,
+    )
+    stored_payload = json_payload(row_value(external_anchor, "payload"))
+    digest = anchor_digest(external_payload)
+    expected_uri = f"{target.public_uri}#anchors/{anchor_id}"
+    if stored_payload != external_payload or str(row_value(external_anchor, "payload_sha256")) != digest:
+        raise AuditChainVerificationError("external audit anchor payload digest mismatch")
+    if (
+        int(row_value(local_anchor, "last_seq")) != external_payload["last_seq"]
+        or str(row_value(local_anchor, "last_row_hash")) != external_payload["last_row_hash"]
+        or as_utc(row_value(local_anchor, "anchored_at")) != as_utc(row_value(external_anchor, "anchored_at"))
+        or str(row_value(local_anchor, "external_anchor_digest")) != digest
+        or str(row_value(local_anchor, "external_anchor_uri")) != expected_uri
+    ):
+        raise AuditChainVerificationError("external audit anchor does not match local commitment")
+
+
+async def read_postgres_anchor(target: PostgresAnchorTarget, *, anchor_id: UUID) -> Any | None:
+    conn = await asyncpg.connect(target.dsn, timeout=POSTGRES_ANCHOR_WRITE_TIMEOUT_SECONDS)
+    try:
+        return await conn.fetchrow(
+            f"""
+            SELECT id, last_seq, last_row_hash, anchored_at, console_kid, payload, payload_sha256
+            FROM {quoted_identifier(target.table)}
+            WHERE id = $1
+            """,
+            anchor_id,
+        )
     finally:
         await conn.close()
 

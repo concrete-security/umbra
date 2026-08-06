@@ -13,6 +13,7 @@ _duration_sum: DefaultDict[tuple[str, str, str], float] = defaultdict(float)
 _duration_count: DefaultDict[tuple[str, str, str], int] = defaultdict(int)
 _duration_buckets: DefaultDict[tuple[str, str, str, float], int] = defaultdict(int)
 _redacted_values_total: DefaultDict[str, int] = defaultdict(int)
+_audit_chain_verification_failures_total = 0
 
 
 def monotonic_seconds() -> float:
@@ -35,10 +36,17 @@ def observe_redacted_value_in_log(*, source: str) -> None:
         _redacted_values_total[source] += 1
 
 
+def observe_audit_chain_verification_failure() -> None:
+    global _audit_chain_verification_failures_total
+    with _lock:
+        _audit_chain_verification_failures_total += 1
+
+
 def prometheus_text() -> str:
     lines: list[str] = []
     _emit_request_metrics(lines)
     _emit_redaction_metrics(lines)
+    _emit_audit_metrics(lines)
     _emit_zero_placeholders(lines)
     return "\n".join(lines) + "\n"
 
@@ -90,6 +98,17 @@ def _emit_redaction_metrics(lines: list[str]) -> None:
         return
     for source, value in items:
         lines.append(f'umbra_console_redacted_value_in_log_total{{source="{_label(source)}"}} {value}')
+
+
+def _emit_audit_metrics(lines: list[str]) -> None:
+    lines.append(
+        "# HELP umbra_console_audit_chain_verification_failures_total "
+        "Failed full audit-chain verification attempts."
+    )
+    lines.append("# TYPE umbra_console_audit_chain_verification_failures_total counter")
+    with _lock:
+        failures = _audit_chain_verification_failures_total
+    lines.append(f"umbra_console_audit_chain_verification_failures_total {failures}")
 
 
 def _emit_zero_placeholders(lines: list[str]) -> None:

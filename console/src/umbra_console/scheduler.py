@@ -13,7 +13,7 @@ import time
 from typing import Any
 from uuid import UUID
 
-from umbra_console.audit_anchor import publish_audit_anchor_if_due
+from umbra_console.audit_anchor import maybe_verify_audit_chain, publish_audit_anchor_if_due
 from umbra_console.audit import insert_audit_event
 from umbra_console.audit_export import (
     AuditExportStorageError,
@@ -5180,6 +5180,7 @@ async def run_reconciliation_pass(*, include_orphans: bool = True) -> Reconcilia
         orphans_cleaned.extend(await maybe_prune_traffic_logs_retention(conn))
         security_cvms_advanced.extend(await reconcile_security_cvm_attestations(conn))
         cvms_advanced.extend(await reconcile_dev_cvm_attestations(conn))
+        await maybe_verify_audit_chain(conn)
         await publish_audit_anchor_if_due(conn)
     # Non-blocking on purpose: the catalog fetch (provider subprocess, up to 60s)
     # must never stall the tick that drives operation sagas. Living in this pass
