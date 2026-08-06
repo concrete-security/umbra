@@ -1350,6 +1350,11 @@ def render_dev_cvm_compose_config(resolved: dict[str, object]) -> str:
             "  dev-egress-forwarder:",
             f"    image: {image}",
             "    entrypoint: [\"umbra-dev-egress-forwarder\"]",
+            # The sidecars reuse the sandbox image, whose baked healthcheck
+            # probes sshd; without this they sit permanently unhealthy
+            # (docs/specs/dev-cvm.md §3.3).
+            "    healthcheck:",
+            "      disable: true",
             "    read_only: true",
             "    tmpfs:",
             "      - /tmp",
@@ -1377,6 +1382,10 @@ def render_dev_cvm_compose_config(resolved: dict[str, object]) -> str:
             "  dev-tunnel:",
             f"    image: {image}",
             "    entrypoint: [\"umbra-dev-tunnel\"]",
+            # Same inherited-sshd-healthcheck disable as the forwarder above
+            # (docs/specs/dev-cvm.md §3.3).
+            "    healthcheck:",
+            "      disable: true",
             "    read_only: true",
             "    tmpfs:",
             "      - /tmp",

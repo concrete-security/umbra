@@ -1,10 +1,12 @@
 import asyncio
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
+import yaml
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 from fastapi import HTTPException
@@ -682,6 +684,88 @@ def test_render_dev_cvm_compose_config_keeps_runtime_values_as_placeholders() ->
     assert "no-new-privileges:true" in compose
     assert "ports:" not in compose
     assert "token_urlsafe" not in compose
+
+
+DEV_CVM_COMPOSE_PATH = Path(__file__).resolve().parents[2] / "cvms" / "dev" / "docker-compose.yml"
+DEV_CVM_IMAGE_PLACEHOLDER = "${DEV_CVM_IMAGE:?set DEV_CVM_IMAGE to a digest-pinned GHCR image}"
+DEV_CVM_PINNED_IMAGE = "registry.invalid/umbra/dev-cvm@sha256:abc"
+_ABSENT = "<absent>"
+
+
+def _dev_cvm_compose_pair() -> tuple[dict, dict]:
+    """Parse the checked-in dev compose and the launch-time rendered compose.
+
+    The single classified-legitimate difference is each service's `image`: the checked-in
+    file is driven by the ${DEV_CVM_IMAGE} shell placeholder while the renderer pins the
+    launch digest. It is normalised away here; every other key is security/runtime
+    relevant and must match.
+    """
+    local = yaml.safe_load(DEV_CVM_COMPOSE_PATH.read_text())
+    rendered = yaml.safe_load(render_dev_cvm_compose_config({"image": DEV_CVM_PINNED_IMAGE}))
+    for service in local["services"].values():
+        assert service["image"] == DEV_CVM_IMAGE_PLACEHOLDER
+    for service in rendered["services"].values():
+        assert service["image"] == DEV_CVM_PINNED_IMAGE
+        service["image"] = DEV_CVM_IMAGE_PLACEHOLDER
+    return local, rendered
+
+
+def _dev_cvm_compose_drift(local: object, rendered: object, path: str = "") -> list[str]:
+    """Recursively collect ``key: checked-in=… rendered=…`` lines for every mismatch."""
+    if isinstance(local, dict) and isinstance(rendered, dict):
+        drift: list[str] = []
+        for key in sorted(set(local) | set(rendered)):
+            drift += _dev_cvm_compose_drift(local.get(key, _ABSENT), rendered.get(key, _ABSENT), f"{path}/{key}")
+        return drift
+    if isinstance(local, list) and isinstance(rendered, list):
+        if sorted(map(repr, local)) == sorted(map(repr, rendered)):
+            return []
+    elif local == rendered:
+        return []
+    return [f"{path or '/'}: checked-in={local!r} rendered={rendered!r}"]
+
+
+def test_render_dev_cvm_compose_config_matches_checked_in_compose_success() -> None:
+    """Pin the two Dev CVM composes together: the renderer's output is what actually
+    launches production CVMs and what ops/deploy/measure-dev-cvm-image.py measures, while
+    cvms/dev/docker-compose.yml is the reviewed reference. Drift between them (e.g. the
+    missing sidecar `healthcheck: disable`) silently ships a different runtime than the
+    one the repo documents and tests.
+    """
+    local, rendered = _dev_cvm_compose_pair()
+
+    drift = _dev_cvm_compose_drift(local, rendered)
+
+    assert not drift, "rendered Dev CVM compose drifted from cvms/dev/docker-compose.yml:\n" + "\n".join(drift)
+
+
+@pytest.mark.parametrize(
+    "service, expected_healthcheck",
+    [
+        (
+            "user-sandbox",
+            {
+                "test": ["CMD-SHELL", "pgrep -x sshd >/dev/null"],
+                "interval": "500ms",
+                "timeout": "2s",
+                "start_period": "3s",
+                "retries": 5,
+            },
+        ),
+        ("dev-egress-forwarder", {"disable": True}),
+        ("dev-tunnel", {"disable": True}),
+    ],
+    ids=["sandbox-probes-sshd", "forwarder-disabled", "tunnel-disabled"],
+)
+def test_render_dev_cvm_compose_config_healthchecks_success(service: str, expected_healthcheck: dict) -> None:
+    """dev-cvm.md §3.3: the sshd probe applies to user-sandbox only, the sidecars reuse the
+    same image artifact and MUST disable the inherited probe (otherwise they sit permanently
+    unhealthy), and no service may gate startup on another's health.
+    """
+    rendered = yaml.safe_load(render_dev_cvm_compose_config({"image": DEV_CVM_PINNED_IMAGE}))
+
+    assert rendered["services"][service].get("healthcheck", _ABSENT) == expected_healthcheck
+    assert "depends_on" not in rendered["services"][service]
 
 
 def test_resolve_security_cvm_provision_config_uses_defaults(monkeypatch) -> None:
