@@ -777,6 +777,8 @@ test_release_publication_trust_boundary() {
     || fail "the explicit fork source identity was not captured for build labels"
   [ "$CVM_REDEPLOY_IMAGE_REF" = "${image_repo}@${FIXTURE_LOCAL_RUNTIME_DIGEST}" ] \
     || fail "publication selected a runtime other than the locally reproduced subject"
+  [ "$CVM_REDEPLOY_PROVENANCE_REF" = "${image_repo}@${FIXTURE_PUBLISHED_INDEX_DIGEST}" ] \
+    || fail "publication did not expose the validated attestation index"
   if contains "$FIXTURE_DOCKER_STDERR" "$(<"$log_capture")"; then
     fail "provider-controlled Docker stderr reached successful publication output"
   fi
@@ -910,6 +912,8 @@ test_release_publication_trust_boundary() {
     || fail "an existing local subject must still publish one digest-only registry build"
   [ ! -e "$FIXTURE_TAG_ARGUMENT_MARKER" ] \
     || fail "a differing published index digest path created a mutable tag"
+  [ "$CVM_REDEPLOY_PROVENANCE_REF" = "${image_repo}@${FIXTURE_PUBLISHED_INDEX_DIGEST}" ] \
+    || fail "publication reported stale provenance after a new index push"
   FIXTURE_PUBLISHED_INDEX_DIGEST="$FIXTURE_INDEX_DIGEST"
 
   FIXTURE_REMOTE_RUNTIME_DIGEST="sha256:$(printf '7%.0s' {1..64})"

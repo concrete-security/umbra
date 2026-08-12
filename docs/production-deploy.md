@@ -82,6 +82,14 @@ make verify-cvm-images-repro
 
 Each gate performs two cache-disabled builds from separate detached worktrees, uses the source commit timestamp to normalize image layers, and compares the runnable OCI manifest digest. Each build's attested result index is separately validated for the expected subject binding, source labels, SPDX document, and max-mode SLSA inputs. BuildKit provenance includes per-invocation timestamps and an invocation ID, so those top-level index digests are expected to differ. The source URL becomes the OCI source label and provenance identity. The publisher also requires the captured commit to be advertised by an `origin` branch or tag, so push the reviewed release commit before publication. Select owned GHCR repositories in the committed mode layer, then regenerate `.env`:
 
+In the canonical repository, `.github/workflows/publish-cvm-images.yml` runs the
+same gate on every trusted `dev` push. It uploads a lock-shaped candidate whose
+image fields are runnable manifest refs and whose provenance fields identify the
+validated immutable attestation indexes. Measurements remain null because the
+public publisher has no provider identity; the private deployment authority
+fills them from the Dev canary before staging. The commands below remain the
+self-hosted/operator publication path.
+
 ```text
 SECURITY_CVM_IMAGE_REPOSITORY=ghcr.io/<owner>/umbra-security-cvm
 DEV_CVM_IMAGE_REPOSITORY=ghcr.io/<owner>/umbra-dev-cvm

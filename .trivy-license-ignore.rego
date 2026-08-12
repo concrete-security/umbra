@@ -1,9 +1,8 @@
 package trivy
 
-# Legal exceptions must identify the exact package and version (and file path
-# when the finding has one), state the rationale and expiry in this file, and
-# receive CODEOWNERS approval. Never suppress a license ID globally: Trivy
-# cannot path-scope OS-package entries. The allowlist is intentionally empty:
-# the locked production npm graph has no reciprocal-license finding, and any
-# future finding must block release until removed or narrowly approved.
+# Trivy CRITICAL (forbidden) classifications block release. Other detected
+# licenses remain visible in THIRD_PARTY_NOTICES.md and the scan output for
+# maintainer review. Any future exception must identify the exact package and
+# version (and file path when present), document its rationale and expiry here,
+# and receive CODEOWNERS approval; never suppress a license ID globally.
 default ignore = false
