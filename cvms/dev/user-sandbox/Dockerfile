@@ -3,6 +3,19 @@
 # reviewed value. Release builds override it with the source commit timestamp.
 ARG SOURCE_DATE_EPOCH=0
 
+FROM golang:1.26.5-bookworm@sha256:53eeac89074db483fdf0ab3be1df32bf6e47562263d2d0d6baa7f26acb4957dd AS compose-builder
+ARG COMPOSE_VERSION=5.4.0
+ARG COMPOSE_SOURCE_SHA256=142f895ba74715ea0018a20b7f93fa96e36fb6c91ea66f856a61c6e3716c4ef8
+RUN curl -fsSL "https://github.com/docker/compose/archive/refs/tags/v${COMPOSE_VERSION}.tar.gz" -o /tmp/compose.tar.gz \
+    && echo "${COMPOSE_SOURCE_SHA256}  /tmp/compose.tar.gz" | sha256sum -c - \
+    && mkdir -p /src \
+    && tar -xzf /tmp/compose.tar.gz -C /src --strip-components=1 \
+    && rm /tmp/compose.tar.gz
+WORKDIR /src
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 make build VERSION="v${COMPOSE_VERSION}" GO_BUILDTAGS=e2e DESTDIR=/out
+
 FROM rust:1-bookworm@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa AS rust-base
 
 FROM rust-base AS atls-connect-builder
@@ -77,13 +90,11 @@ RUN set -a \
     && curl -fsSL "${DOCKER_DEB_BASE_URL}/${DOCKER_CE_CLI_DEB}" -o /tmp/docker-ce-cli.deb \
     && curl -fsSL "${DOCKER_DEB_BASE_URL}/${CONTAINERD_DEB}" -o /tmp/containerd.deb \
     && curl -fsSL "${DOCKER_DEB_BASE_URL}/${DOCKER_BUILDX_DEB}" -o /tmp/docker-buildx.deb \
-    && curl -fsSL "${DOCKER_DEB_BASE_URL}/${DOCKER_COMPOSE_DEB}" -o /tmp/docker-compose.deb \
     && printf '%s  %s\n' \
       "${DOCKER_CE_SHA256}" /tmp/docker-ce.deb \
       "${DOCKER_CE_CLI_SHA256}" /tmp/docker-ce-cli.deb \
       "${CONTAINERD_SHA256}" /tmp/containerd.deb \
       "${DOCKER_BUILDX_SHA256}" /tmp/docker-buildx.deb \
-      "${DOCKER_COMPOSE_SHA256}" /tmp/docker-compose.deb \
       | sha256sum -c - \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -91,7 +102,6 @@ RUN set -a \
       /tmp/docker-buildx.deb \
       /tmp/docker-ce-cli.deb \
       /tmp/docker-ce.deb \
-      /tmp/docker-compose.deb \
     && rm -rf \
       /var/lib/apt/lists/* \
       /var/log/apt/* \
@@ -100,6 +110,7 @@ RUN set -a \
       /var/cache/ldconfig/aux-cache \
       /tmp/*.deb
 
+COPY --from=compose-builder --chmod=0755 /out/docker-compose /usr/libexec/docker/cli-plugins/docker-compose
 COPY cvms/dev/user-sandbox/docker-daemon.json /etc/docker/daemon.json
 COPY cvms/dev/user-sandbox/codex-package ./tmp/codex-package
 COPY --from=uv /uv /uvx /bin/
@@ -111,6 +122,27 @@ RUN set -a \
     && echo "${NODE_SHA256}  /tmp/node.tar.xz" | sha256sum -c - \
     && tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 \
     && rm /tmp/node.tar.xz \
+    && npm install --global "npm@${NPM_VERSION}" --ignore-scripts --no-audit --no-fund \
+    # npm 12.0.2 predates fixed releases of two top-level bundled dependencies.
+    # Keep these checksummed replacements until NPM_VERSION bundles them itself.
+    && curl -fsSL "https://registry.npmjs.org/brace-expansion/-/brace-expansion-${NPM_BRACE_EXPANSION_VERSION}.tgz" -o /tmp/npm-brace-expansion.tgz \
+    && curl -fsSL "https://registry.npmjs.org/ip-address/-/ip-address-${NPM_IP_ADDRESS_VERSION}.tgz" -o /tmp/npm-ip-address.tgz \
+    && printf '%s  %s\n' \
+      "${NPM_BRACE_EXPANSION_SHA256}" /tmp/npm-brace-expansion.tgz \
+      "${NPM_IP_ADDRESS_SHA256}" /tmp/npm-ip-address.tgz \
+      | sha256sum -c - \
+    && rm -rf \
+      /usr/local/lib/node_modules/npm/node_modules/brace-expansion \
+      /usr/local/lib/node_modules/npm/node_modules/ip-address \
+    && install -d \
+      /usr/local/lib/node_modules/npm/node_modules/brace-expansion \
+      /usr/local/lib/node_modules/npm/node_modules/ip-address \
+    && tar -xzf /tmp/npm-brace-expansion.tgz -C /usr/local/lib/node_modules/npm/node_modules/brace-expansion --strip-components=1 \
+    && tar -xzf /tmp/npm-ip-address.tgz -C /usr/local/lib/node_modules/npm/node_modules/ip-address --strip-components=1 \
+    && rm /tmp/npm-brace-expansion.tgz /tmp/npm-ip-address.tgz \
+    && test "$(node -p "require('/usr/local/lib/node_modules/npm/node_modules/brace-expansion/package.json').version")" = "${NPM_BRACE_EXPANSION_VERSION}" \
+    && test "$(node -p "require('/usr/local/lib/node_modules/npm/node_modules/ip-address/package.json').version")" = "${NPM_IP_ADDRESS_VERSION}" \
+    && test "$(npm --version)" = "${NPM_VERSION}" \
     && curl -fsSL "https://github.com/anthropics/claude-code/releases/download/v${CLAUDE_VERSION}/claude-linux-x64.tar.gz" -o /tmp/claude.tar.gz \
     && echo "${CLAUDE_SHA256}  /tmp/claude.tar.gz" | sha256sum -c - \
     && install -d /usr/local/lib/umbra \
