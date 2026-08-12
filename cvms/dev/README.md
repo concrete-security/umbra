@@ -66,6 +66,10 @@ The opt-in reproducibility gate creates two independent clean worktrees, perform
 
 `make verify-cvm-images-repro` applies the gate to both Dev and Security CVM images. Publication enforces the same two independent cache-disabled builds, then verifies the remote runtime and attestations before selecting the digest for deployment.
 
+The canonical `Publish CVM images` workflow records that runtime digest and its
+immutable attestation-index reference in a lock-shaped artifact. It deliberately
+leaves the shared guest MRTD unset for the private provider canary to measure.
+
 Updates use `umbra cvm update <cvm-id>` and preserve provider-managed named volumes. Published images must use immutable digests, never `latest`.
 
 Live key rotation, host-level nested-virtualization alternatives, and guaranteed hitless migration are outside v0.

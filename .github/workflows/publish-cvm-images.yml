@@ -1,0 +1,146 @@
+name: Publish CVM images
+run-name: CVM images ${{ github.sha }}
+
+on:
+  push:
+    branches: [dev]
+  workflow_dispatch:
+
+concurrency:
+  group: cvm-images-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: publish ${{ matrix.component }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - component: dev-cvm
+            repository: ghcr.io/concrete-security/umbra-dev-cvm
+            manifest: dev-cvm.json
+          - component: security-cvm
+            repository: ghcr.io/concrete-security/umbra-security-cvm
+            manifest: security-cvm.json
+    steps:
+      - name: Checkout exact trusted source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          # The publisher proves HEAD is advertised by origin. The ephemeral job
+          # token is removed by checkout's post-step and .git is excluded from
+          # every image build context.
+          persist-credentials: 'true'
+
+      - name: Require a trusted branch commit
+        run: |
+          set -euo pipefail
+          case "$GITHUB_REF" in
+            refs/heads/dev | refs/heads/main) ;;
+            *) echo "CVM publication requires dev or main" >&2; exit 2 ;;
+          esac
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          [[ -z "$(git status --porcelain --untracked-files=all)" ]]
+
+      - name: Install checksum-verified Buildx
+        env:
+          BUILDX_VERSION: 0.34.0
+          BUILDX_SHA256: 0144479d5a1cd710be3464ae898628cfa68033e16b225aef52f81930c45ac9b5
+        run: |
+          set -euo pipefail
+          binary="$RUNNER_TEMP/docker-buildx"
+          curl --fail --silent --show-error --location \
+            "https://github.com/docker/buildx/releases/download/v${BUILDX_VERSION}/buildx-v${BUILDX_VERSION}.linux-amd64" \
+            --output "$binary"
+          echo "${BUILDX_SHA256}  ${binary}" | sha256sum --check --strict
+          sudo install -d -m 0755 /usr/local/lib/docker/cli-plugins
+          sudo install -m 0755 "$binary" /usr/local/lib/docker/cli-plugins/docker-buildx
+          docker buildx version
+
+      - name: Record trusted release-host boundary
+        run: docker version
+
+      - name: Reproduce and publish immutable image
+        env:
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ github.token }}
+          UMBRA_BUILD_SOURCE_REPOSITORY_URL: https://github.com/concrete-security/umbra
+          COMPONENT: ${{ matrix.component }}
+          IMAGE_REPOSITORY: ${{ matrix.repository }}
+          MANIFEST: ${{ matrix.manifest }}
+        run: |
+          set -euo pipefail
+          ./ops/deploy/publish-cvm-image.sh \
+            "$COMPONENT" "$IMAGE_REPOSITORY" "artifacts/$MANIFEST"
+
+      - name: Upload component manifest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cvm-image-part-${{ matrix.component }}-${{ github.sha }}
+          path: artifacts/${{ matrix.manifest }}
+          if-no-files-found: error
+          retention-days: 30
+
+  manifest:
+    name: assemble deployment candidate
+    needs: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Download component manifests
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: cvm-image-part-*-${{ github.sha }}
+          path: parts
+          merge-multiple: true
+
+      - name: Assemble lock-shaped candidate
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          jq -s '
+            if length != 2 then
+              error("expected exactly two component manifests")
+            elif ([.[].source.repository] | unique | length) != 1
+                or ([.[].source.commit] | unique | length) != 1 then
+              error("component manifests disagree on source")
+            elif ([.[].artifact.component] | sort)
+                != ["dev_cvm", "security_cvm"] then
+              error("component manifests are incomplete or duplicated")
+            else
+              {
+                schema_version: 1,
+                source: .[0].source,
+                artifacts: (
+                  map({
+                    key: .artifact.component,
+                    value: (.artifact | del(.component))
+                  }) | from_entries
+                )
+              }
+            end
+          ' parts/*.json > artifacts/deployment-lock.candidate.json
+          jq -e '
+            .source.commit == env.GITHUB_SHA
+            and (.artifacts.dev_cvm.measurement == null)
+            and (.artifacts.security_cvm.measurement == null)
+          ' artifacts/deployment-lock.candidate.json >/dev/null
+
+      - name: Upload deployment candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cvm-images-${{ github.sha }}
+          path: artifacts/deployment-lock.candidate.json
+          if-no-files-found: error
+          retention-days: 30
