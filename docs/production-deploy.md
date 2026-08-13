@@ -250,6 +250,7 @@ curl -fsS "https://${CONSOLE_HOST}/readyz"
 - Use `umbra security-cvm update` and `umbra cvm update <id>` for provider-neutral runtime updates.
 - Use immutable image digests from one tested release set; do not mix arbitrary CLI, Console, or CVM versions.
 - Back up before migration and test the release in staging before production.
+- A database at the exact pre-Umbra head `0032_attn_unreachable` upgrades through the lineage-only compatibility branch to `0033_public_legacy_merge`. Preserve its dormant legacy schema and data, use full Alembic revision IDs, and restore the pre-upgrade backup rather than attempting a downgrade across that merge.
 - Keep process supervision and restart-on-boot configured for the Compose stack.
 - Use `umbra reconcile` for provider drift. Do not edit lifecycle state directly in Postgres.
 - Never inspect or mutate provider resources outside the deployment's dedicated workspace and Umbra-owned naming scope.

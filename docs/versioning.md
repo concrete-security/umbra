@@ -12,6 +12,8 @@ The Console API may evolve before 1.0. A CLI should not be assumed compatible wi
 
 Database migrations are forward-only. Back up the Console database before an upgrade, read the release notes, and test the exact release set in a non-production environment. Rollback may require restoring that backup; do not assume an older Console can read a schema migrated by a newer release.
 
+The initial public migration graph recognizes the exact deployed pre-Umbra head `0032_attn_unreachable` through lineage-only no-op revisions and merges it with the public secret-envelope branch at `0033_public_legacy_merge`. These compatibility revisions retain dormant legacy schema and data; they neither install removed private features on fresh databases nor authorize cleanup of preserved state. Always use complete revision IDs because both branches include an `0028...` revision. Downgrade across the merge is unsupported: restore the pre-upgrade backup.
+
 ## Release notes
 
 Every release records:

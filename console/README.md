@@ -84,6 +84,8 @@ The ordinary Console suite uses fake asyncpg connections and needs no database. 
 
 Console state is durable. Schema changes require Alembic migrations and normal startup deployment. Do not drop or truncate tables, delete Compose volumes, reset the database, or run restore as a debugging technique. Use `make backup-console-db` before upgrades and follow `docs/versioning.md`.
 
+The public migration graph contains a lineage-only compatibility branch for the exact deployed pre-Umbra head `0032_attn_unreachable`. Its no-op revisions let that durable database run the real public migrations and converge at `0033_public_legacy_merge`; they do not install removed private features on fresh databases or delete dormant legacy schema and data. Use full revision IDs because both branches contain a revision beginning with `0028`. Downgrade across the merge is unsupported; restore the pre-upgrade database backup instead.
+
 Generic self-host setup and deployment guidance lives in `docs/operator-setup.md` and `docs/production-deploy.md`.
 
 ## Scope
