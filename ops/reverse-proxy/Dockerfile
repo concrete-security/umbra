@@ -57,10 +57,10 @@ RUN apk add --no-cache \
       py3-tz-pyc=2026.2-r0 \
       py3-urllib3=2.7.0-r0 \
       py3-urllib3-pyc=2.7.0-r0 \
-      pyc=3.14.5-r0 \
-      python3=3.14.5-r0 \
-      python3-pyc=3.14.5-r0 \
-      python3-pycache-pyc0=3.14.5-r0 \
+      pyc=3.14.7-r0 \
+      python3=3.14.7-r0 \
+      python3-pyc=3.14.7-r0 \
+      python3-pycache-pyc0=3.14.7-r0 \
       readline=8.3.3-r1 \
       sqlite-libs=3.53.2-r0
 
