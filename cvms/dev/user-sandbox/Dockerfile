@@ -40,7 +40,7 @@ COPY --from=rust-base /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certi
 # after rebuilding and exercising the sandbox image; it deliberately freezes
 # all packages from the Ubuntu archive. Docker's exact amd64 package filenames
 # and content digests are pinned separately in tool-versions.env below.
-ARG UBUNTU_SNAPSHOT=20260731T000000Z
+ARG UBUNTU_SNAPSHOT=20260813T000000Z
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1
