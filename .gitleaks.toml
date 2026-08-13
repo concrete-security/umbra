@@ -21,5 +21,8 @@ description = "Canonical Alembic public/legacy merge revision identifier"
 targetRules = ["generic-api-key"]
 paths = ['''^console/alembic/versions/0033_public_legacy_merge\.py$''']
 regexTarget = "line"
-regexes = ['''^(?:Revision ID: 0033_public_legacy_merge|revision = "0033_public_legacy_merge")$''']
+regexes = [
+  '''^Revises:[[:space:]]+0028_secret_envelope_v2,[[:space:]]+0032_attn_unreachable$''',
+  '''^down_revision[[:space:]]*=[[:space:]]*\(["']0028_secret_envelope_v2["'],[[:space:]]*["']0032_attn_unreachable["']\)$''',
+]
 condition = "AND"
