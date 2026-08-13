@@ -5,21 +5,9 @@ useDefault = true
 # Spec prose in the Console API error catalog pattern-matches generic-api-key
 # (`details.resource="user_secrets"` is a documented quota error field, not a
 # credential). Allow exactly that line shape in exactly that file.
-[[allowlists]]
+[allowlist]
 description = "Console spec quota-error prose that pattern-matches generic-api-key"
 paths = ['''docs/specs/console\.md''']
 regexTarget = "line"
 regexes = ['''details\.resource="user_secrets"''']
-condition = "AND"
-
-# The canonical Alembic merge revision contains the word "api" followed by a
-# long identifier, which pattern-matches generic-api-key in both its migration
-# header and revision assignment. Allow only those exact safe lines, for that
-# exact rule and file, including when scanning the commit that introduced them.
-[[allowlists]]
-description = "Canonical Alembic public/legacy merge revision identifier"
-targetRules = ["generic-api-key"]
-paths = ['''^console/alembic/versions/0033_public_legacy_merge\.py$''']
-regexTarget = "line"
-regexes = ['''^(Revises:[[:space:]]+0028_secret_envelope_v2,[[:space:]]+0032_attn_unreachable|down_revision[[:space:]]*=[[:space:]]*\(["']0028_secret_envelope_v2["'],[[:space:]]*["']0032_attn_unreachable["']\))$''']
 condition = "AND"
