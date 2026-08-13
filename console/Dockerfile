@@ -103,7 +103,9 @@ COPY --from=atlas-verify-builder /umbra-atlas-verify /usr/local/bin/umbra-atlas-
 EXPOSE 8000
 
 RUN groupadd --gid 10001 console \
-    && useradd --uid 10001 --gid console --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin console
+    && useradd --uid 10001 --gid console --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin console \
+    && chmod -R u=rwX,go=rX /app \
+    && chmod 0755 /entrypoint.sh
 
 USER 10001:10001
 

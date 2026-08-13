@@ -48,6 +48,8 @@ make test
 
 The repository pins Python 3.12 in `.python-version`, matching the Console container. `uv` provisions it when necessary; newer Python minors are not part of the supported or release-tested runtime. The Console image restores the dated Debian snapshots recorded by its digest-pinned Rust and Python bases before installing system packages, so a later repository update cannot silently change the same source build.
 
+The final image normalizes application-tree permissions before switching to unprivileged UID/GID 10001. A restrictive source-checkout umask therefore cannot make Alembic metadata or installed application files unreadable at startup, while the runtime user remains unable to modify the image contents.
+
 `console/package.json` is a private build manifest, not a package intended for npm publication. Its pinned `phala` runtime dependency supplies the provider CLI and narrow compose-hash helper; the development-only `tailwindcss` dependency rebuilds the operator dashboard CSS. The container installs the lock with package scripts disabled and prunes development dependencies.
 
 The ordinary Console suite uses fake asyncpg connections and needs no database. Database integration tests are opt-in through `UMBRA_TEST_DATABASE_URL` and must point at a role allowed to create a throwaway database. Never point them at a production database.
