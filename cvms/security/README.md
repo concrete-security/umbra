@@ -59,7 +59,7 @@ make test
 
 Use digest-pinned images. Runtime updates go through `umbra security-cvm update`; provider-specific commands and IDs remain behind Console adapters. Dev forwarders can accept a locally verified candidate aTLS policy after an SC policy-only change and can refresh a rotated CA through the authenticated runtime path. Processes that cache trust may need restart after CA rotation.
 
-`make verify-security-image-repro` performs two independent cache-disabled builds, requires identical runnable runtime-manifest digests, and independently validates each result index's attestations; `make verify-cvm-images-repro` runs that gate for both CVM images. Publication then performs and revalidates one tagless push-by-digest registry build before selecting the runtime digest.
+`make verify-security-image-repro` performs two independent cache-disabled builds, requires identical runnable runtime-manifest digests, and independently validates each result index's attestations; `make verify-cvm-images-repro` runs that gate for both CVM images. Publication exports the matching result from the fresh isolated cache populated by those builds, then revalidates the tagless push-by-digest registry result before selecting the runtime digest.
 
 The canonical `Publish CVM images` workflow records the runtime digest together
 with the immutable attestation index that carries its SBOM and provenance. The

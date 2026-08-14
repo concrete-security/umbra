@@ -664,7 +664,11 @@ test_release_publication_trust_boundary() {
             type=registry,*) fixture_output=registry ;;
           esac
         done
-        [ "$fixture_no_cache" -eq 1 ] || return 94
+        if [ "$fixture_output" = registry ]; then
+          [ "$fixture_no_cache" -eq 0 ] || return 94
+        else
+          [ "$fixture_no_cache" -eq 1 ] || return 94
+        fi
         [ "$FIXTURE_BUILD_FAILURE" -eq 0 ] || return 1
         if [ "$fixture_output" = registry ]; then
           printf '%s\n' registry-build >> "$FIXTURE_OPERATION_LOG"

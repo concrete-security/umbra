@@ -416,8 +416,9 @@ cvm_redeploy_origin_advertises_commit() {
 # <repo>@<runtime-digest> and CVM_REDEPLOY_PROVENANCE_REF to the immutable
 # attestation index containing its subject-bound SBOM and SLSA provenance. No
 # mutable or source-SHA tag is created. Two local OCI builds must agree on the
-# runnable manifest before publishing; one cache-disabled tagless build publishes
-# the result index by digest.
+# runnable manifest before publishing. The tagless registry export then reuses
+# only the fresh cache those verified builds populated in this run's unique
+# builder, and the remote runtime digest must still equal the local subject.
 #
 # The result comes back through that global, NOT through stdout, and it must stay
 # that way. Bash strips errexit inside a command substitution, so capturing this
@@ -591,10 +592,16 @@ cvm_redeploy_publish_image() {
   registry_password=""
 
   metadata_file="${CVM_REDEPLOY_RELEASE_DIR}/registry-build-metadata.json"
-  cvm_redeploy_info "uploading one tagless attested result index by digest"
+  cvm_redeploy_info "uploading the reproduced tagless attested result index by digest"
+  # This builder is unique to this invocation and began without ambient Buildx
+  # state. The two cache-disabled builds above are therefore the only source of
+  # reusable records, and they already proved the same runtime subject from two
+  # detached worktrees. Rebuilding cache-disabled a third time would fetch build
+  # inputs again after the reproducibility decision and could publish a different
+  # subject; export the proven result instead, then verify its registry digest and
+  # attestations below.
   docker buildx build \
     "${UMBRA_REPRODUCIBLE_BUILD_ARGS[@]}" \
-    --no-cache \
     --platform "$platforms" \
     --file "$worktree_dockerfile" \
     --metadata-file "$metadata_file" \
