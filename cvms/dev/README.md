@@ -19,7 +19,7 @@ The Dev CVM is a per-developer TDX sandbox for agents, shells, builds, nested Do
 - The sandbox runs with `sysbox-runc`; namespace root maps to unprivileged host IDs.
 - The sandbox joins only an internal Docker network with no default egress route. Only the forwarder has an uplink.
 - Proxy and CA variables are forced for shells, sudo, APT, and nested tools.
-- Security CVM policy, FQDN, CA, proxy/control bearers, SSH keys, and non-secret placeholders arrive as measured launch material.
+- Security CVM FQDN, CA, proxy/control bearers, SSH keys, and non-secret placeholders arrive as measured launch material. The full Security CVM aTLS policy never crosses Phala's launch env; the forwarder fetches it from the authenticated Console Dev-control endpoint before the first upstream SC connection or successful CONNECT response.
 - The sandbox receives only the CA, authorized keys, and non-secret placeholders. Forwarder-only trust and bearer material is not exposed there.
 - CA refresh is authenticated against the RTMR3-bound Console origin and replaces, rather than appends to, the sandbox bundle.
 - SSH uses public-key authentication. Keys are fixed for the CVM lifetime.
@@ -36,12 +36,13 @@ Umbra governs network connections opened inside the Dev CVM. Hosted editor or br
 | `SECURITY_CVM_FQDN` | Security CVM network, TLS, and attestation identity. |
 | `SECURITY_CVM_PROXY_PORT` | Proxy port. |
 | `SECURITY_CVM_PROXY_TOKEN` | Per-CVM proxy bearer, forwarder only. |
-| `DEV_CVM_CONTROL_TOKEN` | Per-CVM Console refresh bearer, forwarder only. |
+| `DEV_CVM_CONTROL_TOKEN` | Per-CVM Console policy-bootstrap and refresh bearer, forwarder only. |
 | `SECURITY_CVM_CA_CERT_B64` | Security CVM mitmproxy root CA. |
-| `SECURITY_CVM_ATLS_POLICY_B64` | Policy verified by `umbra-atls-connect`. |
-| `CONSOLE_URL` | Bound Console origin for narrow refresh reads. |
+| `CONSOLE_URL` | Bound Console origin for narrow policy-bootstrap and refresh reads. |
 | `AUTHORIZED_SSH_KEYS_B64` | Launch-time SSH public keys. |
 | `SANDBOX_ENV_PLACEHOLDERS_B64` | Non-secret sandbox environment values. |
+
+The forwarder MAY bind `:3128` without a policy so the Dev CVM remains reachable for measurement, but before its first upstream SC connection or `200 Connection Established` it MUST use `DEV_CVM_CONTROL_TOKEN` to fetch the complete stored SC policy from the Console, strictly validate it, and atomically install it. A missing, disabled, incomplete, invalid, blank, stub, or dev policy, or failure to fetch one within the bounded bootstrap budget, returns fail-closed `502` and opens no upstream connection; no bypass is permitted. The same endpoint supplies periodic policy refreshes afterward.
 
 ## Files and checks
 

@@ -20,6 +20,8 @@ from urllib.parse import urlsplit
 
 MAX_HEADER_BYTES = 65536
 READ_SIZE = 65536
+ATLS_POLICY_FETCH_MAX_ATTEMPTS = 12
+ATLS_POLICY_FETCH_RETRY_SECONDS = 1.0
 DEFAULT_SECURITY_CVM_PROXY_PATH = "/umbra/proxy"
 DEFAULT_SECURITY_CVM_PROXY_UPGRADE = "umbra-proxy"
 PEM_BEGIN = "-----BEGIN CERTIFICATE-----"
@@ -50,6 +52,7 @@ class ForwarderConfig:
     console_url: str | None
     atls_policy_path: Path
     atls_policy_refresh_path: Path
+    atls_policy_fetch_lock: asyncio.Lock
     ca_cert_path: Path
     atls_connect_cmd: tuple[str, ...]
     atls_connect_timeout_seconds: float
@@ -164,20 +167,11 @@ def create_private_file(path: Path, payload: bytes, mode: int) -> bool:
 
 def materialize_runtime_files(runtime_dir: Path) -> tuple[Path, Path, str]:
     ca_cert = decode_required_b64("SECURITY_CVM_CA_CERT_B64")
-    atls_policy = decode_required_b64("SECURITY_CVM_ATLS_POLICY_B64")
-    try:
-        parsed_policy = json.loads(atls_policy.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise RuntimeError("SECURITY_CVM_ATLS_POLICY_B64 must decode to JSON") from exc
-    if not isinstance(parsed_policy, dict):
-        raise RuntimeError("SECURITY_CVM_ATLS_POLICY_B64 must decode to a JSON object")
-
     proxy_token = required_env("SECURITY_CVM_PROXY_TOKEN")
     ca_path = runtime_dir / "security-cvm-ca.pem"
     policy_path = runtime_dir / "security-cvm.atls-policy.json"
     token_path = runtime_dir / "proxy-token"
     write_private_file(ca_path, ca_cert, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
-    write_private_file(policy_path, atls_policy, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
     write_private_file(token_path, proxy_token.encode("utf-8"), stat.S_IRUSR)
 
     for name in ("SECURITY_CVM_CA_CERT_B64", "SECURITY_CVM_ATLS_POLICY_B64", "SECURITY_CVM_PROXY_TOKEN"):
@@ -206,6 +200,7 @@ def load_config(runtime_dir: Path = Path("/run/umbra")) -> ForwarderConfig:
         console_url=optional_url_env("CONSOLE_URL"),
         atls_policy_path=policy_path,
         atls_policy_refresh_path=runtime_dir / "security-cvm.atls-policy.refresh.json",
+        atls_policy_fetch_lock=asyncio.Lock(),
         ca_cert_path=ca_path,
         atls_connect_cmd=argv,
         atls_connect_timeout_seconds=float(os.environ.get("DEV_EGRESS_ATLS_CONNECT_TIMEOUT_SECONDS", "10")),
@@ -402,7 +397,7 @@ async def open_verified_upstream(config: ForwarderConfig) -> VerifiedUpstream:
     raise ConnectionError("aTLS verification failed and refresh did not recover")
 
 
-def fetch_refreshed_atls_policy(config: ForwarderConfig) -> RefreshedAtlsPolicy | None:
+def fetch_refreshed_atls_policy(config: ForwarderConfig, *, force: bool = False) -> RefreshedAtlsPolicy | None:
     if config.console_url is None:
         return None
     parsed = urlsplit(config.console_url)
@@ -464,9 +459,33 @@ def fetch_refreshed_atls_policy(config: ForwarderConfig) -> RefreshedAtlsPolicy 
         log("atls_console_refresh_rejected reason=runtime_verification_fields_missing")
         return None
     data = json.dumps(policy, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    write_private_file(config.atls_policy_refresh_path, data, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
-    log("atls_console_refresh_installed")
-    return RefreshedAtlsPolicy(policy_path=config.atls_policy_refresh_path)
+    policy_path = config.atls_policy_path if force else config.atls_policy_refresh_path
+    write_private_file(policy_path, data, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+    if force:
+        config.atls_policy_refresh_path.unlink(missing_ok=True)
+        log("atls_console_bootstrap_installed")
+    else:
+        log("atls_console_refresh_installed")
+    return RefreshedAtlsPolicy(policy_path=policy_path)
+
+
+async def ensure_atls_policy(config: ForwarderConfig) -> None:
+    """Install one authenticated full SC policy before opening an upstream."""
+    if config.atls_policy_path.is_file():
+        return
+    if config.console_url is None:
+        raise ConnectionError("Security CVM aTLS policy fetch requires CONSOLE_URL")
+    async with config.atls_policy_fetch_lock:
+        if config.atls_policy_path.is_file():
+            return
+        for attempt in range(1, ATLS_POLICY_FETCH_MAX_ATTEMPTS + 1):
+            refreshed = await asyncio.to_thread(fetch_refreshed_atls_policy, config, force=True)
+            if refreshed is not None and refreshed.policy_path == config.atls_policy_path:
+                return
+            if attempt < ATLS_POLICY_FETCH_MAX_ATTEMPTS:
+                log(f"atls_console_policy_fetch_retry attempt={attempt}")
+                await asyncio.sleep(ATLS_POLICY_FETCH_RETRY_SECONDS)
+    raise ConnectionError("Security CVM aTLS policy fetch exhausted its bounded retries")
 
 
 def extract_validated_ca(payload: object, expected_fqdn: str) -> str | None:
@@ -925,6 +944,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             validate_absolute_target(request.target)
             destination = request.target
 
+        await ensure_atls_policy(config)
         upstream = await open_verified_upstream(config)
         await open_security_proxy_tunnel(upstream, config)
         upstream.writer.write(

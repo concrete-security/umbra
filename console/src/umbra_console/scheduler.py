@@ -3402,7 +3402,6 @@ def build_cvm_launch_env(
         "SECURITY_CVM_PROXY_TOKEN": proxy_token,
         "DEV_CVM_CONTROL_TOKEN": dev_control_token,
         "SECURITY_CVM_CA_CERT_B64": b64_text(ca_cert_pem),
-        "SECURITY_CVM_ATLS_POLICY_B64": b64_json(security_cvm_atls_policy(snapshot)),
         "AUTHORIZED_SSH_KEYS_B64": b64_text(authorized_keys),
         "SANDBOX_ENV_PLACEHOLDERS_B64": b64_text(sandbox_env),
         "CONSOLE_URL": console_url,
@@ -4844,11 +4843,6 @@ def sha256_text(value: str) -> str:
 
 def b64_text(value: str) -> str:
     return base64.b64encode(value.encode("utf-8")).decode("ascii")
-
-
-def b64_json(value: dict[str, Any]) -> str:
-    payload = json.dumps(value, sort_keys=True, separators=(",", ":"))
-    return b64_text(payload)
 
 
 def provider_app_id(metadata: Any) -> str | None:

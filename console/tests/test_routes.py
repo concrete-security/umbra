@@ -663,12 +663,12 @@ def test_render_dev_cvm_compose_config_keeps_runtime_values_as_placeholders() ->
     user_sandbox_section = compose.split("  dev-egress-forwarder:", 1)[0]
     forwarder_section = compose.split("  dev-egress-forwarder:", 1)[1].split("  dev-tunnel:", 1)[0]
     assert "${SECURITY_CVM_PROXY_TOKEN}" not in user_sandbox_section
-    assert "${SECURITY_CVM_ATLS_POLICY_B64}" not in user_sandbox_section
+    assert "SECURITY_CVM_ATLS_POLICY_B64" not in compose
+    assert "SECURITY_CVM_ATLS_POLICY_GZIP_B64" not in compose
     assert "${DEV_CVM_CONTROL_TOKEN}" not in user_sandbox_section
     assert "${CONSOLE_URL:-}" not in user_sandbox_section
     assert "SECURITY_CVM_FQDN: ${SECURITY_CVM_FQDN}" in user_sandbox_section
     assert "${SECURITY_CVM_PROXY_TOKEN}" in forwarder_section
-    assert "${SECURITY_CVM_ATLS_POLICY_B64}" in forwarder_section
     assert "${DEV_CVM_CONTROL_TOKEN}" in forwarder_section
     assert "${CONSOLE_URL:-}" in forwarder_section
     assert "${SECURITY_CVM_CONNECT_HOST:-}" not in compose

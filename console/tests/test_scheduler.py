@@ -751,7 +751,8 @@ def test_build_cvm_launch_env_binds_runtime_material(monkeypatch) -> None:
     assert decode_env(env["AUTHORIZED_SSH_KEYS_B64"]) == authorized_keys
     assert decode_env(env["SANDBOX_ENV_PLACEHOLDERS_B64"]) == "AWS_ACCESS_KEY_ID=umbra-proxy-injected\nZED=last\n"
     assert decode_env(env["SECURITY_CVM_CA_CERT_B64"]) == ca_cert
-    assert json.loads(decode_env(env["SECURITY_CVM_ATLS_POLICY_B64"])) == security_atls_policy()
+    assert "SECURITY_CVM_ATLS_POLICY_B64" not in env
+    assert "SECURITY_CVM_ATLS_POLICY_GZIP_B64" not in env
     assert env["CONSOLE_URL"] == ""
     assert binding == {
         "cvm_id": "00000000-0000-4000-8000-000000000031",
