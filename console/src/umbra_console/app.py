@@ -25,6 +25,8 @@ from umbra_console.request_context import resolved_client_ip
 from umbra_console.routes_auth import router as auth_router
 from umbra_console.routes_internal import router as internal_router
 from umbra_console.routes import router
+from umbra_console.routes_connect import connect_router
+from umbra_console.routes_oauth import oauth_router, public_oauth_router
 from umbra_console.routes_admin import router as admin_router
 from umbra_console.scheduler import start_operation_scheduler, stop_operation_scheduler
 
@@ -112,6 +114,9 @@ app = FastAPI(title="Umbra Console", version="0.1.0", lifespan=lifespan)
 app.include_router(auth_router)
 app.include_router(internal_router)
 app.include_router(router)
+app.include_router(oauth_router)
+app.include_router(public_oauth_router)
+app.include_router(connect_router)
 app.include_router(admin_router)
 
 
@@ -504,7 +509,10 @@ def cvm_profile_mutation_route_id(method: str, path: str) -> str | None:
 
 
 def path_exempt_from_rate_limit(path: str) -> bool:
-    return path == "/admin" or path.startswith("/admin/")
+    # Static page serving only; the JSON APIs those pages call stay limited.
+    if path == "/admin" or path.startswith("/admin/"):
+        return True
+    return path == "/connect" or path.startswith("/connect/")
 
 
 def prune_rate_limit_events(events: deque[float], now: float) -> None:
@@ -532,6 +540,8 @@ def apply_response_headers(request: Request, response: Response, request_id: str
     for name, value in SECURITY_HEADERS.items():
         response.headers.setdefault(name, value)
     if request.url.path == "/admin" or request.url.path.startswith("/admin/"):
+        response.headers["Content-Security-Policy"] = ADMIN_CSP
+    if request.url.path == "/connect" or request.url.path.startswith("/connect/"):
         response.headers["Content-Security-Policy"] = ADMIN_CSP
     if request.url.path in {"/healthz", "/readyz"}:
         response.headers["Cache-Control"] = "public, max-age=60"
@@ -605,6 +615,61 @@ def _admin_file_response(name: str, media_type: str) -> Response:
         media_type=media_type,
         headers={"Cache-Control": cache_control},
     )
+
+
+def _connect_static_dir() -> Path:
+    for candidate in (
+        Path("/app/static/connect"),
+        Path(__file__).resolve().parents[2] / "static" / "connect",
+    ):
+        if candidate.is_dir():
+            return candidate
+    return Path("/app/static/connect")
+
+
+def _connect_static_file(name: str) -> Path:
+    static_dir = _connect_static_dir()
+    path = (static_dir / name).resolve()
+    if static_dir.resolve() not in path.parents and path != static_dir.resolve():
+        raise HTTPException(status_code=404, detail="not found")
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="not found")
+    return path
+
+
+def _connect_file_response(name: str, media_type: str) -> Response:
+    return Response(
+        content=_connect_static_file(name).read_bytes(),
+        media_type=media_type,
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+CONNECT_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+CONNECT_RESERVED_SLUGS = {"oauth", "assets"}
+
+
+# Registration order matters: the literal callback and assets routes must
+# precede the {integration} slug route.
+@app.get("/connect/oauth/callback", include_in_schema=False)
+async def connect_oauth_callback_page() -> Response:
+    return _connect_file_response("oauth-callback.html", "text/html; charset=utf-8")
+
+
+@app.get("/connect/assets/{asset_path:path}", include_in_schema=False)
+async def connect_assets(asset_path: str) -> Response:
+    if not asset_path or ".." in asset_path or asset_path.startswith("/"):
+        raise HTTPException(status_code=404, detail="not found")
+    return _connect_file_response(asset_path, _admin_asset_media_type(asset_path))
+
+
+@app.get("/connect/{integration}", include_in_schema=False)
+async def connect_index(integration: str) -> Response:
+    # The shell is static and always 200 for a well-formed slug; the page's JS
+    # asks /api/v1/connect/{integration} for the truth.
+    if not CONNECT_SLUG_RE.fullmatch(integration) or integration in CONNECT_RESERVED_SLUGS:
+        raise HTTPException(status_code=404, detail="not found")
+    return _connect_file_response("index.html", "text/html; charset=utf-8")
 
 
 @app.get("/metrics", include_in_schema=False)

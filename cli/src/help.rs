@@ -139,6 +139,20 @@ const EXAMPLES: &[(&str, &[&str])] = &[
         ],
     ),
     ("codex", &["umbra codex --workspace ~/repo"]),
+    (
+        "claude connect",
+        &[
+            "claude setup-token | umbra --profile <PROFILE_ID|alias> claude connect --cvm <CVM_ID|alias>",
+            "claude setup-token | umbra --profile <PROFILE_ID|alias> claude connect --no-attach",
+        ],
+    ),
+    (
+        "codex connect",
+        &[
+            "umbra --profile <PROFILE_ID|alias> codex connect --cvm <CVM_ID|alias>",
+            "umbra --profile <PROFILE_ID|alias> codex connect --no-attach",
+        ],
+    ),
     ("ps", &["umbra ps", "umbra ps <CVM_ID|alias>"]),
     (
         "attach",
@@ -283,6 +297,13 @@ const EXAMPLES: &[(&str, &[&str])] = &[
     (
         "profile list",
         &["umbra profile list", "umbra profile list --assigned yes"],
+    ),
+    (
+        "profile connections create",
+        &[
+            "umbra --profile <PROFILE_ID|alias> profile connections create slack",
+            "umbra --profile <PROFILE_ID|alias> profile connections create slack --injection-id slack-user-token",
+        ],
     ),
     (
         "profile configure",

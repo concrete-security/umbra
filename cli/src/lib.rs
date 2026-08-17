@@ -8,6 +8,7 @@ use clap::{CommandFactory, FromArgMatches};
 #[macro_use]
 mod cli_macros;
 
+mod atls_policy_store;
 mod cli;
 mod commands;
 mod config;
@@ -17,6 +18,7 @@ mod exit;
 mod fsutil;
 mod help;
 mod operation;
+mod prompt;
 mod session;
 mod ssh_identity;
 mod ssh_identity_store;
@@ -69,16 +71,29 @@ pub fn run() -> ExitCode {
             && config.output != config::OutputFormat::Json
             && io::stdout().is_terminal(),
     );
-    // Passive new-version check: refresh the cached latest-version probe in a
-    // detached background process when stale (never blocks on the network),
-    // and print a one-line stderr notice after the command when the cache
-    // shows a newer release. `update` handles its own probe; `completions`
-    // output is eval'd by shell init and `tunnel` runs as an SSH
-    // ProxyCommand, so both stay notice-free.
-    let update_notice_eligible = !matches!(
+    let quiet_stderr = matches!(
         args.command,
-        cli::Command::Update(_) | cli::Command::Completions { .. } | cli::Command::Tunnel { .. }
+        cli::Command::Completions { .. } | cli::Command::Tunnel { .. }
     );
+    if let (false, Some(reason)) = (quiet_stderr, &config.config_file_error) {
+        style::eprintln_warn(&format!(
+            "[warn] ignoring config.toml: {reason}; every setting falls back to its environment variable or default -- fix that line, check the permissions, or delete the file"
+        ));
+    }
+    if !quiet_stderr && !config.unknown_config_keys.is_empty() {
+        const NAMED: usize = 8;
+        let total = config.unknown_config_keys.len();
+        let mut listed = config.unknown_config_keys[..total.min(NAMED)].join(", ");
+        if total > NAMED {
+            listed.push_str(&format!(", and {} more", total - NAMED));
+        }
+        style::eprintln_warn(&format!(
+            "[warn] config.toml has {} this CLI ignores: {} -- check the spelling, or upgrade with `umbra update`",
+            if total == 1 { "a key" } else { "keys" },
+            style::single_line(&listed)
+        ));
+    }
+    let update_notice_eligible = !quiet_stderr && !matches!(args.command, cli::Command::Update(_));
     if update_notice_eligible {
         commands::update::maybe_spawn_background_refresh(&config);
     }
@@ -88,7 +103,12 @@ pub fn run() -> ExitCode {
         cli::Command::Attach(args) => commands::ssh::run_attach(args, &config),
         cli::Command::Audit(command) => commands::audit::run(command, &config, json_output),
         cli::Command::Auth(command) => commands::auth::run(command, &config, json_output),
-        cli::Command::Claude(args) => commands::ssh::run_agent(args, &config, "claude"),
+        cli::Command::Claude { command, session } => match command {
+            Some(cli::ClaudeCommand::Connect(connect_args)) => {
+                commands::claude_connect::run_connect(connect_args, &config, json_output)
+            }
+            None => commands::ssh::run_agent(session, &config, "claude"),
+        },
         cli::Command::Code(args) => commands::ssh::run_code(args, &config),
         cli::Command::Completions { shell } => {
             let mut command = cli::Cli::command();
@@ -103,7 +123,12 @@ pub fn run() -> ExitCode {
                 }
             }
         }
-        cli::Command::Codex(args) => commands::ssh::run_agent(args, &config, "codex"),
+        cli::Command::Codex { command, session } => match command {
+            Some(cli::CodexCommand::Connect(connect_args)) => {
+                commands::codex_connect::run_connect(connect_args, &config, json_output)
+            }
+            None => commands::ssh::run_agent(session, &config, "codex"),
+        },
         cli::Command::Config(command) => commands::config::run(command, &config, json_output),
         cli::Command::Cvm(command) => commands::cvm::run(command, &config, json_output),
         cli::Command::Cursor(args) => commands::ssh::run_cursor(args, &config),

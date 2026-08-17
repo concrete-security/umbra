@@ -61,6 +61,7 @@ The ordinary Console suite uses fake asyncpg connections and needs no database. 
 | FastAPI app | `src/umbra_console/app.py` |
 | Public REST routes | `src/umbra_console/routes.py` |
 | Auth routes | `src/umbra_console/routes_auth.py` |
+| OAuth / Connect | `src/umbra_console/routes_oauth.py`, `routes_connect.py`, `oauth_endpoints.py`, `static/connect/` |
 | Internal routes | `src/umbra_console/routes_internal.py` |
 | Bootstrap | `src/umbra_console/bootstrap.py` |
 | Scheduler | `src/umbra_console/scheduler.py` |
@@ -86,10 +87,10 @@ The ordinary Console suite uses fake asyncpg connections and needs no database. 
 
 Console state is durable. Schema changes require Alembic migrations and normal startup deployment. Do not drop or truncate tables, delete Compose volumes, reset the database, or run restore as a debugging technique. Use `make backup-console-db` before upgrades and follow `docs/versioning.md`.
 
-The public migration graph contains a lineage-only compatibility branch for the exact deployed pre-Umbra head `0032_attn_unreachable`. Its no-op revisions let that durable database run the real public migrations and converge at `0033_public_legacy_merge`; they do not install removed private features on fresh databases or delete dormant legacy schema and data. Use full revision IDs because both branches contain a revision beginning with `0028`. Downgrade across the merge is unsupported; restore the pre-upgrade database backup instead.
+The public migration graph contains a lineage-only compatibility branch for the exact deployed pre-Umbra head `0032_attn_unreachable`. Its no-op revisions let that durable database run the real public migrations and converge at `0033_public_legacy_merge`. `0034_connect_oauth_schema` then installs the public Connect / OAuth / managed-secret tables and audit actions (idempotent on a database that already has them). Use full revision IDs because both branches contain a revision beginning with `0028`. Downgrade across the merge is unsupported; restore the pre-upgrade database backup instead.
 
 Generic self-host setup and deployment guidance lives in `docs/operator-setup.md` and `docs/production-deploy.md`.
 
 ## Scope
 
-The v0 Console supports Google OIDC, one Security CVM per entity, provider-backed Dev CVMs, profile policy, audit, traffic logs, and the operator dashboard. Additional identity providers, high availability, and connector/tool CVMs are outside the current v0 contract unless their specifications say otherwise.
+The v0 Console supports Google OIDC, one Security CVM per entity, provider-backed Dev CVMs, profile policy, OAuth Connect and managed-secret rotation, audit, traffic logs, and the operator dashboard. Additional identity providers, high availability, and connector/tool CVMs are outside the current v0 contract unless their specifications say otherwise.

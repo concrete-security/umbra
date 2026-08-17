@@ -3505,3 +3505,331 @@ def test_list_sc_control_cvms_emits_per_owner_hydrated_wire_shape(monkeypatch) -
     assert values["00000000-0000-4000-8000-0000000000b2"] == ["xoxp-bob"]
     assert not _scan_payload_for_key(body, "value_from")
     assert response.headers["ETag"].startswith('"')
+
+MINT_PROFILE_ID = UUID("00000000-0000-4000-8000-000000000060")
+MINT_ENTITY_ID = UUID("00000000-0000-4000-8000-000000000001")
+MINT_TEST_KEK = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+
+
+class MintProfileConn:
+    def __init__(self, row):
+        self.row = row
+        self.execute_calls = []
+
+    def transaction(self):
+        return AsyncContext()
+
+    async def fetchrow(self, sql, *args):
+        self.fetchrow_args = args
+        return self.row
+
+    async def execute(self, sql, *args):
+        self.execute_calls.append((sql, args))
+        return "OK"
+
+
+def mint_profile_row(**overrides):
+    row = {
+        "id": MINT_PROFILE_ID,
+        "entity_id": MINT_ENTITY_ID,
+        "policy": {
+            "secret_injections": [
+                {
+                    "id": "claude-code-oauth",
+                    "match": {"scheme": "https", "host": "api.anthropic.com", "ports": [443]},
+                    "type": "request_header",
+                    "header": "authorization",
+                    "value_template": "Bearer ${secret}",
+                }
+            ]
+        },
+        "assigned": True,
+        "member_count": 1,
+    }
+    row.update(overrides)
+    return row
+
+
+def mint_current_user(*, permissions=(), entity_id=MINT_ENTITY_ID):
+    from umbra_console.auth import CurrentUser
+
+    return CurrentUser(
+        id=UUID("00000000-0000-4000-8000-000000000061"),
+        email="dev@acme.test",
+        name="Dev",
+        entity_id=entity_id,
+        entity_name="acme",
+        permissions=frozenset(permissions),
+    )
+
+
+def run_mint(conn, user, *, injection_id="claude-code-oauth", value="sk-ant-oat01-real-token"):
+    return asyncio.run(
+        routes_module.mint_profile_secret(
+            profile_id=MINT_PROFILE_ID,
+            injection_id=injection_id,
+            body=routes_module.ProfileSecretMint(value=value),
+            current_user=user,
+            pool=FakePool(conn),
+        )
+    )
+
+
+def _patch_mint_collaborators(monkeypatch):
+    audits = []
+    bumps = []
+
+    async def fake_audit(conn, **kwargs):
+        audits.append(kwargs)
+
+    async def fake_bump(conn, profile_id):
+        bumps.append(profile_id)
+
+    monkeypatch.setattr(routes_module, "insert_audit_event", fake_audit)
+    monkeypatch.setattr(routes_module, "bump_attached_cvm_policy_versions", fake_bump)
+    return audits, bumps
+
+
+def test_mint_profile_secret_sole_member_upserts_bumps_and_audits(monkeypatch) -> None:
+    monkeypatch.setenv("SECRET_INJECTION_KEK_B64", MINT_TEST_KEK)
+    audits, bumps = _patch_mint_collaborators(monkeypatch)
+    conn = MintProfileConn(mint_profile_row())
+
+    result = run_mint(conn, mint_current_user())
+
+    assert result["profile_id"] == str(MINT_PROFILE_ID)
+    assert result["injection_id"] == "claude-code-oauth"
+    assert result["minted_at"].endswith("Z")
+    assert len(conn.execute_calls) == 1
+    sql, args = conn.execute_calls[0]
+    assert "INSERT INTO profile_secret_material" in sql
+    assert "ON CONFLICT (profile_id, injection_id)" in sql
+    assert args[2].startswith("v2:")
+    assert "sk-ant-oat01-real-token" not in args[2]
+    assert bumps == [MINT_PROFILE_ID]
+    assert [audit["action"] for audit in audits] == ["PROFILE_SECRET_MINTED"]
+    assert audits[0]["after"] == {"injection_id": "claude-code-oauth"}
+    assert audits[0]["target_type"] == "profile"
+
+
+def test_mint_profile_secret_non_member_is_not_found(monkeypatch) -> None:
+    monkeypatch.setenv("SECRET_INJECTION_KEK_B64", MINT_TEST_KEK)
+    _patch_mint_collaborators(monkeypatch)
+    conn = MintProfileConn(mint_profile_row(assigned=False))
+
+    with pytest.raises(HTTPException) as exc:
+        run_mint(conn, mint_current_user())
+
+    assert exc.value.status_code == 404
+    assert conn.execute_calls == []
+
+
+def test_mint_profile_secret_multi_member_conflicts_for_non_admin(monkeypatch) -> None:
+    monkeypatch.setenv("SECRET_INJECTION_KEK_B64", MINT_TEST_KEK)
+    _patch_mint_collaborators(monkeypatch)
+    conn = MintProfileConn(mint_profile_row(member_count=2))
+
+    with pytest.raises(HTTPException) as exc:
+        run_mint(conn, mint_current_user())
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail["error"]["details"]["state"] == "multi_member_profile"
+    assert conn.execute_calls == []
+
+
+def test_mint_profile_secret_user_manage_bypasses_membership(monkeypatch) -> None:
+    monkeypatch.setenv("SECRET_INJECTION_KEK_B64", MINT_TEST_KEK)
+    audits, bumps = _patch_mint_collaborators(monkeypatch)
+    conn = MintProfileConn(mint_profile_row(assigned=False, member_count=3))
+
+    result = run_mint(conn, mint_current_user(permissions=("USER_MANAGE",)))
+
+    assert result["injection_id"] == "claude-code-oauth"
+    assert len(conn.execute_calls) == 1
+    assert bumps == [MINT_PROFILE_ID]
+    assert len(audits) == 1
+
+
+def test_mint_profile_secret_cross_entity_is_not_found(monkeypatch) -> None:
+    monkeypatch.setenv("SECRET_INJECTION_KEK_B64", MINT_TEST_KEK)
+    _patch_mint_collaborators(monkeypatch)
+    conn = MintProfileConn(mint_profile_row())
+
+    with pytest.raises(HTTPException) as exc:
+        run_mint(conn, mint_current_user(entity_id=UUID("00000000-0000-4000-8000-000000000002")))
+
+    assert exc.value.status_code == 404
+    assert conn.execute_calls == []
+
+
+def test_mint_profile_secret_undeclared_injection_rejected(monkeypatch) -> None:
+    monkeypatch.setenv("SECRET_INJECTION_KEK_B64", MINT_TEST_KEK)
+    _patch_mint_collaborators(monkeypatch)
+    conn = MintProfileConn(mint_profile_row())
+
+    with pytest.raises(HTTPException) as exc:
+        run_mint(conn, mint_current_user(), injection_id="slack-bearer")
+
+    assert exc.value.status_code == 422
+    assert exc.value.detail["error"]["details"]["state"] == "unknown_injection"
+    assert conn.execute_calls == []
+
+
+def test_mint_profile_secret_rejects_value_from_injection(monkeypatch) -> None:
+    # A value_from injection is resolved per CVM owner from a user secret; the
+    # SC never reads profile-side material for it, so minting must be refused
+    # rather than silently storing a dead value.
+    monkeypatch.setenv("SECRET_INJECTION_KEK_B64", MINT_TEST_KEK)
+    _patch_mint_collaborators(monkeypatch)
+    row = mint_profile_row(
+        policy={
+            "secret_injections": [
+                {
+                    "id": "slack-user-token",
+                    "match": {"scheme": "https", "host": "slack.com", "ports": [443]},
+                    "type": "request_header",
+                    "header": "authorization",
+                    "value_from": {"user_secret": "slack-user-token"},
+                    "value_template": "Bearer ${secret}",
+                }
+            ]
+        }
+    )
+    conn = MintProfileConn(row)
+
+    with pytest.raises(HTTPException) as exc:
+        run_mint(conn, mint_current_user(), injection_id="slack-user-token")
+
+    assert exc.value.status_code == 422
+    assert exc.value.detail["error"]["details"]["state"] == "not_material_backed"
+    assert conn.execute_calls == []
+
+
+def test_mint_profile_secret_rejects_malformed_injection_id(monkeypatch) -> None:
+    monkeypatch.setenv("SECRET_INJECTION_KEK_B64", MINT_TEST_KEK)
+    _patch_mint_collaborators(monkeypatch)
+    conn = MintProfileConn(mint_profile_row())
+
+    with pytest.raises(HTTPException) as exc:
+        run_mint(conn, mint_current_user(), injection_id="bad id!")
+
+    assert exc.value.status_code == 422
+
+
+def test_mint_profile_secret_rejects_over_long_rendered_value(monkeypatch) -> None:
+    # "Bearer " + token must stay within the SC's 8192-char rendered cap, or
+    # the merged policy fail-closes the CVM. The raw token is under the 8192
+    # body limit but the rendered value is not.
+    monkeypatch.setenv("SECRET_INJECTION_KEK_B64", MINT_TEST_KEK)
+    _patch_mint_collaborators(monkeypatch)
+    conn = MintProfileConn(mint_profile_row())
+
+    with pytest.raises(HTTPException) as exc:
+        run_mint(conn, mint_current_user(), value="x" * 8190)
+
+    assert exc.value.status_code == 422
+    assert exc.value.detail["error"]["details"]["state"] == "rendered_value_too_long"
+    assert conn.execute_calls == []
+
+
+def test_rendered_injection_value_length_helper() -> None:
+    policy = {
+        "secret_injections": [
+            {"id": "a", "value_template": "Bearer ${secret}"},
+            {"id": "b", "value_template": "${secret}"},
+        ]
+    }
+    assert routes_module.rendered_injection_value_length(policy, "a", "tok") == len("Bearer tok")
+    assert routes_module.rendered_injection_value_length(policy, "b", "tok") == 3
+    # Unknown injection falls back to the raw length.
+    assert routes_module.rendered_injection_value_length(policy, "missing", "tok") == 3
+
+
+def test_material_backed_secret_injection_ids_excludes_value_from() -> None:
+    # Inline-value and mint-later (neither value nor value_from) injections are
+    # material-backed; value_from (per-user) injections are not.
+    policy = {
+        "secret_injections": [
+            {"id": "inline", "value": "x"},
+            {"id": "mint-later", "value_template": "Bearer ${secret}"},
+            {"id": "per-user", "value_from": {"user_secret": "s"}},
+        ]
+    }
+    assert routes_module.material_backed_secret_injection_ids(policy) == ["inline", "mint-later"]
+    assert routes_module.declared_secret_injection_ids(policy) == ["inline", "mint-later", "per-user"]
+
+
+def test_profile_secret_mint_value_rejects_control_characters() -> None:
+    with pytest.raises(ValidationError):
+        routes_module.ProfileSecretMint(value="line1\nline2")
+    with pytest.raises(ValidationError):
+        routes_module.ProfileSecretMint(value="   ")
+    assert routes_module.ProfileSecretMint(value="  sk-token  ").value == "sk-token"
+
+
+class SecretGateConn:
+    def __init__(self, material_rows):
+        self.material_rows = material_rows
+        self.fetch_calls = []
+
+    async def fetch(self, sql, *args):
+        self.fetch_calls.append((sql, args))
+        return self.material_rows
+
+
+def test_ensure_profile_secret_material_complete_blocks_unminted() -> None:
+    rows = [
+        {
+            "profile_id": MINT_PROFILE_ID,
+            "policy": {"secret_injections": [{"id": "claude-code-oauth"}, {"id": "slack-bearer"}]},
+        }
+    ]
+    conn = SecretGateConn([{"profile_id": MINT_PROFILE_ID, "injection_id": "claude-code-oauth"}])
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(routes_module.ensure_profile_secret_material_complete(conn, rows, status_code=409))
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail["error"]["code"] == "CONFLICT"
+    details = exc.value.detail["error"]["details"]
+    assert details["state"] == "secrets_not_minted"
+    assert details["missing"] == [{"profile_id": str(MINT_PROFILE_ID), "injection_id": "slack-bearer"}]
+
+
+def test_ensure_profile_secret_material_complete_launch_maps_to_422() -> None:
+    rows = [
+        {"profile_id": MINT_PROFILE_ID, "policy": {"secret_injections": [{"id": "claude-code-oauth"}]}}
+    ]
+    conn = SecretGateConn([])
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(routes_module.ensure_profile_secret_material_complete(conn, rows, status_code=422))
+
+    assert exc.value.status_code == 422
+    assert exc.value.detail["error"]["code"] == "VALIDATION_ERROR"
+
+
+def test_ensure_profile_secret_material_complete_passes_minted_and_plain_profiles() -> None:
+    rows = [
+        {"profile_id": MINT_PROFILE_ID, "policy": {"secret_injections": [{"id": "claude-code-oauth"}]}},
+        {"profile_id": UUID("00000000-0000-4000-8000-000000000070"), "policy": {}},
+    ]
+    conn = SecretGateConn([{"profile_id": MINT_PROFILE_ID, "injection_id": "claude-code-oauth"}])
+
+    asyncio.run(routes_module.ensure_profile_secret_material_complete(conn, rows, status_code=409))
+
+    assert len(conn.fetch_calls) == 1
+    assert conn.fetch_calls[0][1] == ([MINT_PROFILE_ID],)
+
+
+def test_ensure_profile_secret_material_complete_skips_lookup_without_injections() -> None:
+    conn = SecretGateConn([])
+
+    asyncio.run(
+        routes_module.ensure_profile_secret_material_complete(
+            conn, [{"profile_id": MINT_PROFILE_ID, "policy": {}}], status_code=409
+        )
+    )
+
+    assert conn.fetch_calls == []
+

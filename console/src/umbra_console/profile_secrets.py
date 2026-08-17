@@ -78,6 +78,38 @@ def decrypt_user_secret_value(*, user_id: Any, name: str, ciphertext: str) -> st
     )
 
 
+def encrypt_oauth_client_secret(*, entity_id: Any, name: str, value: str) -> str:
+    return _encrypt_secret_value(
+        aad=_oauth_client_secret_aad(entity_id, name, SECRET_INJECTION_ENVELOPE_VERSION),
+        value=value,
+    )
+
+
+def decrypt_oauth_client_secret(*, entity_id: Any, name: str, ciphertext: str) -> str:
+    version = _secret_envelope_version(ciphertext)
+    return _decrypt_secret_value(
+        aad=_oauth_client_secret_aad(entity_id, name, version),
+        ciphertext=ciphertext,
+        version=version,
+    )
+
+
+def encrypt_managed_secret_value(*, profile_id: Any, injection_id: str, value: str) -> str:
+    return _encrypt_secret_value(
+        aad=_managed_secret_aad(profile_id, injection_id, SECRET_INJECTION_ENVELOPE_VERSION),
+        value=value,
+    )
+
+
+def decrypt_managed_secret_value(*, profile_id: Any, injection_id: str, ciphertext: str) -> str:
+    version = _secret_envelope_version(ciphertext)
+    return _decrypt_secret_value(
+        aad=_managed_secret_aad(profile_id, injection_id, version),
+        ciphertext=ciphertext,
+        version=version,
+    )
+
+
 def split_profile_policy_secret_values(policy: dict[str, Any]) -> tuple[dict[str, Any], dict[str, str]]:
     public_policy = dict(policy)
     secret_values: dict[str, str] = {}
@@ -418,3 +450,21 @@ def _user_secret_aad(user_id: Any, name: str, version: str) -> bytes:
         else "umbra.user_secret_material.v2"
     )
     return f"{domain}:{user_id}:{name}".encode("utf-8")
+
+
+def _oauth_client_secret_aad(entity_id: Any, name: str, version: str) -> bytes:
+    domain = (
+        "concrete.oauth_integration.v1"
+        if version == SECRET_INJECTION_LEGACY_ENVELOPE_VERSION
+        else "umbra.oauth_integration.v2"
+    )
+    return f"{domain}:{entity_id}:{name}".encode("utf-8")
+
+
+def _managed_secret_aad(profile_id: Any, injection_id: str, version: str) -> bytes:
+    domain = (
+        "concrete.managed_secret.v1"
+        if version == SECRET_INJECTION_LEGACY_ENVELOPE_VERSION
+        else "umbra.managed_secret.v2"
+    )
+    return f"{domain}:{profile_id}:{injection_id}".encode("utf-8")

@@ -406,6 +406,22 @@ class CVMProfileAttach(BaseModel):
     profile_id: UUID
 
 
+class ProfileSecretMint(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    value: str = Field(min_length=1, max_length=8192)
+
+    @field_validator("value")
+    @classmethod
+    def printable_secret(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("value must not be empty")
+        if any(ord(char) < 0x20 or ord(char) == 0x7F for char in value):
+            raise ValueError("value must not contain control characters")
+        return value
+
+
 class CVMCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -604,7 +620,7 @@ def sandbox_env_value_denylist() -> list[re.Pattern[str]]:
     return [re.compile(pattern) for pattern in patterns if pattern]
 
 
-def validate_profile_policy(policy: dict[str, Any]) -> None:
+def validate_profile_policy(policy: dict[str, Any], *, require_injection_values: bool = True) -> None:
     errors: list[dict[str, Any]] = []
     for key in sorted(set(policy) - POLICY_TOP_LEVEL_FIELDS):
         errors.append({"field": f"policy.{key}", "type": "unknown_field"})
@@ -654,7 +670,9 @@ def validate_profile_policy(policy: dict[str, Any]) -> None:
         allow_extensions=False,
     )
     _validate_secret_patterns(policy.get("secret_patterns"), errors)
-    _validate_secret_injections(policy.get("secret_injections"), errors)
+    _validate_secret_injections(
+        policy.get("secret_injections"), errors, require_values=require_injection_values
+    )
     if errors:
         raise api_error(422, "VALIDATION_ERROR", "invalid profile policy", {"errors": errors})
 
@@ -821,7 +839,9 @@ def _validate_secret_patterns(raw: Any, errors: list[dict[str, Any]]) -> None:
             errors.append({"field": field, "type": "invalid_scan_flags"})
 
 
-def _validate_secret_injections(raw: Any, errors: list[dict[str, Any]]) -> None:
+def _validate_secret_injections(
+    raw: Any, errors: list[dict[str, Any]], *, require_values: bool = True
+) -> None:
     if raw is None:
         return
     if not isinstance(raw, list):
@@ -860,11 +880,15 @@ def _validate_secret_injections(raw: Any, errors: list[dict[str, Any]]) -> None:
             errors.append({"field": f"{field}.header", "type": "invalid_header"})
         has_value = "value" in item
         has_value_from = "value_from" in item
-        if has_value == has_value_from:
-            errors.append({"field": f"{field}.value", "type": "value_xor_value_from"})
         value = item.get("value")
-        if has_value and not isinstance(value, str):
-            errors.append({"field": f"{field}.value", "type": "string_required"})
+        if require_values:
+            if has_value == has_value_from:
+                errors.append({"field": f"{field}.value", "type": "value_xor_value_from"})
+            if has_value and not isinstance(value, str):
+                errors.append({"field": f"{field}.value", "type": "string_required"})
+        else:
+            if has_value:
+                errors.append({"field": f"{field}.value", "type": "value_forbidden"})
         if has_value_from:
             value_from = item.get("value_from")
             if (
@@ -3144,6 +3168,102 @@ async def remove_profile_user(
     return Response(status_code=204)
 
 
+async def fetch_profile_for_secret_write(
+    conn: asyncpg.Connection,
+    *,
+    profile_id: UUID,
+    current_user: CurrentUser,
+) -> asyncpg.Record:
+    row = await conn.fetchrow(
+        """
+        SELECT
+            ep.id,
+            ep.entity_id,
+            ep.policy,
+            (pu.user_id IS NOT NULL) AS assigned,
+            (SELECT count(*) FROM profile_users pc WHERE pc.profile_id = ep.id) AS member_count
+        FROM entity_profiles ep
+        LEFT JOIN profile_users pu
+          ON pu.profile_id = ep.id
+         AND pu.user_id = $2
+        WHERE ep.id = $1
+          AND ep.deleted_at IS NULL
+        FOR UPDATE OF ep
+        """,
+        profile_id,
+        current_user.id,
+    )
+    if row is None:
+        raise api_error(404, "NOT_FOUND", "resource not found")
+    current_user.require_entity(row["entity_id"])
+    is_admin = "USER_MANAGE" in current_user.permissions
+    if not is_admin and not row["assigned"]:
+        raise api_error(404, "NOT_FOUND", "resource not found")
+    if not is_admin and row["member_count"] != 1:
+        raise api_error(
+            409,
+            "CONFLICT",
+            "self-service mint requires being the profile's sole member",
+            {"state": "multi_member_profile", "member_count": row["member_count"]},
+        )
+    return row
+
+
+@router.post("/profiles/{profile_id}/secrets/{injection_id}")
+async def mint_profile_secret(
+    profile_id: UUID,
+    injection_id: str,
+    body: ProfileSecretMint,
+    current_user: CurrentUser = Depends(require_current_user),
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> dict:
+    if not POLICY_ID_RE.fullmatch(injection_id):
+        raise api_error(422, "VALIDATION_ERROR", "invalid injection id", {"field": "injection_id"})
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await fetch_profile_for_secret_write(
+                conn, profile_id=profile_id, current_user=current_user
+            )
+            policy = json_payload(row["policy"])
+            if injection_id not in declared_secret_injection_ids(policy):
+                raise api_error(
+                    422,
+                    "VALIDATION_ERROR",
+                    "injection id is not declared in the profile policy",
+                    {"field": "injection_id", "state": "unknown_injection"},
+                )
+            if injection_id not in material_backed_secret_injection_ids(policy):
+                raise api_error(
+                    422,
+                    "VALIDATION_ERROR",
+                    "injection sources its value from a per-user secret; set it with `umbra secret set`",
+                    {"field": "injection_id", "state": "not_material_backed"},
+                )
+            ensure_rendered_injection_fits(policy, injection_id, body.value)
+            await upsert_profile_secret_material(
+                conn,
+                profile_id=profile_id,
+                secret_values={injection_id: body.value},
+            )
+            minted_at = datetime.now(timezone.utc)
+            await bump_attached_cvm_policy_versions(conn, profile_id)
+            await insert_audit_event(
+                conn,
+                entity_id=row["entity_id"],
+                actor_id=current_user.id,
+                actor_email=current_user.email,
+                action="PROFILE_SECRET_MINTED",
+                target_type="profile",
+                target_id=profile_id,
+                after={"injection_id": injection_id},
+            )
+    return {
+        "profile_id": str(profile_id),
+        "injection_id": injection_id,
+        "minted_at": timestamp(minted_at),
+    }
+
+
 @router.post("/users/{user_id}/permissions")
 async def grant_user_permissions(
     user_id: UUID,
@@ -4402,6 +4522,7 @@ async def create_cvm(
                 user_id=current_user.id,
                 context="launcher",
             )
+            await ensure_profile_secret_material_complete(conn, profile_rows, status_code=422)
             ensure_no_sandbox_env_conflict(profile_rows)
             await ensure_cvm_launch_ssh_keys(conn, body.ssh_key_ids, current_user)
             security_cvm_id = await fetch_live_security_cvm_id(conn, current_user.entity_id)
@@ -4948,6 +5069,7 @@ async def attach_cvm_profile(
                 user_id=cvm["owner_id"],
                 context="cvm_owner",
             )
+            await ensure_profile_secret_material_complete(conn, [profile], status_code=409)
             existing_policies = await conn.fetch(
                 """
                 SELECT ep.id AS profile_id, ep.policy
@@ -5301,6 +5423,125 @@ async def replace_profile_secret_material(
             profile_id,
             injection_id,
             ciphertext,
+        )
+
+
+async def upsert_profile_secret_material(
+    conn: asyncpg.Connection,
+    *,
+    profile_id: UUID,
+    secret_values: dict[str, str],
+) -> None:
+    for injection_id in sorted(secret_values):
+        ciphertext = encrypt_profile_secret_value(
+            profile_id=profile_id,
+            injection_id=injection_id,
+            value=secret_values[injection_id],
+        )
+        await conn.execute(
+            """
+            INSERT INTO profile_secret_material (profile_id, injection_id, ciphertext)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (profile_id, injection_id)
+            DO UPDATE SET ciphertext = EXCLUDED.ciphertext,
+                          updated_at = now()
+            """,
+            profile_id,
+            injection_id,
+            ciphertext,
+        )
+
+
+def declared_secret_injection_ids(policy: Any) -> list[str]:
+    if not isinstance(policy, dict):
+        return []
+    injections = policy.get("secret_injections")
+    if not isinstance(injections, list):
+        return []
+    ids: list[str] = []
+    for injection in injections:
+        if isinstance(injection, dict) and isinstance(injection.get("id"), str):
+            ids.append(injection["id"])
+    return ids
+
+
+def material_backed_secret_injection_ids(policy: Any) -> list[str]:
+    if not isinstance(policy, dict):
+        return []
+    injections = policy.get("secret_injections")
+    if not isinstance(injections, list):
+        return []
+    ids: list[str] = []
+    for injection in injections:
+        if (
+            isinstance(injection, dict)
+            and isinstance(injection.get("id"), str)
+            and "value_from" not in injection
+        ):
+            ids.append(injection["id"])
+    return ids
+
+
+def rendered_injection_value_length(policy: Any, injection_id: str, value: str) -> int:
+    template = "${secret}"
+    if isinstance(policy, dict):
+        injections = policy.get("secret_injections")
+        if isinstance(injections, list):
+            for injection in injections:
+                if (
+                    isinstance(injection, dict)
+                    and injection.get("id") == injection_id
+                    and isinstance(injection.get("value_template"), str)
+                ):
+                    template = injection["value_template"]
+                    break
+    return len(template.replace("${secret}", value))
+
+
+def ensure_rendered_injection_fits(policy: Any, injection_id: str, value: str) -> None:
+    if rendered_injection_value_length(policy, injection_id, value) > POLICY_MAX_RENDERED_SECRET_LEN:
+        raise api_error(
+            422,
+            "VALIDATION_ERROR",
+            "rendered injection value exceeds the maximum length",
+            {"field": "value", "state": "rendered_value_too_long"},
+        )
+
+
+async def ensure_profile_secret_material_complete(
+    conn: asyncpg.Connection,
+    profile_rows: list[Any],
+    *,
+    status_code: int,
+) -> None:
+    required: dict[UUID, list[str]] = {}
+    for row in profile_rows:
+        ids = material_backed_secret_injection_ids(json_payload(row["policy"]))
+        if ids:
+            required[row["profile_id"]] = ids
+    if not required:
+        return
+    material_rows = await conn.fetch(
+        """
+        SELECT profile_id, injection_id
+        FROM profile_secret_material
+        WHERE profile_id = ANY($1::uuid[])
+        """,
+        list(required),
+    )
+    minted = {(material["profile_id"], material["injection_id"]) for material in material_rows}
+    missing = [
+        {"profile_id": str(profile_id), "injection_id": injection_id}
+        for profile_id, injection_ids in sorted(required.items(), key=lambda item: str(item[0]))
+        for injection_id in injection_ids
+        if (profile_id, injection_id) not in minted
+    ]
+    if missing:
+        raise api_error(
+            status_code,
+            "CONFLICT" if status_code == 409 else "VALIDATION_ERROR",
+            "profile secret injections lack minted material",
+            {"state": "secrets_not_minted", "missing": missing},
         )
 
 

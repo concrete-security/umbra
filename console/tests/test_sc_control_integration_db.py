@@ -9,8 +9,9 @@ cannot reach:
 
 1. **Secret-material migrations** — that ``0026_user_secret_material`` creates
    its table, ``0028_secret_envelope_v2`` broadens both ciphertext CHECKs to
-   accept v1/v2 while rejecting unsupported prefixes, and the lineage-only
-   pre-Umbra compatibility branch converges at one canonical head. The v2
+   accept v1/v2 while rejecting unsupported prefixes, the lineage-only
+   pre-Umbra compatibility branch converges, and ``0034_connect_oauth_schema``
+   installs public Connect tables. The v2
    downgrade also refuses to strand existing v2 rows behind v1-only
    constraints. ``make check`` only runs ``alembic heads`` (graph, not upgrade).
 
@@ -467,7 +468,7 @@ def test_sc_control_query_and_migration_real_postgres_success(monkeypatch, migra
     """The head schema and SC-control query work together on real Postgres."""
     monkeypatch.setenv("SECRET_INJECTION_KEK_B64", KEK_B64)
     version = asyncio.run(_admin_fetchval(migrated_database, "SELECT version_num FROM alembic_version"))
-    assert version == "0033_public_legacy_merge"
+    assert version == "0034_connect_oauth_schema"
     asyncio.run(_run_assertions(migrated_database))
 
 
@@ -478,16 +479,16 @@ def test_sc_control_query_and_migration_real_postgres_success(monkeypatch, migra
     ids=["deployed-pre-umbra-parent"],
 )
 def test_legacy_0032_upgrade_public_head_success(migrated_database: str) -> None:
-    """The exact deployed legacy head runs public DDL and converges without private DDL."""
+    """The exact deployed legacy head runs public DDL and converges at Connect schema."""
     stamped = _run_alembic(migrated_database, "stamp", "0032_attn_unreachable")
     assert stamped.returncode == 0, f"alembic stamp failed:\n{stamped.stdout}\n{stamped.stderr}"
 
     upgraded = _run_alembic(migrated_database, "upgrade", "head")
     assert upgraded.returncode == 0, f"alembic upgrade failed:\n{upgraded.stdout}\n{upgraded.stderr}"
     version = asyncio.run(_admin_fetchval(migrated_database, "SELECT version_num FROM alembic_version"))
-    assert version == "0033_public_legacy_merge"
+    assert version == "0034_connect_oauth_schema"
 
-    dormant_table_count = asyncio.run(
+    connect_table_count = asyncio.run(
         _admin_fetchval(
             migrated_database,
             """
@@ -503,7 +504,7 @@ def test_legacy_0032_upgrade_public_head_success(migrated_database: str) -> None
             """,
         )
     )
-    assert dormant_table_count == 0
+    assert connect_table_count == 4
 
     for table in ("profile_secret_material", "user_secret_material"):
         constraint = asyncio.run(
