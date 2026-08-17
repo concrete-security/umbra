@@ -8,20 +8,9 @@ Umbra is an independent project. Its intended public home is `concrete-security/
 
 ## Architecture
 
-```text
-developer/admin machine
-  umbra CLI
-      |
-      | HTTPS REST + OIDC
-      v
-operator environment
-  Console + Postgres + TLS reverse proxy
-      |
-      | provisioning, DNS, and attestation
-      v
-attested CVMs
-  Dev CVM ---- forced aTLS proxy ----> Security CVM ---- TLS ----> internet
-```
+![Umbra v0 architecture: the umbra CLI talks HTTPS REST + OIDC to the Console control plane (Postgres-backed, provisioning CVMs through TDX and DNS providers); developer SSH, editor, and agent sessions reach the Dev CVM over a locally verified aTLS tunnel; all sandbox egress is forced through the dev-egress-forwarder to the entity Security CVM's mitmproxy, which enforces policy, scans for secrets, injects credentials, and emits traffic logs before re-encrypting traffic to the internet; the Security CVM pulls policy from and sends traffic logs to the Console.](docs/assets/architecture.png)
+
+The editable source is [docs/assets/architecture.excalidraw](docs/assets/architecture.excalidraw): open it at [excalidraw.com](https://excalidraw.com), edit, and re-export the SVG alongside it.
 
 | Module       | Path             | Role                                                                                                                        |
 | ------------ | ---------------- | --------------------------------------------------------------------------------------------------------------------------- |
