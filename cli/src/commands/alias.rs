@@ -9,16 +9,12 @@
 
 use std::{
     collections::BTreeMap,
-    fs::{self, OpenOptions},
-    io,
+    fs, io,
     path::{Path, PathBuf},
 };
 
 #[cfg(unix)]
-use std::os::unix::{
-    fs::{OpenOptionsExt, PermissionsExt},
-    io::AsRawFd,
-};
+use std::os::unix::fs::PermissionsExt;
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -494,54 +490,6 @@ pub(crate) fn save(config_dir: &Path, aliases: &Aliases) -> Result<(), String> {
     Ok(())
 }
 
-/// An exclusive advisory lock over the alias store, held for the duration of a
-/// read-modify-write so concurrent `umbra` processes can't interleave their
-/// load→mutate→save and clobber each other (last-writer-wins). Taken on a
-/// dedicated `aliases.lock` — never on `aliases.toml`, whose inode is replaced by
-/// [`save`]'s atomic rename, which would drop the lock. `flock` is released when
-/// the guard drops. On non-unix it is a no-op (best-effort), as with the store's
-/// permission tightening.
-struct StoreLock {
-    #[cfg(unix)]
-    file: fs::File,
-}
-
-impl StoreLock {
-    /// Block until this process holds the store lock. Creates the config dir and
-    /// the lock file (owner-only) if absent.
-    fn acquire(config_dir: &Path) -> Result<Self, String> {
-        fs::create_dir_all(config_dir)
-            .map_err(|err| format!("[error] failed to create config directory: {err}"))?;
-        #[cfg(unix)]
-        {
-            let mut options = OpenOptions::new();
-            options.create(true).write(true).mode(0o600);
-            let file = options
-                .open(config_dir.join("aliases.lock"))
-                .map_err(|err| format!("[error] failed to open aliases lock: {err}"))?;
-            // SAFETY: `file` owns the fd for the guard's lifetime; LOCK_EX blocks
-            // until no other process holds the lock. Released in `Drop`.
-            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-                return Err(format!(
-                    "[error] failed to lock aliases file: {}",
-                    io::Error::last_os_error()
-                ));
-            }
-            Ok(StoreLock { file })
-        }
-        #[cfg(not(unix))]
-        Ok(StoreLock {})
-    }
-}
-
-#[cfg(unix)]
-impl Drop for StoreLock {
-    fn drop(&mut self) {
-        // Best-effort unlock; closing the fd would release it anyway.
-        unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
-    }
-}
-
 /// The one serialized read-modify-write of the alias store: take the exclusive
 /// lock, reload the store **under the lock**, run `mutate` against that fresh
 /// state, then persist. `mutate` returns whether it changed anything — the store
@@ -553,7 +501,9 @@ pub(crate) fn locked_update(
     config_dir: &Path,
     mutate: impl FnOnce(&mut Aliases) -> Result<bool, String>,
 ) -> Result<(), String> {
-    let _guard = StoreLock::acquire(config_dir)?;
+    let lock_path = config_dir.join("aliases.lock");
+    let _guard = crate::fsutil::StoreLock::acquire(&lock_path)
+        .map_err(|err| format!("[error] failed to lock {}: {err}", lock_path.display()))?;
     let mut aliases = load(config_dir)?;
     if mutate(&mut aliases)? {
         save(config_dir, &aliases)?;

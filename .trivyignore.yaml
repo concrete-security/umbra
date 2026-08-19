@@ -1,0 +1,25 @@
+vulnerabilities:
+  - id: CVE-2026-34040
+    paths:
+      - usr/libexec/docker/cli-plugins/docker-buildx
+      - usr/libexec/docker/cli-plugins/docker-compose
+    statement: >-
+      Buildx and Compose are client-only plugins; this advisory affects Docker
+      daemon AuthZ request-body handling. The installed Docker Engine 29.7.1 is
+      patched. Remove this exception when both plugins update their embedded
+      Moby dependency metadata.
+    expired_at: 2026-10-01
+
+misconfigurations:
+  - id: AVD-DS-0002
+    paths:
+      - cvms/dev/user-sandbox/Dockerfile
+    statement: The Dev CVM sandbox is a privileged runtime that must launch dockerd and sshd before dropping privileges for user sessions.
+  - id: AVD-DS-0002
+    paths:
+      - ops/installer/Dockerfile
+    statement: The installer binds its nginx listener and materializes configuration under /etc/nginx at container startup.
+  - id: AVD-DS-0002
+    paths:
+      - ops/reverse-proxy/Dockerfile
+    statement: The reverse proxy binds ports 80 and 443 and manages Certbot state under /etc/letsencrypt at container startup.

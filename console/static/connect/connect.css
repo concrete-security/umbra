@@ -1,0 +1,126 @@
+:root {
+  color-scheme: light dark;
+  --fg: #1a1d21;
+  --muted: #6b7280;
+  --accent: #2f6fed;
+  --border: #d7dbe0;
+  --bad: #b42318;
+  --good: #147a3d;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --fg: #e7e9ec;
+    --muted: #9aa1ab;
+    --border: #3a3f46;
+  }
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: var(--fg);
+  background: Canvas;
+  display: flex;
+  justify-content: center;
+}
+.shell {
+  width: min(560px, 92vw);
+  padding: 3rem 0 4rem;
+}
+h1 {
+  font-size: 1.25rem;
+  letter-spacing: 0.02em;
+}
+.muted {
+  color: var(--muted);
+}
+.banner {
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--accent);
+  padding: 0.6rem 0.9rem;
+  margin: 1rem 0;
+  border-radius: 6px;
+}
+.banner.error {
+  border-left-color: var(--bad);
+}
+.banner.ok {
+  border-left-color: var(--good);
+}
+.hidden {
+  display: none;
+}
+button {
+  font: inherit;
+  padding: 0.55rem 1.1rem;
+  border-radius: 6px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+}
+button.secondary {
+  background: transparent;
+  color: var(--accent);
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem;
+  margin: 0.8rem 0;
+}
+.card h2 {
+  margin: 0 0 0.4rem;
+  font-size: 1rem;
+}
+.cvm-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  padding: 0.45rem 0;
+  border-top: 1px solid var(--border);
+}
+.cvm-row:first-of-type {
+  border-top: none;
+}
+.badge {
+  font-size: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.1rem 0.55rem;
+  color: var(--muted);
+}
+.badge.on {
+  color: var(--good);
+  border-color: var(--good);
+}
+code {
+  background: rgba(127, 127, 127, 0.14);
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+  font-size: 0.85em;
+  overflow-wrap: anywhere;
+}
+.steps {
+  list-style: none;
+  padding: 0;
+  margin: 1rem 0;
+}
+.steps li {
+  padding: 0.25rem 0;
+  color: var(--muted);
+}
+.steps li.done {
+  color: var(--good);
+}
+.steps li.active {
+  color: var(--fg);
+  font-weight: 600;
+}

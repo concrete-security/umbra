@@ -286,7 +286,6 @@ def measurement_env(raw: dict[str, str]) -> dict[str, str]:
         "SECURITY_CVM_PROXY_PORT": "443",
         "SECURITY_CVM_PROXY_TOKEN": secrets.token_urlsafe(32),
         "SECURITY_CVM_CA_CERT_B64": b64_text(DUMMY_CA_PEM),
-        "SECURITY_CVM_ATLS_POLICY_B64": b64_json({}),
         "AUTHORIZED_SSH_KEYS_B64": b64_text(f"{MOCK_SSH_KEY}\n"),
         "SANDBOX_ENV_PLACEHOLDERS_B64": b64_text(""),
     }
@@ -321,10 +320,6 @@ def random_token() -> str:
 
 def b64_text(value: str) -> str:
     return base64.b64encode(value.encode("utf-8")).decode("ascii")
-
-
-def b64_json(value: Any) -> str:
-    return b64_text(json.dumps(value, sort_keys=True, separators=(",", ":")))
 
 
 def write_private_text(path: Path, payload: str) -> None:

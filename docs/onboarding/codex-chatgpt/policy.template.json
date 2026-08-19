@@ -1,0 +1,39 @@
+{
+  "egress_boundary": true,
+  "allowed_destinations": [
+    {
+      "id": "chatgpt-codex-backend",
+      "scheme": "https",
+      "host": "chatgpt.com",
+      "ports": [443],
+      "methods": ["GET", "POST"],
+      "path_prefixes": ["/backend-api/codex"]
+    }
+  ],
+  "blocked_destinations": [
+    {
+      "id": "openai-token-endpoint",
+      "scheme": "https",
+      "host": "auth.openai.com",
+      "ports": [443],
+      "methods": ["GET", "POST"],
+      "path_prefixes": ["/"]
+    }
+  ],
+  "secret_injections": [
+    {
+      "id": "codex-chatgpt-oauth",
+      "match": {
+        "scheme": "https",
+        "host": "chatgpt.com",
+        "ports": [443],
+        "methods": ["GET", "POST"],
+        "path_prefixes": ["/backend-api/codex"]
+      },
+      "type": "request_header",
+      "header": "authorization",
+      "value": "umbra-unminted",
+      "value_template": "Bearer ${secret}"
+    }
+  ]
+}

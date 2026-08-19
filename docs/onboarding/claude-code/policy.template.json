@@ -1,0 +1,56 @@
+{
+  "egress_boundary": true,
+  "allowed_destinations": [
+    {
+      "id": "anthropic-api",
+      "scheme": "https",
+      "host": "api.anthropic.com",
+      "ports": [443],
+      "methods": ["GET", "POST"],
+      "path_prefixes": ["/"]
+    },
+    {
+      "id": "claude-platform",
+      "scheme": "https",
+      "host": "platform.claude.com",
+      "ports": [443],
+      "methods": ["GET", "POST"],
+      "path_prefixes": ["/"]
+    },
+    {
+      "id": "claude-downloads",
+      "scheme": "https",
+      "host": "downloads.claude.ai",
+      "ports": [443],
+      "methods": ["GET", "HEAD"],
+      "path_prefixes": ["/"]
+    },
+    {
+      "id": "npm-registry",
+      "scheme": "https",
+      "host": "registry.npmjs.org",
+      "ports": [443],
+      "methods": ["GET", "HEAD"],
+      "path_prefixes": ["/"]
+    }
+  ],
+  "secret_injections": [
+    {
+      "id": "claude-code-oauth",
+      "match": {
+        "scheme": "https",
+        "host": "api.anthropic.com",
+        "ports": [443],
+        "methods": ["GET", "POST"],
+        "path_prefixes": ["/"]
+      },
+      "type": "request_header",
+      "header": "authorization",
+      "value": "umbra-unminted",
+      "value_template": "Bearer ${secret}"
+    }
+  ],
+  "sandbox_env": {
+    "CLAUDE_CODE_OAUTH_TOKEN": "umbra-proxy-injected"
+  }
+}

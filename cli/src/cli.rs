@@ -73,7 +73,14 @@ pub enum Command {
     Attach(SessionTargetArgs),
 
     /// Start or reopen a Claude session on a Dev CVM.
-    Claude(AgentSessionArgs),
+    #[command(args_conflicts_with_subcommands = true)]
+    Claude {
+        #[command(subcommand)]
+        command: Option<ClaudeCommand>,
+
+        #[command(flatten)]
+        session: AgentSessionArgs,
+    },
 
     /// Print a shell-completion script.
     Completions {
@@ -83,7 +90,14 @@ pub enum Command {
     },
 
     /// Start or reopen a Codex session on a Dev CVM.
-    Codex(AgentSessionArgs),
+    #[command(args_conflicts_with_subcommands = true)]
+    Codex {
+        #[command(subcommand)]
+        command: Option<CodexCommand>,
+
+        #[command(flatten)]
+        session: AgentSessionArgs,
+    },
 
     /// Open VS Code connected to the selected Dev CVM.
     Code(CodeArgs),
@@ -556,6 +570,60 @@ pub struct AgentSessionArgs {
     /// Save a local alias for the session.
     #[arg(long)]
     pub alias: Option<String>,
+
+    /// Claude sessions only: keep the sandbox Anthropic auth env untouched
+    /// instead of exporting the SC-injected OAuth placeholder.
+    #[arg(long)]
+    pub no_oauth_env: bool,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ClaudeCommand {
+    /// Mint a Claude Code OAuth token (read from stdin) into the selected
+    /// profile's secret injection and bind that profile to a Dev CVM.
+    Connect(ClaudeConnectArgs),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum CodexCommand {
+    /// Mint a dedicated ChatGPT OAuth grant (throwaway `codex login`) into a
+    /// Console-managed rotating secret and plant the sandbox placeholder.
+    Connect(CodexConnectArgs),
+}
+
+#[derive(clap::Args, Debug)]
+pub struct CodexConnectArgs {
+    /// Dev CVM to bind the profile to and plant the placeholder auth.json on
+    /// (positional `[CVM_ID|alias]` or --cvm). Defaults to
+    /// UMBRA_DEFAULT_CVM / default_cvm; when none resolves those steps are
+    /// skipped with a note.
+    #[command(flatten)]
+    pub target: CvmTarget,
+
+    /// Secret-injection id declared in the profile policy.
+    #[arg(long, default_value = "codex-chatgpt-oauth")]
+    pub injection_id: String,
+
+    /// Configure rotation only; skip the placeholder and the CVM bind.
+    #[arg(long)]
+    pub no_attach: bool,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct ClaudeConnectArgs {
+    /// Dev CVM to bind the profile to (positional `[CVM_ID|alias]` or --cvm).
+    /// Defaults to UMBRA_DEFAULT_CVM / default_cvm; when none resolves the
+    /// bind step is skipped with a note.
+    #[command(flatten)]
+    pub target: CvmTarget,
+
+    /// Secret-injection id declared in the profile policy.
+    #[arg(long, default_value = "claude-code-oauth")]
+    pub injection_id: String,
+
+    /// Mint only; skip binding the profile to a CVM.
+    #[arg(long)]
+    pub no_attach: bool,
 }
 
 #[derive(clap::Args, Debug)]
@@ -788,6 +856,30 @@ pub enum ProfileCommand {
     /// Manage users assigned to the selected profile.
     #[command(subcommand)]
     Members(ProfileMembersCommand),
+
+    /// Show grant status for the selected profile's secret injections.
+    Grants,
+
+    /// Manage OAuth connect links for the selected profile.
+    #[command(subcommand)]
+    Connections(ProfileConnectionsCommand),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ProfileConnectionsCommand {
+    /// Mint a one-time connect link for the selected profile (admin).
+    Create(ProfileConnectionsCreateArgs),
+}
+
+#[derive(clap::Args, Debug)]
+pub struct ProfileConnectionsCreateArgs {
+    /// Entity OAuth integration name (e.g. slack).
+    pub integration: String,
+
+    /// Restrict the mint to specific injection ids (repeatable). Defaults to
+    /// every injection the profile policy declares.
+    #[arg(long = "injection-id")]
+    pub injection_ids: Vec<String>,
 }
 
 /// Arguments for the `umbra profile list` subcommand. The `--assigned` flag

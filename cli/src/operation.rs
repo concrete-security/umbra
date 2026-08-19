@@ -104,6 +104,15 @@ pub(crate) fn operation_failure_message(operation: &Operation) -> String {
     }
 }
 
+/// Why the Console cancelled the operation, when it says. The envelope carries a
+/// reason and dropping it left the caller with nothing to act on.
+fn operation_cancelled_message(operation: &Operation) -> String {
+    match &operation.error {
+        Some(error) => format!("[cancelled] {}", error.message),
+        None => "[cancelled] operation was cancelled".to_string(),
+    }
+}
+
 /// Print the operation handle on stdout (or stderr when timing out). Identical
 /// shape across cvm / security_cvm / audit: `--json` dumps the envelope as-is,
 /// human mode uses [`style::operation_handle_confirm`].
@@ -179,10 +188,7 @@ pub(crate) fn wait_for_operation(
                 return Err((ExitStatus::Error, operation_failure_message(&operation)));
             }
             "cancelled" => {
-                return Err((
-                    ExitStatus::Error,
-                    "[cancelled] operation was cancelled".to_string(),
-                ));
+                return Err((ExitStatus::Error, operation_cancelled_message(&operation)));
             }
             "pending" | "running" => {}
             status => {
@@ -197,11 +203,22 @@ pub(crate) fn wait_for_operation(
             .saturating_sub(excluded)
             >= timeout
         {
-            print_operation(&operation, json_output, true);
-            return Err((
-                ExitStatus::WaitTimeout,
-                "[wait_timeout] operation did not complete before timeout".to_string(),
-            ));
+            if json_output {
+                print_operation(&operation, true, true);
+                return Err((ExitStatus::WaitTimeout, String::new()));
+            }
+            let block = style::wait_timeout_block(
+                &operation.id,
+                &operation.kind,
+                operation.target.id.as_deref(),
+                &operation.status,
+                timeout.as_secs(),
+            );
+            match steps {
+                Some(steps) => steps.finalize_timeout(&block),
+                None => style::eprintln_error_block(&block),
+            }
+            return Err((ExitStatus::WaitTimeout, String::new()));
         }
         thread::sleep(Duration::from_secs(1));
         match fetch_operation(console_url, access_token, &operation.id)? {
@@ -347,22 +364,43 @@ mod tests {
         assert!(!message.contains(hostile_value));
     }
 
-    /// An already-terminal `failed` operation surfaces as an error (no poll).
-    #[test]
-    fn await_result_terminal_failed_failure() {
+    /// An already-terminal `failed` or `cancelled` operation surfaces as an error
+    /// (no poll), keeping the Console's own reason when the envelope carries one
+    /// rather than flattening it to a generic message.
+    #[rstest::rstest]
+    #[case::failed_generic("failed", None, "[error] operation failed")]
+    #[case::cancelled_generic("cancelled", None, "[cancelled] operation was cancelled")]
+    #[case::cancelled_with_reason(
+        "cancelled",
+        Some("superseded by a newer update"),
+        "[cancelled] superseded by a newer update"
+    )]
+    fn await_result_terminal_failure(
+        #[case] status: &str,
+        #[case] reason: Option<&str>,
+        #[case] expected: &str,
+    ) {
         let wait = WaitArgs {
             no_wait: false,
             wait_timeout_seconds: 60,
         };
+        let mut operation = op(status, None);
+        operation.error = reason.map(|message| OperationError {
+            code: "cancelled".into(),
+            message: message.into(),
+            details: None,
+        });
         let out: Result<Option<Value>, _> = await_result(
             "http://unused",
             "tok",
-            op("failed", None),
+            operation,
             &wait,
             true,
             true,
             "launch",
         );
-        assert!(out.is_err());
+        let (exit_status, message) = out.expect_err("terminal failure surfaces");
+        assert!(matches!(exit_status, ExitStatus::Error));
+        assert_eq!(message, expected);
     }
 }

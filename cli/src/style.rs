@@ -134,7 +134,7 @@ const CLEAR_LINE: &str = "\r\x1b[K";
 /// would forge extra card rows — even a fake `> ID <uuid>` title, inventing a
 /// record that does not exist. Escaped rather than dropped, so the suspicious bytes
 /// stay visible to the reader.
-fn single_line(value: &str) -> String {
+pub(crate) fn single_line(value: &str) -> String {
     value.replace('\n', "\\n").replace('\t', "\\t")
 }
 
@@ -2779,6 +2779,122 @@ impl ErrorBlock {
             request_id,
         })
     }
+
+    /// Construct a client-side error block with a bracket `symbol` (e.g.
+    /// `error`, `wait_timeout`, `auth_required`) and a headline `message`.
+    /// Attach optional `cause` / `details` / `fix` rows with the builder
+    /// setters below (section 6.5 multi-line form). All inputs are
+    /// ASCII-sanitised, like [`Self::single`].
+    pub fn new(symbol: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::single(symbol, message)
+    }
+
+    /// Attach the `cause` row (one-line reason). Last call wins.
+    pub fn with_cause(mut self, cause: impl Into<String>) -> Self {
+        self.cause = Some(sanitize_ascii(&cause.into()));
+        self
+    }
+
+    /// Attach the `details` row (one-line elaboration). Last call wins.
+    pub fn with_details(mut self, details: impl Into<String>) -> Self {
+        self.details = Some(sanitize_ascii(&details.into()));
+        self
+    }
+
+    /// Attach the `fix` row (one suggested command or action). Last call wins.
+    pub fn with_fix(mut self, fix: impl Into<String>) -> Self {
+        self.fix = Some(sanitize_ascii(&fix.into()));
+        self
+    }
+}
+
+/// Build the non-terminal wait-timeout block (section 6.5). The CLI stopped
+/// polling at the caller's `--wait-timeout-seconds`, but the Console saga
+/// keeps running and reaches its terminal state on its own; this block
+/// reports the last observed `operation_status` (`pending` or `running`)
+/// instead of looking like a launch failure. `kind` is the operation kind
+/// (`cvm.launch`, `security_cvm.update`, `audit.export`, ...); the check
+/// command in the `fix` row is derived from its prefix. `target_id` is the
+/// affected resource's id when the stub has been persisted (it usually has by
+/// the time a launch can time out).
+pub fn wait_timeout_block(
+    op_id: &str,
+    kind: &str,
+    target_id: Option<&str>,
+    operation_status: &str,
+    timeout_secs: u64,
+) -> ErrorBlock {
+    let (noun, check) = match kind.split('.').next().unwrap_or("") {
+        "cvm" => ("cvm", Some("umbra cvm list")),
+        "security_cvm" => ("security cvm", Some("umbra security-cvm show")),
+        "audit" => ("audit export", None),
+        _ => ("operation", None),
+    };
+    let target = match target_id {
+        Some(id) if !id.is_empty() => format!(", {noun} {id}"),
+        _ => String::new(),
+    };
+    let block = ErrorBlock::new(
+        "wait_timeout",
+        format!(
+            "stopped watching after {timeout_secs}s -- the {noun} operation is still {operation_status}"
+        ),
+    )
+    .with_cause(format!(
+        "the CLI stopped waiting, not the operation; status was '{operation_status}' (not terminal) at the timeout"
+    ))
+    .with_details(format!(
+        "operation {op_id}{target}; the server finishes it on its own -- watch longer with --wait-timeout-seconds <n>, or skip waiting with --no-wait"
+    ));
+    match check {
+        Some(cmd) => block.with_fix(cmd),
+        None => block,
+    }
+}
+
+/// Build the "the attested tunnel dropped" block shown when OpenSSH explicitly
+/// reports that a previously established interactive connection exited 255.
+/// `session_survived` is true only after a follow-up SSH probe found the exact
+/// dtach session; the block promises survival and offers direct attach only in
+/// that case. Otherwise its copy stays neutral and points at `ps`. Every
+/// recovery command pins `cvm_id` so an explicit non-default target is
+/// preserved.
+pub fn ssh_disconnect_block(
+    cvm_id: &str,
+    session_name: Option<&str>,
+    session_survived: bool,
+) -> ErrorBlock {
+    let mut block = ErrorBlock::new("error", format!("connection to dev cvm {cvm_id} dropped"))
+        .with_cause(
+            "the attested tunnel closed mid-session -- usually laptop sleep, a network change, or a VPN switch",
+        );
+    if session_survived {
+        block = block.with_details(
+            "the dtach session is still running on the cvm; reconnect to continue your work",
+        );
+    } else {
+        block = block.with_details(
+            "the CLI could not confirm that the dtach session is still running; check the cvm before reconnecting",
+        );
+    }
+    match (session_name, session_survived) {
+        (Some(name), true) => block.with_fix(format!("umbra attach {name} --cvm {cvm_id}")),
+        _ => block.with_fix(format!(
+            "umbra ps --cvm {cvm_id}   (then: umbra attach <session> --cvm {cvm_id})"
+        )),
+    }
+}
+
+/// Build the block shown when an interactive SSH / session command exits 255
+/// before OpenSSH's successful-connection callback ran -- a connection-setup
+/// failure rather than a mid-session drop.
+pub fn ssh_connect_failed_block(cvm_id: &str) -> ErrorBlock {
+    ErrorBlock::new("error", format!("could not connect to dev cvm {cvm_id}"))
+        .with_cause(
+            "the attested tunnel did not come up -- the cvm may not be RUNNING yet, or the ssh key was rejected",
+        )
+        .with_details("see ssh's output above for the specific reason; no interactive session was started")
+        .with_fix("umbra cvm list   (confirm it is RUNNING, then retry)")
 }
 
 fn stringify_envelope_value(v: &serde_json::Value) -> String {
@@ -2811,6 +2927,15 @@ pub fn eprintln_error(message: &str) {
         ErrorBlock::parse_legacy(message)
     };
     eprintln!("{}", render_error(&block));
+}
+
+/// Print a fully-built [`ErrorBlock`] to stderr via the section 6.5 template.
+/// Use this from command code that has structured `cause` / `details` / `fix`
+/// guidance to attach (built via [`ErrorBlock::new`] + the `with_*` setters).
+/// [`eprintln_error`] remains the entry point for plain `[symbol] message`
+/// strings and Console error envelopes.
+pub fn eprintln_error_block(block: &ErrorBlock) {
+    eprintln!("{}", render_error(block));
 }
 
 /// Emit a diagnostic warning to stderr. Unlike [`eprintln_error`] this does not
@@ -3077,6 +3202,14 @@ impl StepsRenderer {
     /// the operation result). Consumes the renderer.
     pub fn close(mut self) {
         self.finalize_last_step(false);
+    }
+
+    /// Mark the current step done and emit the wait-timeout block on stderr.
+    /// The saga is still running; this is not a failed step.
+    pub fn finalize_timeout(mut self, block: &ErrorBlock) {
+        self.finalize_last_step(false);
+        eprintln!();
+        eprintln!("{}", render_error(block));
     }
 
     fn finalize_last_step(&mut self, failed: bool) {
@@ -4627,5 +4760,96 @@ mod tests {
         assert!(out.contains("permissive-dev"));
         assert!(out.contains("prof-1"));
         assert!(!out.contains('\x1b'));
+    }
+
+    #[test]
+    fn wait_timeout_block_reports_observed_status_success() {
+        init(false);
+        for operation_status in ["pending", "running"] {
+            let block = wait_timeout_block(
+                "op-123",
+                "cvm.launch",
+                Some("cvm-456"),
+                operation_status,
+                600,
+            );
+            let out = render_error(&block);
+            assert!(out.starts_with("[wait_timeout] stopped watching after 600s"));
+            assert!(out.contains(&format!("still {operation_status}")));
+            assert!(out.contains(&format!("status was '{operation_status}'")));
+            assert!(out.contains("not terminal"));
+            assert!(out.contains("op-123"));
+            assert!(out.contains("cvm cvm-456"));
+            assert!(out.contains("--wait-timeout-seconds"));
+            assert!(out.contains("--no-wait"));
+            assert!(out.contains("        fix      umbra cvm list"));
+        }
+    }
+
+    #[test]
+    fn wait_timeout_block_uses_security_cvm_read_command() {
+        init(false);
+        let block = wait_timeout_block("op-9", "security_cvm.update", None, "running", 120);
+        let out = render_error(&block);
+        assert!(out.contains("the security cvm operation is still running"));
+        assert!(out.contains("        fix      umbra security-cvm show"));
+        assert!(!out.contains(", security cvm "));
+    }
+
+    #[test]
+    fn wait_timeout_block_omits_fix_when_no_read_command() {
+        init(false);
+        let block = wait_timeout_block("op-1", "audit.export", None, "running", 600);
+        let out = render_error(&block);
+        assert!(out.contains("the audit export operation is still running"));
+        assert!(!out.contains("        fix      "));
+    }
+
+    #[test]
+    fn ssh_disconnect_block_names_cvm_and_generic_reconnect_when_session_unknown() {
+        init(false);
+        let out = render_error(&ssh_disconnect_block(
+            "021b2dcc-d045-0c64-b509-000000000000",
+            None,
+            false,
+        ));
+        assert!(out.starts_with(
+            "[error] connection to dev cvm 021b2dcc-d045-0c64-b509-000000000000 dropped\n"
+        ));
+        assert!(out.contains("dtach"));
+        assert!(out.contains("could not confirm"));
+        assert!(out.contains(
+            "        fix      umbra ps --cvm 021b2dcc-d045-0c64-b509-000000000000   (then: umbra attach <session> --cvm 021b2dcc-d045-0c64-b509-000000000000)"
+        ));
+    }
+
+    #[test]
+    fn ssh_disconnect_block_gives_exact_attach_command_when_session_known() {
+        init(false);
+        let out = render_error(&ssh_disconnect_block(
+            "cvm-abc123",
+            Some("claude-20260702-101530"),
+            true,
+        ));
+        assert!(out.starts_with("[error] connection to dev cvm cvm-abc123 dropped\n"));
+        assert!(out.contains("still running"));
+        assert!(
+            out.contains("        fix      umbra attach claude-20260702-101530 --cvm cvm-abc123")
+        );
+        assert!(!out.contains("<session>"));
+    }
+
+    #[test]
+    fn ssh_connect_failed_block_does_not_assert_a_surviving_session() {
+        init(false);
+        let out = render_error(&ssh_connect_failed_block(
+            "021b2dcc-d045-0c64-b509-000000000000",
+        ));
+        assert!(out.starts_with(
+            "[error] could not connect to dev cvm 021b2dcc-d045-0c64-b509-000000000000\n"
+        ));
+        assert!(out.contains("RUNNING yet"));
+        assert!(!out.contains("still running"));
+        assert!(out.contains("        fix      umbra cvm list"));
     }
 }

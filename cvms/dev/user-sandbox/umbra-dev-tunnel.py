@@ -23,16 +23,22 @@ class TunnelConfig:
     listen_port: int
     ssh_host: str
     ssh_port: int
-    path: str
+    paths: tuple[str, ...]
 
 
 def load_config() -> TunnelConfig:
+    # /concrete/tunnel is a transition alias: concrete-branded CLIs (<= 0.4.x)
+    # dial it and must keep SSH access while users migrate to umbra-cli.
     return TunnelConfig(
         listen_host=os.environ.get("DEV_TUNNEL_HOST", "0.0.0.0"),
         listen_port=int(os.environ.get("DEV_TUNNEL_PORT", "8090")),
         ssh_host=os.environ.get("DEV_CVM_SSH_HOST", "user-sandbox"),
         ssh_port=int(os.environ.get("DEV_CVM_SSH_PORT", "22")),
-        path=os.environ.get("DEV_TUNNEL_PATH", "/umbra/tunnel"),
+        paths=tuple(
+            part.strip()
+            for part in os.environ.get("DEV_TUNNEL_PATH", "/umbra/tunnel,/concrete/tunnel").split(",")
+            if part.strip()
+        ),
     )
 
 
@@ -149,7 +155,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
     try:
         request_line, headers = await read_http_headers(reader)
         parts = request_line.split()
-        if len(parts) != 3 or parts[0] != "GET" or parts[1].split("?", 1)[0] != config.path:
+        if len(parts) != 3 or parts[0] != "GET" or parts[1].split("?", 1)[0] not in config.paths:
             await write_http_response(writer, "404 Not Found", b"not found\n")
             return
         if headers.get("upgrade", "").lower() != "websocket":

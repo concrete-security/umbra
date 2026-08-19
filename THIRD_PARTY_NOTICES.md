@@ -18,7 +18,7 @@ Every entry in the review queue below is **pending maintainer approval**; the in
 | Rust — `umbra-atls-connect` | 267 | 265 | 2 |
 | Rust — `atlas-verify-cli` | 271 | 269 | 2 |
 | Python — Console | 35 | 34 | 1 |
-| Python — Security CVM | 54 | 48 | 6 |
+| Python — Security CVM | 52 | 44 | 8 |
 | npm — Console runtime (`phala` CLI) | 158 | 158 | 0 |
 | npm — dashboard build graph (build-time only) | 55 | 55 | 0 |
 | npm — Codex (Dev CVM image) | 7 | 7 | 0 |
@@ -33,13 +33,15 @@ Every row below is unapproved until a maintainer records a decision in this file
 | Rust — `umbra-atls-connect` | `webpki-roots` | 1.0.7 | CDLA-Permissive-2.0 | non-OSI permissive | — |
 | Rust — `atlas-verify-cli` | `webpki-roots` | 0.26.11 | CDLA-Permissive-2.0 | non-OSI permissive | — |
 | Rust — `atlas-verify-cli` | `webpki-roots` | 1.0.8 | CDLA-Permissive-2.0 | non-OSI permissive | — |
-| Python — Console | `certifi` | 2026.4.22 | MPL-2.0 | weak copyleft | from trove classifiers |
-| Python — Security CVM | `certifi` | 2026.4.22 | MPL-2.0 | weak copyleft | from trove classifiers |
+| Python — Security CVM | `mitmproxy-linux` | 0.12.11 | _none declared_ | unknown | installed only when: sys_platform == 'linux' |
+| Python — Security CVM | `mitmproxy-rs` | 0.12.11 | _none declared_ | unknown | — |
+| Python — Console | `certifi` | 2026.7.22 | MPL-2.0 | weak copyleft | from trove classifiers |
+| Python — Security CVM | `certifi` | 2026.7.22 | MPL-2.0 | weak copyleft | from trove classifiers |
 | Python — Security CVM | `ldap3` | 2.9.1 | LGPL-3.0-only | weak copyleft | from trove classifiers |
-| Python — Security CVM | `mitmproxy-windows` | 0.11.5 | LGPL-3.0-or-later | weak copyleft | installed only when: os_name == 'nt' |
+| Python — Security CVM | `mitmproxy-windows` | 0.12.11 | LGPL-3.0-or-later | weak copyleft | installed only when: os_name == 'nt' |
 | Python — Security CVM | `publicsuffix2` | 2.20191221 | MIT AND MPL-2.0 | weak copyleft | from trove classifiers |
 | Python — Security CVM | `pydivert` | 2.1.0 | LGPL-3.0-or-later | weak copyleft | from trove classifiers — installed only when: sys_platform == 'win32' |
-| Python — Security CVM | `urwid` | 2.6.16 | LGPL-2.1-only | weak copyleft | from the prose `License` field |
+| Python — Security CVM | `urwid` | 3.0.5 | LGPL-2.1-only | weak copyleft | — |
 
 ## Rust — `umbra` CLI
 
@@ -216,7 +218,7 @@ Locked non-dev closure of `umbra-cli`, unioned across the published targets (`x8
 | `proc-macro-crate` | 3.5.0 | MIT OR Apache-2.0 | permissive | — |
 | `proc-macro2` | 1.0.106 | MIT OR Apache-2.0 | permissive | — |
 | `quinn` | 0.11.9 | MIT OR Apache-2.0 | permissive | — |
-| `quinn-proto` | 0.11.14 | MIT OR Apache-2.0 | permissive | — |
+| `quinn-proto` | 0.11.15 | MIT OR Apache-2.0 | permissive | — |
 | `quinn-udp` | 0.5.14 | MIT OR Apache-2.0 | permissive | — |
 | `quote` | 1.0.45 | MIT OR Apache-2.0 | permissive | — |
 | `radium` | 0.7.0 | MIT | permissive | — |
@@ -497,7 +499,7 @@ Locked non-dev closure for `x86_64-unknown-linux-gnu`. Distributed inside the De
 | `proc-macro-crate` | 3.5.0 | MIT OR Apache-2.0 | permissive | — |
 | `proc-macro2` | 1.0.106 | MIT OR Apache-2.0 | permissive | — |
 | `quinn` | 0.11.9 | MIT OR Apache-2.0 | permissive | — |
-| `quinn-proto` | 0.11.14 | MIT OR Apache-2.0 | permissive | — |
+| `quinn-proto` | 0.11.15 | MIT OR Apache-2.0 | permissive | — |
 | `quinn-udp` | 0.5.14 | MIT OR Apache-2.0 | permissive | — |
 | `quote` | 1.0.45 | MIT OR Apache-2.0 | permissive | — |
 | `radium` | 0.7.0 | MIT | permissive | — |
@@ -888,41 +890,41 @@ Locked runtime closure of `umbra-console` from `console/uv.lock` (`uv sync --fro
 
 | Package | Version | Declared license | Category | Note |
 | --- | --- | --- | --- | --- |
-| `alembic` | 1.18.4 | MIT | permissive | — |
-| `annotated-doc` | 0.0.4 | MIT | permissive | — |
-| `annotated-types` | 0.7.0 | MIT | permissive | from trove classifiers |
-| `anyio` | 4.13.0 | MIT | permissive | — |
+| `alembic` | 1.19.1 | MIT | permissive | — |
+| `annotated-doc` | 0.0.5 | MIT | permissive | — |
+| `annotated-types` | 0.8.0 | MIT | permissive | — |
+| `anyio` | 4.14.2 | MIT | permissive | — |
 | `asyncpg` | 0.31.0 | Apache-2.0 | permissive | — |
-| `certifi` | 2026.4.22 | MPL-2.0 | weak copyleft | from trove classifiers |
-| `cffi` | 2.0.0 | MIT | permissive | installed only when: platform_python_implementation != 'PyPy' |
-| `click` | 8.3.3 | BSD-3-Clause | permissive | — |
+| `certifi` | 2026.7.22 | MPL-2.0 | weak copyleft | from trove classifiers |
+| `cffi` | 2.1.1 | MIT-0 | permissive | installed only when: platform_python_implementation != 'PyPy' |
+| `click` | 8.4.2 | BSD-3-Clause | permissive | — |
 | `colorama` | 0.4.6 | BSD-3-Clause | permissive | from trove classifiers — installed only when: sys_platform == 'win32' |
-| `cryptography` | 48.0.0 | Apache-2.0 OR BSD-3-Clause | permissive | — |
-| `fastapi` | 0.136.1 | MIT | permissive | — |
+| `cryptography` | 50.0.0 | Apache-2.0 OR BSD-3-Clause | permissive | — |
+| `fastapi` | 0.141.1 | MIT | permissive | — |
 | `google-re2` | 1.1.20251105 | BSD-3-Clause | permissive | from trove classifiers |
-| `greenlet` | 3.5.0 | MIT AND PSF-2.0 | permissive | installed only when: platform_machine == 'AMD64' or platform_machine == 'WIN32' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'ppc64le' or platform_machine == 'win32' or platform_machine == 'x86_64' |
+| `greenlet` | 3.5.5 | MIT AND PSF-2.0 | permissive | installed only when: platform_machine == 'AMD64' or platform_machine == 'WIN32' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'ppc64le' or platform_machine == 'win32' or platform_machine == 'x86_64' |
 | `h11` | 0.16.0 | MIT | permissive | from trove classifiers |
 | `httpcore` | 1.0.9 | BSD-3-Clause | permissive | — |
-| `httptools` | 0.7.1 | MIT | permissive | — |
+| `httptools` | 0.8.0 | MIT | permissive | — |
 | `httpx` | 0.28.1 | BSD-3-Clause | permissive | from trove classifiers |
-| `idna` | 3.15 | BSD-3-Clause | permissive | — |
-| `mako` | 1.3.12 | MIT | permissive | from trove classifiers |
+| `idna` | 3.18 | BSD-3-Clause | permissive | — |
+| `mako` | 1.4.1 | MIT | permissive | — |
 | `markupsafe` | 3.0.3 | BSD-3-Clause | permissive | — |
 | `pycparser` | 3.0 | BSD-3-Clause | permissive | installed only when: implementation_name != 'PyPy' |
 | `pydantic` | 2.13.4 | MIT | permissive | — |
 | `pydantic-core` | 2.46.4 | MIT | permissive | — |
-| `pyjwt` | 2.12.1 | MIT | permissive | — |
+| `pyjwt` | 2.13.0 | MIT | permissive | — |
 | `python-dotenv` | 1.2.2 | BSD-3-Clause | permissive | from the prose `License` field |
 | `pyyaml` | 6.0.3 | MIT | permissive | from trove classifiers |
-| `sqlalchemy` | 2.0.49 | MIT | permissive | from the prose `License` field |
-| `starlette` | 1.0.0 | BSD-3-Clause | permissive | — |
+| `sqlalchemy` | 2.0.52 | MIT | permissive | from the prose `License` field |
+| `starlette` | 1.6.0 | BSD-3-Clause | permissive | — |
 | `structlog` | 25.5.0 | MIT OR Apache-2.0 | permissive | — |
-| `typing-extensions` | 4.15.0 | PSF-2.0 | permissive | — |
-| `typing-inspection` | 0.4.2 | MIT | permissive | — |
-| `uvicorn` | 0.47.0 | BSD-3-Clause | permissive | — |
+| `typing-extensions` | 4.16.0 | PSF-2.0 | permissive | — |
+| `typing-inspection` | 0.4.4 | MIT | permissive | — |
+| `uvicorn` | 0.52.1 | BSD-3-Clause | permissive | — |
 | `uvloop` | 0.22.1 | Apache-2.0 AND MIT | permissive | from trove classifiers — installed only when: platform_python_implementation != 'PyPy' and sys_platform != 'cygwin' and sys_platform != 'win32' |
-| `watchfiles` | 1.1.1 | MIT | permissive | from trove classifiers |
-| `websockets` | 16.0 | BSD-3-Clause | permissive | — |
+| `watchfiles` | 1.2.0 | MIT | permissive | from trove classifiers |
+| `websockets` | 17.0.1 | BSD-3-Clause | permissive | — |
 
 ## Python — Security CVM
 
@@ -931,59 +933,57 @@ Locked runtime closure of `umbra-security-cvm` from `cvms/security/uv.lock` incl
 | Package | Version | Declared license | Category | Note |
 | --- | --- | --- | --- | --- |
 | `aioquic` | 1.2.0 | BSD-3-Clause | permissive | from trove classifiers |
-| `anyio` | 4.13.0 | MIT | permissive | — |
-| `argon2-cffi` | 23.1.0 | MIT | permissive | from trove classifiers |
+| `anyio` | 4.14.2 | MIT | permissive | — |
+| `argon2-cffi` | 25.1.0 | MIT | permissive | — |
 | `argon2-cffi-bindings` | 25.1.0 | MIT | permissive | — |
-| `asgiref` | 3.8.1 | BSD-3-Clause | permissive | from trove classifiers |
+| `asgiref` | 3.11.1 | BSD-3-Clause | permissive | from trove classifiers |
 | `attrs` | 26.1.0 | MIT | permissive | — |
+| `bcrypt` | 5.0.0 | Apache-2.0 | permissive | from trove classifiers |
 | `blinker` | 1.9.0 | MIT | permissive | from trove classifiers |
-| `brotli` | 1.1.0 | MIT | permissive | from trove classifiers |
-| `certifi` | 2026.4.22 | MPL-2.0 | weak copyleft | from trove classifiers |
-| `cffi` | 2.0.0 | MIT | permissive | — |
-| `click` | 8.3.3 | BSD-3-Clause | permissive | — |
+| `brotli` | 1.2.0 | MIT | permissive | from the prose `License` field |
+| `certifi` | 2026.7.22 | MPL-2.0 | weak copyleft | from trove classifiers |
+| `cffi` | 2.1.1 | MIT-0 | permissive | — |
+| `click` | 8.4.2 | BSD-3-Clause | permissive | — |
 | `colorama` | 0.4.6 | BSD-3-Clause | permissive | from trove classifiers — installed only when: sys_platform == 'win32' |
-| `cryptography` | 44.0.3 | Apache-2.0 AND BSD-3-Clause | permissive | from trove classifiers |
-| `flask` | 3.1.0 | BSD-3-Clause | permissive | from trove classifiers |
+| `cryptography` | 50.0.0 | Apache-2.0 OR BSD-3-Clause | permissive | — |
+| `flask` | 3.1.3 | BSD-3-Clause | permissive | — |
 | `google-re2` | 1.1.20251105 | BSD-3-Clause | permissive | from trove classifiers |
-| `h11` | 0.14.0 | MIT | permissive | from trove classifiers |
-| `h2` | 4.1.0 | MIT | permissive | from trove classifiers |
-| `hpack` | 4.1.0 | MIT | permissive | from trove classifiers |
-| `httpcore` | 1.0.8 | BSD-3-Clause | permissive | — |
+| `h11` | 0.16.0 | MIT | permissive | from trove classifiers |
+| `h2` | 4.3.0 | MIT | permissive | from trove classifiers |
+| `hpack` | 4.2.0 | MIT | permissive | — |
+| `httpcore` | 1.0.9 | BSD-3-Clause | permissive | — |
 | `httpx` | 0.28.1 | BSD-3-Clause | permissive | from trove classifiers |
 | `hyperframe` | 6.1.0 | MIT | permissive | from trove classifiers |
-| `idna` | 3.15 | BSD-3-Clause | permissive | — |
+| `idna` | 3.18 | BSD-3-Clause | permissive | — |
 | `itsdangerous` | 2.2.0 | BSD-3-Clause | permissive | from trove classifiers |
 | `jinja2` | 3.1.6 | BSD-3-Clause | permissive | from trove classifiers |
-| `kaitaistruct` | 0.10 | MIT | permissive | from trove classifiers |
+| `kaitaistruct` | 0.11 | MIT | permissive | from the prose `License` field |
 | `ldap3` | 2.9.1 | LGPL-3.0-only | weak copyleft | from trove classifiers |
 | `markupsafe` | 3.0.3 | BSD-3-Clause | permissive | — |
-| `mitmproxy` | 11.1.3 | MIT | permissive | from trove classifiers |
-| `mitmproxy-linux` | 0.11.5 | MIT | permissive | from the prose `License` field — installed only when: sys_platform == 'linux' |
-| `mitmproxy-macos` | 0.11.5 | MIT | permissive | installed only when: sys_platform == 'darwin' |
-| `mitmproxy-rs` | 0.11.5 | MIT | permissive | from the prose `License` field |
-| `mitmproxy-windows` | 0.11.5 | LGPL-3.0-or-later | weak copyleft | installed only when: os_name == 'nt' |
-| `msgpack` | 1.1.0 | Apache-2.0 | permissive | from trove classifiers |
-| `passlib` | 1.7.4 | BSD-3-Clause | permissive | from the prose `License` field |
+| `mitmproxy` | 12.2.3 | MIT | permissive | from trove classifiers |
+| `mitmproxy-linux` | 0.12.11 | _none declared_ | unknown | installed only when: sys_platform == 'linux' |
+| `mitmproxy-macos` | 0.12.11 | MIT | permissive | installed only when: sys_platform == 'darwin' |
+| `mitmproxy-rs` | 0.12.11 | _none declared_ | unknown | — |
+| `mitmproxy-windows` | 0.12.11 | LGPL-3.0-or-later | weak copyleft | installed only when: os_name == 'nt' |
+| `msgpack` | 1.2.1 | Apache-2.0 | permissive | — |
 | `publicsuffix2` | 2.20191221 | MIT AND MPL-2.0 | weak copyleft | from trove classifiers |
-| `pyasn1` | 0.6.3 | BSD-2-Clause | permissive | from the prose `License` field |
-| `pyasn1-modules` | 0.4.2 | BSD-3-Clause | permissive | from trove classifiers |
+| `pyasn1` | 0.6.4 | BSD-2-Clause | permissive | from the prose `License` field |
 | `pycparser` | 3.0 | BSD-3-Clause | permissive | installed only when: implementation_name != 'PyPy' |
 | `pydivert` | 2.1.0 | LGPL-3.0-or-later | weak copyleft | from trove classifiers — installed only when: sys_platform == 'win32' |
 | `pylsqpack` | 0.3.24 | BSD-3-Clause | permissive | — |
-| `pyopenssl` | 25.0.0 | Apache-2.0 | permissive | from trove classifiers |
-| `pyparsing` | 3.2.1 | MIT | permissive | from trove classifiers |
-| `pyperclip` | 1.9.0 | BSD-3-Clause | permissive | from trove classifiers |
-| `ruamel-yaml` | 0.18.10 | MIT | permissive | from trove classifiers |
-| `ruamel-yaml-clib` | 0.2.15 | MIT | permissive | from trove classifiers — installed only when: platform_python_implementation == 'CPython' |
-| `service-identity` | 24.2.0 | MIT | permissive | from trove classifiers |
+| `pyopenssl` | 26.4.0 | Apache-2.0 | permissive | from trove classifiers |
+| `pyparsing` | 3.3.2 | MIT | permissive | — |
+| `pyperclip` | 1.11.0 | BSD-3-Clause | permissive | from trove classifiers |
+| `ruamel-yaml` | 0.19.1 | MIT | permissive | from trove classifiers |
+| `service-identity` | 26.1.0 | MIT | permissive | — |
 | `sortedcontainers` | 2.4.0 | Apache-2.0 | permissive | from trove classifiers |
-| `tornado` | 6.4.2 | Apache-2.0 | permissive | from trove classifiers |
-| `typing-extensions` | 4.15.0 | PSF-2.0 | permissive | — |
-| `urwid` | 2.6.16 | LGPL-2.1-only | weak copyleft | from the prose `License` field |
-| `wcwidth` | 0.7.0 | MIT | permissive | — |
+| `tornado` | 6.5.8 | Apache-2.0 | permissive | from trove classifiers |
+| `typing-extensions` | 4.14.0 | PSF-2.0 | permissive | — |
+| `urwid` | 3.0.5 | LGPL-2.1-only | weak copyleft | — |
+| `wcwidth` | 0.8.2 | MIT | permissive | — |
 | `werkzeug` | 3.1.8 | BSD-3-Clause | permissive | — |
-| `wsproto` | 1.2.0 | MIT | permissive | from trove classifiers |
-| `zstandard` | 0.23.0 | BSD-3-Clause | permissive | from trove classifiers |
+| `wsproto` | 1.3.2 | MIT | permissive | — |
+| `zstandard` | 0.25.0 | BSD-3-Clause | permissive | — |
 
 ## npm — Console runtime (`phala` CLI)
 
@@ -1218,13 +1218,13 @@ Non-dev entries of `console/package-lock.json`. The Console image retains this g
 
 | Package | Version | Declared license | Category | Note |
 | --- | --- | --- | --- | --- |
-| `@openai/codex` | 0.131.0 | Apache-2.0 | permissive | — |
-| `@openai/codex` | 0.131.0-darwin-arm64 | Apache-2.0 | permissive | — |
-| `@openai/codex` | 0.131.0-darwin-x64 | Apache-2.0 | permissive | — |
-| `@openai/codex` | 0.131.0-linux-arm64 | Apache-2.0 | permissive | — |
-| `@openai/codex` | 0.131.0-linux-x64 | Apache-2.0 | permissive | — |
-| `@openai/codex` | 0.131.0-win32-arm64 | Apache-2.0 | permissive | — |
-| `@openai/codex` | 0.131.0-win32-x64 | Apache-2.0 | permissive | — |
+| `@openai/codex` | 0.147.0 | Apache-2.0 | permissive | — |
+| `@openai/codex` | 0.147.0-darwin-arm64 | Apache-2.0 | permissive | — |
+| `@openai/codex` | 0.147.0-darwin-x64 | Apache-2.0 | permissive | — |
+| `@openai/codex` | 0.147.0-linux-arm64 | Apache-2.0 | permissive | — |
+| `@openai/codex` | 0.147.0-linux-x64 | Apache-2.0 | permissive | — |
+| `@openai/codex` | 0.147.0-win32-arm64 | Apache-2.0 | permissive | — |
+| `@openai/codex` | 0.147.0-win32-x64 | Apache-2.0 | permissive | — |
 
 <!-- END GENERATED INVENTORY -->
 

@@ -43,11 +43,18 @@ def admin_oauth_redirect_uri(settings: OidcSettings | None = None) -> str:
     return f"{settings.console_url}/admin/oauth/callback"
 
 
+def connect_oauth_redirect_uri(settings: OidcSettings | None = None) -> str:
+    settings = settings or oidc_settings()
+    return f"{settings.console_url}/connect/oauth/callback"
+
+
 def is_allowed_redirect_uri(redirect_uri: str, *, settings: OidcSettings | None = None) -> bool:
     settings = settings or oidc_settings()
     if REDIRECT_URI_RE.fullmatch(redirect_uri):
         return True
-    return redirect_uri == admin_oauth_redirect_uri(settings)
+    if redirect_uri == admin_oauth_redirect_uri(settings):
+        return True
+    return redirect_uri == connect_oauth_redirect_uri(settings)
 
 
 class TokenRequest(BaseModel):

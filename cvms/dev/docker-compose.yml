@@ -45,7 +45,7 @@ services:
     image: "${DEV_CVM_IMAGE:?set DEV_CVM_IMAGE to a digest-pinned GHCR image}"
     entrypoint: ["umbra-dev-egress-forwarder"]
     healthcheck:
-      disable: true
+      test: ["NONE"]
     read_only: true
     tmpfs:
       - /tmp
@@ -57,7 +57,6 @@ services:
     environment:
       SECURITY_CVM_FQDN: ${SECURITY_CVM_FQDN}
       SECURITY_CVM_PROXY_PORT: ${SECURITY_CVM_PROXY_PORT}
-      SECURITY_CVM_ATLS_POLICY_B64: ${SECURITY_CVM_ATLS_POLICY_B64}
       SECURITY_CVM_CA_CERT_B64: ${SECURITY_CVM_CA_CERT_B64}
       SECURITY_CVM_PROXY_TOKEN: ${SECURITY_CVM_PROXY_TOKEN}
       DEV_CVM_CONTROL_TOKEN: ${DEV_CVM_CONTROL_TOKEN}
@@ -74,7 +73,7 @@ services:
     image: "${DEV_CVM_IMAGE:?set DEV_CVM_IMAGE to a digest-pinned GHCR image}"
     entrypoint: ["umbra-dev-tunnel"]
     healthcheck:
-      disable: true
+      test: ["NONE"]
     read_only: true
     tmpfs:
       - /tmp

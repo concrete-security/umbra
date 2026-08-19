@@ -143,10 +143,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # glibc is the portability baseline the published Linux binaries are
+          # linked against (via cargo-zigbuild), NOT the runner's glibc: a plain
+          # `cargo build` on ubuntu-latest links the runner's glibc (2.39) and the
+          # binary then refuses to start on any older host (AlmaLinux/RHEL 9 is
+          # 2.34). 2.28 covers RHEL/Alma 8+, Debian 10+, Ubuntu 18.10+.
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            glibc: '2.28'
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
+            glibc: '2.28'
           - os: macos-14
             target: aarch64-apple-darwin
     runs-on: ${{ matrix.os }}
@@ -160,8 +167,29 @@ jobs:
       - name: Set reproducible build timestamp
         shell: bash
         run: echo "SOURCE_DATE_EPOCH=$(git show -s --format=%ct "${GITHUB_SHA}")" >> "${GITHUB_ENV}"
+      - name: Install cargo-zigbuild
+        if: ${{ matrix.glibc }}
+        run: pip3 install --user cargo-zigbuild==0.23.0 ziglang==0.16.0
       - name: Build CLI
-        run: cargo build --release --locked -p umbra-cli --target ${{ matrix.target }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${{ matrix.glibc }}" ]; then
+            cargo zigbuild --release --locked -p umbra-cli --target "${{ matrix.target }}.${{ matrix.glibc }}"
+          else
+            cargo build --release --locked -p umbra-cli --target "${{ matrix.target }}"
+          fi
+      - name: Gate glibc portability
+        if: ${{ matrix.glibc }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="target/${{ matrix.target }}/release/umbra"
+          baseline="${{ matrix.glibc }}"
+          max="$(objdump -T "$bin" | grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' | sed 's/^GLIBC_//' | sort -uV | tail -1)"
+          echo "max glibc symbol required: ${max} (baseline ${baseline})"
+          test "$(printf '%s\n%s\n' "$max" "$baseline" | sort -V | tail -1)" = "$baseline"
+          docker run --rm -v "${PWD}/${bin}:/umbra:ro" almalinux:8 /umbra --version
       - name: Stage artifact
         shell: bash
         run: |

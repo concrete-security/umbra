@@ -23,10 +23,23 @@ from umbra_console.audit_export import (
     serialize_audit_export,
     write_audit_export_artifact,
 )
+import httpx
+from starlette.concurrency import run_in_threadpool
+
 from umbra_console.config import load_settings
 from umbra_console.db import get_pool
 from umbra_console.instance_types import REASON_SCHEDULER, catalog_service
 from umbra_console.log_config import logger
+from umbra_console.oauth_endpoints import (
+    TokenEndpointError,
+    assert_token_url_egress_allowed,
+    sanitize_provider_error_code,
+)
+from umbra_console.profile_secrets import (
+    decrypt_managed_secret_value,
+    encrypt_managed_secret_value,
+    encrypt_profile_secret_value,
+)
 from umbra_console.resources import (
     cvm_resource,
     json_payload,
@@ -38,8 +51,12 @@ from umbra_console.resources import (
 log = logger()
 _last_successful_tick_monotonic: float | None = None
 _last_traffic_prune_wall: datetime | None = None
+_last_managed_secret_rotation_wall: datetime | None = None
 TRAFFIC_LOG_PRUNE_LOCK_ID = 884_422_001
 TRAFFIC_LOG_DELETE_CHUNK = 10_000
+MANAGED_SECRET_ROTATION_LOCK_ID = 884_422_002
+MANAGED_SECRET_EXCHANGE_TIMEOUT_SECONDS = 10.0
+MANAGED_SECRET_ROTATION_BATCH_LIMIT = 32
 LEGACY_SECURITY_CVM_REBIND_MARKER = "SECURITY_CVM_REBIND_REQUIRED"
 OPERATION_START_STEPS = {
     "audit.export": ("materialize", 20),
@@ -323,6 +340,17 @@ def reconciler_attestation_interval_seconds() -> int:
     if interval < 3600 or interval > 86400:
         raise RuntimeError("RECONCILER_ATTESTATION_INTERVAL_SECONDS must be between 3600 and 86400")
     return interval
+
+
+def reconciler_attestation_unreachable_grace_seconds() -> int:
+    raw = load_settings().raw.get("RECONCILER_ATTESTATION_UNREACHABLE_GRACE_SECONDS", "1800").strip() or "1800"
+    try:
+        grace = int(raw)
+    except ValueError as exc:
+        raise RuntimeError("RECONCILER_ATTESTATION_UNREACHABLE_GRACE_SECONDS must be an integer") from exc
+    if grace < 60 or grace > 86400:
+        raise RuntimeError("RECONCILER_ATTESTATION_UNREACHABLE_GRACE_SECONDS must be between 60 and 86400")
+    return grace
 
 
 def keep_failed_cvm_resources() -> bool:
@@ -3402,7 +3430,6 @@ def build_cvm_launch_env(
         "SECURITY_CVM_PROXY_TOKEN": proxy_token,
         "DEV_CVM_CONTROL_TOKEN": dev_control_token,
         "SECURITY_CVM_CA_CERT_B64": b64_text(ca_cert_pem),
-        "SECURITY_CVM_ATLS_POLICY_B64": b64_json(security_cvm_atls_policy(snapshot)),
         "AUTHORIZED_SSH_KEYS_B64": b64_text(authorized_keys),
         "SANDBOX_ENV_PLACEHOLDERS_B64": b64_text(sandbox_env),
         "CONSOLE_URL": console_url,
@@ -3462,6 +3489,13 @@ def render_dev_cvm_shade_config(snapshot: Any, *, name: str) -> str:
             f"  region: {_row_value(snapshot, 'region')}",
             "  routes:",
             "    - path: /umbra/tunnel",
+            "      service: dev-tunnel",
+            "      port: 8090",
+            "      websocket: true",
+            "      cors: false",
+            # Transition alias: concrete-branded CLIs (<= 0.4.x) dial
+            # /concrete/tunnel and must keep SSH access after rebind.
+            "    - path: /concrete/tunnel",
             "      service: dev-tunnel",
             "      port: 8090",
             "      websocket: true",
@@ -4247,6 +4281,7 @@ async def mark_security_cvm_provision_failed(operation_id: Any, *, code: str, de
                     UPDATE security_cvms
                     SET state = 'FAILED',
                         error_reason = $2,
+                        deleted_at = now(),
                         updated_at = now()
                     WHERE id = $1
                       AND state IN ('PROVISIONING', 'RUNNING')
@@ -4846,11 +4881,6 @@ def b64_text(value: str) -> str:
     return base64.b64encode(value.encode("utf-8")).decode("ascii")
 
 
-def b64_json(value: dict[str, Any]) -> str:
-    payload = json.dumps(value, sort_keys=True, separators=(",", ":"))
-    return b64_text(payload)
-
-
 def provider_app_id(metadata: Any) -> str | None:
     metadata = json_payload(metadata or {})
     if not isinstance(metadata, dict):
@@ -5165,6 +5195,429 @@ async def maybe_prune_traffic_logs_retention(conn: Any) -> list[str]:
     return []
 
 
+def managed_secret_rotation_gate_seconds() -> int:
+    raw = load_settings().raw.get("MANAGED_SECRET_ROTATION_GATE_SECONDS", "300")
+    try:
+        return max(30, int(raw))
+    except ValueError:
+        return 300
+
+
+def managed_secret_rotation_threshold_seconds() -> int:
+    # Rotate when less than this much access-token life remains (default 5 days,
+    # against ChatGPT's ~10-day access tokens).
+    raw = load_settings().raw.get("MANAGED_SECRET_ROTATION_THRESHOLD_SECONDS", str(5 * 86400))
+    try:
+        return max(60, int(raw))
+    except ValueError:
+        return 5 * 86400
+
+
+def managed_secret_failure_backoff_seconds() -> int:
+    # After a failed rotation, wait this long before retrying (default 1h), so
+    # a bricked grant (e.g. burned one-shot refresh token -> invalid_grant)
+    # retries ~24x/day instead of every gate pass (~288x/day). A fresh PUT
+    # clears last_error, so reconfiguring resumes immediately.
+    raw = load_settings().raw.get("MANAGED_SECRET_FAILURE_BACKOFF_SECONDS", "3600")
+    try:
+        return max(60, int(raw))
+    except ValueError:
+        return 3600
+
+
+def managed_secret_default_ttl_seconds() -> int:
+    raw = load_settings().raw.get("MANAGED_SECRET_DEFAULT_TTL_SECONDS", str(10 * 86400))
+    try:
+        return max(300, int(raw))
+    except ValueError:
+        return 10 * 86400
+
+
+def jwt_exp_claim(token: str) -> datetime | None:
+    """Best-effort exp extraction from an (unverified) JWT payload segment."""
+    segments = token.split(".")
+    if len(segments) != 3:
+        return None
+    try:
+        padded = segments[1] + "=" * (-len(segments[1]) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    exp = payload.get("exp") if isinstance(payload, dict) else None
+    if not isinstance(exp, (int, float)):
+        return None
+    return datetime.fromtimestamp(exp, tz=timezone.utc)
+
+
+def _safe_refresh_error_code(value: Any) -> str:
+    return sanitize_provider_error_code(value)
+
+
+async def exchange_refresh_token(
+    token_url: str, *, client_id: str, refresh_token: str
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Refresh-token grant (JSON body — the ChatGPT/auth.openai.com shape).
+
+    Runs outside any DB transaction. Returns (payload, error_code); error
+    codes are short safe strings, never token material.
+    """
+    body = {"client_id": client_id, "grant_type": "refresh_token", "refresh_token": refresh_token}
+    try:
+        async with httpx.AsyncClient(timeout=MANAGED_SECRET_EXCHANGE_TIMEOUT_SECONDS) as client:
+            response = await client.post(token_url, json=body, headers={"Accept": "application/json"})
+    except httpx.HTTPError as exc:
+        return None, f"refresh_transport:{type(exc).__name__}"
+    if response.status_code != 200:
+        return None, f"refresh_status:{response.status_code}"
+    try:
+        payload = response.json()
+    except ValueError:
+        return None, "refresh_malformed_response"
+    if not isinstance(payload, dict):
+        return None, "refresh_malformed_response"
+    if payload.get("error"):
+        return None, f"refresh_error:{_safe_refresh_error_code(payload.get('error'))}"
+    return payload, None
+
+
+MANAGED_SECRET_ROW_COLUMNS = """
+    pms.profile_id, pms.injection_id, pms.token_url, pms.client_id,
+    pms.refresh_token_ciphertext, pms.account_id, pms.access_token_expires_at,
+    pms.last_error, pms.last_attempt_at, pms.updated_at, ep.entity_id, ep.policy
+"""
+
+
+def managed_secret_lock_keys(profile_id: Any, injection_id: str) -> tuple[int, int]:
+    """Two signed int32 advisory-lock keys for one (profile, injection).
+
+    Serializes the immediate PUT rotation against the scheduler pass on the
+    same secret so they cannot both submit the same one-shot refresh token.
+    """
+    digest = hashlib.sha256(f"{profile_id}:{injection_id}".encode("utf-8")).digest()
+    k1 = int.from_bytes(digest[0:4], "big", signed=True)
+    k2 = int.from_bytes(digest[4:8], "big", signed=True)
+    return k1, k2
+
+
+def managed_secret_due(row: Any) -> bool:
+    now = datetime.now(timezone.utc)
+    # Back off after a failure: a bricked grant must not re-hit the provider
+    # (and write an audit row) every gate pass. A fresh PUT clears last_error.
+    last_error = row["last_error"] if "last_error" in row else None
+    last_attempt_at = row["last_attempt_at"] if "last_attempt_at" in row else None
+    if last_error and last_attempt_at is not None:
+        backoff = timedelta(seconds=managed_secret_failure_backoff_seconds())
+        if last_attempt_at > now - backoff:
+            return False
+    expires_at = row["access_token_expires_at"]
+    if expires_at is None:
+        return True
+    threshold = timedelta(seconds=managed_secret_rotation_threshold_seconds())
+    return expires_at < now + threshold
+
+
+async def _record_managed_secret_failure(conn: Any, row: Any, error: str) -> None:
+    """CAS-guarded failure record + audit, committed atomically.
+
+    The `updated_at` predicate stops a stale failed attempt from clobbering a
+    grant that was re-uploaded (or rotated) while this request was in flight;
+    the audit row is written only when the update matched, so the hash-chain
+    advisory lock covers a real, committed state change.
+    """
+    async with conn.transaction():
+        matched = await conn.fetchval(
+            """
+            UPDATE profile_managed_secrets
+            SET last_attempt_at = now(),
+                last_error = $3,
+                updated_at = now()
+            WHERE profile_id = $1
+              AND injection_id = $2
+              AND updated_at = $4
+            RETURNING 1
+            """,
+            row["profile_id"],
+            row["injection_id"],
+            error[:300],
+            row["updated_at"],
+        )
+        if matched is None:
+            return
+        await insert_audit_event(
+            conn,
+            entity_id=row["entity_id"],
+            actor_id=None,
+            actor_email=None,
+            action="PROFILE_SECRET_ROTATION_FAILED",
+            target_type="profile",
+            target_id=row["profile_id"],
+            after={"injection_id": row["injection_id"], "error": error[:300]},
+        )
+
+
+async def rotate_managed_secret_row(conn: Any, row: Any) -> tuple[bool, str | None]:
+    """Refresh one managed secret and upsert the fresh access token.
+
+    Callers hold the per-secret advisory lock. The token-endpoint HTTP call
+    happens before the write transaction; the rotated refresh token
+    (exactly-one-refresher: providers may revoke the old one on use), the
+    injection-material upsert, the attached-CVM policy bumps, and the audit
+    row commit together, all CAS-guarded on the pre-request `updated_at`.
+    """
+    # SSRF guard: re-validate host + resolved IPs immediately before the fetch.
+    try:
+        await run_in_threadpool(assert_token_url_egress_allowed, row["token_url"])
+    except TokenEndpointError:
+        await _record_managed_secret_failure(conn, row, "token_url_not_allowed")
+        return False, "token_url_not_allowed"
+    refresh_token = decrypt_managed_secret_value(
+        profile_id=row["profile_id"],
+        injection_id=row["injection_id"],
+        ciphertext=row["refresh_token_ciphertext"],
+    )
+    payload, error = await exchange_refresh_token(
+        row["token_url"], client_id=row["client_id"], refresh_token=refresh_token
+    )
+    if error is None:
+        access_token = payload.get("access_token")
+        if not isinstance(access_token, str) or not access_token.strip():
+            error = "refresh_no_access_token"
+    if error is None:
+        # Deferred import: routes.py imports this module, so pull the shared
+        # rendered-length helper at call time to avoid a module-load cycle.
+        from umbra_console.routes import (
+            POLICY_MAX_RENDERED_SECRET_LEN,
+            rendered_injection_value_length,
+        )
+
+        access_token = access_token.strip()
+        if (
+            rendered_injection_value_length(
+                json_payload(row["policy"]), row["injection_id"], access_token
+            )
+            > POLICY_MAX_RENDERED_SECRET_LEN
+        ):
+            error = "rendered_value_too_long"
+    if error is not None:
+        await _record_managed_secret_failure(conn, row, error)
+        log.warning(
+            "MANAGED_SECRET_ROTATION_FAILED",
+            profile_id=str(row["profile_id"]),
+            injection_id=row["injection_id"],
+            error=error,
+        )
+        return False, error
+    expires_in = payload.get("expires_in")
+    if isinstance(expires_in, (int, float)) and expires_in > 0:
+        expires_at = datetime.now(timezone.utc) + timedelta(seconds=int(expires_in))
+    else:
+        expires_at = jwt_exp_claim(access_token) or (
+            datetime.now(timezone.utc) + timedelta(seconds=managed_secret_default_ttl_seconds())
+        )
+    rotated_refresh = payload.get("refresh_token")
+    new_ciphertext = (
+        encrypt_managed_secret_value(
+            profile_id=row["profile_id"],
+            injection_id=row["injection_id"],
+            value=rotated_refresh,
+        )
+        if isinstance(rotated_refresh, str) and rotated_refresh
+        else None
+    )
+    async with conn.transaction():
+        updated = await conn.fetchval(
+            """
+            UPDATE profile_managed_secrets
+            SET refresh_token_ciphertext = COALESCE($3, refresh_token_ciphertext),
+                access_token_expires_at = $4,
+                last_rotated_at = now(),
+                last_attempt_at = now(),
+                last_error = NULL,
+                updated_at = now()
+            WHERE profile_id = $1
+              AND injection_id = $2
+              AND updated_at = $5
+            RETURNING 1
+            """,
+            row["profile_id"],
+            row["injection_id"],
+            new_ciphertext,
+            expires_at,
+            row["updated_at"],
+        )
+        if updated is None:
+            # Reconfigured mid-flight (new grant uploaded); the fresher row wins.
+            return False, "superseded"
+        injection_ciphertext = encrypt_profile_secret_value(
+            profile_id=row["profile_id"],
+            injection_id=row["injection_id"],
+            value=access_token,
+        )
+        await conn.execute(
+            """
+            INSERT INTO profile_secret_material (profile_id, injection_id, ciphertext)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (profile_id, injection_id)
+            DO UPDATE SET ciphertext = EXCLUDED.ciphertext,
+                          updated_at = now()
+            """,
+            row["profile_id"],
+            row["injection_id"],
+            injection_ciphertext,
+        )
+        await conn.execute(
+            """
+            UPDATE cvms c
+            SET policy_version = policy_version + 1,
+                updated_at = now()
+            FROM cvm_profiles cp
+            WHERE cp.cvm_id = c.id
+              AND cp.profile_id = $1
+              AND c.deleted_at IS NULL
+              AND c.state <> 'TERMINATED'
+            """,
+            row["profile_id"],
+        )
+        await insert_audit_event(
+            conn,
+            entity_id=row["entity_id"],
+            actor_id=None,
+            actor_email=None,
+            action="PROFILE_SECRET_ROTATED",
+            target_type="profile",
+            target_id=row["profile_id"],
+            after={
+                "injection_id": row["injection_id"],
+                "access_token_expires_at": timestamp(expires_at),
+                "refresh_token_rotated": new_ciphertext is not None,
+            },
+        )
+    return True, None
+
+
+async def fetch_managed_secret_row(conn: Any, *, profile_id: UUID, injection_id: str) -> Any:
+    return await conn.fetchrow(
+        f"""
+        SELECT {MANAGED_SECRET_ROW_COLUMNS}
+        FROM profile_managed_secrets pms
+        JOIN entity_profiles ep ON ep.id = pms.profile_id
+        WHERE pms.profile_id = $1
+          AND pms.injection_id = $2
+          AND ep.deleted_at IS NULL
+        """,
+        profile_id,
+        injection_id,
+    )
+
+
+async def rotate_managed_secret_locked(
+    conn: Any, *, profile_id: Any, injection_id: str, blocking: bool
+) -> tuple[bool, str | None]:
+    """Take the per-secret lock, re-fetch fresh, and rotate if still due.
+
+    `blocking=True` (PUT path) waits for any in-flight scheduler rotation;
+    `blocking=False` (scheduler) skips a secret another worker holds. After
+    acquiring the lock the row is re-read, so a secret rotated by the other
+    party in the meantime is seen as no-longer-due and reported as success
+    without burning a second one-shot refresh token.
+    """
+    k1, k2 = managed_secret_lock_keys(profile_id, injection_id)
+    if blocking:
+        await conn.execute("SELECT pg_advisory_lock($1, $2)", k1, k2)
+        acquired = True
+    else:
+        acquired = await conn.fetchval("SELECT pg_try_advisory_lock($1, $2)", k1, k2)
+        if not acquired:
+            return False, "locked"
+    try:
+        row = await fetch_managed_secret_row(conn, profile_id=profile_id, injection_id=injection_id)
+        if row is None:
+            return False, "not_found"
+        if not managed_secret_due(row):
+            return True, None
+        return await rotate_managed_secret_row(conn, row)
+    finally:
+        await conn.execute("SELECT pg_advisory_unlock($1, $2)", k1, k2)
+
+
+async def rotate_managed_secret_now(
+    conn: Any, *, profile_id: UUID, injection_id: str
+) -> tuple[bool, str | None]:
+    """Immediate rotation for a just-configured managed secret (PUT path)."""
+    return await rotate_managed_secret_locked(
+        conn, profile_id=profile_id, injection_id=injection_id, blocking=True
+    )
+
+
+async def rotate_due_managed_secrets(conn: Any) -> list[str]:
+    rows = await conn.fetch(
+        f"""
+        SELECT {MANAGED_SECRET_ROW_COLUMNS}
+        FROM profile_managed_secrets pms
+        JOIN entity_profiles ep ON ep.id = pms.profile_id
+        WHERE ep.deleted_at IS NULL
+          AND (pms.access_token_expires_at IS NULL
+               OR pms.access_token_expires_at < now() + make_interval(secs => $1))
+          -- Skip rows still inside their post-failure backoff window.
+          AND (pms.last_error IS NULL
+               OR pms.last_attempt_at IS NULL
+               OR pms.last_attempt_at < now() - make_interval(secs => $2))
+        ORDER BY pms.access_token_expires_at ASC NULLS FIRST
+        LIMIT $3
+        """,
+        float(managed_secret_rotation_threshold_seconds()),
+        float(managed_secret_failure_backoff_seconds()),
+        MANAGED_SECRET_ROTATION_BATCH_LIMIT,
+    )
+    events: list[str] = []
+    for row in rows:
+        # Per-row isolation: one corrupt ciphertext / bad expiry / encryption
+        # failure must not abort the batch and starve later credentials.
+        try:
+            rotated, error = await rotate_managed_secret_locked(
+                conn,
+                profile_id=row["profile_id"],
+                injection_id=row["injection_id"],
+                blocking=False,
+            )
+            outcome = "ok" if rotated else (error or "failed")
+        except Exception as exc:  # noqa: BLE001 — defensive per-row boundary
+            log.error(
+                "MANAGED_SECRET_ROTATION_ROW_ERROR",
+                profile_id=str(row["profile_id"]),
+                injection_id=row["injection_id"],
+                error_type=type(exc).__name__,
+            )
+            try:
+                await _record_managed_secret_failure(conn, row, f"rotation_exception:{type(exc).__name__}")
+            except Exception:  # noqa: BLE001 — never let bookkeeping abort the batch
+                pass
+            outcome = "error"
+        events.append(
+            f"maintenance:managed_secret_rotation:{row['profile_id']}:{row['injection_id']}:{outcome}"
+        )
+    return events
+
+
+async def maybe_rotate_managed_secrets(conn: Any) -> list[str]:
+    global _last_managed_secret_rotation_wall
+    now = datetime.now(timezone.utc)
+    if (
+        _last_managed_secret_rotation_wall is not None
+        and (now - _last_managed_secret_rotation_wall).total_seconds()
+        < managed_secret_rotation_gate_seconds()
+    ):
+        return []
+    locked = await conn.fetchval("SELECT pg_try_advisory_lock($1)", MANAGED_SECRET_ROTATION_LOCK_ID)
+    if not locked:
+        return []
+    try:
+        events = await rotate_due_managed_secrets(conn)
+    finally:
+        await conn.execute("SELECT pg_advisory_unlock($1)", MANAGED_SECRET_ROTATION_LOCK_ID)
+    _last_managed_secret_rotation_wall = now
+    return events
+
 async def run_reconciliation_pass(*, include_orphans: bool = True) -> ReconciliationSummary:
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -5173,11 +5626,13 @@ async def run_reconciliation_pass(*, include_orphans: bool = True) -> Reconcilia
         security_cvms_advanced.extend(await reconcile_security_cvm_provider_drift(conn))
         orphans_cleaned = await cleanup_orphan_dns_records(conn) if include_orphans else []
         orphans_cleaned.extend(await prune_expired_auth_flow_rows(conn))
+        orphans_cleaned.extend(await prune_expired_oauth_connection_states(conn))
         orphans_cleaned.extend(await prune_expired_reconciler_rows(conn))
         operation_prune_count = await prune_expired_operations(conn)
         if operation_prune_count:
             orphans_cleaned.append(f"maintenance:operations:{operation_prune_count}")
         orphans_cleaned.extend(await maybe_prune_traffic_logs_retention(conn))
+        orphans_cleaned.extend(await maybe_rotate_managed_secrets(conn))
         security_cvms_advanced.extend(await reconcile_security_cvm_attestations(conn))
         cvms_advanced.extend(await reconcile_dev_cvm_attestations(conn))
         await maybe_verify_audit_chain(conn)
@@ -5432,6 +5887,34 @@ async def prune_expired_auth_flow_rows(conn: Any) -> list[str]:
     return cleaned
 
 
+def oauth_connection_state_retention_seconds() -> int:
+    raw = load_settings().raw.get("OAUTH_CONNECTION_STATE_RETENTION_SECONDS", str(30 * 86400))
+    try:
+        return max(3600, int(raw))
+    except ValueError:
+        return 30 * 86400
+
+
+async def prune_expired_oauth_connection_states(conn: Any) -> list[str]:
+    status = await conn.execute(
+        """
+        WITH stale AS (
+            SELECT id
+            FROM oauth_connection_states
+            WHERE expires_at < now() - make_interval(secs => $1)
+            ORDER BY expires_at
+            LIMIT 1000
+            FOR UPDATE SKIP LOCKED
+        )
+        DELETE FROM oauth_connection_states
+        WHERE id IN (SELECT id FROM stale)
+        """,
+        float(oauth_connection_state_retention_seconds()),
+    )
+    count = deleted_row_count(status)
+    return [f"maintenance:oauth_connection_states:{count}"] if count else []
+
+
 async def prune_expired_operations(conn: Any) -> int:
     status = await conn.execute(
         """
@@ -5573,6 +6056,7 @@ async def reconcile_security_cvm_attestations(conn: Any) -> list[str]:
     except AttestationVerifierUnavailable:
         return []
     interval = reconciler_attestation_interval_seconds()
+    unreachable_grace = reconciler_attestation_unreachable_grace_seconds()
     advanced: list[str] = []
     # Claim candidates in a SHORT transaction, then release the FOR UPDATE locks and the
     # in-transaction connection BEFORE running the shade + verifier subprocesses: a reconciler
@@ -5641,6 +6125,12 @@ async def reconcile_security_cvm_attestations(conn: Any) -> list[str]:
                 security_cvm_id=str(_row_value(row, "id")),
                 code=exc.code,
             )
+            if exc.code == "ATTESTATION_FETCH_FAILED" and _attestation_overdue_past_grace(
+                _row_value(row, "attestation_verified_at"), interval, unreachable_grace
+            ):
+                async with conn.transaction():
+                    if await _record_cvm_attestation_refresh_unreachable(conn, row, SECURITY_CVM, code=exc.code):
+                        advanced.append(str(_row_value(row, "id")))
             continue
 
         drift_kind = attestation_drift_kind(
@@ -5673,6 +6163,7 @@ async def reconcile_dev_cvm_attestations(conn: Any) -> list[str]:
     except AttestationVerifierUnavailable:
         return []
     interval = reconciler_attestation_interval_seconds()
+    unreachable_grace = reconciler_attestation_unreachable_grace_seconds()
     advanced: list[str] = []
     # Claim candidates in a SHORT transaction, then release the FOR UPDATE locks before the
     # verifier subprocess: a reconciler step never holds a transaction across an external call
@@ -5721,6 +6212,12 @@ async def reconcile_dev_cvm_attestations(conn: Any) -> list[str]:
                 cvm_id=str(_row_value(row, "id")),
                 code=exc.code,
             )
+            if exc.code == "ATTESTATION_FETCH_FAILED" and _attestation_overdue_past_grace(
+                _row_value(row, "attestation_verified_at"), interval, unreachable_grace
+            ):
+                async with conn.transaction():
+                    if await _record_cvm_attestation_refresh_unreachable(conn, row, DEV_CVM, code=exc.code):
+                        advanced.append(str(_row_value(row, "id")))
             continue
 
         drift_kind = attestation_drift_kind(
@@ -5875,6 +6372,55 @@ async def _record_cvm_attestation_refresh_drift(
             "image_measurement": report.image_measurement,
             "rtmr3_digest": report.rtmr3_digest,
             "drift_kind": drift_kind,
+            "source": "reconciler",
+        },
+    )
+    return True
+
+
+def _attestation_overdue_past_grace(verified_at: Any, interval: int, grace: int) -> bool:
+    if verified_at is None:
+        return False
+    return verified_at < datetime.now(timezone.utc) - timedelta(seconds=interval + grace)
+
+
+async def _record_cvm_attestation_refresh_unreachable(conn: Any, row: Any, kind: CvmKind, *, code: str) -> bool:
+    result = await conn.execute(
+        f"""
+        UPDATE {kind.table}
+        SET error_reason = 'ATTESTATION_UNREACHABLE',
+            updated_at = now()
+        WHERE id = $1
+          AND state = 'RUNNING'
+          AND deleted_at IS NULL
+          AND attestation_verified_at IS NOT DISTINCT FROM $2
+          AND error_reason IS DISTINCT FROM 'ATTESTATION_UNREACHABLE'
+          AND error_reason IS DISTINCT FROM 'ATTESTATION_DRIFT'
+          AND error_reason IS DISTINCT FROM 'SECURITY_CVM_REBIND_REQUIRED'
+        """,
+        _row_value(row, "id"),
+        _row_value(row, "attestation_verified_at"),
+    )
+    if result != "UPDATE 1":
+        return False
+    last_verified = _row_value(row, "attestation_verified_at")
+    await insert_audit_event(
+        conn,
+        entity_id=_row_value(row, "entity_id"),
+        actor_id=None,
+        actor_email="reconciler@umbra.invalid",
+        action=f"{kind.audit_prefix}_ATTESTATION_UNREACHABLE",
+        target_type=kind.audit_target,
+        target_id=_row_value(row, "id"),
+        before={
+            "attestation_verified_at": (
+                last_verified.isoformat().replace("+00:00", "Z") if last_verified is not None else None
+            ),
+            "error_reason": _row_value(row, "error_reason"),
+        },
+        after={
+            "error_reason": "ATTESTATION_UNREACHABLE",
+            "failure_code": code,
             "source": "reconciler",
         },
     )

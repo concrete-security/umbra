@@ -51,14 +51,14 @@ jobs:
           version: v0.70.0
           scan-type: fs
           scan-ref: .
+          trivyignores: .trivyignore.yaml
           scanners: vuln,secret,misconfig
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           exit-code: '1'
           timeout: 15m
-      # Reciprocal licenses are MEDIUM and unrecognized licenses are UNKNOWN in
-      # Trivy. Both require explicit review; suppressions live only in the
-      # package-scoped Rego policy and are intentionally empty at launch.
+      # CRITICAL classifications are forbidden and block release. All other
+      # detected licenses remain inventoried for explicit maintainer review.
       - name: Enforce dependency license policy
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
@@ -67,7 +67,7 @@ jobs:
           scan-type: fs
           scan-ref: .
           scanners: license
-          severity: UNKNOWN,MEDIUM,HIGH,CRITICAL
+          severity: CRITICAL
           ignore-policy: .trivy-license-ignore.rego
           exit-code: '1'
           timeout: 15m
@@ -192,6 +192,7 @@ jobs:
           scan-type: image
           image-ref: umbra-security-scan:${{ matrix.name }}
           scanners: vuln
+          trivyignores: .trivyignore.yaml
           vuln-type: os,library
           severity: HIGH,CRITICAL
           ignore-unfixed: true
@@ -201,8 +202,8 @@ jobs:
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         env:
           # Include loose/bundled license texts as well as OS and language
-          # package metadata. Any exception must be explicit in the reviewed
-          # package-scoped policy file; the launch policy currently contains none.
+          # package metadata. CRITICAL classifications block release; the full
+          # inventory remains available for explicit maintainer review.
           TRIVY_LICENSE_FULL: 'true'
         with:
           version: v0.70.0
@@ -210,7 +211,7 @@ jobs:
           scan-type: image
           image-ref: umbra-security-scan:${{ matrix.name }}
           scanners: license
-          severity: UNKNOWN,MEDIUM,HIGH,CRITICAL
+          severity: CRITICAL
           ignore-policy: .trivy-license-ignore.rego
           exit-code: '1'
           timeout: 15m

@@ -1,9 +1,9 @@
 # syntax=docker/dockerfile:1.26.0@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
 # ---- atlas verifier (Rust, out-of-process attestation verifier) ----
 # Built from console/atlas-verify against the PUBLISHED atlas-rs crate — atlas stays
-# untouched. Same Debian bookworm base as the runtime stage below, so the binary's
-# glibc matches the Console container and it runs without ABI surprises. Rust pin must
-# be recent enough for the dependency tree's edition2024 crates (e.g. indexmap >=2.14).
+# untouched. The runtime's newer Debian glibc remains compatible with this
+# bookworm-built binary. Rust must be recent enough for the dependency tree's
+# edition2024 crates (e.g. indexmap >=2.14).
 FROM ghcr.io/astral-sh/uv:0.12.1@sha256:cf4eedcaa81655197f625739489effcbe71b61ceb1506f332c3facae5deceded AS uv
 
 FROM rust:1.96-slim-bookworm@sha256:e18a79fc84dfcfc3ab5ba72290398a644c135c97eaa881447fddc354ee4701a3 AS atlas-verify-builder
@@ -22,7 +22,7 @@ COPY atlas-verify/src ./src
 RUN cargo build --release --locked \
     && install -m 0755 target/release/umbra-atlas-verify /umbra-atlas-verify
 
-FROM python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de AS console-base
+FROM python:3.12-slim-trixie@sha256:229a2c5bfa27522db7815ea81f9bed70af17ccb9de9fc7ad142b1877b5830d36 AS console-base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -32,12 +32,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 RUN sed -i \
-      -e 's|URIs: http://deb.debian.org/debian$|URIs: https://snapshot.debian.org/archive/debian/20260713T000000Z|' \
-      -e 's|URIs: http://deb.debian.org/debian-security$|URIs: https://snapshot.debian.org/archive/debian-security/20260713T000000Z|' \
+      -e 's|URIs: http://deb.debian.org/debian$|URIs: https://snapshot.debian.org/archive/debian/20260811T000000Z|' \
+      -e 's|URIs: http://deb.debian.org/debian-security$|URIs: https://snapshot.debian.org/archive/debian-security/20260811T000000Z|' \
       /etc/apt/sources.list.d/debian.sources \
     && printf '%s\n' 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99snapshot \
     && apt-get update \
-    && apt-get install -y --no-install-recommends nodejs npm \
+    && apt-get upgrade -y \
+    && apt-get install -y --no-install-recommends nodejs \
     && rm -rf \
         /var/lib/apt/lists/* \
         /var/log/apt/* \
@@ -52,6 +53,14 @@ COPY --from=uv /uv /uvx /bin/
 # context, so the image cannot accidentally bake a stale opaque copy.
 FROM console-base AS webapp-builder
 WORKDIR /build
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends npm \
+    && rm -rf \
+        /var/lib/apt/lists/* \
+        /var/log/apt/* \
+        /var/log/alternatives.log \
+        /var/log/dpkg.log \
+        /var/cache/ldconfig/aux-cache
 COPY package.json package-lock.json ./
 RUN npm ci --ignore-scripts --no-audit --no-fund
 COPY tailwind.config.js ./
@@ -92,6 +101,13 @@ RUN uv sync --frozen --no-dev --no-editable \
 COPY --from=atlas-verify-builder /umbra-atlas-verify /usr/local/bin/umbra-atlas-verify
 
 EXPOSE 8000
+
+RUN groupadd --gid 10001 console \
+    && useradd --uid 10001 --gid console --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin console \
+    && chmod -R u=rwX,go=rX /app \
+    && chmod 0755 /entrypoint.sh
+
+USER 10001:10001
 
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["uvicorn", "umbra_console.app:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]

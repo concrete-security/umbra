@@ -12,6 +12,7 @@ feature branch --PR--> dev --reviewed promotion--> main --tag/release--> immutab
 | --- | --- | --- | --- |
 | PR gate | PR to `dev` | `.github/workflows/pr-gate.yml` | Run `make check` and `make test` without live credentials. |
 | Security checks | repository security triggers | `.github/workflows/security.yml` | Run public dependency, source, and artifact security gates. |
+| CVM image candidate | push to `dev`; manual after promotion | `.github/workflows/publish-cvm-images.yml` | Reproduce and publish digest-only Dev/Security images with SBOM and provenance, then emit a lock-shaped candidate. |
 | CLI release | manual | `.github/workflows/publish-cli.yml` | Package and publish one reviewed version and its installer tree. |
 
 The public repository contains no staging or production deployment workflow. The maintainers' private deployment repository records the exact public commit, release tag, image digest, SBOM, and provenance selected for each environment, and owns all live deployment orchestration.
@@ -40,6 +41,12 @@ Pull-request merge-ref caches do not flow into protected branches. Default-branc
 ## Deployment boundary
 
 The public repository is authoritative for source, tests, release artifacts, image digests, SBOMs, and provenance. It has no cloud deployment identity and receives no staging or production credentials.
+
+The CVM publisher receives only the workflow's package-scoped `GITHUB_TOKEN`.
+It publishes tagless GHCR indexes, records their stable runtime subjects and
+attestation-index references, and leaves both guest measurements null. The
+private deployment authority measures the Dev image through its provider canary
+and applies that shared dstack guest MRTD to both components before staging.
 
 The private deployment repository is authoritative for environment lock files, Workload Identity Federation conditions, service accounts, hosts, databases, provider workspaces, approval gates, session caches, rollback state, and recovery material. It consumes only immutable public artifacts and never rebuilds product source for deployment.
 

@@ -48,6 +48,8 @@ make test
 
 The repository pins Python 3.12 in `.python-version`, matching the Console container. `uv` provisions it when necessary; newer Python minors are not part of the supported or release-tested runtime. The Console image restores the dated Debian snapshots recorded by its digest-pinned Rust and Python bases before installing system packages, so a later repository update cannot silently change the same source build.
 
+The final image normalizes application-tree permissions before switching to unprivileged UID/GID 10001. A restrictive source-checkout umask therefore cannot make Alembic metadata or installed application files unreadable at startup, while the runtime user remains unable to modify the image contents.
+
 `console/package.json` is a private build manifest, not a package intended for npm publication. Its pinned `phala` runtime dependency supplies the provider CLI and narrow compose-hash helper; the development-only `tailwindcss` dependency rebuilds the operator dashboard CSS. The container installs the lock with package scripts disabled and prunes development dependencies.
 
 The ordinary Console suite uses fake asyncpg connections and needs no database. Database integration tests are opt-in through `UMBRA_TEST_DATABASE_URL` and must point at a role allowed to create a throwaway database. Never point them at a production database.
@@ -59,6 +61,7 @@ The ordinary Console suite uses fake asyncpg connections and needs no database. 
 | FastAPI app | `src/umbra_console/app.py` |
 | Public REST routes | `src/umbra_console/routes.py` |
 | Auth routes | `src/umbra_console/routes_auth.py` |
+| OAuth / Connect | `src/umbra_console/routes_oauth.py`, `routes_connect.py`, `oauth_endpoints.py`, `static/connect/` |
 | Internal routes | `src/umbra_console/routes_internal.py` |
 | Bootstrap | `src/umbra_console/bootstrap.py` |
 | Scheduler | `src/umbra_console/scheduler.py` |
@@ -84,8 +87,10 @@ The ordinary Console suite uses fake asyncpg connections and needs no database. 
 
 Console state is durable. Schema changes require Alembic migrations and normal startup deployment. Do not drop or truncate tables, delete Compose volumes, reset the database, or run restore as a debugging technique. Use `make backup-console-db` before upgrades and follow `docs/versioning.md`.
 
+The public migration graph contains a lineage-only compatibility branch for the exact deployed pre-Umbra head `0032_attn_unreachable`. Its no-op revisions let that durable database run the real public migrations and converge at `0033_public_legacy_merge`. `0034_connect_oauth_schema` then installs the public Connect / OAuth / managed-secret tables and audit actions (idempotent on a database that already has them). Use full revision IDs because both branches contain a revision beginning with `0028`. Downgrade across the merge is unsupported; restore the pre-upgrade database backup instead.
+
 Generic self-host setup and deployment guidance lives in `docs/operator-setup.md` and `docs/production-deploy.md`.
 
 ## Scope
 
-The v0 Console supports Google OIDC, one Security CVM per entity, provider-backed Dev CVMs, profile policy, audit, traffic logs, and the operator dashboard. Additional identity providers, high availability, and connector/tool CVMs are outside the current v0 contract unless their specifications say otherwise.
+The v0 Console supports Google OIDC, one Security CVM per entity, provider-backed Dev CVMs, profile policy, OAuth Connect and managed-secret rotation, audit, traffic logs, and the operator dashboard. Additional identity providers, high availability, and connector/tool CVMs are outside the current v0 contract unless their specifications say otherwise.

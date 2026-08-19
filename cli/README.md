@@ -13,7 +13,7 @@ The authoritative contract is `docs/specs/cli.md`. Human-readable output formatt
 - Register and remove SSH keys.
 - Launch, list, attach to, stop, start, update, and terminate Dev CVMs.
 - Launch, inspect, update, attest, and terminate the entity Security CVM.
-- Create and configure profiles, profile membership, users, permissions, and quotas.
+- Create and configure profiles, profile membership, users, permissions, quotas, and Connect/managed-secret grants (`claude connect`, `codex connect`, `profile grants`).
 - Open `umbra tunnel`, `umbra ssh`, `umbra claude`, `umbra codex`, `umbra code`, and `umbra cursor` sessions.
 - Read audit events and submit/download audit exports.
 - Self-update from immutable published artifacts (`umbra update`) only after checksum and fixed-identity SLSA provenance verification, with a passive once-per-day new-version notice on stderr in interactive terminals.
@@ -61,6 +61,10 @@ Run the **Release Umbra CLI** workflow manually. Its dry run packages the crate 
 | `src/commands/auth.rs` | Login, logout, refresh, token, and session-status handling. |
 | `src/commands/cvm.rs` | Dev CVM list, instance-type catalog listing, launch, lifecycle, profile attach/detach, operation polling, policy-file writes. |
 | `src/commands/ssh.rs` | SSH, dtach session, editor, Claude, and Codex wrappers. |
+| `src/commands/claude_connect.rs` | `claude connect`: stdin mint into profile secret material. |
+| `src/commands/codex_connect.rs` | `codex connect`: laptop grant upload and sandbox placeholder auth. |
+| `src/atls_policy_store.rs` | Per-CVM aTLS policy persist/load shared by launch, update, SSH, and tunnel. |
+| `src/prompt.rs` | Typed yes/no consent prompts. |
 | `src/commands/alias.rs` | Client-side alias store (CVM/profile/ssh-key/session) and resolution helpers. |
 | `src/commands/tunnel.rs` | Low-level WebSocket tunnel over atlas-rs-verified TLS; owns the aTLS connect and policy-file lookup. |
 | `src/commands/update.rs` | Fail-closed, SLSA-verified self-update from immutable install-service artifacts plus the passive new-version check (cache, background probe, stderr notice). |
@@ -70,7 +74,7 @@ Run the **Release Umbra CLI** workflow manually. Its dry run packages the crate 
 | `src/console.rs` | Shared Console API client: `fetch_json` (GET), `send` / `post_json` (writes), response decoding, and error-envelope-to-bracket mapping. |
 | `src/operation.rs` | Console async-operation types and the poll → extract helpers (`wait_for_operation`, `await_result`); the submit itself is a command-layer `post_json`. |
 | `src/style.rs` | Human-output rendering primitives and the `--json` emitter (`emit_json`). |
-| `src/fsutil.rs` | Atomic, owner-only local-file write (`write_atomic_file`), shared by config / session / alias / per-CVM state / policy files. |
+| `src/fsutil.rs` | Atomic, owner-only local-file write (`write_atomic_file`) and bounded `StoreLock` around read→modify→write of local stores. |
 
 Every Console write (POST/PATCH/DELETE) goes through the shared `src/console.rs` client (`send` / `post_json`), and GET reads that need only a typed JSON body use `fetch_json`. Reads that need the raw response — ETag capture, custom 404 handling — and the OAuth device flow still build their own request.
 

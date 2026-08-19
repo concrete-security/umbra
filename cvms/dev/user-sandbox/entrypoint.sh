@@ -293,7 +293,9 @@ ensure_dev_dir_if_missing 0755 /home/dev/.vscode-server
 ensure_claude_config /home/dev/.claude/.claude.json
 ensure_claude_native_install
 
-if [ -n "${SECURITY_CVM_PROXY_TOKEN+x}" ] || [ -n "${SECURITY_CVM_ATLS_POLICY_B64+x}" ]; then
+if [ -n "${SECURITY_CVM_PROXY_TOKEN+x}" ] \
+  || [ -n "${SECURITY_CVM_ATLS_POLICY_B64+x}" ] \
+  || [ -n "${SECURITY_CVM_ATLS_POLICY_GZIP_B64+x}" ]; then
   fail "forwarder-only Security CVM material must not be injected into user-sandbox"
 fi
 
