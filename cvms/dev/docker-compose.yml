@@ -45,7 +45,7 @@ services:
     image: "${DEV_CVM_IMAGE:?set DEV_CVM_IMAGE to a digest-pinned GHCR image}"
     entrypoint: ["umbra-dev-egress-forwarder"]
     healthcheck:
-      disable: true
+      test: ["NONE"]
     read_only: true
     tmpfs:
       - /tmp
@@ -73,7 +73,7 @@ services:
     image: "${DEV_CVM_IMAGE:?set DEV_CVM_IMAGE to a digest-pinned GHCR image}"
     entrypoint: ["umbra-dev-tunnel"]
     healthcheck:
-      disable: true
+      test: ["NONE"]
     read_only: true
     tmpfs:
       - /tmp

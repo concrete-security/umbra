@@ -577,7 +577,7 @@ services:
     image: registry.example.com/umbra/dev-cvm/egress-forwarder:<sha>
     entrypoint: ["umbra-dev-egress-forwarder"]
     healthcheck:
-      disable: true
+      test: ["NONE"]
     read_only: true
     tmpfs: [/tmp, /run]
     cap_drop: [ALL]
@@ -596,7 +596,7 @@ services:
     image: registry.example.com/umbra/dev-cvm/tunnel:<sha>
     entrypoint: ["umbra-dev-tunnel"]
     healthcheck:
-      disable: true
+      test: ["NONE"]
     read_only: true
     tmpfs: [/tmp]
     cap_drop: [ALL]

@@ -729,7 +729,7 @@ def test_render_dev_cvm_compose_config_matches_checked_in_compose_success() -> N
     """Pin the two Dev CVM composes together: the renderer's output is what actually
     launches production CVMs and what ops/deploy/measure-dev-cvm-image.py measures, while
     cvms/dev/docker-compose.yml is the reviewed reference. Drift between them (e.g. the
-    missing sidecar `healthcheck: disable`) silently ships a different runtime than the
+    missing sidecar healthcheck override) silently ships a different runtime than the
     one the repo documents and tests.
     """
     local, rendered = _dev_cvm_compose_pair()
@@ -752,14 +752,16 @@ def test_render_dev_cvm_compose_config_matches_checked_in_compose_success() -> N
                 "retries": 5,
             },
         ),
-        ("dev-egress-forwarder", {"disable": True}),
-        ("dev-tunnel", {"disable": True}),
+        ("dev-egress-forwarder", {"test": ["NONE"]}),
+        ("dev-tunnel", {"test": ["NONE"]}),
     ],
     ids=["sandbox-probes-sshd", "forwarder-disabled", "tunnel-disabled"],
 )
 def test_render_dev_cvm_compose_config_healthchecks_success(service: str, expected_healthcheck: dict) -> None:
     """dev-cvm.md §3.3: the sshd probe applies to user-sandbox only, the sidecars reuse the
-    same image artifact and MUST disable the inherited probe (otherwise they sit permanently
+    same image artifact and MUST override the inherited probe with test: ["NONE"], the
+    compose-spec equivalent of disable: true accepted by Phala Cloud's compose validator
+    (otherwise they sit permanently
     unhealthy), and no service may gate startup on another's health.
     """
     rendered = yaml.safe_load(render_dev_cvm_compose_config({"image": DEV_CVM_PINNED_IMAGE}))

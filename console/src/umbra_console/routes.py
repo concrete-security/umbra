@@ -1376,9 +1376,11 @@ def render_dev_cvm_compose_config(resolved: dict[str, object]) -> str:
             "    entrypoint: [\"umbra-dev-egress-forwarder\"]",
             # The sidecars reuse the sandbox image, whose baked healthcheck
             # probes sshd; without this they sit permanently unhealthy
-            # (docs/specs/dev-cvm.md §3.3).
+            # (docs/specs/dev-cvm.md §3.3). Spelled test: ["NONE"], the
+            # compose-spec equivalent of disable: true, because Phala
+            # Cloud's compose validator requires healthcheck.test.
             "    healthcheck:",
-            "      disable: true",
+            "      test: [\"NONE\"]",
             "    read_only: true",
             "    tmpfs:",
             "      - /tmp",
@@ -1408,7 +1410,7 @@ def render_dev_cvm_compose_config(resolved: dict[str, object]) -> str:
             # Same inherited-sshd-healthcheck disable as the forwarder above
             # (docs/specs/dev-cvm.md §3.3).
             "    healthcheck:",
-            "      disable: true",
+            "      test: [\"NONE\"]",
             "    read_only: true",
             "    tmpfs:",
             "      - /tmp",
