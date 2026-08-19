@@ -162,7 +162,7 @@ def main() -> None:
     )
     require("chown -R" not in entrypoint, "entrypoint must not recursively chown volumes")
     require(
-        re.search(r"dev-egress-forwarder:.*?healthcheck:\s+disable:\s+true", compose, re.DOTALL) is not None,
+        re.search(r'dev-egress-forwarder:.*?healthcheck:\s+test:\s+\["NONE"\]', compose, re.DOTALL) is not None,
         "forwarder must disable the inherited sshd image healthcheck",
     )
     user_sandbox = compose.split("  dev-egress-forwarder:", 1)[0]
@@ -171,7 +171,7 @@ def main() -> None:
         "sandbox CA bootstrap must receive the launch-bound Security CVM FQDN",
     )
     require(
-        re.search(r"dev-tunnel:.*?healthcheck:\s+disable:\s+true", compose, re.DOTALL) is not None,
+        re.search(r'dev-tunnel:.*?healthcheck:\s+test:\s+\["NONE"\]', compose, re.DOTALL) is not None,
         "tunnel must disable the inherited sshd image healthcheck",
     )
 
