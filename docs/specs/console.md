@@ -3380,7 +3380,7 @@ The Console reads configuration from two sources: **plain values** (env vars or 
 | `PROVIDER_UPDATE_TIMEOUT_SECONDS` | int | `900` | Timeout for the provider update submit call. Must be between 300 and 1800 seconds. The provider-running wait is handled by the operation scheduler after submit. |
 | `PHALA_REGION` | string | `FR-PARIS-1` | Default region. |
 | `PHALA_DEFAULT_INSTANCE_TYPE` | string | `tdx.small` | Default Security CVM instance type when `POST /entities/{id}/security-cvm` omits it. |
-| `SHADE_DIR` | filesystem path | `""` | Required for provisioning sagas. Directory of the operator-approved pinned shade checkout. The Console invokes `uv run --project ${SHADE_DIR} shade build -c <shade.yml> -f <docker-compose.yml> -o <docker-compose.shade.yml>` and `shade policy generate` at the adapter boundary (§18.8). |
+| `SHADE_DIR` | filesystem path | `""` | Required for provisioning sagas. Directory of the operator-approved shade checkout whose content is pinned by `SHADE_REF` in `.env.common`. The Console invokes `uv run --project ${SHADE_DIR} shade build -c <shade.yml> -f <docker-compose.yml> -o <docker-compose.shade.yml>` and `shade policy generate` at the adapter boundary (§18.8). |
 | `DEV_CVM_DEFAULT_INSTANCE_TYPE` | string | `tdx.small` | Default Dev CVM instance type when `POST /cvms` omits it (§3.6). When empty, the route returns `422 VALIDATION_ERROR` if the request also omits `instance_type`. |
 | `DEV_CVM_DEFAULT_REGION` | string | `""` | Dev-specific region default when `POST /cvms` omits it. When empty, Dev launch falls back to `PHALA_REGION`; when both are empty AND the request omits `region`, the route returns `422 VALIDATION_ERROR`. |
 | `DEV_CVM_DEFAULT_DISK_GB` | int | `40` | Default Dev CVM root disk (GB) when `POST /cvms` omits `disk_size_gb` (§3.6). Matches the provider's own default so existing launch behavior is unchanged. A value outside `[DEV_CVM_MIN_DISK_GB, DEV_CVM_MAX_DISK_GB]` (or unparseable) yields `503 SERVICE_UNAVAILABLE`. |
@@ -4079,7 +4079,7 @@ When `JWT_PRIVATE_KEY_REF` is `kms://...`, the implementation MUST use the KMS p
 
 - **Phala / dstack:** the `phala` CLI (subprocess), per §10.1.
 - **Cloudflare:** thin httpx wrapper, NOT the synchronous `cloudflare` SDK.
-- **shade:** an operator-approved checkout pinned by commit for Dev CVM compose generation and configured through `SHADE_DIR`.
+- **shade:** an operator-approved checkout at `SHADE_DIR`, content-pinned by `SHADE_REF` in `.env.common`. `make deploy` converges the checkout; provisioning sagas invoke shade through `SHADE_DIR`.
 - **atlas-rs verifier:** subprocess command from `ATLAS_VERIFIER_CMD`, invoked with JSON on stdin and no shell. Request shape: `{"kind":"dev_cvm"|"security_cvm","fqdn":<fqdn>,"policy":{...}}`, where `policy` carries the dstack TDX policy values from §10.4 / §10.4a. The verifier opens TCP to `fqdn`, uses it as the TLS SNI, and validates the certificate and attestation identity against `fqdn` with `fqdn` as HTTP Host. Success stdout is `{"image_measurement":<96hex>,"rtmr3_digest":<96hex>}`. Failure stdout MAY be `{"error":{"code":<§10.5 attestation code>,"details":{...}}}`; stderr is diagnostic only and MUST be redacted before logging.
 
 ### 18.9 Logging: `structlog`

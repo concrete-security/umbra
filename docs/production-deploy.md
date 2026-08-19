@@ -40,6 +40,8 @@ docker info >/dev/null
 docker buildx version  # must report exactly v0.34.0
 docker buildx inspect umbra-release --bootstrap  # exact digest-pinned BuildKit 0.32.2
 test -d "$SHADE_DIR"
+test -n "$SHADE_REF"
+test "$(git -c "safe.directory=${SHADE_DIR}" -C "$SHADE_DIR" rev-parse HEAD)" = "$SHADE_REF"
 uv run --project "$SHADE_DIR" shade --help >/dev/null
 test -n "$CONSOLE_HOST"
 test -n "$VM_PUBLIC_IP"
