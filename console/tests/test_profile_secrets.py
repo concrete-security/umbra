@@ -228,23 +228,38 @@ def test_user_and_profile_secret_aads_are_distinct_families_failure(monkeypatch)
         pytest.param(
             decrypt_profile_secret_value,
             {"profile_id": "profile-a", "injection_id": "anthropic-key"},
-            "concrete.profile_secret_material.v1:profile-a:anthropic-key",
+            "legacyns.profile_secret_material.v1:profile-a:anthropic-key",
             id="profile",
         ),
         pytest.param(
             decrypt_user_secret_value,
             {"user_id": "user-a", "name": "slack-user-token"},
-            "concrete.user_secret_material.v1:user-a:slack-user-token",
+            "legacyns.user_secret_material.v1:user-a:slack-user-token",
             id="user",
         ),
     ],
 )
 def test_secret_values_legacy_v1_reads_success(monkeypatch, decrypt, kwargs, aad) -> None:
-    """Legacy v1 rows remain readable only under their historical AAD."""
+    """Legacy v1 rows remain readable only under the configured historical AAD namespace."""
     monkeypatch.setenv("SECRET_INJECTION_KEK_B64", TEST_KEK)
+    monkeypatch.setenv("LEGACY_SECRET_AAD_NAMESPACE", "legacyns")
     ciphertext = _ciphertext_for_aad(version="v1", aad=aad, value="legacy-secret")
 
     assert decrypt(**kwargs, ciphertext=ciphertext) == "legacy-secret"
+
+
+def test_secret_values_legacy_v1_read_requires_namespace_failure(monkeypatch) -> None:
+    """Without the operator-configured namespace, v1 ciphertext is unreadable, with a clear error."""
+    monkeypatch.setenv("SECRET_INJECTION_KEK_B64", TEST_KEK)
+    monkeypatch.delenv("LEGACY_SECRET_AAD_NAMESPACE", raising=False)
+    ciphertext = _ciphertext_for_aad(
+        version="v1",
+        aad="legacyns.profile_secret_material.v1:profile-a:anthropic-key",
+        value="legacy-secret",
+    )
+
+    with pytest.raises(ValueError, match="LEGACY_SECRET_AAD_NAMESPACE"):
+        decrypt_profile_secret_value(profile_id="profile-a", injection_id="anthropic-key", ciphertext=ciphertext)
 
 
 @pytest.mark.parametrize(
@@ -273,8 +288,9 @@ def test_secret_values_cross_version_aad_fallback_failure(
     version,
     wrong_aad,
 ) -> None:
-    """A valid tag under the wrong product/version AAD is never retried."""
+    """A valid tag under the wrong namespace/version AAD is never retried."""
     monkeypatch.setenv("SECRET_INJECTION_KEK_B64", TEST_KEK)
+    monkeypatch.setenv("LEGACY_SECRET_AAD_NAMESPACE", "legacyns")
     ciphertext = _ciphertext_for_aad(version=version, aad=wrong_aad)
 
     with pytest.raises(InvalidTag):

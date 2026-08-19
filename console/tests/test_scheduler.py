@@ -732,6 +732,7 @@ def security_cvm_resource_row(**overrides):
 
 def test_build_cvm_launch_env_binds_runtime_material(monkeypatch) -> None:
     monkeypatch.delenv("CONSOLE_URL", raising=False)
+    monkeypatch.setenv("DEV_TUNNEL_EXTRA_PATHS", "/legacy-cli/tunnel")
 
     env, binding = scheduler.build_cvm_launch_env(
         launch_snapshot(),
@@ -755,6 +756,7 @@ def test_build_cvm_launch_env_binds_runtime_material(monkeypatch) -> None:
     assert "SECURITY_CVM_ATLS_POLICY_B64" not in env
     assert "SECURITY_CVM_ATLS_POLICY_GZIP_B64" not in env
     assert env["CONSOLE_URL"] == ""
+    assert env["DEV_TUNNEL_PATH"] == "/umbra/tunnel,/legacy-cli/tunnel"
     assert binding == {
         "cvm_id": "00000000-0000-4000-8000-000000000031",
         "console_url": "",
@@ -880,7 +882,8 @@ def test_cvm_launch_provider_name_is_managed_scoped() -> None:
     )
 
 
-def test_render_dev_cvm_shade_config_routes_tunnel_websocket() -> None:
+def test_render_dev_cvm_shade_config_routes_tunnel_websocket(monkeypatch) -> None:
+    monkeypatch.delenv("DEV_TUNNEL_EXTRA_PATHS", raising=False)
     shade = scheduler.render_dev_cvm_shade_config(launch_snapshot(), name="umbra-v0-cvm-test")
 
     assert "name: umbra-v0-cvm-test" in shade
@@ -889,8 +892,24 @@ def test_render_dev_cvm_shade_config_routes_tunnel_websocket() -> None:
     assert "region: FR-PARIS-1" in shade
     assert "dev-tunnel:" in shade
     assert "path: /umbra/tunnel" in shade
-    assert "path: /concrete/tunnel" in shade
     assert "websocket: true" in shade
+
+
+def test_render_dev_cvm_shade_config_routes_extra_tunnel_paths(monkeypatch) -> None:
+    """Operator-configured aliases render as additional routes to the same tunnel."""
+    monkeypatch.setenv("DEV_TUNNEL_EXTRA_PATHS", "/legacy-cli/tunnel, /umbra/tunnel,")
+    shade = scheduler.render_dev_cvm_shade_config(launch_snapshot(), name="umbra-v0-cvm-test")
+
+    assert shade.count("service: dev-tunnel") == 2
+    assert shade.count("path: /umbra/tunnel") == 1
+    assert "path: /legacy-cli/tunnel" in shade
+
+
+def test_dev_tunnel_extra_paths_rejects_relative_paths_failure(monkeypatch) -> None:
+    monkeypatch.setenv("DEV_TUNNEL_EXTRA_PATHS", "legacy-cli/tunnel")
+
+    with pytest.raises(RuntimeError, match="DEV_TUNNEL_EXTRA_PATHS"):
+        scheduler.dev_tunnel_paths()
 
 
 def test_security_cvm_provider_name_is_managed_scoped() -> None:

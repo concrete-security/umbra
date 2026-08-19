@@ -2039,7 +2039,7 @@ Profile secret-injection values are write-only material encrypted outside `<Prof
 
 The Console strips `secret_injections[*].value` before writing `entity_profiles.policy`, upserts the corresponding encrypted rows here, and deletes rows for injections removed by policy replacement. A DB check constraint MUST reject `entity_profiles.policy` documents containing `secret_injections[*].value`, and active writes use `v2:` envelope format for `profile_secret_material.ciphertext`. User-facing profile reads MUST NOT return plaintext or ciphertext. Internal SC-control expands plaintext `value` only when rendering the Security CVM policy pull.
 
-Current writes use Umbra AAD `umbra.profile_secret_material.v2:{profile_id}:{injection_id}`; `v2:` is the active envelope version for all new rows. Reads remain compatibility-only for legacy `v1:` ciphertext bound to the historical AAD `concrete.profile_secret_material.v1:{profile_id}:{injection_id}` until an explicit decrypt-and-re-encrypt migration completes.
+Current writes use Umbra AAD `umbra.profile_secret_material.v2:{profile_id}:{injection_id}`; `v2:` is the active envelope version for all new rows. Reads remain compatibility-only for legacy `v1:` ciphertext bound to the historical AAD `{LEGACY_SECRET_AAD_NAMESPACE}.profile_secret_material.v1:{profile_id}:{injection_id}` until an explicit decrypt-and-re-encrypt migration completes. The namespace is operator configuration carried by migrated deployments; when unset (every fresh install), `v1:` reads MUST fail with a configuration error rather than fall back to any built-in value.
 
 `value_from` injections (§2.3) store nothing in this table — their material lives in `user_secret_material` (§7.6b) keyed by user, so policy replacement neither wipes nor rewrites it.
 
@@ -2051,7 +2051,7 @@ Per-user, host-bound secret values referenced by profile `secret_injections[*].v
 |---|---|---|
 | `user_id` | `UUID NOT NULL FK users.id CASCADE` | PK part 1. |
 | `name` | `VARCHAR(100) NOT NULL` | PK part 2. Matches `^[A-Za-z0-9._:-]{1,100}$`; referenced by `value_from.user_secret`. |
-| `ciphertext` | `TEXT NOT NULL` | AES-GCM envelope encrypted with `SECRET_INJECTION_KEK_B64` (same KEK as §7.6a), AAD `umbra.user_secret_material.v2:{user_id}:{name}` for active writes (`v2:` envelope). Legacy reads for historical `concrete.user_secret_material.v1:{user_id}:{name}` (`v1:` envelope) remain supported for migration only. |
+| `ciphertext` | `TEXT NOT NULL` | AES-GCM envelope encrypted with `SECRET_INJECTION_KEK_B64` (same KEK as §7.6a), AAD `umbra.user_secret_material.v2:{user_id}:{name}` for active writes (`v2:` envelope). Legacy reads for historical `{LEGACY_SECRET_AAD_NAMESPACE}.user_secret_material.v1:{user_id}:{name}` (`v1:` envelope) remain supported for migration only. |
 | `allowed_hosts` | `JSONB NOT NULL` | Non-empty array (≤ 16) of host-binding patterns in the `DestinationRule.host` grammar: exact host, `*.suffix`, or `*`. DB check: array type. |
 | `created_at` | `TIMESTAMPTZ NOT NULL DEFAULT now()` | |
 | `updated_at` | `TIMESTAMPTZ NOT NULL DEFAULT now()` | |
@@ -3227,7 +3227,7 @@ Cursor pagination uses a `(seq ASC)` keyset (the chain order, not the `timestamp
 `POST /audit/export` (§3.10) is gated by `AUDIT_EXPORT` (T-21) — distinct from `AUDIT_VIEW` because bulk export produces an artefact that survives outside the Console. The export Operation:
 
 1. Materialises the rows matching the supplied filters (paginating internally; row cap `1_000_000` per export).
-2. Streams them as `csv` or `ndjson` to the configured artifact store. v0 supports `file://` for local testing and an external Postgres store for production. The Postgres store MUST be separate from the Console runtime database and use credentials separate from `DATABASE_URL`; `AUDIT_EXPORT_BUCKET` is a `postgresql://`/`postgres://` DSN with optional `table=<identifier>` (active default `umbra_audit_export_artifacts`). Legacy deployments MAY set `table=concrete_audit_export_artifacts` only as an explicit migration window. The external table MUST be pre-created and grant the writer `INSERT, SELECT` only:
+2. Streams them as `csv` or `ndjson` to the configured artifact store. v0 supports `file://` for local testing and an external Postgres store for production. The Postgres store MUST be separate from the Console runtime database and use credentials separate from `DATABASE_URL`; `AUDIT_EXPORT_BUCKET` is a `postgresql://`/`postgres://` DSN with optional `table=<identifier>` (active default `umbra_audit_export_artifacts`). Legacy deployments MAY set `table=` to their pre-migration artifact table name only as an explicit migration window. The external table MUST be pre-created and grant the writer `INSERT, SELECT` only:
 
 ```
 CREATE TABLE umbra_audit_export_artifacts (
@@ -3269,7 +3269,7 @@ The replay processes every committed row in ascending `seq` order, from the firs
 The chain is anchored periodically to an external append-only store:
 
 - A scheduler-driven task (§9.2 step 5) takes the latest `(seq, row_hash)` and writes it to the configured external Postgres anchor store (`AUDIT_ANCHOR_TARGET`, §12). The bytes committed externally are `JCS({last_seq,last_row_hash,anchored_at,console_kid})`.
-- `AUDIT_ANCHOR_TARGET` MUST be a `postgresql://` or `postgres://` DSN for a database that is separate from the Console runtime database and uses credentials separate from `DATABASE_URL`. The optional query parameter `table=<identifier>` selects the external table name; the active default is `umbra_audit_anchors`. Legacy deployments MAY set `table=concrete_audit_anchors` only as an explicit migration window. Other query parameters are passed to the Postgres driver. The table MUST be pre-created by the operator:
+- `AUDIT_ANCHOR_TARGET` MUST be a `postgresql://` or `postgres://` DSN for a database that is separate from the Console runtime database and uses credentials separate from `DATABASE_URL`. The optional query parameter `table=<identifier>` selects the external table name; the active default is `umbra_audit_anchors`. Legacy deployments MAY set `table=` to their pre-migration anchor table name only as an explicit migration window. Other query parameters are passed to the Postgres driver. The table MUST be pre-created by the operator:
 
 ```
 CREATE TABLE umbra_audit_anchors (
@@ -3418,15 +3418,17 @@ The Console reads configuration from two sources: **plain values** (env vars or 
 | `RECONCILER_INTERVAL_SECONDS` | int ≥ 1 | `30` | Background loop interval. |
 | `OPERATION_RETENTION_DAYS` | int 1..365 | `30` | Per-operation TTL after `succeeded` / `failed` / `cancelled` (§7.17). |
 | `TRAFFIC_LOG_RETENTION_DAYS` | int 7..730 | `90` | Daily prune horizon for `traffic_logs` (§11.8). |
-| `AUDIT_ANCHOR_TARGET` | URI | (none, REQUIRED in production) | External Postgres anchor DSN (`postgresql://...` or `postgres://...`; optional `?table=<identifier>`, active default `umbra_audit_anchors`, with `concrete_audit_anchors` available only during explicit migration). §11.6. |
+| `AUDIT_ANCHOR_TARGET` | URI | (none, REQUIRED in production) | External Postgres anchor DSN (`postgresql://...` or `postgres://...`; optional `?table=<identifier>`, active default `umbra_audit_anchors`; a pre-migration table name is allowed only during explicit migration). §11.6. |
 | `AUDIT_ANCHOR_INTERVAL_SECONDS` | int 60..86400 | `3600` | Anchor cadence. |
-| `AUDIT_EXPORT_BUCKET` | URI | (none, REQUIRED for `POST /audit/export`) | Local `file://` bucket for development or external Postgres artifact-store DSN (`postgresql://...`; optional `?table=<identifier>`, active default `umbra_audit_export_artifacts`, with `concrete_audit_export_artifacts` available only during explicit migration). §11.5. |
+| `AUDIT_EXPORT_BUCKET` | URI | (none, REQUIRED for `POST /audit/export`) | Local `file://` bucket for development or external Postgres artifact-store DSN (`postgresql://...`; optional `?table=<identifier>`, active default `umbra_audit_export_artifacts`; a pre-migration table name is allowed only during explicit migration). §11.5. |
 | `METRICS_TOKEN` `secret` | string | `""` | Bearer token required by `GET /metrics` (§13.6). When empty, `/metrics` returns `503` so an unconfigured deployment does not accidentally expose metrics. |
 | `LOG_LEVEL` | enum `debug` / `info` / `warn` / `error` | `info` | Stdlib + structlog filter (§13.3). |
 | `TRUST_FORWARDED_HEADERS` | bool | `false` | When `true`, `X-Forwarded-For` is honored. MUST remain `false` unless fronted by a sanitising reverse proxy (§13.8). |
 | `AUTO_PROVISION_SECURITY_CVM_ON_PROFILE_CREATE` | bool | `false` | Logs an auto-provision marker on profile creation; the saga itself does not run inline. |
 | `UMBRA_ALLOW_BOOTSTRAP` | bool | `false` | Bootstrap (§12.3) refuses to run unless `true`. Not read elsewhere. |
 | `SANDBOX_ENV_VALUE_DENYLIST` | comma-list of regex | `^sk-ant-[A-Za-z0-9_-]+$,^sk-[A-Za-z0-9]{32,}$,^gh[pousr]_[A-Za-z0-9]{36,}$,^AKIA[0-9A-Z]{16}$,^ASIA[0-9A-Z]{16}$` | Patterns rejected by `policy.sandbox_env` validation (§2.3 `<Profile>`, §8.5). Defaults cover Anthropic, OpenAI, GitHub, and AWS access-key shapes; operators MAY extend with provider-specific patterns. |
+| `DEV_TUNNEL_EXTRA_PATHS` | comma-list of absolute URL paths | `""` | Alias tunnel paths for clients that predate `/umbra/tunnel`. Each entry is rendered as an additional Dev CVM route to `dev-tunnel:8090` and appended to the `DEV_TUNNEL_PATH` value injected at launch/update (dev-cvm spec §3.7, §4.3). |
+| `LEGACY_SECRET_AAD_NAMESPACE` | string | `""` | Historical AAD namespace for `v1:` secret envelopes written before the rename (§7.6a/§7.6b). Set only on migrated deployments; when unset, `v1:` reads fail with a configuration error. |
 
 ### 12.2 Secrets policy
 
