@@ -5,14 +5,33 @@ use std::{
 
 use serde::Deserialize;
 
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+/// `default_profile` takes a list because a Dev CVM attaches 1..16 profiles and
+/// merges their policies, so "the profiles I always launch with" is a set, not a
+/// single value. The bare-string form is kept — and listed first, so it is what a
+/// one-element list round-trips to — because every `config.toml` already written
+/// holds one, and a typed key that stopped accepting its own old value would make
+/// the whole file unusable on upgrade.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged, expecting = "a name, or a list of names")]
+enum OneOrMany {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl OneOrMany {
+    fn into_vec(self) -> Vec<String> {
+        match self {
+            Self::One(value) => vec![value],
+            Self::Many(values) => values,
+        }
+    }
+}
 
 #[derive(Debug, Default, Deserialize)]
 struct ConfigFile {
     console_url: Option<String>,
     default_cvm: Option<String>,
-    default_profile: Option<String>,
+    default_profile: Option<OneOrMany>,
     default_ssh_identity: Option<PathBuf>,
     atls_policy: Option<PathBuf>,
     atls_policy_insecure_skip: Option<bool>,
@@ -25,9 +44,11 @@ struct ConfigFile {
     output: Option<String>,
     no_color: Option<bool>,
     log_level: Option<String>,
-    skill_auto_install: Option<String>,
+    skill_auto_install: Option<toml::Value>,
     install_base_url: Option<String>,
     no_update_check: Option<bool>,
+    #[serde(flatten)]
+    unknown: toml::Table,
 }
 
 #[derive(Debug, Default)]
@@ -54,7 +75,7 @@ pub struct ResolvedConfig {
     pub default_cvm_source: ConfigSource,
     pub default_ssh_identity: Option<PathBuf>,
     pub default_ssh_identity_source: ConfigSource,
-    pub profile: Option<String>,
+    pub profiles: Vec<String>,
     pub profile_source: ConfigSource,
     pub profile_flags: Vec<String>,
     pub atls_policy: Option<PathBuf>,
@@ -86,6 +107,8 @@ pub struct ResolvedConfig {
     pub install_base_url_source: ConfigSource,
     pub no_update_check: bool,
     pub no_update_check_source: ConfigSource,
+    pub config_file_error: Option<String>,
+    pub unknown_config_keys: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,7 +156,8 @@ impl ResolvedConfig {
         } else {
             (default_config_dir(), ConfigSource::Default)
         };
-        let file = read_config_file(&config_dir).unwrap_or_default();
+        let (file, config_file_error) = read_config_file(&config_dir);
+        let unknown_config_keys: Vec<String> = file.unknown.keys().cloned().collect();
         let (console_url, console_url_source) = if let Some(value) = overrides.console_url {
             (Some(value), ConfigSource::Flag)
         } else if let Some(value) = env::var("UMBRA_CONSOLE_URL")
@@ -175,19 +199,22 @@ impl ResolvedConfig {
             (None, ConfigSource::Missing)
         };
 
-        let (profile, profile_source) = if overrides.profile.len() == 1 {
-            (Some(overrides.profile[0].clone()), ConfigSource::Flag)
-        } else if overrides.profile.len() > 1 {
-            (None, ConfigSource::Flag)
-        } else if let Some(value) = env::var("UMBRA_DEFAULT_PROFILE")
+        let (profiles, profile_source) = if !overrides.profile.is_empty() {
+            (overrides.profile.clone(), ConfigSource::Flag)
+        } else if let Some(values) = env::var("UMBRA_DEFAULT_PROFILE")
             .ok()
-            .filter(|value| !value.is_empty())
+            .map(|value| split_list(&value))
+            .filter(|values| !values.is_empty())
         {
-            (Some(value), ConfigSource::Env)
-        } else if let Some(value) = file.default_profile {
-            (Some(value), ConfigSource::File)
+            (values, ConfigSource::Env)
+        } else if let Some(values) = file
+            .default_profile
+            .map(OneOrMany::into_vec)
+            .filter(|values| !values.is_empty())
+        {
+            (values, ConfigSource::File)
         } else {
-            (None, ConfigSource::Missing)
+            (Vec::new(), ConfigSource::Missing)
         };
 
         let (atls_policy, atls_policy_source) = if let Some(value) = overrides.atls_policy {
@@ -332,7 +359,13 @@ impl ResolvedConfig {
         let skill_auto_install = if env_bool("UMBRA_NO_SKILL") == Some(true) {
             Some(false)
         } else {
-            file.skill_auto_install.as_deref().and_then(parse_bool)
+            file.skill_auto_install
+                .as_ref()
+                .and_then(|value| match value {
+                    toml::Value::Boolean(flag) => Some(*flag),
+                    toml::Value::String(text) => parse_bool(text),
+                    _ => None,
+                })
         };
 
         let (install_base_url, install_base_url_source) = if let Some(value) =
@@ -367,7 +400,7 @@ impl ResolvedConfig {
             default_cvm_source,
             default_ssh_identity,
             default_ssh_identity_source,
-            profile,
+            profiles,
             profile_source,
             profile_flags: overrides.profile,
             atls_policy,
@@ -397,6 +430,8 @@ impl ResolvedConfig {
             install_base_url_source,
             no_update_check,
             no_update_check_source,
+            config_file_error,
+            unknown_config_keys,
         }
     }
 
@@ -408,61 +443,133 @@ impl ResolvedConfig {
     }
 
     pub fn require_profile(&self) -> Result<&str, String> {
-        if self.profile_flags.len() > 1 {
-            return Err(
-                "[usage] expected exactly one profile for this command; repeat --profile only where supported"
+        match self.profiles.as_slice() {
+            [only] => Ok(only),
+            [] => Err(
+                "[usage] missing profile; set --profile, UMBRA_DEFAULT_PROFILE, or config.toml default_profile"
                     .to_string(),
-            );
+            ),
+            several => Err(format!(
+                "[usage] this command takes exactly one profile but {} names {}; {}",
+                match self.profile_source {
+                    ConfigSource::Flag => "--profile",
+                    ConfigSource::Env => "UMBRA_DEFAULT_PROFILE",
+                    _ => "default_profile",
+                },
+                several.len(),
+                match self.profile_source {
+                    ConfigSource::Flag => {
+                        "repeat --profile only where several are supported".to_string()
+                    }
+                    _ => "pass --profile to choose one".to_string(),
+                }
+            )),
         }
-        self.profile.as_deref().ok_or_else(|| {
-            "[usage] missing profile; set --profile, UMBRA_DEFAULT_PROFILE, or config.toml default_profile".to_string()
-        })
     }
+}
+
+pub(crate) fn locked_update(
+    config_dir: &Path,
+    mutate: impl FnOnce(&mut toml::Table) -> Result<bool, String>,
+) -> Result<(), String> {
+    let lock_path = config_dir.join("config.lock");
+    let _guard = crate::fsutil::StoreLock::acquire(&lock_path)
+        .map_err(|err| format!("[error] failed to lock {}: {err}", lock_path.display()))?;
+    let target = config_dir.join("config.toml");
+    let mut table = read_config_table(&target)?;
+    if !mutate(&mut table)? {
+        return Ok(());
+    }
+    let data = toml::to_string_pretty(&table)
+        .map_err(|err| format!("[error] failed to serialize config: {err}"))?;
+    crate::fsutil::write_atomic_file(&target, data.as_bytes(), 0o600)
+        .map_err(|err| format!("[error] failed to write config file: {err}"))
 }
 
 pub(crate) fn persist_string_values(
     config_dir: &Path,
     values: &[(&str, String)],
 ) -> Result<(), String> {
-    fs::create_dir_all(config_dir)
-        .map_err(|err| format!("[error] failed to create config directory: {err}"))?;
-    #[cfg(unix)]
-    {
-        fs::set_permissions(config_dir, fs::Permissions::from_mode(0o700)).map_err(|err| {
-            format!("[error] failed to tighten config directory permissions: {err}")
-        })?;
-    }
+    locked_update(config_dir, |table| {
+        for (key, value) in values {
+            table.insert((*key).to_string(), toml::Value::String(value.clone()));
+        }
+        Ok(!values.is_empty())
+    })
+}
 
-    let target = config_dir.join("config.toml");
-    let mut table = match fs::read_to_string(&target) {
-        Ok(data) => data.parse::<toml::Table>().map_err(|err| {
-            format!(
-                "[error] failed to parse existing config {}: {err}",
-                target.display()
-            )
-        })?,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => toml::Table::new(),
+fn read_config_table(target: &Path) -> Result<toml::Table, String> {
+    let data = match fs::read_to_string(target) {
+        Ok(data) => data,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(toml::Table::new()),
         Err(err) => {
             return Err(format!(
                 "[error] failed to read existing config {}: {err}",
-                target.display()
+                crate::style::single_line(&target.display().to_string())
             ))
         }
     };
-    for (key, value) in values {
-        table.insert((*key).to_string(), toml::Value::String(value.clone()));
-    }
-    let data = toml::to_string_pretty(&table)
-        .map_err(|err| format!("[error] failed to serialize config: {err}"))?;
-    crate::fsutil::write_atomic_file(&target, data.as_bytes(), 0o600)
-        .map_err(|err| format!("[error] failed to write config file: {err}"))?;
-    Ok(())
+    let unusable = |err: &toml::de::Error| {
+        format!(
+            "[error] failed to parse existing config {}: {}",
+            crate::style::single_line(&target.display().to_string()),
+            toml_error_summary(err)
+        )
+    };
+    let table = data.parse::<toml::Table>().map_err(|err| unusable(&err))?;
+    toml::from_str::<ConfigFile>(&data).map_err(|err| unusable(&err))?;
+    Ok(table)
 }
 
-fn read_config_file(config_dir: &Path) -> Option<ConfigFile> {
+fn toml_error_summary(err: &toml::de::Error) -> String {
+    let text = err.to_string();
+    let mut lines = text.lines().map(str::trim).filter(|line| !line.is_empty());
+    let Some(first) = lines.next() else {
+        return String::new();
+    };
+    match lines.next_back() {
+        Some(last) if last != first => format!("{first}: {last}"),
+        _ => first.to_string(),
+    }
+}
+
+fn read_config_file(config_dir: &Path) -> (ConfigFile, Option<String>) {
     let path = config_dir.join("config.toml");
-    let data = fs::read_to_string(path).ok()?;
-    toml::from_str(&data).ok()
+    let data = match fs::read_to_string(&path) {
+        Ok(data) => data,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return (ConfigFile::default(), None)
+        }
+        Err(err) => {
+            return (
+                ConfigFile::default(),
+                Some(format!(
+                    "{}: {err}",
+                    crate::style::single_line(&path.display().to_string())
+                )),
+            )
+        }
+    };
+    match toml::from_str::<ConfigFile>(&data) {
+        Ok(file) => (file, None),
+        Err(err) => (
+            ConfigFile::default(),
+            Some(format!(
+                "{}: {}",
+                crate::style::single_line(&path.display().to_string()),
+                toml_error_summary(&err)
+            )),
+        ),
+    }
+}
+
+fn split_list(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 fn default_config_dir() -> PathBuf {
@@ -505,7 +612,11 @@ fn verbose_log_level(verbose: u8) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_bool, parse_output, persist_string_values, verbose_log_level, OutputFormat};
+    use super::{
+        locked_update, parse_bool, parse_output, persist_string_values, verbose_log_level,
+        ConfigOverrides, OutputFormat, ResolvedConfig,
+    };
+    use rstest::rstest;
     use std::fs;
 
     fn temp_config_dir() -> std::path::PathBuf {
@@ -573,5 +684,73 @@ mod tests {
         );
 
         fs::remove_dir_all(config_dir).expect("test config dir removed");
+    }
+
+    fn config_dir_with(contents: &str) -> std::path::PathBuf {
+        let config_dir = temp_config_dir();
+        fs::create_dir_all(&config_dir).expect("config dir created");
+        if !contents.is_empty() {
+            fs::write(config_dir.join("config.toml"), contents).expect("config written");
+        }
+        config_dir
+    }
+
+    fn resolve_in(config_dir: &std::path::Path, flags: &[&str]) -> ResolvedConfig {
+        ResolvedConfig::resolve(ConfigOverrides {
+            config_dir: Some(config_dir.to_path_buf()),
+            profile: flags.iter().map(|flag| (*flag).to_string()).collect(),
+            ..Default::default()
+        })
+    }
+
+    #[rstest]
+    #[case::one_bare_string("default_profile = \"celia-dev\"\n", vec!["celia-dev"])]
+    #[case::a_list("default_profile = [\"celia-dev\", \"eng\"]\n", vec!["celia-dev", "eng"])]
+    #[case::a_one_element_list("default_profile = [\"celia-dev\"]\n", vec!["celia-dev"])]
+    #[case::absent("", vec![])]
+    #[case::an_empty_list_is_not_configured("default_profile = []\n", vec![])]
+    fn resolve_profiles_success(#[case] contents: &str, #[case] expected: Vec<&str>) {
+        let config_dir = config_dir_with(contents);
+        assert_eq!(resolve_in(&config_dir, &[]).profiles, expected);
+        fs::remove_dir_all(config_dir).expect("cleanup");
+    }
+
+    #[rstest]
+    #[case::several_in_the_file(&[], "default_profile = [\"a\", \"b\"]\n", "default_profile names 2")]
+    #[case::several_flags(&["a", "b"], "", "--profile names 2")]
+    #[case::none_anywhere(&[], "", "missing profile")]
+    fn require_profile_failure(
+        #[case] flags: &[&str],
+        #[case] contents: &str,
+        #[case] expected: &str,
+    ) {
+        let config_dir = config_dir_with(contents);
+        let err = resolve_in(&config_dir, flags)
+            .require_profile()
+            .expect_err("not exactly one profile");
+        assert!(err.contains(expected), "err={err}");
+        fs::remove_dir_all(config_dir).expect("cleanup");
+    }
+
+    #[rstest]
+    #[case::a_flag_overrides_a_list(&["flagged"], "default_profile = [\"a\", \"b\"]\n", "flagged")]
+    #[case::a_one_element_list(&[], "default_profile = [\"listed\"]\n", "listed")]
+    fn require_profile_success(
+        #[case] flags: &[&str],
+        #[case] contents: &str,
+        #[case] expected: &str,
+    ) {
+        let config_dir = config_dir_with(contents);
+        let config = resolve_in(&config_dir, flags);
+        assert_eq!(config.require_profile().expect("exactly one"), expected);
+        fs::remove_dir_all(config_dir).expect("cleanup");
+    }
+
+    #[test]
+    fn locked_update_unusable_file_failure() {
+        let config_dir = config_dir_with("default_profile = [");
+        let err = locked_update(&config_dir, |_| Ok(true)).expect_err("truncated toml refused");
+        assert!(err.contains("failed to parse existing config"), "err={err}");
+        fs::remove_dir_all(config_dir).expect("cleanup");
     }
 }

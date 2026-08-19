@@ -44,11 +44,11 @@ The explicit workspace is cached per CVM and reused by later bare agent/editor c
 | `user` | `add`, `list`, `show`, `deactivate`, `reactivate`, `erase`, `permissions` | User lifecycle and permission grants. |
 | `key` | `list`, `add`, `remove` | The caller's SSH public keys and local identity mapping. |
 | `secret` | `set`, `list`, `remove` | Write-only, per-user secrets with mandatory host bindings. Values arrive on stdin or from a file, never argv. |
-| `profile` | `create`, `list`, `show`, `configure`, `members` | Policy authoring and membership. `configure` replaces the complete policy document. |
+| `profile` | `create`, `list`, `show`, `configure`, `members`, `grants`, `connections create` | Policy authoring and membership. `configure` replaces the complete policy document. `grants` shows redacted injection status; `connections create` mints a one-time OAuth connect link. |
 | `quota` | `get`, `set`, `clear` | Entity or user resource limits. |
 | `cvm` | `list`, `instance-types`, `launch`, `attach`, `detach`, `start`, `stop`, `update`, `terminate` | Dev CVM lifecycle. |
 | `security-cvm` | `show`, `launch`, `update`, `terminate`, `attestation` | The entity's single Security CVM. |
-| `ssh`, `claude`, `codex`, `code`, `cursor` | top-level | Open shell, agent, or editor sessions. |
+| `ssh`, `claude`, `codex`, `code`, `cursor` | top-level | Open shell, agent, or editor sessions. `claude connect` and `codex connect` mint SC-injected credentials without putting the real token in the sandbox. |
 | `ps`, `attach`, `kill` | top-level | Manage persistent dtach sessions in Dev CVMs. |
 | `alias` | `cvm`, `profile`, `ssh-key`, `session`, `list`, `rm`, `rename`, `prune` | Local names for UUID-backed resources and sessions. |
 | `tunnel` | top-level | Low-level aTLS-verified WebSocket pipe. |
@@ -139,6 +139,24 @@ A profile references it with:
 
 Host binding is the user's consent boundary. `*.example.com` does not include the apex; list both when both are intended. `*` explicitly opts out of host binding.
 
+## Connect and managed credentials
+
+The Security CVM still injects secrets at egress. Connect is the higher-level acquisition path so the sandbox never holds the real token.
+
+```bash
+claude setup-token | umbra --profile <profile-id> claude connect --cvm <cvm-id>
+umbra --profile <profile-id> codex connect --cvm <cvm-id>
+umbra --profile <profile-id> profile grants
+umbra --profile <profile-id> profile connections create slack
+```
+
+- `claude connect` reads the token from stdin only. The sandbox sees `CLAUDE_CODE_OAUTH_TOKEN=umbra-proxy-injected`; `--no-oauth-env` opts a session out.
+- `codex connect` runs a throwaway-home laptop login, uploads the refresh grant, and plants a placeholder `~/.codex/auth.json`. Never run `codex login` inside the CVM.
+- `profile grants` shows minted/rotation status without secret values. Re-auth is the same command that connected the first time.
+- Browser Connect lives at `/connect/<integration>` after an admin configures the entity OAuth integration. Runbooks: `docs/onboarding/claude-code.md`, `docs/onboarding/codex-chatgpt.md`, `docs/onboarding/slack-claude.md`.
+
+Minted injections are still wiped by `profile configure` unless re-supplied inline; re-mint after any wholesale policy edit.
+
 ## Profile guarantees
 
 A profile is one JSON document replaced wholesale by `profile configure`. Important keys are `egress_boundary`, `allowed_destinations`, `blocked_destinations`, `secret_patterns`, `secret_injections`, and `sandbox_env`.
@@ -185,7 +203,8 @@ Governed inbound WebSocket filtering is fail-closed. A frame must be selected by
 - A `412 PRECONDITION_FAILED` on membership means the profile changed between read and write; retry instead of reaching for `--force`.
 - The Dev CVM uses dtach, not tmux.
 - Editor wrappers use a managed SSH config and may ignore `~/.ssh/config`. Supply `--identity-file` when automatic key resolution cannot find a match.
-- Never put a token or secret on argv.
+- Never put a token or secret on argv. `claude connect` reads the token from stdin for this reason.
+- Editing a profile with minted injections requires a re-mint; stored values cannot be read back.
 - An aTLS policy mismatch is a trust failure. Review the new policy material before accepting a replacement; do not bypass verification.
 
 When diagnosis remains unclear, run command help, `umbra config show`, and `umbra status`, then use the public support process without including tokens, session files, personal data, or live deployment material.

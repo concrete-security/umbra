@@ -69,11 +69,20 @@ fn config_entries(config: &ResolvedConfig) -> Vec<ConfigEntry> {
             config.default_cvm.clone(),
             config.default_cvm_source,
         ),
-        string_entry(
-            "default_profile",
-            config.profile.clone(),
-            config.profile_source,
-        ),
+        ConfigEntry {
+            key: "default_profile",
+            value: match config.profiles.as_slice() {
+                [] => Value::Null,
+                [only] => Value::String(only.clone()),
+                several => Value::Array(
+                    several
+                        .iter()
+                        .map(|profile| Value::String(profile.clone()))
+                        .collect(),
+                ),
+            },
+            source: config.profile_source,
+        },
         string_entry(
             "default_ssh_identity",
             config

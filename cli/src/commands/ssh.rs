@@ -2,7 +2,7 @@ use std::{
     collections::BTreeMap,
     env,
     ffi::OsString,
-    fs,
+    fs::{self, OpenOptions},
     io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -13,9 +13,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 use crate::{
+    atls_policy_store,
     cli::{AgentSessionArgs, CodeArgs, CursorArgs, SessionListArgs, SessionTargetArgs, SshArgs},
     commands::{alias, legacy_cvm_replacement_error, select_cvm},
     config::ResolvedConfig,
@@ -56,6 +57,7 @@ struct SshInvocation<'a> {
     identity_file: Option<&'a Path>,
     remote_command: String,
     allocate_tty: bool,
+    session_name: Option<&'a str>,
 }
 
 struct PreparedSsh {
@@ -125,6 +127,7 @@ pub fn run(args: SshArgs, config: &ResolvedConfig) -> ExitStatus {
             identity_file: args.identity_file.as_deref(),
             remote_command,
             allocate_tty: args.command.is_none(),
+            session_name: session_name.as_deref(),
         },
         config,
     );
@@ -168,7 +171,11 @@ pub fn run_agent(
         }
     };
     let workspace = resolve_workspace(args.workspace.as_deref(), config, &cvm_id);
-    let program_command = agent_program_command(program, workspace.as_deref());
+    let program_command = agent_program_command(
+        program,
+        workspace.as_deref(),
+        verb == "claude" && !args.no_oauth_env,
+    );
     let session_name = match session_name(args.name.as_deref(), program) {
         Ok(value) => value,
         Err(message) => {
@@ -191,6 +198,7 @@ pub fn run_agent(
             identity_file: args.identity_file.as_deref(),
             remote_command: dtach_remote_command(&session_name, &program_command),
             allocate_tty: true,
+            session_name: Some(&session_name),
         },
         config,
     );
@@ -470,6 +478,7 @@ pub fn run_attach(args: SessionTargetArgs, config: &ResolvedConfig) -> ExitStatu
             identity_file: args.identity_file.as_deref(),
             remote_command: attach_remote_command(&session_name),
             allocate_tty: true,
+            session_name: Some(&session_name),
         },
         config,
     )
@@ -487,6 +496,7 @@ pub fn run_kill(args: SessionTargetArgs, config: &ResolvedConfig, json_output: b
             identity_file: args.identity_file.as_deref(),
             remote_command: kill_remote_command(&session_name),
             allocate_tty: false,
+            session_name: None,
         },
         config,
     ) {
@@ -546,6 +556,7 @@ pub(crate) fn list_session_names(
             identity_file,
             remote_command: ps_remote_command(),
             allocate_tty: false,
+            session_name: None,
         },
         config,
     )?;
@@ -571,22 +582,111 @@ fn run_ssh(invocation: SshInvocation<'_>, config: &ResolvedConfig) -> ExitStatus
         invocation.identity_file,
         config
     ));
-    let mut ssh = base_ssh_command(&prepared, invocation.allocate_tty);
+    let ssh_diagnostics = if invocation.allocate_tty {
+        match ssh_diagnostic_paths(&config.config_dir) {
+            Ok(paths) => Some(paths),
+            Err(message) => {
+                crate::style::eprintln_error(&message);
+                return ExitStatus::Error;
+            }
+        }
+    } else {
+        None
+    };
+    let mut ssh = base_ssh_command(
+        &prepared,
+        invocation.allocate_tty,
+        ssh_diagnostics
+            .as_ref()
+            .map(|(establishment_marker, _)| establishment_marker.as_path()),
+        ssh_diagnostics
+            .as_ref()
+            .map(|(_, debug_log)| debug_log.as_path()),
+    );
     ssh.arg(invocation.remote_command);
     let result = ssh.status();
-    // ssh has handed the terminal back; make sure the cursor is visible no
-    // matter how the remote session (or a detached TUI) left it.
+    let connection_established = ssh_diagnostics
+        .as_ref()
+        .map(|(establishment_marker, _)| establishment_marker.as_path())
+        .map(Path::is_file)
+        .unwrap_or(false);
+    let ssh_debug_log = ssh_diagnostics
+        .as_ref()
+        .and_then(|(_, debug_log)| fs::read(debug_log).ok())
+        .map(|contents| String::from_utf8_lossy(&contents).into_owned());
+    let remote_exit_status = ssh_debug_log.as_deref().and_then(ssh_remote_exit_status);
+    if let Some((establishment_marker, debug_log)) = ssh_diagnostics.as_ref() {
+        let _ = fs::remove_file(establishment_marker);
+        let _ = fs::remove_file(debug_log);
+    }
     restore_local_cursor(invocation.allocate_tty);
     match result {
         Ok(status) if status.success() => ExitStatus::Ok,
         Ok(status) => {
-            crate::style::eprintln_error(&format!("[error] ssh exited with status {status}"));
+            if invocation.allocate_tty {
+                for diagnostic in ssh_user_diagnostics(ssh_debug_log.as_deref().unwrap_or("")) {
+                    eprintln!("{}", style::sanitize_ascii(diagnostic));
+                }
+                match classify_interactive_ssh_exit(
+                    status.code(),
+                    connection_established,
+                    remote_exit_status,
+                ) {
+                    InteractiveSshOutcome::TunnelDropped => {
+                        let session_survived = invocation
+                            .session_name
+                            .map(|name| {
+                                capture_prepared(&prepared, ps_remote_command())
+                                    .map(|output| confirm_session_survived(&output, name))
+                                    .unwrap_or(false)
+                            })
+                            .unwrap_or(false);
+                        crate::style::eprintln_error_block(&crate::style::ssh_disconnect_block(
+                            &prepared.cvm_id,
+                            invocation.session_name,
+                            session_survived,
+                        ));
+                    }
+                    InteractiveSshOutcome::ConnectFailed => {
+                        crate::style::eprintln_error_block(
+                            &crate::style::ssh_connect_failed_block(&prepared.cvm_id),
+                        );
+                    }
+                    InteractiveSshOutcome::Status => {
+                        crate::style::eprintln_error(&format!(
+                            "[error] ssh exited with status {status}"
+                        ));
+                    }
+                }
+            } else {
+                crate::style::eprintln_error(&format!("[error] ssh exited with status {status}"));
+            }
             ExitStatus::Error
         }
         Err(err) => {
             crate::style::eprintln_error(&format!("[error] failed to invoke ssh: {err}"));
             ExitStatus::Error
         }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum InteractiveSshOutcome {
+    TunnelDropped,
+    ConnectFailed,
+    Status,
+}
+
+fn classify_interactive_ssh_exit(
+    code: Option<i32>,
+    connection_established: bool,
+    remote_exit_status: Option<i32>,
+) -> InteractiveSshOutcome {
+    match (code, connection_established, remote_exit_status) {
+        (Some(255), _, Some(255)) => InteractiveSshOutcome::Status,
+        (Some(255), true, None) => InteractiveSshOutcome::TunnelDropped,
+        (Some(255), false, None) => InteractiveSshOutcome::ConnectFailed,
+        _ => InteractiveSshOutcome::Status,
     }
 }
 
@@ -631,6 +731,23 @@ fn run_editor(
     }
 }
 
+pub(crate) fn run_remote_command_capture(
+    cvm_id: &str,
+    remote_command: String,
+    config: &ResolvedConfig,
+) -> Result<String, (ExitStatus, String)> {
+    run_ssh_capture(
+        SshInvocation {
+            cvm_id,
+            identity_file: None,
+            remote_command,
+            allocate_tty: false,
+            session_name: None,
+        },
+        config,
+    )
+}
+
 fn run_ssh_capture(
     invocation: SshInvocation<'_>,
     config: &ResolvedConfig,
@@ -647,7 +764,7 @@ fn capture_prepared(
     remote_command: String,
 ) -> Result<String, (ExitStatus, String)> {
     // Capturing stdout never needs a TTY (the interactive path is `run_ssh`).
-    let mut ssh = base_ssh_command(prepared, false);
+    let mut ssh = base_ssh_command(prepared, false, None, None);
     ssh.arg(remote_command);
     let output = ssh.output().map_err(|err| {
         (
@@ -756,7 +873,12 @@ fn build_ssh(
     })
 }
 
-fn base_ssh_command(prepared: &PreparedSsh, allocate_tty: bool) -> Command {
+fn base_ssh_command(
+    prepared: &PreparedSsh,
+    allocate_tty: bool,
+    establishment_marker: Option<&Path>,
+    debug_log: Option<&Path>,
+) -> Command {
     let mut ssh = Command::new("ssh");
     ssh.arg("-o")
         .arg(format!("ProxyCommand={}", prepared.proxy_command))
@@ -765,7 +887,11 @@ fn base_ssh_command(prepared: &PreparedSsh, allocate_tty: bool) -> Command {
         .arg("-o")
         .arg("UserKnownHostsFile=/dev/null")
         .arg("-o")
-        .arg("LogLevel=ERROR")
+        .arg(if debug_log.is_some() {
+            "LogLevel=DEBUG1"
+        } else {
+            "LogLevel=ERROR"
+        })
         .arg("-o")
         .arg(format!(
             "BatchMode={}",
@@ -777,6 +903,16 @@ fn base_ssh_command(prepared: &PreparedSsh, allocate_tty: bool) -> Command {
         ))
         .arg("-o")
         .arg("ConnectTimeout=30");
+    if let Some(marker) = establishment_marker {
+        let marker = marker.display().to_string().replace('%', "%%");
+        ssh.arg("-o")
+            .arg("PermitLocalCommand=yes")
+            .arg("-o")
+            .arg(format!("LocalCommand=touch {}", shell_quote(&marker)));
+    }
+    if let Some(path) = debug_log {
+        ssh.arg("-E").arg(path);
+    }
     if let Some(identity_file) = prepared.identity_file.as_deref() {
         ssh.arg("-o").arg("IdentitiesOnly=yes");
         ssh.arg("-i").arg(identity_file);
@@ -786,6 +922,58 @@ fn base_ssh_command(prepared: &PreparedSsh, allocate_tty: bool) -> Command {
     }
     ssh.arg(format!("dev@{}", prepared.fqdn));
     ssh
+}
+
+fn ssh_diagnostic_paths(config_dir: &Path) -> Result<(PathBuf, PathBuf), String> {
+    let dir = config_dir.join("ssh-control");
+    fs::create_dir_all(&dir)
+        .map_err(|err| format!("[error] failed to prepare SSH connection marker: {err}"))?;
+    #[cfg(unix)]
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).map_err(|err| {
+        format!("[error] failed to secure SSH connection marker directory: {err}")
+    })?;
+    let token = uuid::Uuid::new_v4().simple();
+    let establishment_marker = dir.join(format!("established-{token}"));
+    let debug_log = dir.join(format!("debug-{token}.log"));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    options
+        .open(&debug_log)
+        .map_err(|err| format!("[error] failed to prepare SSH diagnostic log: {err}"))?;
+    Ok((establishment_marker, debug_log))
+}
+
+fn ssh_remote_exit_status(debug_log: &str) -> Option<i32> {
+    debug_log.lines().rev().find_map(|line| {
+        line.trim()
+            .strip_prefix("debug1: Exit status ")
+            .and_then(|value| value.parse::<i32>().ok())
+    })
+}
+
+fn ssh_user_diagnostics(debug_log: &str) -> Vec<&str> {
+    debug_log
+        .lines()
+        .filter(|line| {
+            let line = line.trim_start();
+            !line.is_empty()
+                && !line.starts_with("debug1:")
+                && !line.starts_with("debug2:")
+                && !line.starts_with("debug3:")
+                && !line.starts_with("Warning: Permanently added")
+        })
+        .collect()
+}
+
+fn confirm_session_survived(session_listing: &str, session_name: &str) -> bool {
+    parse_session_rows(session_listing, &BTreeMap::new())
+        .map(|rows| {
+            rows.iter()
+                .any(|row| row.name == session_name && row.attached)
+        })
+        .unwrap_or(false)
 }
 
 fn fetch_cvm(
@@ -860,33 +1048,13 @@ fn resolve_policy_path(
     session: &Session,
     cvm_id: &str,
 ) -> Result<PathBuf, (ExitStatus, String)> {
-    let policy_path = per_cvm_policy_path(&config.config_dir, cvm_id);
+    let policy_path = atls_policy_store::store_path(&config.config_dir, cvm_id);
     if policy_path.is_file() {
         return Ok(policy_path);
     }
-    let bundle = fetch_policy_bundle(console_url, session, cvm_id)?;
-    crate::commands::cvm::write_policy_file(&config.config_dir, &bundle, cvm_id)
+    let bundle = atls_policy_store::fetch_bundle(console_url, session, cvm_id)?;
+    atls_policy_store::write(&config.config_dir, &bundle, cvm_id)
         .map_err(|message| (ExitStatus::Error, message))
-}
-
-fn fetch_policy_bundle(
-    console_url: &str,
-    session: &Session,
-    cvm_id: &str,
-) -> Result<crate::commands::cvm::PolicyBundle, (ExitStatus, String)> {
-    fetch_json(
-        console_url,
-        session,
-        &format!("/api/v1/cvms/{cvm_id}/policy-bundle"),
-        &[],
-        "fetch Dev CVM policy bundle",
-    )
-}
-
-fn per_cvm_policy_path(config_dir: &Path, cvm_id: &str) -> PathBuf {
-    config_dir
-        .join("cvms")
-        .join(format!("{cvm_id}.atls-policy.json"))
 }
 
 fn proxy_command(
@@ -1123,15 +1291,26 @@ fn dtach_remote_command(session_name: &str, program_command: &str) -> String {
     )
 }
 
-fn agent_program_command(program: &str, workspace: Option<&str>) -> String {
+const CLAUDE_OAUTH_ENV_EXPORTS: &str =
+    "unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN\nexport CLAUDE_CODE_OAUTH_TOKEN=umbra-proxy-injected\n";
+const CODEX_ENV_UNSETS: &str = "unset OPENAI_API_KEY CODEX_API_KEY CODEX_ACCESS_TOKEN\n";
+
+fn agent_program_command(program: &str, workspace: Option<&str>, claude_oauth_env: bool) -> String {
     let workspace_cd = workspace.map(workspace_cd_command);
     if program != "claude" {
-        return match workspace_cd {
-            Some(cd) => format!("bash -lc {}", shell_quote(&format!("{cd}\nexec {program}"))),
-            None => program.to_string(),
-        };
+        let mut script = String::from(CODEX_ENV_UNSETS);
+        if let Some(cd) = workspace_cd {
+            script.push_str(&cd);
+            script.push('\n');
+        }
+        script.push_str(&format!("exec {program}"));
+        return format!("bash -lc {}", shell_quote(&script));
     }
-    let mut script = String::from(
+    let mut script = String::new();
+    if claude_oauth_env {
+        script.push_str(CLAUDE_OAUTH_ENV_EXPORTS);
+    }
+    script.push_str(
         r#"mkdir -p "$HOME/.claude"
 if [ -e "$HOME/.claude.json" ] && [ ! -L "$HOME/.claude.json" ]; then
   if [ ! -s "$HOME/.claude.json" ]; then
@@ -1317,7 +1496,7 @@ fn default_session_name(prefix: &str) -> String {
     format!("{}-{}", prefix, Utc::now().format("%Y%m%d-%H%M%S"))
 }
 
-fn shell_quote(value: &str) -> String {
+pub(crate) fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
@@ -1357,7 +1536,7 @@ mod tests {
     #[test]
     fn per_cvm_policy_path_uses_config_cvms_dir() {
         assert_eq!(
-            per_cvm_policy_path(Path::new("/tmp/umbra"), "cvm-1"),
+            atls_policy_store::store_path(Path::new("/tmp/umbra"), "cvm-1"),
             PathBuf::from("/tmp/umbra/cvms/cvm-1.atls-policy.json")
         );
     }
@@ -1370,7 +1549,7 @@ mod tests {
             proxy_command: "umbra tunnel cvm.example.com".to_string(),
             identity_file: Some(PathBuf::from("/tmp/umbra-key")),
         };
-        let ssh = base_ssh_command(&prepared, false);
+        let ssh = base_ssh_command(&prepared, false, None, None);
         let args: Vec<String> = ssh
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -1485,6 +1664,24 @@ mod tests {
         assert!(ps_failure_to_propagate(explicit, &groups).is_none());
     }
 
+    #[rstest]
+    #[case::established_transport_drop(Some(255), true, None, InteractiveSshOutcome::TunnelDropped)]
+    #[case::connection_setup_failure(Some(255), false, None, InteractiveSshOutcome::ConnectFailed)]
+    #[case::remote_255(Some(255), true, Some(255), InteractiveSshOutcome::Status)]
+    #[case::ordinary_remote_failure(Some(1), true, Some(1), InteractiveSshOutcome::Status)]
+    #[case::terminated_by_signal(None, true, None, InteractiveSshOutcome::Status)]
+    fn interactive_ssh_exit_uses_establishment_signal_success(
+        #[case] code: Option<i32>,
+        #[case] connection_established: bool,
+        #[case] remote_exit_status: Option<i32>,
+        #[case] expected: InteractiveSshOutcome,
+    ) {
+        assert_eq!(
+            classify_interactive_ssh_exit(code, connection_established, remote_exit_status),
+            expected
+        );
+    }
+
     #[test]
     fn validate_session_name_rejects_shell_metacharacters() {
         assert_eq!(
@@ -1499,24 +1696,47 @@ mod tests {
 
     #[test]
     fn claude_agent_command_repairs_empty_config() {
-        let command = agent_program_command("claude", None);
+        let command = agent_program_command("claude", None, false);
         assert!(command.starts_with("bash -lc "));
         assert!(command.contains(".claude/.claude.json"));
         assert!(command.contains("printf"));
         assert!(command.contains("exec claude"));
-        assert_eq!(agent_program_command("codex", None), "codex");
     }
 
     #[test]
     fn agent_command_changes_to_workspace_before_launch() {
-        let claude = agent_program_command("claude", Some("~/workspaces/myrepo"));
+        let claude = agent_program_command("claude", Some("~/workspaces/myrepo"), false);
         assert!(claude.contains(r#"cd "$HOME/workspaces/myrepo""#));
         assert!(claude.contains("exec claude"));
 
-        let codex = agent_program_command("codex", Some("/home/dev/workspaces/myrepo"));
+        let codex = agent_program_command("codex", Some("/home/dev/workspaces/myrepo"), false);
         assert!(codex.starts_with("bash -lc "));
         assert!(codex.contains(r#"cd "/home/dev/workspaces/myrepo""#));
         assert!(codex.contains("exec codex"));
+    }
+
+    #[test]
+    fn claude_agent_command_exports_oauth_placeholder_env() {
+        let command = agent_program_command("claude", None, true);
+        assert!(command.contains("unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN"));
+        assert!(command.contains("export CLAUDE_CODE_OAUTH_TOKEN=umbra-proxy-injected"));
+        let env_index = command.find("CLAUDE_CODE_OAUTH_TOKEN").unwrap();
+        let exec_index = command.find("exec claude").unwrap();
+        assert!(env_index < exec_index);
+
+        let without = agent_program_command("claude", None, false);
+        assert!(!without.contains("CLAUDE_CODE_OAUTH_TOKEN"));
+    }
+
+    #[test]
+    fn codex_agent_command_unsets_env_auth_overrides() {
+        for claude_oauth_env in [false, true] {
+            let command = agent_program_command("codex", None, claude_oauth_env);
+            assert!(command.starts_with("bash -lc "));
+            assert!(command.contains("unset OPENAI_API_KEY CODEX_API_KEY CODEX_ACCESS_TOKEN"));
+            assert!(command.contains("exec codex"));
+            assert!(!command.contains("CLAUDE_CODE_OAUTH_TOKEN"));
+        }
     }
 
     #[test]

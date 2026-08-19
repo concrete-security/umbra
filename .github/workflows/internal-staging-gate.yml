@@ -36,8 +36,11 @@ jobs:
             echo "UMBRA_INTERNAL_STATUS_ACTOR is not configured" >&2
             exit 1
           }
-          status="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/status" \
-            --jq '[.statuses[] | select(.context == "umbra-internal/staging-verified")][0]')"
+          # The list endpoint (newest first) must be used here: the combined
+          # /status endpoint omits `creator` for statuses posted with
+          # fine-grained tokens, which would fail the actor check below.
+          status="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/statuses?per_page=100" \
+            --jq '[.[] | select(.context == "umbra-internal/staging-verified")][0]')"
           [[ "$(jq -r '.state // ""' <<<"$status")" == success ]] || {
             echo "no successful internal staging status exists for this commit" >&2
             exit 1
@@ -52,7 +55,10 @@ jobs:
             exit 1
           }
           description="$(jq -r '.description // ""' <<<"$status")"
-          [[ "$description" =~ ^success\ lock\ sha256:[0-9a-f]{12}$ ]] || {
+          # Both internal success shapes are trusted: `success lock …` from
+          # deploy-verify and `success cutover lock …` from the one-time
+          # state cutover, which also deploys and live-verifies the lock.
+          [[ "$description" =~ ^success\ (cutover\ )?lock\ sha256:[0-9a-f]{12}$ ]] || {
             echo "staging status does not identify a verified lock digest" >&2
             exit 1
           }

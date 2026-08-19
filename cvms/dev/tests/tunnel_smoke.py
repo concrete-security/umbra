@@ -44,30 +44,34 @@ async def smoke():
     tunnel_module = load_tunnel_module()
     ssh = await asyncio.start_server(echo_server, "127.0.0.1", 0)
     ssh_port = ssh.sockets[0].getsockname()[1]
-    config = tunnel_module.TunnelConfig("127.0.0.1", 0, "127.0.0.1", ssh_port, "/umbra/tunnel")
+    config = tunnel_module.TunnelConfig(
+        "127.0.0.1", 0, "127.0.0.1", ssh_port, ("/umbra/tunnel", "/concrete/tunnel")
+    )
     tunnel = await asyncio.start_server(lambda r, w: tunnel_module.handle_client(r, w, config), "127.0.0.1", 0)
     tunnel_port = tunnel.sockets[0].getsockname()[1]
-    reader, writer = await asyncio.open_connection("127.0.0.1", tunnel_port)
-    key = base64.b64encode(os.urandom(16)).decode("ascii")
-    writer.write(
-        (
-            "GET /umbra/tunnel HTTP/1.1\r\n"
-            "Host: localhost\r\n"
-            "Upgrade: websocket\r\n"
-            "Connection: Upgrade\r\n"
-            f"Sec-WebSocket-Key: {key}\r\n"
-            "Sec-WebSocket-Version: 13\r\n\r\n"
-        ).encode("ascii")
-        + masked_binary(b"hello")
-    )
-    await writer.drain()
-    response = await reader.readuntil(b"\r\n\r\n")
-    assert b"101 Switching Protocols" in response
-    opcode, payload = await read_server_frame(reader)
-    assert opcode == 2
-    assert payload == b"HELLO"
-    writer.close()
-    await writer.wait_closed()
+    # Both the canonical path and the concrete-CLI transition alias must relay.
+    for path in ("/umbra/tunnel", "/concrete/tunnel"):
+        reader, writer = await asyncio.open_connection("127.0.0.1", tunnel_port)
+        key = base64.b64encode(os.urandom(16)).decode("ascii")
+        writer.write(
+            (
+                f"GET {path} HTTP/1.1\r\n"
+                "Host: localhost\r\n"
+                "Upgrade: websocket\r\n"
+                "Connection: Upgrade\r\n"
+                f"Sec-WebSocket-Key: {key}\r\n"
+                "Sec-WebSocket-Version: 13\r\n\r\n"
+            ).encode("ascii")
+            + masked_binary(b"hello")
+        )
+        await writer.drain()
+        response = await reader.readuntil(b"\r\n\r\n")
+        assert b"101 Switching Protocols" in response
+        opcode, payload = await read_server_frame(reader)
+        assert opcode == 2
+        assert payload == b"HELLO"
+        writer.close()
+        await writer.wait_closed()
     tunnel.close()
     await tunnel.wait_closed()
     ssh.close()

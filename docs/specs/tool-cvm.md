@@ -96,10 +96,9 @@ The Console injects the following configuration into the Tool CVM deployment. Pl
 | `CONSOLE_TOOL_TOKEN` | Service-principal bearer used to pull tool-control state and submit tool events. |
 | `TOOL_PROXY_TOKEN` | Service-principal bearer used by the Tool CVM egress forwarder when sending outbound traffic through the Security CVM. |
 | `SECURITY_CVM_FQDN` | Entity Security CVM endpoint used for Tool CVM egress. |
-| `SECURITY_CVM_ATLS_POLICY_B64` | aTLS policy for the Tool CVM egress forwarder to verify the Security CVM. |
 | `SECURITY_CVM_CA_B64` | Security CVM mitmproxy CA trusted by Tool CVM egress clients. |
 
-Provider credentials are not injected at boot. The Tool CVM receives provider credential material only through the attested tool-control pull after the Console has verified the Tool CVM.
+Provider credentials are not injected at boot. The Tool CVM receives provider credential material only through the attested tool-control pull after the Console has verified the Tool CVM. Mirroring the Dev forwarder, the full SC aTLS policy MUST NOT enter the provider launch env: the Tool forwarder MAY listen for measurement compatibility, but before its first upstream SC connection or successful proxy response it MUST authenticated-fetch a complete policy with `CONSOLE_TOOL_TOKEN`, strictly validate it, and atomically install it. Bounded fetch or validation failure returns fail-closed `502`; blank, stub, dev, disabled, or incomplete policies and bypasses are forbidden. It periodically refreshes from the same authenticated control endpoint afterward.
 
 ### 3.2 Runtime Measurement Binding
 
@@ -110,7 +109,6 @@ At startup, the Tool CVM MUST extend the hardware runtime measurement register w
   "CONSOLE_URL": "<...>",
   "console_tool_token_sha256": "<sha256>",
   "entity_id": "<uuid>",
-  "security_cvm_atls_policy_sha256": "<sha256>",
   "security_cvm_ca_sha256": "<sha256>",
   "security_cvm_fqdn": "<fqdn>",
   "tool_cvm_id": "<uuid>",
@@ -438,7 +436,7 @@ The Tool CVM MUST authorize GitHub writes by semantic operation, repository, and
 
 ## 10. Tool CVM Egress Through the Security CVM
 
-The Tool CVM MUST use a local egress forwarder equivalent to the Dev CVM's forwarder. The Tool CVM application container joins only an internal network. The egress forwarder holds `TOOL_PROXY_TOKEN`, verifies the Security CVM with `SECURITY_CVM_ATLS_POLICY_B64`, and forwards all outbound HTTP(S) traffic through the Security CVM.
+The Tool CVM MUST use a local egress forwarder equivalent to the Dev CVM's forwarder. The Tool CVM application container joins only an internal network. The egress forwarder holds `TOOL_PROXY_TOKEN`, authenticated-fetches and strictly validates the complete Security CVM policy before its first upstream SC connection or successful proxy response, verifies the Security CVM with the installed policy, periodically refreshes it from the same Console control endpoint, and forwards all outbound HTTP(S) traffic through the Security CVM. The listener may exist for measurement compatibility, but bounded fetch failure, missing material, or an invalid, disabled, incomplete, blank, stub, or dev policy MUST return fail-closed `502` without an upstream connection; no full policy may be transported through the provider launch env and no bypass is permitted.
 
 The Security CVM MUST distinguish Tool CVM egress from Dev CVM egress by service-principal token purpose. Tool CVM egress policy SHOULD be narrow:
 

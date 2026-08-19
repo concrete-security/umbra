@@ -8,10 +8,12 @@ query. It exists to cover the two runtime surfaces the fake-connection tests
 cannot reach:
 
 1. **Secret-material migrations** — that ``0026_user_secret_material`` creates
-   its table and ``0028_secret_envelope_v2`` broadens both ciphertext CHECKs to
-   accept v1/v2 while rejecting unsupported prefixes. The v2 downgrade also
-   refuses to strand existing v2 rows behind v1-only constraints. ``make
-   check`` only runs ``alembic heads`` (graph, not upgrade).
+   its table, ``0028_secret_envelope_v2`` broadens both ciphertext CHECKs to
+   accept v1/v2 while rejecting unsupported prefixes, the lineage-only
+   pre-Umbra compatibility branch converges, and ``0034_connect_oauth_schema``
+   installs public Connect tables. The v2
+   downgrade also refuses to strand existing v2 rows behind v1-only
+   constraints. ``make check`` only runs ``alembic heads`` (graph, not upgrade).
 
 2. **``list_sc_control_cvms``** — that the added ``c.owner_id`` in the
    SELECT/GROUP BY plus the correlated ``owner_secret_material`` subquery are
@@ -121,8 +123,8 @@ def _run_alembic(db_dsn: str, *args: str) -> subprocess.CompletedProcess:
 
 
 @pytest.fixture
-def migrated_database() -> Iterator[str]:
-    """Create, migrate, and finally drop one uniquely named test database."""
+def migrated_database(request: pytest.FixtureRequest) -> Iterator[str]:
+    """Create, migrate to the requested revision, and drop a unique database."""
     base = _base_dsn()
     assert base is not None  # guarded by pytestmark
     dbname = f"umbra_itest_{uuid.uuid4().hex}"
@@ -130,8 +132,9 @@ def migrated_database() -> Iterator[str]:
     asyncio.run(_admin_execute(base, f'CREATE DATABASE "{dbname}"'))
     child_dsn = _with_database(base, dbname)
     try:
-        proc = _run_alembic(child_dsn, "upgrade", "head")
-        assert proc.returncode == 0, f"alembic upgrade head failed:\n{proc.stdout}\n{proc.stderr}"
+        revision = getattr(request, "param", "head")
+        proc = _run_alembic(child_dsn, "upgrade", revision)
+        assert proc.returncode == 0, f"alembic upgrade {revision} failed:\n{proc.stdout}\n{proc.stderr}"
         yield child_dsn
     finally:
         asyncio.run(
@@ -464,7 +467,55 @@ async def _run_assertions(db_dsn: str) -> None:
 def test_sc_control_query_and_migration_real_postgres_success(monkeypatch, migrated_database: str) -> None:
     """The head schema and SC-control query work together on real Postgres."""
     monkeypatch.setenv("SECRET_INJECTION_KEK_B64", KEK_B64)
+    version = asyncio.run(_admin_fetchval(migrated_database, "SELECT version_num FROM alembic_version"))
+    assert version == "0034_connect_oauth_schema"
     asyncio.run(_run_assertions(migrated_database))
+
+
+@pytest.mark.parametrize(
+    "migrated_database",
+    ["0027_traffic_logs_decision"],
+    indirect=True,
+    ids=["deployed-pre-umbra-parent"],
+)
+def test_legacy_0032_upgrade_public_head_success(migrated_database: str) -> None:
+    """The exact deployed legacy head runs public DDL and converges at Connect schema."""
+    stamped = _run_alembic(migrated_database, "stamp", "0032_attn_unreachable")
+    assert stamped.returncode == 0, f"alembic stamp failed:\n{stamped.stdout}\n{stamped.stderr}"
+
+    upgraded = _run_alembic(migrated_database, "upgrade", "head")
+    assert upgraded.returncode == 0, f"alembic upgrade failed:\n{upgraded.stdout}\n{upgraded.stderr}"
+    version = asyncio.run(_admin_fetchval(migrated_database, "SELECT version_num FROM alembic_version"))
+    assert version == "0034_connect_oauth_schema"
+
+    connect_table_count = asyncio.run(
+        _admin_fetchval(
+            migrated_database,
+            """
+            SELECT count(*)
+            FROM pg_tables
+            WHERE schemaname = 'public'
+              AND tablename IN (
+                  'oauth_integrations',
+                  'oauth_connection_states',
+                  'profile_managed_secrets',
+                  'integration_profiles'
+              )
+            """,
+        )
+    )
+    assert connect_table_count == 4
+
+    for table in ("profile_secret_material", "user_secret_material"):
+        constraint = asyncio.run(
+            _admin_fetchval(
+                migrated_database,
+                "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = $1",
+                f"{table}_ciphertext_check",
+            )
+        )
+        assert "v1:%" in constraint
+        assert "v2:%" in constraint
 
 
 @pytest.mark.parametrize(
@@ -485,6 +536,12 @@ def test_sc_control_query_and_migration_real_postgres_success(monkeypatch, migra
             id="user",
         ),
     ],
+)
+@pytest.mark.parametrize(
+    "migrated_database",
+    ["0028_secret_envelope_v2"],
+    indirect=True,
+    ids=["public-secret-envelope-head"],
 )
 def test_secret_envelope_v2_downgrade_with_v2_rows_failure(
     monkeypatch,
@@ -512,6 +569,12 @@ def test_secret_envelope_v2_downgrade_with_v2_rows_failure(
     assert user_rows == expected_user_rows
 
 
+@pytest.mark.parametrize(
+    "migrated_database",
+    ["0028_secret_envelope_v2"],
+    indirect=True,
+    ids=["public-secret-envelope-head"],
+)
 def test_secret_envelope_v2_downgrade_with_v1_rows_success(monkeypatch, migrated_database: str) -> None:
     """Downgrade preserves legacy rows and restores the v1-only constraints."""
     monkeypatch.setenv("SECRET_INJECTION_KEK_B64", KEK_B64)

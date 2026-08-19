@@ -46,6 +46,11 @@ pub fn write_identity(config_dir: &Path, key_id: &str, identity_file: &Path) -> 
         fs::set_permissions(config_dir, fs::Permissions::from_mode(0o700))?;
     }
 
+    let lock_path = config_dir.join("ssh-identities.lock");
+    let _guard = crate::fsutil::StoreLock::acquire(&lock_path).map_err(|err| {
+        io::Error::other(format!("failed to lock {}: {err}", lock_path.display()))
+    })?;
+
     let path = store_path(config_dir);
     let mut keys = read(config_dir)
         .into_iter()
@@ -73,6 +78,29 @@ mod tests {
         let stored = read(&dir);
         assert_eq!(stored.get("key-1"), Some(&PathBuf::from("/tmp/key-1")));
         assert_eq!(stored.get("key-2"), Some(&PathBuf::from("/tmp/key-2")));
+        fs::remove_dir_all(dir).expect("temp dir removed");
+    }
+
+    #[test]
+    fn write_identity_concurrent_success() {
+        use std::sync::{Arc, Barrier};
+
+        let dir = std::env::temp_dir().join(format!("umbra-ssh-store-{}", Uuid::new_v4()));
+        let barrier = Arc::new(Barrier::new(8));
+        let workers = (0..8)
+            .map(|n| {
+                let (dir, barrier) = (dir.clone(), Arc::clone(&barrier));
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    write_identity(&dir, &format!("key-{n}"), Path::new("/tmp/key"))
+                })
+            })
+            .collect::<Vec<_>>();
+        for worker in workers {
+            worker.join().expect("worker done").expect("key written");
+        }
+
+        assert_eq!(read(&dir).len(), 8);
         fs::remove_dir_all(dir).expect("temp dir removed");
     }
 }

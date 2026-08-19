@@ -9,6 +9,7 @@ import pytest
 
 from umbra_console import attestation
 from umbra_console import scheduler
+from umbra_console.audit import AUDIT_ACTIONS
 
 
 class FakeConn:
@@ -751,7 +752,8 @@ def test_build_cvm_launch_env_binds_runtime_material(monkeypatch) -> None:
     assert decode_env(env["AUTHORIZED_SSH_KEYS_B64"]) == authorized_keys
     assert decode_env(env["SANDBOX_ENV_PLACEHOLDERS_B64"]) == "AWS_ACCESS_KEY_ID=umbra-proxy-injected\nZED=last\n"
     assert decode_env(env["SECURITY_CVM_CA_CERT_B64"]) == ca_cert
-    assert json.loads(decode_env(env["SECURITY_CVM_ATLS_POLICY_B64"])) == security_atls_policy()
+    assert "SECURITY_CVM_ATLS_POLICY_B64" not in env
+    assert "SECURITY_CVM_ATLS_POLICY_GZIP_B64" not in env
     assert env["CONSOLE_URL"] == ""
     assert binding == {
         "cvm_id": "00000000-0000-4000-8000-000000000031",
@@ -887,6 +889,7 @@ def test_render_dev_cvm_shade_config_routes_tunnel_websocket() -> None:
     assert "region: FR-PARIS-1" in shade
     assert "dev-tunnel:" in shade
     assert "path: /umbra/tunnel" in shade
+    assert "path: /concrete/tunnel" in shade
     assert "websocket: true" in shade
 
 
@@ -2737,3 +2740,230 @@ def test_run_cvm_launch_attestation_verifier_skips_advance_on_zero_rows(monkeypa
     assert conn.audit_calls == []
     operation_updates = [args for query, args in conn.execute_calls if "UPDATE operations" in query]
     assert operation_updates == []
+
+def _unreachable_dev_row(cvm_id, *, age_seconds, error_reason=None) -> dict:
+    """RUNNING Dev CVM row snapshot whose last successful attestation is age_seconds old,
+    with a policy bundle complete enough for build_dev_cvm_attestation_request."""
+    return {
+        "id": cvm_id,
+        "entity_id": UUID("00000000-0000-4000-8000-000000000001"),
+        "fqdn": "cvm.example.com",
+        "metadata": {
+            "policy_bundle": {
+                "compose_template": "services: {}\n",
+                "expected_bootchain": {"mrtd": "d" * 96},
+                "os_image_hash": "e" * 64,
+                "rtmr3_binding": {"cvm_id": str(cvm_id)},
+            }
+        },
+        "expected_image_measurement": "a" * 96,
+        "image_measurement": "a" * 96,
+        "rtmr3_digest": "d" * 96,
+        "attestation_verified_at": scheduler.datetime.now(scheduler.timezone.utc)
+        - scheduler.timedelta(seconds=age_seconds),
+        "error_reason": error_reason,
+    }
+
+
+def _registered_audit_recorder(conn):
+    """Audit fake that also pins action registration: recording an action absent from
+    AUDIT_ACTIONS would raise in production (insert_audit_event ValueError + unknown
+    Postgres enum label), which is exactly how the unregistered-action defect shipped."""
+
+    async def fake_insert_audit_event(_conn, **kwargs):
+        assert kwargs["action"] in AUDIT_ACTIONS, f"unregistered audit action: {kwargs['action']}"
+        conn.audit_calls.append(kwargs)
+
+    return fake_insert_audit_event
+
+
+def test_reconcile_dev_cvm_attestation_refresh_marks_unreachable(monkeypatch) -> None:
+    """A refresh whose verify keeps failing with the connectivity code escalates to
+    error_reason=ATTESTATION_UNREACHABLE + a CVM_ATTESTATION_UNREACHABLE audit event once the
+    last success is older than interval + grace (21600 + 1800 defaults). Also pins the guarded
+    UPDATE's shape: the stale-snapshot binding ($2 = the claimed attestation_verified_at) and
+    the never-overwrite guards for ATTESTATION_DRIFT / SECURITY_CVM_REBIND_REQUIRED that spec
+    §9.2 requires."""
+    cvm_id = UUID("00000000-0000-4000-8000-000000000031")
+    row = _unreachable_dev_row(cvm_id, age_seconds=90_000)
+    conn = ReconcileAttestationConn(dev_rows=[row])
+
+    class FakeVerifier:
+        async def verify(self, request, *, timeout_seconds):
+            raise attestation.AttestationVerifierError("ATTESTATION_FETCH_FAILED", {"reason": "verifier_timeout"})
+
+    monkeypatch.setattr(attestation.AtlasVerifierClient, "from_settings", classmethod(lambda cls: FakeVerifier()))
+    monkeypatch.setattr(scheduler, "insert_audit_event", _registered_audit_recorder(conn))
+
+    advanced = asyncio.run(scheduler.reconcile_dev_cvm_attestations(conn))
+
+    assert advanced == [str(cvm_id)]
+    unreachable_calls = [
+        (query, args)
+        for query, args in conn.execute_calls
+        if "SET error_reason = 'ATTESTATION_UNREACHABLE'" in query
+    ]
+    assert len(unreachable_calls) == 1
+    query, args = unreachable_calls[0]
+    assert args == (cvm_id, row["attestation_verified_at"])
+    assert "attestation_verified_at IS NOT DISTINCT FROM $2" in query
+    assert "error_reason IS DISTINCT FROM 'ATTESTATION_DRIFT'" in query
+    assert "error_reason IS DISTINCT FROM 'SECURITY_CVM_REBIND_REQUIRED'" in query
+    assert conn.audit_calls[0]["action"] == "CVM_ATTESTATION_UNREACHABLE"
+    assert conn.audit_calls[0]["after"]["failure_code"] == "ATTESTATION_FETCH_FAILED"
+
+
+@pytest.mark.parametrize(
+    ("age_seconds", "code"),
+    [
+        pytest.param(22_000, "ATTESTATION_FETCH_FAILED", id="within-grace"),
+        pytest.param(90_000, "ATTESTATION_IMAGE_MISMATCH", id="mismatch-code"),
+        pytest.param(90_000, "ATTESTATION_QUOTE_INVALID", id="quote-invalid-code"),
+    ],
+)
+def test_reconcile_dev_cvm_attestation_refresh_spares_unreachable(monkeypatch, age_seconds, code) -> None:
+    """No escalation happens for a failure still inside the grace window (transient blips stay
+    WARN-and-retry) or for a non-connectivity verifier code however old the row: a verifier
+    REFUSAL (image/RTMR/quote mismatch) is a drift-class security signal, and mislabelling it
+    ATTESTATION_UNREACHABLE would bypass the gates keyed on ATTESTATION_DRIFT."""
+    cvm_id = UUID("00000000-0000-4000-8000-000000000031")
+    conn = ReconcileAttestationConn(dev_rows=[_unreachable_dev_row(cvm_id, age_seconds=age_seconds)])
+
+    class FakeVerifier:
+        async def verify(self, request, *, timeout_seconds):
+            raise attestation.AttestationVerifierError(code, {"reason": "test"})
+
+    monkeypatch.setattr(attestation.AtlasVerifierClient, "from_settings", classmethod(lambda cls: FakeVerifier()))
+    monkeypatch.setattr(scheduler, "insert_audit_event", _registered_audit_recorder(conn))
+
+    advanced = asyncio.run(scheduler.reconcile_dev_cvm_attestations(conn))
+
+    assert advanced == []
+    assert all("ATTESTATION_UNREACHABLE" not in query for query, _ in conn.execute_calls)
+    assert conn.audit_calls == []
+
+
+def test_reconcile_dev_cvm_attestation_refresh_unreachable_marks_once(monkeypatch) -> None:
+    """Once a row is already marked ATTESTATION_UNREACHABLE, every later failing tick's
+    guarded UPDATE matches 0 rows: no duplicate audit event, no progress reported — the
+    escalation fires once per outage, not once per reconciler tick."""
+    cvm_id = UUID("00000000-0000-4000-8000-000000000031")
+
+    class AlreadyMarkedConn(ReconcileAttestationConn):
+        async def execute(self, query, *args):
+            self.execute_calls.append((query, args))
+            return "UPDATE 0" if "UPDATE cvms" in query else "UPDATE 1"
+
+    conn = AlreadyMarkedConn(
+        dev_rows=[_unreachable_dev_row(cvm_id, age_seconds=90_000, error_reason="ATTESTATION_UNREACHABLE")]
+    )
+
+    class FakeVerifier:
+        async def verify(self, request, *, timeout_seconds):
+            raise attestation.AttestationVerifierError("ATTESTATION_FETCH_FAILED", {"reason": "verifier_timeout"})
+
+    monkeypatch.setattr(attestation.AtlasVerifierClient, "from_settings", classmethod(lambda cls: FakeVerifier()))
+    monkeypatch.setattr(scheduler, "insert_audit_event", _registered_audit_recorder(conn))
+
+    advanced = asyncio.run(scheduler.reconcile_dev_cvm_attestations(conn))
+
+    assert advanced == []
+    assert conn.audit_calls == []
+
+
+def test_reconcile_security_cvm_attestation_refresh_marks_unreachable(monkeypatch) -> None:
+    """The SC path escalates the same way as Dev CVMs: a connectivity failure past interval +
+    grace marks the security_cvms row ATTESTATION_UNREACHABLE (binding the claimed
+    attestation_verified_at snapshot) and emits SECURITY_CVM_ATTESTATION_UNREACHABLE."""
+    security_cvm_id = UUID("00000000-0000-4000-8000-000000000041")
+    verified_at = scheduler.datetime.now(scheduler.timezone.utc) - scheduler.timedelta(seconds=90_000)
+    conn = ReconcileAttestationConn(
+        security_rows=[
+            {
+                "id": security_cvm_id,
+                "entity_id": UUID("00000000-0000-4000-8000-000000000001"),
+                "fqdn": "sc.example.com",
+                "compose_config": "services: {}\n",
+                "expected_image_measurement": "a" * 96,
+                "image_measurement": "a" * 96,
+                "rtmr3_digest": "d" * 96,
+                "attestation_verified_at": verified_at,
+                "error_reason": None,
+            }
+        ],
+        token_rows=[
+            {"purpose": "INGEST", "token_hash": "b" * 64},
+            {"purpose": "CA_EXPORT", "token_hash": "c" * 64},
+        ],
+    )
+
+    class FakeVerifier:
+        async def verify(self, request, *, timeout_seconds):
+            raise attestation.AttestationVerifierError("ATTESTATION_FETCH_FAILED", {"reason": "verifier_timeout"})
+
+    async def fake_materialize(_snapshot):
+        return {
+            "app_compose": {"runner": "docker-compose", "docker_compose_file": "services: {}\n"},
+            "expected_bootchain": {"mrtd": "e" * 96},
+            "os_image_hash": "f" * 64,
+        }
+
+    monkeypatch.setenv("CONSOLE_URL", "https://console.example.com")
+    monkeypatch.setattr(attestation.AtlasVerifierClient, "from_settings", classmethod(lambda cls: FakeVerifier()))
+    monkeypatch.setattr(scheduler, "insert_audit_event", _registered_audit_recorder(conn))
+    monkeypatch.setattr(scheduler, "materialize_security_cvm_shade_policy_for_attestation", fake_materialize)
+
+    advanced = asyncio.run(scheduler.reconcile_security_cvm_attestations(conn))
+
+    assert advanced == [str(security_cvm_id)]
+    unreachable_updates = [
+        args for query, args in conn.execute_calls if "SET error_reason = 'ATTESTATION_UNREACHABLE'" in query
+    ]
+    assert unreachable_updates == [(security_cvm_id, verified_at)]
+    assert conn.audit_calls[0]["action"] == "SECURITY_CVM_ATTESTATION_UNREACHABLE"
+    assert conn.audit_calls[0]["after"]["failure_code"] == "ATTESTATION_FETCH_FAILED"
+
+def test_mark_security_cvm_provision_failed_soft_deletes_row(monkeypatch) -> None:
+    """A failed SC provision must soft-delete its `security_cvms` row, per the
+    docs/specs/console.md §8.4 `security_cvm.provision` compensations -- not merely mark FAILED. The
+    already-live conflict check (`fetch_security_cvm_row`) selects on `deleted_at IS NULL`
+    alone, so a row left live wedges every later launch for that entity behind
+    `security_cvm_already_live`. The `ca_cert_pem IS NULL` guard must survive so a finalised
+    SC is never soft-deleted by a stray failure."""
+    conn = FakeConn(
+        fetchrow_row={
+            "target_id": UUID("00000000-0000-4000-8000-000000000041"),
+            "actor_id": UUID("00000000-0000-4000-8000-000000000011"),
+            "actor_email": "admin@example.com",
+            "entity_id": UUID("00000000-0000-4000-8000-000000000021"),
+            "state": "PROVISIONING",
+            "error_reason": None,
+        }
+    )
+
+    async def fake_get_pool():
+        return LaunchFakePool(conn)
+
+    async def fake_insert_audit_event(_conn, **_kwargs):
+        return None
+
+    monkeypatch.setattr(scheduler, "get_pool", fake_get_pool)
+    monkeypatch.setattr(scheduler, "insert_audit_event", fake_insert_audit_event)
+
+    asyncio.run(
+        scheduler.mark_security_cvm_provision_failed(
+            UUID("00000000-0000-4000-8000-000000000030"),
+            code="PHALA_DEPLOY_FAILED",
+            details={"adapter": "phala"},
+        )
+    )
+
+    # The CA-export plaintext scrub also UPDATEs security_cvms; select the compensation itself.
+    sc_updates = [
+        query
+        for query, _ in conn.execute_calls
+        if "UPDATE security_cvms" in query and "state = 'FAILED'" in query
+    ]
+    assert len(sc_updates) == 1
+    assert "deleted_at = now()" in sc_updates[0]
+    assert "AND ca_cert_pem IS NULL" in sc_updates[0]

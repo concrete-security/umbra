@@ -413,9 +413,12 @@ cvm_redeploy_origin_advertises_commit() {
 
 # Reproduce and publish an immutable result index from the given Dockerfile and
 # build context, then set CVM_REDEPLOY_IMAGE_REF to its runnable
-# <repo>@<runtime-digest>. No mutable or source-SHA tag is created. Two local OCI
-# builds must agree on the runnable manifest before publishing; one cache-disabled
-# tagless build publishes the result index by digest.
+# <repo>@<runtime-digest> and CVM_REDEPLOY_PROVENANCE_REF to the immutable
+# attestation index containing its subject-bound SBOM and SLSA provenance. No
+# mutable or source-SHA tag is created. Two local OCI builds must agree on the
+# runnable manifest before publishing. The tagless registry export then reuses
+# only the fresh cache those verified builds populated in this run's unique
+# builder, and the remote runtime digest must still equal the local subject.
 #
 # The result comes back through that global, NOT through stdout, and it must stay
 # that way. Bash strips errexit inside a command substitution, so capturing this
@@ -426,6 +429,7 @@ cvm_redeploy_origin_advertises_commit() {
 cvm_redeploy_publish_image() {
   builtin set +x
   CVM_REDEPLOY_IMAGE_REF=""
+  CVM_REDEPLOY_PROVENANCE_REF=""
   local image_repo="$1" dockerfile="$2" context="$3" platforms="$4"
   local attestation_digest attestation_json descriptors git_sha
   local index_json local_archive local_runtime_digest
@@ -588,10 +592,16 @@ cvm_redeploy_publish_image() {
   registry_password=""
 
   metadata_file="${CVM_REDEPLOY_RELEASE_DIR}/registry-build-metadata.json"
-  cvm_redeploy_info "uploading one tagless attested result index by digest"
+  cvm_redeploy_info "uploading the reproduced tagless attested result index by digest"
+  # This builder is unique to this invocation and began without ambient Buildx
+  # state. The two cache-disabled builds above are therefore the only source of
+  # reusable records, and they already proved the same runtime subject from two
+  # detached worktrees. Rebuilding cache-disabled a third time would fetch build
+  # inputs again after the reproducibility decision and could publish a different
+  # subject; export the proven result instead, then verify its registry digest and
+  # attestations below.
   docker buildx build \
     "${UMBRA_REPRODUCIBLE_BUILD_ARGS[@]}" \
-    --no-cache \
     --platform "$platforms" \
     --file "$worktree_dockerfile" \
     --metadata-file "$metadata_file" \
@@ -686,6 +696,7 @@ cvm_redeploy_publish_image() {
     || cvm_redeploy_fail "published SBOM is not a non-empty SPDX 2.3 document"
 
   CVM_REDEPLOY_IMAGE_REF="${image_repo}@${runtime_digest}"
+  CVM_REDEPLOY_PROVENANCE_REF="${image_repo}@${published_index_digest}"
   cvm_redeploy_cleanup_release_workspace \
     || cvm_redeploy_fail "could not clean the isolated release workspace"
   cvm_redeploy_restore_release_exit_trap

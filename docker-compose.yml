@@ -24,6 +24,7 @@ services:
       DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://umbra:umbra@console-db:5432/umbra}
       AUDIT_EXPORT_BUCKET: ${AUDIT_EXPORT_BUCKET:-}
       UV_PROJECT_ENVIRONMENT: /tmp/umbra-shade-venv
+      UV_CACHE_DIR: /tmp/umbra-uv-cache
       # Publisher credentials are host-side, one-shot inputs. Explicitly blank
       # legacy values that may still exist in an old generated .env.
       GHCR_USER: ""

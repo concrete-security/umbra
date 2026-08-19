@@ -13,3 +13,9 @@ cvm:
       port: 8090
       websocket: true
       cors: false
+    # Transition alias for concrete-branded CLIs (<= 0.4.x).
+    - path: /concrete/tunnel
+      service: dev-tunnel
+      port: 8090
+      websocket: true
+      cors: false

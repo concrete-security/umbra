@@ -1,0 +1,58 @@
+{
+  "egress_boundary": true,
+  "allowed_destinations": [
+    {
+      "id": "slack-web-api-readonly",
+      "scheme": "https",
+      "host": "slack.com",
+      "ports": [443],
+      "methods": ["POST"],
+      "path_prefixes": [
+        "/api/auth.test",
+        "/api/conversations.list",
+        "/api/conversations.info",
+        "/api/conversations.history",
+        "/api/conversations.replies",
+        "/api/users.info",
+        "/api/users.list",
+        "/api/users.profile.get"
+      ]
+    },
+    {
+      "id": "slack-subdomains-readonly",
+      "scheme": "https",
+      "host": "*.slack.com",
+      "ports": [443],
+      "methods": ["GET"],
+      "path_prefixes": ["/"]
+    }
+  ],
+  "secret_injections": [
+    {
+      "id": "slack-user-token",
+      "match": {
+        "scheme": "https",
+        "host": "slack.com",
+        "ports": [443],
+        "methods": ["POST"],
+        "path_prefixes": [
+          "/api/auth.test",
+          "/api/conversations.list",
+          "/api/conversations.info",
+          "/api/conversations.history",
+          "/api/conversations.replies",
+          "/api/users.info",
+          "/api/users.list",
+          "/api/users.profile.get"
+        ]
+      },
+      "type": "request_header",
+      "header": "authorization",
+      "value": "umbra-unminted",
+      "value_template": "Bearer ${secret}"
+    }
+  ],
+  "sandbox_env": {
+    "SLACK_USER_TOKEN": "umbra-proxy-injected"
+  }
+}

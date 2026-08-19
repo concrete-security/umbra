@@ -1,6 +1,5 @@
 use std::{
-    fs::{self, OpenOptions},
-    io::{BufRead, BufReader, Write as _},
+    fs,
     path::{Path, PathBuf},
 };
 
@@ -14,10 +13,7 @@ use tokio::{
 };
 
 use crate::{
-    config::ResolvedConfig,
-    console::{console_session, fetch_json},
-    exit::ExitStatus,
-    session::Session,
+    atls_policy_store, config::ResolvedConfig, console::console_session, exit::ExitStatus, prompt,
     style,
 };
 
@@ -187,7 +183,8 @@ fn refresh_policy_after_mismatch(
     host: &str,
     detail: &str,
 ) -> Result<RefreshDecision, (ExitStatus, String)> {
-    let Some(cvm_id) = cvm_id_from_per_cvm_policy_path(&config.config_dir, policy_path) else {
+    let Some(cvm_id) = atls_policy_store::cvm_id_from_store_path(&config.config_dir, policy_path)
+    else {
         return Ok(RefreshDecision::Declined(friendly_mismatch_message(
             host,
             policy_path,
@@ -196,14 +193,14 @@ fn refresh_policy_after_mismatch(
             "This policy path does not look like a per-CVM policy file, so Umbra cannot refresh it automatically.",
         )));
     };
-    let prompt = friendly_mismatch_message(
+    let question = friendly_mismatch_message(
         host,
         policy_path,
         Some(&cvm_id),
         detail,
-        "Refresh this local policy file from Console and retry verification now? [y/N] ",
+        "Refresh this local policy file from Console and retry verification now?",
     );
-    match prompt_refresh_policy(&prompt).map_err(|message| (ExitStatus::Error, message))? {
+    match prompt::confirm(&question) {
         Some(true) => {}
         Some(false) => {
             return Ok(RefreshDecision::Declined(
@@ -216,7 +213,7 @@ fn refresh_policy_after_mismatch(
                 policy_path,
                 Some(&cvm_id),
                 detail,
-                "No interactive terminal was available to confirm the refresh. Re-run from a terminal and answer yes if you trust the refreshed policy.",
+                "The refresh was not confirmed -- no terminal to ask on, no reply, or no usable answer. Re-run from a terminal and answer y if you trust the refreshed policy.",
             )));
         }
     }
@@ -226,56 +223,22 @@ fn refresh_policy_after_mismatch(
             refresh_failed_message(host, policy_path, detail, &message),
         )
     })?;
-    let bundle =
-        fetch_policy_bundle(console_url, &session, &cvm_id).map_err(|(status, message)| {
+    let bundle = atls_policy_store::fetch_bundle(console_url, &session, &cvm_id).map_err(
+        |(status, message)| {
             (
                 status,
                 refresh_failed_message(host, policy_path, detail, &message),
             )
-        })?;
-    let path = crate::commands::cvm::write_policy_file(&config.config_dir, &bundle, &cvm_id)
-        .map_err(|message| {
+        },
+    )?;
+    let path =
+        atls_policy_store::write(&config.config_dir, &bundle, &cvm_id).map_err(|message| {
             (
                 ExitStatus::Error,
                 refresh_failed_message(host, policy_path, detail, &message),
             )
         })?;
     Ok(RefreshDecision::Refreshed(path))
-}
-
-fn fetch_policy_bundle(
-    console_url: &str,
-    session: &Session,
-    cvm_id: &str,
-) -> Result<crate::commands::cvm::PolicyBundle, (ExitStatus, String)> {
-    fetch_json(
-        console_url,
-        session,
-        &format!("/api/v1/cvms/{cvm_id}/policy-bundle"),
-        &[],
-        "fetch Dev CVM policy bundle",
-    )
-}
-
-fn prompt_refresh_policy(message: &str) -> Result<Option<bool>, String> {
-    #[cfg(unix)]
-    {
-        if let Ok(mut tty) = OpenOptions::new().read(true).write(true).open("/dev/tty") {
-            write!(tty, "{message}")
-                .and_then(|_| tty.flush())
-                .map_err(|err| format!("[error] failed to write policy refresh prompt: {err}"))?;
-            let mut answer = String::new();
-            let mut reader = BufReader::new(tty);
-            reader.read_line(&mut answer).map_err(|err| {
-                format!("[error] failed to read policy refresh prompt response: {err}")
-            })?;
-            return Ok(Some(matches!(
-                answer.trim().to_ascii_lowercase().as_str(),
-                "y" | "yes"
-            )));
-        }
-    }
-    Ok(None)
 }
 
 fn friendly_mismatch_message(
@@ -307,7 +270,7 @@ fn refresh_failed_message(host: &str, policy_path: &Path, detail: &str, reason: 
         friendly_mismatch_message(
             host,
             policy_path,
-            cvm_id_from_policy_path(policy_path).as_deref(),
+            atls_policy_store::cvm_id_from_path(policy_path).as_deref(),
             detail,
             "Umbra could not refresh the local policy automatically.",
         ),
@@ -345,27 +308,6 @@ fn is_transport_handshake_failure(detail: &str) -> bool {
 
 fn is_app_compose_hash_mismatch(detail: &str) -> bool {
     detail.contains("app compose hash mismatch") || detail.contains("app_compose_hash_mismatch")
-}
-
-fn cvm_id_from_policy_path(path: &Path) -> Option<String> {
-    let name = path.file_name()?.to_str()?;
-    let cvm_id = name.strip_suffix(".atls-policy.json")?;
-    if cvm_id.is_empty() {
-        return None;
-    }
-    Some(cvm_id.to_string())
-}
-
-fn cvm_id_from_per_cvm_policy_path(config_dir: &Path, path: &Path) -> Option<String> {
-    let cvm_id = cvm_id_from_policy_path(path)?;
-    let expected = config_dir
-        .join("cvms")
-        .join(format!("{cvm_id}.atls-policy.json"));
-    if path == expected {
-        Some(cvm_id)
-    } else {
-        None
-    }
 }
 
 async fn websocket_handshake<S>(stream: &mut S, host: &str) -> Result<(), String>
@@ -656,11 +598,14 @@ mod tests {
             .join("cvms")
             .join("cvm-aaaaaaaaaaaaaaaaaaaaaaaaaa.atls-policy.json");
         assert_eq!(
-            cvm_id_from_per_cvm_policy_path(config_dir, &canonical).as_deref(),
+            atls_policy_store::cvm_id_from_store_path(config_dir, &canonical).as_deref(),
             Some("cvm-aaaaaaaaaaaaaaaaaaaaaaaaaa")
         );
 
         let custom = Path::new("/tmp/custom/cvm-aaaaaaaaaaaaaaaaaaaaaaaaaa.atls-policy.json");
-        assert_eq!(cvm_id_from_per_cvm_policy_path(config_dir, custom), None);
+        assert_eq!(
+            atls_policy_store::cvm_id_from_store_path(config_dir, custom),
+            None
+        );
     }
 }

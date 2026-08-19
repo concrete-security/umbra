@@ -73,7 +73,177 @@ pub fn run(command: ProfileCommand, config: &ResolvedConfig, json: bool) -> Exit
         ProfileCommand::Show => show(config, json),
         ProfileCommand::Configure(args) => configure(config, args, json),
         ProfileCommand::Members(command) => members(config, command, json),
+        ProfileCommand::Grants => grants(config, json),
+        ProfileCommand::Connections(command) => connections(config, command, json),
     }
+}
+
+fn grants(config: &ResolvedConfig, json_output: bool) -> ExitStatus {
+    let (console_url, session, profile_id) = match selected_profile_session(config) {
+        Ok(value) => value,
+        Err((status, message)) => {
+            crate::style::eprintln_error(&message);
+            return status;
+        }
+    };
+    let response = Client::new()
+        .get(format!(
+            "{console_url}/api/v1/profiles/{profile_id}/secrets-status"
+        ))
+        .bearer_auth(&session.access_token)
+        .send()
+        .map_err(|err| {
+            (
+                ExitStatus::Error,
+                format!("[error] failed to fetch grant status: {err}"),
+            )
+        });
+    let status_payload: serde_json::Value = match response
+        .and_then(|response| crate::console::read_json_response(response, "fetch grant status"))
+    {
+        Ok(value) => value,
+        Err((status, message)) => {
+            crate::style::eprintln_error(&message);
+            return status;
+        }
+    };
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&status_payload).expect("grant status serializes")
+        );
+        return ExitStatus::Ok;
+    }
+    println!("profile: {profile_id}");
+    let injections = status_payload
+        .get("injections")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if injections.is_empty() {
+        println!("injections: none declared");
+    }
+    for injection in &injections {
+        let id = injection
+            .get("injection_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("?");
+        let present = injection
+            .get("material_present")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let mut line = format!("{id}: {}", if present { "minted" } else { "NOT MINTED" });
+        if let Some(updated) = injection
+            .get("updated_at")
+            .and_then(serde_json::Value::as_str)
+        {
+            line.push_str(&format!(" (updated {updated})"));
+        }
+        if let Some(managed) = injection.get("managed").filter(|value| !value.is_null()) {
+            if let Some(expires) = managed
+                .get("access_token_expires_at")
+                .and_then(serde_json::Value::as_str)
+            {
+                line.push_str(&format!("; managed, expires {expires}"));
+            } else {
+                line.push_str("; managed");
+            }
+            if let Some(error) = managed
+                .get("last_error")
+                .and_then(serde_json::Value::as_str)
+            {
+                line.push_str(&format!("; last error: {error}"));
+            }
+        }
+        println!("{line}");
+    }
+    if let Some(connection) = status_payload.get("last_connection") {
+        if let Some(error) = connection.get("error").and_then(serde_json::Value::as_str) {
+            println!("last connection: FAILED ({error})");
+        } else if let Some(connected) = connection
+            .get("connected_at")
+            .and_then(serde_json::Value::as_str)
+        {
+            println!("last connection: ok ({connected})");
+        }
+    }
+    ExitStatus::Ok
+}
+
+fn connections(
+    config: &ResolvedConfig,
+    command: crate::cli::ProfileConnectionsCommand,
+    json_output: bool,
+) -> ExitStatus {
+    match command {
+        crate::cli::ProfileConnectionsCommand::Create(args) => {
+            connections_create(config, args, json_output)
+        }
+    }
+}
+
+fn connections_create(
+    config: &ResolvedConfig,
+    args: crate::cli::ProfileConnectionsCreateArgs,
+    json_output: bool,
+) -> ExitStatus {
+    let (console_url, session, profile_id) = match selected_profile_session(config) {
+        Ok(value) => value,
+        Err((status, message)) => {
+            crate::style::eprintln_error(&message);
+            return status;
+        }
+    };
+    let mut body = serde_json::json!({ "integration": args.integration });
+    if !args.injection_ids.is_empty() {
+        body["injection_ids"] = serde_json::json!(args.injection_ids);
+    }
+    let response = Client::new()
+        .post(format!(
+            "{console_url}/api/v1/profiles/{profile_id}/connections"
+        ))
+        .bearer_auth(&session.access_token)
+        .json(&body)
+        .send()
+        .map_err(|err| {
+            (
+                ExitStatus::Error,
+                format!("[error] failed to create connect link: {err}"),
+            )
+        });
+    let link: serde_json::Value = match response
+        .and_then(|response| crate::console::read_json_response(response, "create connect link"))
+    {
+        Ok(value) => value,
+        Err((status, message)) => {
+            crate::style::eprintln_error(&message);
+            return status;
+        }
+    };
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&link).expect("connect link serializes")
+        );
+        return ExitStatus::Ok;
+    }
+    println!(
+        "connect_url: {}",
+        link.get("connect_url")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("?")
+    );
+    println!(
+        "expires_at: {}",
+        link.get("expires_at")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("?")
+    );
+    eprintln!(
+        "{}",
+        crate::style::info_line("single-use link; send it to the profile's developer")
+    );
+    ExitStatus::Ok
 }
 
 fn create(config: &ResolvedConfig, args: ProfileCreateArgs, json_output: bool) -> ExitStatus {
@@ -337,7 +507,7 @@ fn member_remove(config: &ResolvedConfig, user_id: &str, json_output: bool) -> E
     ExitStatus::Ok
 }
 
-fn selected_profile_session(
+pub(crate) fn selected_profile_session(
     config: &ResolvedConfig,
 ) -> Result<(&str, Session, String), (ExitStatus, String)> {
     let raw = config
