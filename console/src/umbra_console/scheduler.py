@@ -3493,6 +3493,13 @@ def render_dev_cvm_shade_config(snapshot: Any, *, name: str) -> str:
             "      port: 8090",
             "      websocket: true",
             "      cors: false",
+            # Transition alias: concrete-branded CLIs (<= 0.4.x) dial
+            # /concrete/tunnel and must keep SSH access after rebind.
+            "    - path: /concrete/tunnel",
+            "      service: dev-tunnel",
+            "      port: 8090",
+            "      websocket: true",
+            "      cors: false",
             "",
         ]
     )

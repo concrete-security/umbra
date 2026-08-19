@@ -206,7 +206,9 @@ The image bakes Claude Code, Codex, and `gh` at known versions. The entrypoint M
 A small relay that:
 
 - Listens on TCP `:8090` (HTTP).
-- Accepts a WebSocket upgrade on `/umbra/tunnel`.
+- Accepts a WebSocket upgrade on `/umbra/tunnel`, and on `/concrete/tunnel`
+  as a transition alias for concrete-branded CLIs (<= 0.4.x); the alias is
+  removed once those CLIs are retired.
 - Bridges binary WebSocket frames to a TCP connection to `user-sandbox:22`.
 - Drops all capabilities (`cap_drop: [ALL]`), `read_only: true`, `security_opt: [no-new-privileges:true]`, `tmpfs: [/tmp]`.
 - Exposes no other endpoints.
@@ -264,7 +266,7 @@ The container's behavior is fully described by §3 (build) + §10 (boot sequence
 - Publishes ports `80:80` and `443:443` on the host.
 - Routes:
   - `POST /tdx_quote` → `attestation-service:8080` with `X-TLS-EKM-Channel-Binding: ${ekm_hex}:${hmac_hex}` (RFC 5705 EKM exporter `EXPORTER-Channel-Binding`, 32 bytes; `hmac_hex` = HMAC-SHA256(`ekm_raw`, in-TEE HMAC key)).
-  - `GET /umbra/tunnel` (WebSocket upgrade) → `dev-tunnel:8090`. `proxy_read_timeout` and `proxy_send_timeout` MUST be ≥ 3600s.
+  - `GET /umbra/tunnel` (WebSocket upgrade) → `dev-tunnel:8090`. `proxy_read_timeout` and `proxy_send_timeout` MUST be ≥ 3600s. `GET /concrete/tunnel` routes identically as the concrete-CLI transition alias.
 - All other paths MUST return 404.
 
 ### 4.4 `attestation-service` runtime (shade)

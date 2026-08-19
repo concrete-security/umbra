@@ -108,18 +108,21 @@ docker compose -p "$PROJECT" -f "$ROOT/cvms/dev/docker-compose.yml" -f "$TMPDIR/
       dev@user-sandbox '"'"'test "$(id -u)" = 1001 && test "$VERIFY_PLACEHOLDER" = compose-smoke && test -L /home/dev/.claude.json && python3 -m json.tool /home/dev/.claude.json >/dev/null'"'"'
   ' <"$TMPDIR/id_ed25519"
 
-python3 - "$tunnel_port" <<'PY'
+# The canonical path and the concrete-CLI transition alias must both relay.
+for tunnel_path in /umbra/tunnel /concrete/tunnel; do
+python3 - "$tunnel_port" "$tunnel_path" <<'PY'
 import base64
 import os
 import socket
 import sys
 
 port = int(sys.argv[1])
+path = sys.argv[2]
 key = base64.b64encode(os.urandom(16)).decode("ascii")
 with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
     sock.sendall(
         (
-            "GET /umbra/tunnel HTTP/1.1\r\n"
+            f"GET {path} HTTP/1.1\r\n"
             "Host: localhost\r\n"
             "Upgrade: websocket\r\n"
             "Connection: Upgrade\r\n"
@@ -153,5 +156,6 @@ with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
     if not payload.startswith(b"SSH-"):
         raise SystemExit(f"unexpected tunnel payload: {payload!r}")
 PY
+done
 
 echo "dev_compose_smoke: ok"

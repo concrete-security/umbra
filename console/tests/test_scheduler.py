@@ -889,6 +889,7 @@ def test_render_dev_cvm_shade_config_routes_tunnel_websocket() -> None:
     assert "region: FR-PARIS-1" in shade
     assert "dev-tunnel:" in shade
     assert "path: /umbra/tunnel" in shade
+    assert "path: /concrete/tunnel" in shade
     assert "websocket: true" in shade
 
 
