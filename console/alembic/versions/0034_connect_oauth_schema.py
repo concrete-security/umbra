@@ -7,7 +7,7 @@ Create Date: 2026-08-17
 The pre-Umbra compatibility branch left these objects as lineage-only no-ops so
 fresh databases would not install a then-removed private feature. Connect is now
 a public Umbra surface, so this revision creates the tables and audit actions on
-every database that reached ``0033_public_legacy_merge``. Existing Concrete
+every database that reached ``0033_public_legacy_merge``. Existing pre-rename
 schema is retained: ``CREATE IF NOT EXISTS`` / ``ADD VALUE IF NOT EXISTS`` keep
 a migrated database intact, and ciphertext CHECKs accept Umbra v2 envelopes as
 well as legacy v1.

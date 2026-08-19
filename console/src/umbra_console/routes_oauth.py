@@ -817,8 +817,8 @@ async def delete_profile_managed_secret(
 def callback_page(status_code: int, message: str) -> HTMLResponse:
     body = (
         "<!doctype html>\n"
-        '<html><head><meta charset="utf-8"><title>Concrete</title></head>\n'
-        f"<body><h1>Concrete</h1><p>{html.escape(message)}</p></body></html>\n"
+        '<html><head><meta charset="utf-8"><title>Umbra</title></head>\n'
+        f"<body><h1>Umbra</h1><p>{html.escape(message)}</p></body></html>\n"
     )
     return HTMLResponse(content=body, status_code=status_code)
 

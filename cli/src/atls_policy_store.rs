@@ -241,14 +241,14 @@ mod tests {
     #[test]
     fn store_path_uses_config_cvms_dir() {
         assert_eq!(
-            store_path(Path::new("/tmp/concrete"), "cvm-1"),
-            PathBuf::from("/tmp/concrete/cvms/cvm-1.atls-policy.json")
+            store_path(Path::new("/tmp/umbra"), "cvm-1"),
+            PathBuf::from("/tmp/umbra/cvms/cvm-1.atls-policy.json")
         );
     }
 
     #[test]
     fn cvm_id_from_store_path_yields_cvm_id_only_for_canonical_path() {
-        let config_dir = Path::new("/tmp/concrete");
+        let config_dir = Path::new("/tmp/umbra");
         let canonical = config_dir
             .join("cvms")
             .join("cvm-s7oz4pkm2r3c5g6pta35gm5taq.atls-policy.json");
@@ -285,7 +285,7 @@ mod tests {
 
     #[test]
     fn update_policy_refuses_to_overwrite_changed_local_trust_in_json_mode() {
-        let dir = std::env::temp_dir().join(format!("concrete-cvm-policy-test-{}", Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("umbra-cvm-policy-test-{}", Uuid::new_v4()));
         let cvm_id = "00000000-0000-4000-8000-000000000001";
         let old_hash = "a".repeat(64);
         let new_hash = "b".repeat(64);
@@ -305,7 +305,7 @@ mod tests {
 
     #[test]
     fn update_policy_accepts_unchanged_local_trust() {
-        let dir = std::env::temp_dir().join(format!("concrete-cvm-policy-test-{}", Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("umbra-cvm-policy-test-{}", Uuid::new_v4()));
         let cvm_id = "00000000-0000-4000-8000-000000000001";
         write(
             &dir,
