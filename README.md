@@ -2,15 +2,11 @@
 
 Umbra runs AI coding agents in attested cloud sandboxes with governed network and secret access. Developers use a CLI to create and enter Dev CVMs; all sandbox egress is forced through an entity Security CVM for policy enforcement, secret scanning, proxy-time credential injection, and traffic logging.
 
-Umbra is an independent project. Its intended public home is `concrete-security/umbra` on GitHub; publication remains gated on maintainers proving control of that repository and its release identities.
-
 > Umbra is pre-1.0 software. Interfaces, deployment requirements, and compatibility may change between minor releases. Only the latest pre-1.0 release is supported; see [versioning](docs/versioning.md).
 
 ## Architecture
 
 ![Umbra v0 architecture: the umbra CLI talks HTTPS REST + OIDC to the Console control plane (Postgres-backed, provisioning CVMs through TDX and DNS providers); developer SSH, editor, and agent sessions reach the Dev CVM over a locally verified aTLS tunnel; all sandbox egress is forced through the dev-egress-forwarder to the entity Security CVM's mitmproxy, which enforces policy, scans for secrets, injects credentials, and emits traffic logs before re-encrypting traffic to the internet; the Security CVM pulls policy from and sends traffic logs to the Console.](docs/assets/architecture.png)
-
-The editable source is [docs/assets/architecture.excalidraw](docs/assets/architecture.excalidraw): open it at [excalidraw.com](https://excalidraw.com), edit, and re-export the SVG alongside it.
 
 | Module       | Path             | Role                                                                                                                        |
 | ------------ | ---------------- | --------------------------------------------------------------------------------------------------------------------------- |
