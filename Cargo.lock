@@ -2903,7 +2903,7 @@ dependencies = [
 
 [[package]]
 name = "umbra-cli"
-version = "0.3.0-beta.3"
+version = "0.1.0"
 dependencies = [
  "anstyle",
  "atlas-rs",

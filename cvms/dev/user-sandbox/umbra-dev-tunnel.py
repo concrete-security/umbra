@@ -27,8 +27,9 @@ class TunnelConfig:
 
 
 def load_config() -> TunnelConfig:
-    # /concrete/tunnel is a transition alias: concrete-branded CLIs (<= 0.4.x)
-    # dial it and must keep SSH access while users migrate to umbra-cli.
+    # DEV_TUNNEL_PATH is the comma-separated list of accepted upgrade paths.
+    # The Console injects the canonical path plus any operator-configured
+    # aliases kept for older clients (docs/specs/dev-cvm.md §7).
     return TunnelConfig(
         listen_host=os.environ.get("DEV_TUNNEL_HOST", "0.0.0.0"),
         listen_port=int(os.environ.get("DEV_TUNNEL_PORT", "8090")),
@@ -36,7 +37,7 @@ def load_config() -> TunnelConfig:
         ssh_port=int(os.environ.get("DEV_CVM_SSH_PORT", "22")),
         paths=tuple(
             part.strip()
-            for part in os.environ.get("DEV_TUNNEL_PATH", "/umbra/tunnel,/concrete/tunnel").split(",")
+            for part in os.environ.get("DEV_TUNNEL_PATH", "/umbra/tunnel").split(",")
             if part.strip()
         ),
     )

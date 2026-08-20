@@ -3433,6 +3433,7 @@ def build_cvm_launch_env(
         "AUTHORIZED_SSH_KEYS_B64": b64_text(authorized_keys),
         "SANDBOX_ENV_PLACEHOLDERS_B64": b64_text(sandbox_env),
         "CONSOLE_URL": console_url,
+        "DEV_TUNNEL_PATH": ",".join(dev_tunnel_paths()),
     }
     env.update(dstack_docker_pull_env())
     return env, binding
@@ -3473,7 +3474,44 @@ def security_cvm_atls_policy(snapshot: Any) -> dict[str, Any]:
     return policy
 
 
+DEV_TUNNEL_CANONICAL_PATH = "/umbra/tunnel"
+DEV_TUNNEL_EXTRA_PATHS_ENV = "DEV_TUNNEL_EXTRA_PATHS"
+DEV_TUNNEL_PATH_ALLOWED_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._~/-"
+)
+
+
+def dev_tunnel_paths() -> list[str]:
+    """The canonical tunnel path plus operator-configured aliases.
+
+    Aliases exist so clients that predate the current path keep SSH access;
+    they are deployment configuration, never hardcoded here.
+    """
+    raw = load_settings().raw.get(DEV_TUNNEL_EXTRA_PATHS_ENV, "").strip()
+    paths = [DEV_TUNNEL_CANONICAL_PATH]
+    for part in raw.split(","):
+        path = part.strip()
+        if not path:
+            continue
+        if not path.startswith("/") or not set(path) <= DEV_TUNNEL_PATH_ALLOWED_CHARS:
+            raise RuntimeError(f"{DEV_TUNNEL_EXTRA_PATHS_ENV} entries must be absolute URL paths")
+        if path not in paths:
+            paths.append(path)
+    return paths
+
+
 def render_dev_cvm_shade_config(snapshot: Any, *, name: str) -> str:
+    route_lines: list[str] = []
+    for path in dev_tunnel_paths():
+        route_lines.extend(
+            [
+                f"    - path: {path}",
+                "      service: dev-tunnel",
+                "      port: 8090",
+                "      websocket: true",
+                "      cors: false",
+            ]
+        )
     return "\n".join(
         [
             "app:",
@@ -3488,18 +3526,7 @@ def render_dev_cvm_shade_config(snapshot: Any, *, name: str) -> str:
             f"  instance_type: {_row_value(snapshot, 'instance_type')}",
             f"  region: {_row_value(snapshot, 'region')}",
             "  routes:",
-            "    - path: /umbra/tunnel",
-            "      service: dev-tunnel",
-            "      port: 8090",
-            "      websocket: true",
-            "      cors: false",
-            # Transition alias: concrete-branded CLIs (<= 0.4.x) dial
-            # /concrete/tunnel and must keep SSH access after rebind.
-            "    - path: /concrete/tunnel",
-            "      service: dev-tunnel",
-            "      port: 8090",
-            "      websocket: true",
-            "      cors: false",
+            *route_lines,
             "",
         ]
     )

@@ -82,6 +82,7 @@ export SECURITY_CVM_FQDN="sc.example.com"
 export SECURITY_CVM_PROXY_PORT="8080"
 export SECURITY_CVM_PROXY_TOKEN="compose-smoke-token"
 export DEV_CVM_CONTROL_TOKEN="compose-smoke-dev-control-token"
+export DEV_TUNNEL_PATH="/umbra/tunnel,/legacy-cli/tunnel"
 
 rendered_compose="$(
   docker compose -p "$PROJECT" -f "$ROOT/cvms/dev/docker-compose.yml" -f "$TMPDIR/compose.override.yml" config
@@ -108,8 +109,8 @@ docker compose -p "$PROJECT" -f "$ROOT/cvms/dev/docker-compose.yml" -f "$TMPDIR/
       dev@user-sandbox '"'"'test "$(id -u)" = 1001 && test "$VERIFY_PLACEHOLDER" = compose-smoke && test -L /home/dev/.claude.json && python3 -m json.tool /home/dev/.claude.json >/dev/null'"'"'
   ' <"$TMPDIR/id_ed25519"
 
-# The canonical path and the concrete-CLI transition alias must both relay.
-for tunnel_path in /umbra/tunnel /concrete/tunnel; do
+# The canonical path and a configured alias must both relay.
+for tunnel_path in /umbra/tunnel /legacy-cli/tunnel; do
 python3 - "$tunnel_port" "$tunnel_path" <<'PY'
 import base64
 import os
