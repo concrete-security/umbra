@@ -4,6 +4,10 @@ Umbra follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and will 
 
 ## Unreleased
 
+## [0.1.0] - 2026-08-19
+
+First public release of `umbra-cli`.
+
 ### Added
 
 - Initial public source release of the CLI, Console, Dev CVM, Security CVM, specifications, self-host templates, and CI/release definitions.

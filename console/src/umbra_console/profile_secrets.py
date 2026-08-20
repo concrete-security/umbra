@@ -14,6 +14,11 @@ from umbra_console.config import load_settings
 SECRET_INJECTION_KEK_ENV = "SECRET_INJECTION_KEK_B64"
 SECRET_INJECTION_ENVELOPE_VERSION = "v2"
 SECRET_INJECTION_LEGACY_ENVELOPE_VERSION = "v1"
+# AAD namespace for `v1:` ciphertext written by pre-rename deployments. The
+# exact bytes are bound into every legacy envelope, so the value is operator
+# configuration carried by migrated deployments; fresh installs never set it
+# and therefore cannot read `v1:` rows.
+LEGACY_SECRET_AAD_NAMESPACE_ENV = "LEGACY_SECRET_AAD_NAMESPACE"
 SECRET_INJECTION_NONCE_BYTES = 12
 SECRET_INJECTION_KEY_BYTES = 32
 SECRET_INJECTION_RENDERED_MAX_LEN = 8192
@@ -434,37 +439,34 @@ def _valid_dns_name(host: str) -> bool:
     return len(labels) >= 2 and all(SECRET_HOST_DNS_LABEL_RE.fullmatch(label) for label in labels)
 
 
+def _legacy_aad_namespace() -> str:
+    namespace = load_settings().raw.get(LEGACY_SECRET_AAD_NAMESPACE_ENV, "").strip()
+    if not namespace:
+        raise ValueError(f"{LEGACY_SECRET_AAD_NAMESPACE_ENV} is required to read legacy v1 ciphertext")
+    return namespace
+
+
+def _aad_domain(family: str, version: str) -> str:
+    if version == SECRET_INJECTION_LEGACY_ENVELOPE_VERSION:
+        return f"{_legacy_aad_namespace()}.{family}.v1"
+    return f"umbra.{family}.v2"
+
+
 def _secret_aad(profile_id: Any, injection_id: str, version: str) -> bytes:
-    domain = (
-        "concrete.profile_secret_material.v1"
-        if version == SECRET_INJECTION_LEGACY_ENVELOPE_VERSION
-        else "umbra.profile_secret_material.v2"
-    )
+    domain = _aad_domain("profile_secret_material", version)
     return f"{domain}:{profile_id}:{injection_id}".encode("utf-8")
 
 
 def _user_secret_aad(user_id: Any, name: str, version: str) -> bytes:
-    domain = (
-        "concrete.user_secret_material.v1"
-        if version == SECRET_INJECTION_LEGACY_ENVELOPE_VERSION
-        else "umbra.user_secret_material.v2"
-    )
+    domain = _aad_domain("user_secret_material", version)
     return f"{domain}:{user_id}:{name}".encode("utf-8")
 
 
 def _oauth_client_secret_aad(entity_id: Any, name: str, version: str) -> bytes:
-    domain = (
-        "concrete.oauth_integration.v1"
-        if version == SECRET_INJECTION_LEGACY_ENVELOPE_VERSION
-        else "umbra.oauth_integration.v2"
-    )
+    domain = _aad_domain("oauth_integration", version)
     return f"{domain}:{entity_id}:{name}".encode("utf-8")
 
 
 def _managed_secret_aad(profile_id: Any, injection_id: str, version: str) -> bytes:
-    domain = (
-        "concrete.managed_secret.v1"
-        if version == SECRET_INJECTION_LEGACY_ENVELOPE_VERSION
-        else "umbra.managed_secret.v2"
-    )
+    domain = _aad_domain("managed_secret", version)
     return f"{domain}:{profile_id}:{injection_id}".encode("utf-8")
