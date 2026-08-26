@@ -3,9 +3,9 @@
 # reviewed value. Release builds override it with the source commit timestamp.
 ARG SOURCE_DATE_EPOCH=0
 
-FROM golang:1.26.5-bookworm@sha256:53eeac89074db483fdf0ab3be1df32bf6e47562263d2d0d6baa7f26acb4957dd AS compose-builder
-ARG COMPOSE_VERSION=5.4.0
-ARG COMPOSE_SOURCE_SHA256=142f895ba74715ea0018a20b7f93fa96e36fb6c91ea66f856a61c6e3716c4ef8
+FROM golang:1.26.6-bookworm@sha256:116d58cbd88c1297624acc6e967a060012422bacf9930927e23fb719189c6f36 AS compose-builder
+ARG COMPOSE_VERSION=5.5.0
+ARG COMPOSE_SOURCE_SHA256=504ed1541f4bc5c301dc9cf7b86ae8e2d26b57a558a248d9b832af188b298bba
 RUN curl -fsSL "https://github.com/docker/compose/archive/refs/tags/v${COMPOSE_VERSION}.tar.gz" -o /tmp/compose.tar.gz \
     && echo "${COMPOSE_SOURCE_SHA256}  /tmp/compose.tar.gz" | sha256sum -c - \
     && mkdir -p /src \
@@ -40,7 +40,7 @@ COPY --from=rust-base /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certi
 # after rebuilding and exercising the sandbox image; it deliberately freezes
 # all packages from the Ubuntu archive. Docker's exact amd64 package filenames
 # and content digests are pinned separately in tool-versions.env below.
-ARG UBUNTU_SNAPSHOT=20260813T000000Z
+ARG UBUNTU_SNAPSHOT=20260826T120000Z
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1
@@ -123,25 +123,31 @@ RUN set -a \
     && tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 \
     && rm /tmp/node.tar.xz \
     && npm install --global "npm@${NPM_VERSION}" --ignore-scripts --no-audit --no-fund \
-    # npm 12.0.2 predates fixed releases of two top-level bundled dependencies.
+    # npm 12.0.2 predates fixed releases of three top-level bundled dependencies.
     # Keep these checksummed replacements until NPM_VERSION bundles them itself.
     && curl -fsSL "https://registry.npmjs.org/brace-expansion/-/brace-expansion-${NPM_BRACE_EXPANSION_VERSION}.tgz" -o /tmp/npm-brace-expansion.tgz \
     && curl -fsSL "https://registry.npmjs.org/ip-address/-/ip-address-${NPM_IP_ADDRESS_VERSION}.tgz" -o /tmp/npm-ip-address.tgz \
+    && curl -fsSL "https://registry.npmjs.org/tar/-/tar-${NPM_TAR_VERSION}.tgz" -o /tmp/npm-tar.tgz \
     && printf '%s  %s\n' \
       "${NPM_BRACE_EXPANSION_SHA256}" /tmp/npm-brace-expansion.tgz \
       "${NPM_IP_ADDRESS_SHA256}" /tmp/npm-ip-address.tgz \
+      "${NPM_TAR_SHA256}" /tmp/npm-tar.tgz \
       | sha256sum -c - \
     && rm -rf \
       /usr/local/lib/node_modules/npm/node_modules/brace-expansion \
       /usr/local/lib/node_modules/npm/node_modules/ip-address \
+      /usr/local/lib/node_modules/npm/node_modules/tar \
     && install -d \
       /usr/local/lib/node_modules/npm/node_modules/brace-expansion \
       /usr/local/lib/node_modules/npm/node_modules/ip-address \
+      /usr/local/lib/node_modules/npm/node_modules/tar \
     && tar -xzf /tmp/npm-brace-expansion.tgz -C /usr/local/lib/node_modules/npm/node_modules/brace-expansion --strip-components=1 \
     && tar -xzf /tmp/npm-ip-address.tgz -C /usr/local/lib/node_modules/npm/node_modules/ip-address --strip-components=1 \
-    && rm /tmp/npm-brace-expansion.tgz /tmp/npm-ip-address.tgz \
+    && tar -xzf /tmp/npm-tar.tgz -C /usr/local/lib/node_modules/npm/node_modules/tar --strip-components=1 \
+    && rm /tmp/npm-brace-expansion.tgz /tmp/npm-ip-address.tgz /tmp/npm-tar.tgz \
     && test "$(node -p "require('/usr/local/lib/node_modules/npm/node_modules/brace-expansion/package.json').version")" = "${NPM_BRACE_EXPANSION_VERSION}" \
     && test "$(node -p "require('/usr/local/lib/node_modules/npm/node_modules/ip-address/package.json').version")" = "${NPM_IP_ADDRESS_VERSION}" \
+    && test "$(node -p "require('/usr/local/lib/node_modules/npm/node_modules/tar/package.json').version")" = "${NPM_TAR_VERSION}" \
     && test "$(npm --version)" = "${NPM_VERSION}" \
     && curl -fsSL "https://github.com/anthropics/claude-code/releases/download/v${CLAUDE_VERSION}/claude-linux-x64.tar.gz" -o /tmp/claude.tar.gz \
     && echo "${CLAUDE_SHA256}  /tmp/claude.tar.gz" | sha256sum -c - \
