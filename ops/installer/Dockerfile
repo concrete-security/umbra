@@ -6,7 +6,9 @@ FROM nginx:1.30.4-alpine3.24@sha256:97d490c12ba55b4946b01546d1c3ed324e8d41ab1c9f
 RUN apk add --no-cache \
       gettext=1.0-r0 \
       gettext-libs=1.0-r0 \
-      libgomp=15.2.0-r5
+      libcrypto3=3.5.8-r0 \
+      libgomp=15.2.0-r5 \
+      libssl3=3.5.8-r0
 
 COPY install.sh /opt/umbra/installer/install.sh.template
 COPY nginx.conf.template /etc/nginx/templates/nginx.conf.template
