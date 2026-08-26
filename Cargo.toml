@@ -11,7 +11,7 @@ repository = "https://github.com/concrete-security/umbra"
 documentation = "https://github.com/concrete-security/umbra/blob/main/README.md"
 license-file = "LICENSE.txt"
 rust-version = "1.92"
-keywords = ["confidential-computing", "developer-tools", "security", "cli"]
+keywords = ["confidential-vm", "developer-tools", "security", "cli"]
 categories = ["command-line-utilities", "development-tools"]
 
 [profile.release]

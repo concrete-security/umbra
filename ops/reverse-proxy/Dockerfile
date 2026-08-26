@@ -9,9 +9,11 @@ RUN apk add --no-cache \
       gdbm=1.26-r0 \
       gettext=1.0-r0 \
       gettext-libs=1.0-r0 \
+      libcrypto3=3.5.8-r0 \
       libffi=3.5.2-r1 \
       libgomp=15.2.0-r5 \
       libpanelw=6.6_p20260516-r0 \
+      libssl3=3.5.8-r0 \
       mpdecimal=4.0.1-r0 \
       py3-acme=5.6.0-r0 \
       py3-acme-pyc=5.6.0-r0 \
@@ -62,7 +64,7 @@ RUN apk add --no-cache \
       python3-pyc=3.14.7-r1 \
       python3-pycache-pyc0=3.14.7-r1 \
       readline=8.3.3-r1 \
-      sqlite-libs=3.53.2-r0
+      sqlite-libs=3.53.4-r0
 
 COPY entrypoint.sh /entrypoint.sh
 COPY default.conf.template /etc/nginx/templates/default.conf.template
