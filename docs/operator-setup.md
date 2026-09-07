@@ -71,7 +71,7 @@ Create a dedicated provider workspace and least-privilege API token for each env
 
 Confirm quota for at least one Security CVM and one Dev CVM, then record the approved region and instance types. Install the exact provider CLI version and verify its package digest against `.env.common`.
 
-Umbra also invokes a pinned shade checkout. Set `SHADE_DIR` in the private admin layer. The Console image builds and includes its atlas verification helper; `ATLAS_VERIFIER_CMD` normally remains `/usr/local/bin/umbra-atlas-verify`.
+Umbra also invokes a pinned shade checkout. Set `SHADE_DIR` in the private admin layer to the host path; `.env.common` pins the checkout's content as `SHADE_REF`. `make deploy` converges the checkout to that commit and refuses a dirty tree. Do not hand-edit the checkout on a host. The Console image builds and includes its atlas verification helper; `ATLAS_VERIFIER_CMD` normally remains `/usr/local/bin/umbra-atlas-verify`.
 
 ## 5. Container images
 

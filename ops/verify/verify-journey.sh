@@ -183,6 +183,17 @@ else
   echo "journey preflight: skipping phala instance-types contract check (phala CLI or PHALA_API_TOKEN unavailable)" >&2
 fi
 
+step "preflight" "checking the shade checkout against the pinned SHADE_REF"
+[ -n "${SHADE_REF:-}" ] || fail "journey preflight: SHADE_REF is not set; rebuild .env with make build-env"
+[ -n "${SHADE_DIR:-}" ] && [ -d "${SHADE_DIR}" ] \
+  || fail "journey preflight: SHADE_DIR '${SHADE_DIR:-unset}' is not a directory"
+shade_head="$(git -c "safe.directory=${SHADE_DIR}" -C "${SHADE_DIR}" rev-parse HEAD 2>/dev/null)" \
+  || fail "journey preflight: could not read the shade checkout at ${SHADE_DIR}"
+[ "${shade_head}" = "${SHADE_REF}" ] \
+  || fail "journey preflight: shade checkout is at ${shade_head}, not pinned SHADE_REF ${SHADE_REF}; make deploy converges it"
+[ -z "$(git -c "safe.directory=${SHADE_DIR}" -C "${SHADE_DIR}" status --porcelain)" ] \
+  || fail "journey preflight: shade checkout at ${SHADE_DIR} has local modifications"
+
 step 1 "platform bootstrap"
 require_env UMBRA_VERIFY_BOOTSTRAP_DOMAIN 1
 require_env UMBRA_VERIFY_BOOTSTRAP_ADMIN_EMAIL 1

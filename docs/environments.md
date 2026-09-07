@@ -72,6 +72,7 @@ The committed prod and staging values are examples, including RFC 5737 IP addres
 - Use separate cloud federation identities and least-privilege deployers. Bind each identity to the exact repository, workflow, branch, and protected environment that needs it.
 - Keep production deployment and CLI publication behind their separate required reviewers with self-approval disabled. A staging identity must not be able to reach production resources, and the `release` environment must grant no cloud deployment authority.
 - Pin released containers by immutable digest. A tag is not deployment trust material.
+- Pin the shade checkout with `SHADE_REF` in `.env.common`. The Console shells out to `SHADE_DIR` for compose rendering and aTLS policy generation, so that checkout is part of the deployed artifact. `make deploy` converges it to `SHADE_REF` and refuses a dirty tree; the verify journey asserts the same pair. Bump `SHADE_REF` in the same change as any Console edit that alters the Console↔shade contract. Never hand-edit the checkout on a host.
 - Back up durable Console data before migrations or upgrades. Never use reset or restore as an ordinary deploy step.
 
 Google's browser/loopback and device authorization flows require different OAuth client types. Configure both when the environment supports interactive CLI login and headless verification.

@@ -287,6 +287,19 @@ SH
 
 chmod 755 -- "${mock_bin}"/*
 
+# The journey's preflight asserts the shade checkout matches the pinned SHADE_REF
+# before step 1, so the session-transfer fixtures need a clean throwaway checkout
+# to reach the code under test at all.
+shade_fixture_dir="${session_fixture_root}/shade"
+mkdir -p -- "${shade_fixture_dir}"
+git -c init.defaultBranch=main init -q -- "${shade_fixture_dir}"
+: >"${shade_fixture_dir}/pinned"
+git -C "${shade_fixture_dir}" add pinned
+git -C "${shade_fixture_dir}" \
+  -c user.name=verify -c user.email=verify@example.com \
+  commit -q -m "shade fixture"
+shade_fixture_ref="$(git -C "${shade_fixture_dir}" rev-parse HEAD)"
+
 session_transfer_case() {
   local script_label="$1"
   local script_path="$2"
@@ -318,6 +331,8 @@ session_transfer_case() {
       PATH="${mock_bin}:/usr/bin:/bin" \
       HOME="${case_dir}/home" \
       CONSOLE_URL="https://console.invalid" \
+      SHADE_DIR="${shade_fixture_dir}" \
+      SHADE_REF="${shade_fixture_ref}" \
       UMBRA_VERIFY_CLI_CONFIG_DIR="${config_dir}" \
       UMBRA_VERIFY_BOOTSTRAP_DOMAIN="${identity_marker}" \
       UMBRA_VERIFY_BOOTSTRAP_ADMIN_EMAIL="${identity_marker}" \

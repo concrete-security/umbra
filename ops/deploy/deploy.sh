@@ -80,6 +80,28 @@ dev_requested() {
     || component_requested dev
 }
 
+sync_shade_checkout() {
+  local shade_dir="${SHADE_DIR:-}"
+  local shade_ref="${SHADE_REF:-}"
+
+  [ -n "$shade_ref" ] || fail "missing SHADE_REF; rebuild .env with make build-env MODE=<mode>"
+  [ -n "$shade_dir" ] && [ -d "$shade_dir" ] \
+    || fail "missing shade checkout at SHADE_DIR '${shade_dir:-unset}'; see docs/operator-setup.md"
+  command -v git >/dev/null || fail "git is required to pin the shade checkout"
+
+  local -a shade_git=(git -c "safe.directory=${shade_dir}" -C "$shade_dir")
+  [ -z "$("${shade_git[@]}" status --porcelain)" ] \
+    || fail "shade checkout at ${shade_dir} has local modifications; refusing to deploy against an unpinned shade"
+
+  if [ "$("${shade_git[@]}" rev-parse HEAD)" != "$shade_ref" ]; then
+    info "moving shade checkout to pinned SHADE_REF ${shade_ref}"
+    "${shade_git[@]}" fetch --quiet origin
+    "${shade_git[@]}" checkout --quiet --detach "$shade_ref" \
+      || fail "could not check out pinned SHADE_REF ${shade_ref} in ${shade_dir}"
+  fi
+  info "shade checkout pinned at ${shade_ref}"
+}
+
 wait_for_url() {
   local name="$1"
   local url="$2"
@@ -148,6 +170,8 @@ wait_seconds="${UMBRA_DEPLOY_CONSOLE_WAIT_SECONDS:-180}"
 if ! [[ "$wait_seconds" =~ ^[0-9]+$ ]]; then
   fail "UMBRA_DEPLOY_CONSOLE_WAIT_SECONDS must be a non-negative integer"
 fi
+
+sync_shade_checkout
 
 ./ops/cli-release/prepare-cli-installer.sh
 
