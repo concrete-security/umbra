@@ -53,7 +53,7 @@ The forwarder MAY bind `:3128` without a policy so the Dev CVM remains reachable
 | `user-sandbox/` | Dockerfile, entrypoint, SSH, tunnel, forwarder, watcher, and helper crate. |
 | `tests/` | Local smoke and package tests. |
 
-The sandbox image is amd64-only. Its Ubuntu packages resolve from a dated Canonical snapshot, while exact Docker Engine, CLI, containerd, Buildx, and Compose `.deb` filenames and SHA-256 digests are reviewed in `user-sandbox/tool-versions.env`; architecture or digest drift fails closed.
+The sandbox image is amd64-only. Its Ubuntu packages resolve from a dated Canonical snapshot. Exact Docker Engine, CLI, containerd, and Buildx `.deb` filenames and SHA-256 digests are reviewed in `user-sandbox/tool-versions.env`; the Compose source archive, checksum, and Go builder are pinned in the Dockerfile. Architecture or digest drift fails closed.
 
 ```bash
 make check
@@ -74,3 +74,5 @@ leaves the shared guest MRTD unset for the private provider canary to measure.
 Updates use `umbra cvm update <cvm-id>` and preserve provider-managed named volumes. Published images must use immutable digests, never `latest`.
 
 Live key rotation, host-level nested-virtualization alternatives, and guaranteed hitless migration are outside v0.
+
+The pinned sandbox tools include Docker Engine/CLI 29.8.0, Buildx 0.37.0, Compose 5.5.1, and GitHub CLI 2.99.0. Their Go dependencies include the upstream security fixes; source archives and binary packages remain checksum-verified. The image smoke test exercises each Docker command and Compose configuration parsing.

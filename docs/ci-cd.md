@@ -61,6 +61,10 @@ Configure GitHub before accepting public contributions or publishing releases:
 - enable secret scanning, push protection, dependency review, and the DCO gate;
 - restrict Actions to approved immutable references.
 
+Public repositories must also have GitHub's dependency graph enabled. The
+dependency-review job deliberately fails when that repository prerequisite is
+missing; do not weaken or skip the gate to compensate for incomplete settings.
+
 An `environment: release` declaration does not protect a publication by itself: GitHub will create an unprotected environment when the named environment is missing. Capture the `release` environment's deployment-branch policy and reviewer settings through the GitHub API before the first non-dry-run release.
 
 ## Host model

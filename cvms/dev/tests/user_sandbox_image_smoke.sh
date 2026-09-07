@@ -12,7 +12,7 @@ docker build \
 
 docker run --rm --platform linux/amd64 --entrypoint bash "${IMAGE_TAG}" -lc '
   set -euo pipefail
-  for cmd in claude codex node npm gh uv; do
+  for cmd in claude codex node npm gh uv docker dockerd containerd; do
     command -v "${cmd}" >/dev/null
   done
   test -x /usr/local/lib/umbra/claude.real
@@ -44,6 +44,13 @@ docker run --rm --platform linux/amd64 --entrypoint bash "${IMAGE_TAG}" -lc '
   grep -Fx '"'"'REQUESTS_CA_BUNDLE=/run/umbra/ca-bundle.pem'"'"' <<<"${sudo_env}" >/dev/null
   grep -Fx '"'"'SSL_CERT_FILE=/run/umbra/ca-bundle.pem'"'"' <<<"${sudo_env}" >/dev/null
   grep -Fx '"'"'CURL_CA_BUNDLE=/run/umbra/ca-bundle.pem'"'"' <<<"${sudo_env}" >/dev/null
+  docker --version >/dev/null
+  dockerd --version >/dev/null
+  containerd --version >/dev/null
+  docker buildx version >/dev/null
+  docker compose version >/dev/null
+  printf "services:\n  smoke:\n    image: scratch\n" | docker compose --project-name smoke -f - config --quiet
+  gh --version >/dev/null
   claude --version >/dev/null
   codex --version >/dev/null
   node --version | grep -q "^v22\\."
