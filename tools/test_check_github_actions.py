@@ -532,3 +532,31 @@ def test_repository_workflow_cache_policy_success() -> None:
     """Checked-in workflows keep the cache trust boundary mechanically pinned."""
 
     assert checker.workflow_cache_policy_failures(checker.REPO_ROOT) == []
+
+
+@pytest.mark.parametrize("count", [0, 2])
+def test_recovery_slsa_reference_count_failure(tmp_path: Path, count: int) -> None:
+    """Recovery cannot omit its signer or add multiple signing references."""
+    workflows = tmp_path / ".github/workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "publish-cli.yml").write_text(
+        f"jobs: {{sign: {{uses: {checker.SLSA_REUSABLE_REF}}}}}\n"
+    )
+    (workflows / "recover-cli-0.1.0.yml").write_text(
+        "jobs:\n" + "".join(
+            f"  sign{i}: {{uses: {checker.SLSA_REUSABLE_REF}}}\n" for i in range(count)
+        )
+    )
+    assert any("recovery must have exactly one" in failure
+               for failure in checker.action_reference_failures(tmp_path))
+
+
+def test_recovery_slsa_reference_success(tmp_path: Path) -> None:
+    """Only the named recovery workflow receives the additional exact signer."""
+    workflows = tmp_path / ".github/workflows"
+    workflows.mkdir(parents=True)
+    for name in ("publish-cli.yml", "recover-cli-0.1.0.yml"):
+        (workflows / name).write_text(
+            f"jobs: {{sign: {{uses: {checker.SLSA_REUSABLE_REF}}}}}\n"
+        )
+    assert checker.action_reference_failures(tmp_path) == []
