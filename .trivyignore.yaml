@@ -9,6 +9,127 @@ vulnerabilities:
       patched. Remove this exception when both plugins update their embedded
       Moby dependency metadata.
     expired_at: 2026-10-01
+  - id: CVE-2026-33818
+    paths:
+      - usr/bin/docker
+      - usr/bin/docker-proxy
+      - usr/bin/dockerd
+      - usr/libexec/docker/cli-plugins/docker-buildx
+    statement: >-
+      Docker 29.7.2 and Buildx 0.36.1 are the latest signed upstream packages,
+      but still embed Go 1.26.5. Remove this exception when upstream packages
+      use Go 1.26.6 or newer.
+    expired_at: 2026-10-01
+  - id: CVE-2026-39821
+    paths:
+      - usr/bin/docker
+      - usr/bin/docker-proxy
+      - usr/bin/dockerd
+      - usr/libexec/docker/cli-plugins/docker-buildx
+    statement: >-
+      Docker 29.7.2 and Buildx 0.36.1 are the latest signed upstream packages,
+      but still embed Go 1.26.5. Remove this exception when upstream packages
+      use Go 1.26.6 or newer.
+    expired_at: 2026-10-01
+  - id: CVE-2026-46600
+    paths:
+      - usr/bin/docker
+      - usr/bin/docker-proxy
+      - usr/bin/dockerd
+      - usr/libexec/docker/cli-plugins/docker-buildx
+    statement: >-
+      Docker 29.7.2 and Buildx 0.36.1 are the latest signed upstream packages,
+      but still embed Go 1.26.5. Remove this exception when upstream packages
+      use Go 1.26.6 or newer.
+    expired_at: 2026-10-01
+  - id: CVE-2026-56853
+    paths:
+      - usr/bin/docker
+      - usr/bin/docker-proxy
+      - usr/bin/dockerd
+      - usr/libexec/docker/cli-plugins/docker-buildx
+    statement: >-
+      Docker 29.7.2 and Buildx 0.36.1 are the latest signed upstream packages,
+      but still embed Go 1.26.5. Remove this exception when upstream packages
+      use Go 1.26.6 or newer.
+    expired_at: 2026-10-01
+  - id: CVE-2026-56858
+    paths:
+      - usr/bin/docker
+      - usr/bin/docker-proxy
+      - usr/bin/dockerd
+      - usr/libexec/docker/cli-plugins/docker-buildx
+    statement: >-
+      Docker 29.7.2 and Buildx 0.36.1 are the latest signed upstream packages,
+      but still embed Go 1.26.5. Remove this exception when upstream packages
+      use Go 1.26.6 or newer.
+    expired_at: 2026-10-01
+  - id: CVE-2026-56859
+    paths:
+      - usr/bin/docker
+      - usr/bin/docker-proxy
+      - usr/bin/dockerd
+      - usr/libexec/docker/cli-plugins/docker-buildx
+    statement: >-
+      Docker 29.7.2 and Buildx 0.36.1 are the latest signed upstream packages,
+      but still embed Go 1.26.5. Remove this exception when upstream packages
+      use Go 1.26.6 or newer.
+    expired_at: 2026-10-01
+  - id: CVE-2026-56860
+    paths:
+      - usr/bin/docker
+      - usr/bin/docker-proxy
+      - usr/bin/dockerd
+      - usr/libexec/docker/cli-plugins/docker-buildx
+    statement: >-
+      Docker 29.7.2 and Buildx 0.36.1 are the latest signed upstream packages,
+      but still embed Go 1.26.5. Remove this exception when upstream packages
+      use Go 1.26.6 or newer.
+    expired_at: 2026-10-01
+  - id: CVE-2026-56862
+    paths:
+      - usr/bin/docker
+      - usr/bin/docker-proxy
+      - usr/bin/dockerd
+      - usr/libexec/docker/cli-plugins/docker-buildx
+    statement: >-
+      Docker 29.7.2 and Buildx 0.36.1 are the latest signed upstream packages,
+      but still embed Go 1.26.5. Remove this exception when upstream packages
+      use Go 1.26.6 or newer.
+    expired_at: 2026-10-01
+  - id: CVE-2026-56864
+    paths:
+      - usr/bin/dockerd
+      - usr/libexec/docker/cli-plugins/docker-buildx
+      - usr/libexec/docker/cli-plugins/docker-compose
+      - usr/local/bin/gh
+    statement: >-
+      The latest upstream Docker, Buildx, Compose, and GitHub CLI artifacts
+      still embed golang.org/x/mod 0.38.0. The affected GOSUMDB module-resolution
+      code is not used by these shipped runtime binaries. Remove this exception
+      when upstream releases embed 0.40.0 or newer.
+    expired_at: 2026-10-01
+  - id: CVE-2026-56865
+    paths:
+      - usr/bin/dockerd
+      - usr/libexec/docker/cli-plugins/docker-buildx
+      - usr/libexec/docker/cli-plugins/docker-compose
+      - usr/local/bin/gh
+    statement: >-
+      The latest upstream Docker, Buildx, Compose, and GitHub CLI artifacts
+      still embed golang.org/x/mod 0.38.0. The affected GOSUMDB module-resolution
+      code is not used by these shipped runtime binaries. Remove this exception
+      when upstream releases embed 0.40.0 or newer.
+    expired_at: 2026-10-01
+  - id: CVE-2026-17106
+    paths:
+      - usr/libexec/docker/cli-plugins/docker-buildx
+    statement: >-
+      Buildx 0.36.1 is the latest signed upstream package and predates the
+      go-archive fix. Build inputs are developer-selected and remain inside the
+      developer's own CVM boundary. Remove this exception when upstream Buildx
+      embeds go-archive 0.3.0 or newer.
+    expired_at: 2026-10-01
 
 misconfigurations:
   - id: AVD-DS-0002
