@@ -74,3 +74,5 @@ leaves the shared guest MRTD unset for the private provider canary to measure.
 Updates use `umbra cvm update <cvm-id>` and preserve provider-managed named volumes. Published images must use immutable digests, never `latest`.
 
 Live key rotation, host-level nested-virtualization alternatives, and guaranteed hitless migration are outside v0.
+
+The pinned sandbox tools include Docker Engine/CLI 29.8.0, Buildx 0.37.0, Compose 5.5.1, and GitHub CLI 2.99.0. Their Go dependencies include the upstream security fixes; source archives and binary packages remain checksum-verified. The image smoke test exercises each Docker command and Compose configuration parsing.

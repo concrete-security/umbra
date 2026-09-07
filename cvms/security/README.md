@@ -50,7 +50,7 @@ Source IP is not the identity boundary; the per-CVM bearer is.
 
 ## Build and test
 
-The repository pins Python 3.12 in `.python-version`, matching the Security CVM container. `uv` provisions it when necessary; newer Python minors are not part of the supported or release-tested runtime. The image restores the dated Debian snapshot recorded by its digest-pinned Python base before installing system packages; unavailable reviewed inputs fail the build instead of resolving newer packages.
+The repository pins Python 3.12 in `.python-version`, matching the Security CVM container. `uv` provisions it when necessary; newer Python minors are not part of the supported or release-tested runtime. The image restores the dated Debian snapshot recorded by its digest-pinned Python base before installing system packages; the corrected `linux-libc-dev` 6.12.107-1 package is separately pinned by SHA-256 from the Debian snapshot archive. Unavailable reviewed inputs fail the build instead of resolving newer packages.
 
 ```bash
 make check
