@@ -250,6 +250,8 @@ def action_reference_failures(root: Path = REPO_ROOT) -> list[str]:
     """Return mutable, malformed, or missing SLSA workflow reference findings."""
     failures: list[str] = []
     slsa_references: list[str] = []
+    recovery_references: list[str] = []
+    recovery_path = Path(".github/workflows/recover-cli-0.1.0.yml")
     files = action_files(root)
     if not files:
         return ["no GitHub Actions workflow or composite-action manifests found"]
@@ -288,12 +290,18 @@ def action_reference_failures(root: Path = REPO_ROOT) -> list[str]:
                 elif local_manifest is not None:
                     files.append(local_manifest)
             if reference.partition("@")[0] == SLSA_REUSABLE_PATH:
-                slsa_references.append(reference)
+                if display_path == recovery_path:
+                    recovery_references.append(reference)
+                else:
+                    slsa_references.append(reference)
             if reference_allowed(reference):
                 continue
             failures.append(
                 f"{display_path}:{line_number}: mutable Actions reference {reference}"
             )
+
+    if (root / recovery_path).exists() and recovery_references != [SLSA_REUSABLE_REF]:
+        failures.append("0.1.0 recovery must have exactly one reference to " + SLSA_REUSABLE_REF)
 
     if slsa_references != [SLSA_REUSABLE_REF]:
         rendered = ", ".join(slsa_references) if slsa_references else "none"
