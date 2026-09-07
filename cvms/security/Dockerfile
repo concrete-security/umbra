@@ -1,6 +1,11 @@
 # syntax=docker/dockerfile:1.26.0@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
 FROM ghcr.io/astral-sh/uv:0.12.1@sha256:cf4eedcaa81655197f625739489effcbe71b61ceb1506f332c3facae5deceded AS uv
 
+# Pin the corrected userspace headers without changing the other snapshot inputs.
+FROM scratch AS linux-headers
+ADD --checksum=sha256:dc68dd53c7356598d005866da0d19d7bd33af2a62971aced624cdf04492902b4 \
+    https://snapshot.debian.org/file/b10cb849084121247812039a0d80ff406c0f2235 /linux-libc-dev.deb
+
 FROM python:3.12-slim-trixie@sha256:229a2c5bfa27522db7815ea81f9bed70af17ccb9de9fc7ad142b1877b5830d36
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -9,7 +14,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-RUN sed -i \
+RUN --mount=type=bind,from=linux-headers,source=/linux-libc-dev.deb,target=/tmp/linux-libc-dev.deb \
+    sed -i \
       -e 's|URIs: http://deb.debian.org/debian$|URIs: https://snapshot.debian.org/archive/debian/20260826T120000Z|' \
       -e 's|URIs: http://deb.debian.org/debian-security$|URIs: https://snapshot.debian.org/archive/debian-security/20260826T120000Z|' \
       /etc/apt/sources.list.d/debian.sources \
@@ -17,6 +23,7 @@ RUN sed -i \
     && apt-get update \
     && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends \
+        /tmp/linux-libc-dev.deb \
         build-essential \
         ca-certificates \
         libffi-dev \

@@ -13,6 +13,7 @@ RUN apk add --no-cache \
       libffi=3.5.2-r1 \
       libgomp=15.2.0-r5 \
       libpanelw=6.6_p20260516-r0 \
+      libuuid=2.42.3-r1 \
       libssl3=3.5.8-r0 \
       mpdecimal=4.0.1-r0 \
       py3-acme=5.6.0-r0 \
