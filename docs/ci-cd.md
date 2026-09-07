@@ -125,3 +125,21 @@ No external issue-tracker integration is required by this repository.
 4. Update the private deployment repository to pin those exact public identifiers, verify them in staging, then promote the same digests to production under the private deployment gates.
 
 No public-repository workflow deploys a maintainer-operated environment.
+
+## One-time CLI 0.1.0 draft recovery
+
+`recover-cli-0.1.0.yml` is the explicitly approved packaging recovery for the
+unpublished GitHub 0.1.0 draft. It does not publish crates, move tags, or replace
+release assets. It verifies the pinned original successful run and SLSA evidence,
+removes only the accidentally included skill, and retains the original binary
+bytes. The strict distribution extractor remains unchanged. A signed repair
+receipt links the original binary source to the new packaging commit; original
+archive, checksums and provenance are retained as separate evidence.
+
+After independent verification of the new SLSA evidence, an authorized operator
+may replace only the archive, checksum manifest and provenance while the release
+remains a draft and its tag and original asset IDs/digests remain unchanged.
+Preserve the original evidence and signed receipt alongside the release. Verify
+the re-downloaded canonical assets and isolated installation before publishing.
+This exception does not apply to public releases or change normal publication's
+byte-identity checks. Production installer-mirror deployment is separate.
