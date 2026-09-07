@@ -1,0 +1,16 @@
+{
+  "version": "0.1.0",
+  "source_commit": "0bd721e93585a65353bd52935235affb9b5d3746",
+  "source_run": 34103392444,
+  "source_epoch": 1788771463,
+  "crate_checksum": "0018d876dae6c8837e424fca8edef7ce80e95156edd88474ff4945e5451a3e14",
+  "assets": {
+    "SHA256SUMS": "4e1883252023f9b50862b03299a478df8ddab55d7f00103f7d7ee6ca92869c36",
+    "umbra-cli-aarch64-apple-darwin.cdx.json": "db28076e595f9c964f981032be600d214a906c86a73448659647ad3815d4a3dc",
+    "umbra-cli-aarch64-unknown-linux-gnu.cdx.json": "622d20f2ab324c64fffdb5641a414d5de87e0262dfd2676b22950ca875e4429d",
+    "umbra-cli-release-tree.tar.gz": "a324cbfb4a1a85fa1cdb16656ca22118abe6c0c20c55c33b98b202bcf20b6571",
+    "umbra-cli-x86_64-unknown-linux-gnu.cdx.json": "dfbe389aad57b62c9bb743bcc32e30267f54b3ae3533697a78eba96344576f66",
+    "umbra-cli.intoto.jsonl": "0b8832ebf5e29a9eace1171641a8eb76ef81a27d099ec347b74c1a936479bfd2",
+    "umbra-install.sh": "7cf045ae214a0f19ac6b571fe6397cea19ab83f61267f536a72659fc201d047a"
+  }
+}
