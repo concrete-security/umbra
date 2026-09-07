@@ -4,8 +4,8 @@
 ARG SOURCE_DATE_EPOCH=0
 
 FROM golang:1.26.6-bookworm@sha256:116d58cbd88c1297624acc6e967a060012422bacf9930927e23fb719189c6f36 AS compose-builder
-ARG COMPOSE_VERSION=5.5.0
-ARG COMPOSE_SOURCE_SHA256=504ed1541f4bc5c301dc9cf7b86ae8e2d26b57a558a248d9b832af188b298bba
+ARG COMPOSE_VERSION=5.5.1
+ARG COMPOSE_SOURCE_SHA256=311077662698fd8e34769a894f9d5240befb1730990efa8ed58e0fa8725d2d84
 RUN curl -fsSL "https://github.com/docker/compose/archive/refs/tags/v${COMPOSE_VERSION}.tar.gz" -o /tmp/compose.tar.gz \
     && echo "${COMPOSE_SOURCE_SHA256}  /tmp/compose.tar.gz" | sha256sum -c - \
     && mkdir -p /src \

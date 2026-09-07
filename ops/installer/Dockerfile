@@ -8,6 +8,7 @@ RUN apk add --no-cache \
       gettext-libs=1.0-r0 \
       libcrypto3=3.5.8-r0 \
       libgomp=15.2.0-r5 \
+      libuuid=2.42.3-r1 \
       libssl3=3.5.8-r0
 
 COPY install.sh /opt/umbra/installer/install.sh.template
