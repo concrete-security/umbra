@@ -1,0 +1,78 @@
+name: Recover Umbra CLI 0.1.0 draft
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Must be false to generate signed recovery artifacts; does not publish them'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: recover-cli-0.1.0
+  cancel-in-progress: false
+
+jobs:
+  recover:
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      subjects: ${{ steps.subjects.outputs.base64 }}
+    steps:
+      - name: Require protected source
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REPOSITORY" == concrete-security/umbra ]]
+          [[ "$GITHUB_REF" == refs/heads/main ]]
+      - name: Checkout packaging source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: 'false'
+      - name: Validate original run and unchanged tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api repos/concrete-security/umbra/actions/runs/34103392444 > original-run.json
+          jq -e '.head_sha == "0bd721e93585a65353bd52935235affb9b5d3746" and .head_branch == "main" and .conclusion == "success" and .path == ".github/workflows/publish-cli.yml"' original-run.json
+          tag_sha="$(gh api repos/concrete-security/umbra/git/ref/tags/umbra-cli/0.1.0 --jq .object.sha)"
+          [[ "$tag_sha" == 0bd721e93585a65353bd52935235affb9b5d3746 ]]
+          gh run download 34103392444 -R concrete-security/umbra -n umbra-cli-release-tree -D original
+          gh run download 34103392444 -R concrete-security/umbra -n umbra-cli.intoto.jsonl -D original
+      - name: Build pinned provenance verifier
+        env:
+          GOBIN: ${{ runner.temp }}/verifier
+          GOPROXY: https://proxy.golang.org
+          GOSUMDB: sum.golang.org
+        run: go install github.com/slsa-framework/slsa-verifier/v2/cli/slsa-verifier@v2.7.1
+      - name: Repackage verified original binaries
+        run: |
+          python3 ops/cli-release/recover-0.1.0.py original recovered \
+            --verifier "$RUNNER_TEMP/verifier/slsa-verifier" --packaging-commit "$GITHUB_SHA"
+      - name: Encode independently checked subjects
+        id: subjects
+        run: echo "base64=$(base64 -w0 recovered/provenance-subjects.sha256)" >> "$GITHUB_OUTPUT"
+      - name: Upload recovery artifacts for independent verification
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: umbra-cli-recovered-0.1.0
+          path: recovered/
+          if-no-files-found: error
+  provenance:
+    needs: recover
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
+    permissions:
+      actions: read
+      id-token: write
+      contents: write
+    with:
+      base64-subjects: ${{ needs.recover.outputs.subjects }}
+      provenance-name: umbra-cli.intoto.jsonl
+      upload-assets: false
