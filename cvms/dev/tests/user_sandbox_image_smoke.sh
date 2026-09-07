@@ -49,7 +49,7 @@ docker run --rm --platform linux/amd64 --entrypoint bash "${IMAGE_TAG}" -lc '
   containerd --version >/dev/null
   docker buildx version >/dev/null
   docker compose version >/dev/null
-  printf "services:\n  smoke:\n    image: scratch\n" | docker compose -f - config --quiet
+  printf "services:\n  smoke:\n    image: scratch\n" | docker compose --project-name smoke -f - config --quiet
   gh --version >/dev/null
   claude --version >/dev/null
   codex --version >/dev/null
