@@ -29,6 +29,11 @@ RUN cargo build --locked --release -p umbra-atls-connect --target-dir /tmp/atls-
 
 FROM ghcr.io/astral-sh/uv:0.12.1@sha256:cf4eedcaa81655197f625739489effcbe71b61ceb1506f332c3facae5deceded AS uv
 
+# Pin corrected userspace headers without advancing the other Ubuntu snapshot inputs.
+FROM scratch AS linux-headers
+ADD --checksum=sha256:f8292b3414cac372ec28ba484a45e3f18b3ac5fc7872ca82661835286f1c5865 \
+    https://snapshot.ubuntu.com/ubuntu/20260908T120000Z/pool/main/l/linux/linux-libc-dev_6.8.0-139.139_amd64.deb /linux-libc-dev.deb
+
 FROM ubuntu:24.04@sha256:561618e2c15bf2397621dd04f96926663a3b5616c189cf7e38db7e82f5c538ea
 
 # Ubuntu's minimal rootfs has no CA bundle, but the immutable archive is HTTPS.
@@ -49,12 +54,14 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 COPY cvms/dev/user-sandbox/tool-versions.env /tmp/tool-versions.env
 
-RUN sed -i \
+RUN --mount=type=bind,from=linux-headers,source=/linux-libc-dev.deb,target=/tmp/linux-libc-dev.deb \
+    sed -i \
       -e "s|http://archive.ubuntu.com/ubuntu|https://snapshot.ubuntu.com/ubuntu/${UBUNTU_SNAPSHOT}|g" \
       -e "s|http://security.ubuntu.com/ubuntu|https://snapshot.ubuntu.com/ubuntu/${UBUNTU_SNAPSHOT}|g" \
       /etc/apt/sources.list.d/ubuntu.sources \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
+      /tmp/linux-libc-dev.deb \
       ca-certificates \
       curl \
       openssh-server \

@@ -53,7 +53,7 @@ The forwarder MAY bind `:3128` without a policy so the Dev CVM remains reachable
 | `user-sandbox/` | Dockerfile, entrypoint, SSH, tunnel, forwarder, watcher, and helper crate. |
 | `tests/` | Local smoke and package tests. |
 
-The sandbox image is amd64-only. Its Ubuntu packages resolve from a dated Canonical snapshot. Exact Docker Engine, CLI, containerd, and Buildx `.deb` filenames and SHA-256 digests are reviewed in `user-sandbox/tool-versions.env`; the Compose source archive, checksum, and Go builder are pinned in the Dockerfile. Architecture or digest drift fails closed.
+The sandbox image is amd64-only. Its Ubuntu packages resolve from a dated Canonical snapshot, with a checksum-pinned `linux-libc-dev` 6.8.0-139.139 override for the userspace headers. This updates container headers, not the provider-managed guest kernel. Exact Docker Engine, CLI, containerd, and Buildx `.deb` filenames and SHA-256 digests are reviewed in `user-sandbox/tool-versions.env`; the Compose source archive, checksum, and Go builder are pinned in the Dockerfile. Architecture or digest drift fails closed.
 
 ```bash
 make check
