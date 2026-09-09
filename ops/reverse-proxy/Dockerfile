@@ -10,6 +10,7 @@ RUN apk add --no-cache \
       gettext=1.0-r0 \
       gettext-libs=1.0-r0 \
       libcrypto3=3.5.8-r0 \
+      libexpat=2.8.4-r0 \
       libffi=3.5.2-r1 \
       libgomp=15.2.0-r5 \
       libpanelw=6.6_p20260516-r0 \
