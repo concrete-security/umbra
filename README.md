@@ -1,27 +1,37 @@
 # Umbra
 
-Umbra runs AI coding agents in attested cloud sandboxes with governed network and secret access. Developers use a CLI to create and enter Dev CVMs; all sandbox egress is forced through an entity Security CVM for policy enforcement, secret scanning, proxy-time credential injection, and traffic logging.
+AI agents need a full environment with full machine access, and they need to be locked down. Umbra runs the agent in an attested confidential VM (CVM). The box is a real computer: workspace, packages, Docker, sudo. What happens inside is not inspected. Outbound traffic is governed.
 
-> Umbra is pre-1.0 software. Interfaces, deployment requirements, and compatibility may change between minor releases. Only the latest pre-1.0 release is supported; see [versioning](docs/versioning.md).
+Run a standalone agent in a CVM that is attested and has an identity. Secrets are injected at the proxy, never stored on the machine. The network is bounded.
+
+> Pre-1.0. Interfaces and deployment requirements can change between minor releases. Only the latest release is supported. [Versioning](docs/versioning.md).
 
 ## Architecture
 
-![Umbra v0 architecture: the umbra CLI talks HTTPS REST + OIDC to the Console control plane (Postgres-backed, provisioning CVMs through TDX and DNS providers); developer SSH, editor, and agent sessions reach the Dev CVM over a locally verified aTLS tunnel; all sandbox egress is forced through the dev-egress-forwarder to the entity Security CVM's mitmproxy, which enforces policy, scans for secrets, injects credentials, and emits traffic logs before re-encrypting traffic to the internet; the Security CVM pulls policy from and sends traffic logs to the Console.](docs/assets/architecture.png)
+A CVM is a confidential VM: a virtual machine the hardware can attest. It runs in a TEE (trusted execution environment). Umbra uses Intel TDX.
 
-| Module       | Path             | Role                                                                                                                        |
-| ------------ | ---------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| CLI          | `cli/`           | Authentication, local state, CVM lifecycle, verified tunnels, SSH/editor/agent sessions, profiles, audit, and traffic logs. |
-| Console      | `console/`       | HTTPS control plane for OIDC, sessions, RBAC, resource state, orchestration, policy, audit, and reconciliation.             |
-| Dev CVM      | `cvms/dev/`      | Per-developer TDX sandbox with SSH, persistent sessions, Docker, and fail-closed egress forwarding.                         |
-| Security CVM | `cvms/security/` | Per-entity egress proxy for policy, DLP, credential injection, CA export, and traffic-log emission.                         |
+The TEE is why you do not have to trust the operator. Guest memory is confidential; the host cannot read or rewrite it. The TEE also makes the VM verifiable. Hardware produces a quote of what booted: firmware, OS, compose, launch bindings such as the developer's SSH keys and the Security CVM's identity. Connections to a CVM use aTLS: TLS with that quote in the handshake, checked against a local policy and bound to the session. The same mechanism can verify what the agent does. Today Umbra attests the box, not the agent's files or commands after boot.
 
-The Console is a conventional HTTPS control plane. The attested Dev and Security CVMs are the confidential-compute boundary. The trust model and component contracts are described in [the v0 plan](docs/v0_plan.md), the [supply-chain threat model](docs/supply-chain-threat-model.md), and the documents under [docs/specs/](docs/specs/).
+![CLI talks HTTPS to the Console; developer sessions reach the Dev CVM over aTLS; sandbox egress is forced through the Security CVM.](docs/assets/architecture.png)
+
+Diagram source: [architecture.excalidraw](docs/assets/architecture.excalidraw).
+
+| Module | Path | Role |
+| --- | --- | --- |
+| CLI | `cli/` | Auth, CVM lifecycle, aTLS tunnels, SSH/editor/agent sessions. |
+| Console | `console/` | Auth, policy, orchestration, audit. |
+| Dev CVM | `cvms/dev/` | Per-developer TDX sandbox. Fail-closed egress. |
+| Security CVM | `cvms/security/` | Per-entity egress proxy: policy, DLP, credential injection, traffic logs. |
+
+The Console is ordinary HTTPS. The Dev and Security CVMs are the confidential-compute boundary.
+
+See the [v0 plan](docs/v0_plan.md), [supply-chain threat model](docs/supply-chain-threat-model.md), and [specs](docs/specs/).
 
 ## Try the CLI
 
-If an operator has already provisioned your account and assigned a profile:
+Once an operator has provisioned your account and assigned a profile:
 
-After the first approved release and its provenance are published, install the CLI with the SLSA-verified procedure in the [developer quick start](docs/quick-start.md#install). A source build is the documented path before that launch gate. Then:
+Build from source until the first approved release is published. After that, use the [SLSA-verified installer](docs/quick-start.md#install). Then:
 
 ```bash
 umbra auth login https://console.example.com
@@ -29,24 +39,20 @@ umbra cvm launch
 umbra ssh
 ```
 
-See the [developer quick start](docs/quick-start.md) for SSH keys, editors, Claude Code, Codex, and common troubleshooting.
+Keys, editors, Claude Code, and Codex: [quick start](docs/quick-start.md).
 
 ## Self-host
 
-A live deployment currently requires a Linux host plus accounts or credentials for an OIDC provider, DNS, a supported TDX CVM provider, a container registry, and persistent Postgres. These services may be paid and their cost depends on region and instance size.
+A live deployment needs a Linux host, Postgres, OIDC, DNS, a TDX CVM provider, and a container registry.
 
-Start with:
+- [Environments](docs/environments.md)
+- [Operator setup](docs/operator-setup.md)
+- [Deployment](docs/production-deploy.md)
+- [CI/CD](docs/ci-cd.md)
 
-- [environment model](docs/environments.md);
-- [operator setup](docs/operator-setup.md);
-- [deployment guide](docs/production-deploy.md);
-- [CI/CD model](docs/ci-cd.md).
-
-The committed environment files contain reserved examples only. Put secrets in the gitignored layers described by the setup guide, never in a tracked file.
+Tracked environment files are examples. Put secrets in the gitignored layers from the setup guide.
 
 ## Develop
-
-The normal contributor gates are local and do not require maintainer cloud credentials:
 
 ```bash
 make build
@@ -54,32 +60,29 @@ make check
 make test
 ```
 
-Read the module README before changing a component:
+These run locally. You do not need maintainer cloud credentials.
 
-- [CLI](cli/README.md)
-- [Console](console/README.md)
-- [Dev CVM](cvms/dev/README.md)
-- [Security CVM](cvms/security/README.md)
+Module READMEs: [CLI](cli/README.md), [Console](console/README.md), [Dev CVM](cvms/dev/README.md), [Security CVM](cvms/security/README.md).
 
-Specs are the behavioral contract. A behavior change should update its spec, implementation, tests, and affected README together. See [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md) for repository conventions.
+Specs are the contract. Update spec, implementation, tests, and the affected README together. See [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md).
 
 ## Security boundary
 
-Umbra governs traffic opened by processes inside the Dev CVM network namespace. Local workstation tools and provider-hosted editor or browser tools may open their own network connections outside that boundary. Use an agent or shell running inside the Dev CVM when Security CVM egress enforcement is required.
+Umbra governs traffic from processes inside the Dev CVM. Your laptop and provider-hosted editors can still reach the network on their own. Run the agent or shell inside the Dev CVM when you need Security CVM enforcement.
 
-Do not use an attestation bypass in a production or release-verification path. The temporary Security CVM image-policy deviation is documented openly in [docs/sc-policy-check-disabled.md](docs/sc-policy-check-disabled.md).
+Do not use an attestation bypass in production or release verification. Temporary Security CVM image-policy deviation: [docs/sc-policy-check-disabled.md](docs/sc-policy-check-disabled.md).
 
-Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
+Report vulnerabilities privately: [SECURITY.md](SECURITY.md).
 
-## Project information
+## Project
 
 - [Roadmap](ROADMAP.md)
 - [Changelog](CHANGELOG.md)
-- [Versioning and compatibility](docs/versioning.md)
+- [Versioning](docs/versioning.md)
 - [Governance](GOVERNANCE.md)
 - [Support](SUPPORT.md)
 - [Code of conduct](CODE_OF_CONDUCT.md)
 - [Trademarks](TRADEMARKS.md)
 - [Authors](AUTHORS.md)
 
-Licensing terms are in [LICENSE.txt](LICENSE.txt).
+[License](LICENSE.txt).
