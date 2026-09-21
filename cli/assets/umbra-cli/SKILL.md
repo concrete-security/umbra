@@ -224,3 +224,10 @@ Governed inbound WebSocket filtering is fail-closed. A frame must be selected by
 - An aTLS policy mismatch is a trust failure. Review the new policy material before accepting a replacement; do not bypass verification.
 
 When diagnosis remains unclear, run command help, `umbra config show`, and `umbra status`, then use the public support process without including tokens, session files, personal data, or live deployment material.
+
+### Local desktop handoff
+
+Use `umbra start local --app codex` or `--app claude` from the project (`--preview`
+on its first start). This imports files, registers the private SSH workspace and
+opens the app. Select the printed SSH alias and guest path in the app; no agent
+is started automatically. Host-side app tools remain outside the sandbox.

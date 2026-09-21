@@ -1,7 +1,7 @@
 //! Project-aware local execution behind the existing Umbra CLI.
 //!
 //! The Python supervisor is a private installed runtime, not a second product
-//! CLI. Explicit remote targets bypass local selection, including for the relay.
+//! CLI. Explicit remote targets bypass local selection, without changing cloud session behavior.
 use std::{
     collections::HashSet,
     env,
@@ -224,6 +224,7 @@ fn start_local(args: LocalStartArgs, config: &ResolvedConfig) -> ExitStatus {
         "--path".into(),
         directory.into_os_string(),
     ];
+    text_option(&mut request, "--app", args.app.as_deref());
     if args.preview {
         request.push("--preview".into());
     }

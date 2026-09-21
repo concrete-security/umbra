@@ -2302,3 +2302,11 @@ The following are deliberately excluded from this specification. They may be add
 - Generic `umbra operation` noun. Async commands today (§2.6) submit and either wait or return a handle; the user who runs `--no-wait` must record the `operation_id` and re-poll out of band. A future revision will add `umbra operation show <op_id>` (single GET) and `umbra operation wait <op_id>` (poll until terminal) so a `--no-wait` caller has a first-class re-poll surface. `umbra operation list` is on the wishlist but not yet committed.
 - Console-routed admin verbs not yet realized in CLI commands. The Console exposes routes for these flows (cited below against `docs/specs/console.md`); each will get a matching CLI verb in a follow-up revision. Until then, operators drive them via direct HTTP:
   - Golden-measurement / aTLS policy fetch (`umbra policy fetch`) — today the CLI consumes a policy file via `--atls-policy` (§6.1) and a per-CVM policy bundle at launch (§3.4); distribution of refreshed templates remains out-of-band until this verb lands.
+
+### Local desktop handoff
+
+`umbra start local --app codex|claude` prepares the folder-bound preview and
+registers its SSH connection before opening the desktop app. The result includes
+`desktop_app`, `ssh_host`, and `next_step`. Select the printed SSH host and guest
+folder in the app; this command does not create an agent session. See
+[local sandbox contract](local-sandbox.md) for first-start and security rules.

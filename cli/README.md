@@ -181,3 +181,8 @@ Dev CVM updates preserve the provider-managed named volumes. If the Console-retu
 - Per-CVM aTLS policy files are server-rendered by the Console and stored locally by the CLI.
 - `umbra tunnel` rejects `--insecure-skip-atls-policy`; verifier green paths must never use any aTLS bypass.
 - Secrets must never be printed, logged, accepted on argv, or stored in world-readable files.
+
+Local desktop workspaces use `umbra start local --app codex|claude` (plus
+`--preview` on first launch). The command prepares the VM and registers SSH;
+select that SSH host and its guest folder in the desktop app. See the
+[desktop setup](../local/README.md#desktop-apps) for the handoff and limitations.

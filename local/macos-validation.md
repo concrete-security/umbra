@@ -71,3 +71,23 @@ For ordinary rebuilds, use a working Swift 6+ Xcode/Command Line Tools
 installation. The prebuilt local bundle is ad-hoc signed for this Mac; it is not
 a release or managed installation. Python, CLI and smoke-test commands remain
 as documented in the README.
+
+## Desktop handoff follow-up
+
+`start local --app codex|claude` now registers SSH and opens the selected app after
+startup/import and guest readiness. All 91 local tests and the CLI suite passed;
+14 CLI integration cases include desktop dispatch. Strict Clippy passed. A new
+real-Mac smoke assertion connects through the generated desktop alias and checks
+the guest login proxy/CA environment. The full smoke passed with fixture services.
+No desktop UI or model session was started by the test.
+
+The hardware check found that the guest service's umask made `/run/umbra` mode
+0700, preventing the `dev` agent from reading its public CA bundle. Bootstrap now
+sets that public-only directory to 0755; its files stay 0644. The guest image was
+rebuilt and the real unprivileged SSH readiness check passed. Existing guest disks
+need explicit migration or a newly created workspace; changing a bundle under an
+existing workspace remains rejected.
+
+Desktop app selection and authentication still require live verification; opening
+an app is not evidence that a remote agent session started. SSH and Claude settings
+registration preserves unrelated configuration and retains private backups.

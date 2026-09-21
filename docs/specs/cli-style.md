@@ -13,7 +13,7 @@ The keywords MUST, MUST NOT, SHOULD, SHOULD NOT, MAY, and OPTIONAL in this docum
 `start local`, `stop local` and folder-scoped `status` use the single-section
 card renderer `style::local_workspace_card`. Title: `> Local workspace`.
 Fields, when present, are `state`, `assurance`, `project`, `guest_workspace`,
-`local_workspace_id`, `security_cvm_id`, `profiles`, and `changed_files`. The label width is 15,
+`local_workspace_id`, `security_cvm_id`, `profiles`, `changed_files`, `desktop_app`, `ssh_host`, and `next_step`. The label width is 15,
 with six leading spaces and two spaces before values. Running is green;
 stopped/starting/stopping are warnings. The `local-preview` assurance remains a
 warning even when the VM is running. Paths MUST be sanitized ASCII single-line

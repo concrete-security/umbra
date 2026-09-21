@@ -134,3 +134,17 @@ fn explicit_remote_dispatch_success(#[case] args: &[&str]) {
     assert_eq!(output.status.code(), Some(2), "{:?}", output);
     assert!(!String::from_utf8_lossy(&output.stderr).contains("local project registry"));
 }
+
+/// Desktop selection reaches the worker without becoming a cloud session.
+#[rstest]
+#[case::codex("codex")]
+#[case::claude("claude")]
+fn local_desktop_dispatch_success(#[case] app: &str) {
+    let project = Project::new();
+    project.worker("printf '%s\\n' \"$@\" >&2; printf '%s\\n' '{}' ");
+    let output = project.run(&["--json", "start", "local", "--app", app, "--preview"]);
+    assert!(
+        output.status.success()
+            && String::from_utf8_lossy(&output.stderr).contains(&format!("--app\n{app}\n"))
+    );
+}

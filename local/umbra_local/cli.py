@@ -17,7 +17,7 @@ import subprocess
 import sys
 import time
 
-from . import projects, service
+from . import desktop, projects, service
 from .state import LocalError, lock, private_dir, ssh_config, verify_bundle, workspace, write_file, write_json
 
 DEFAULT_BUNDLE = Path("/Library/Application Support/Umbra/Local/preview-v1")
@@ -55,6 +55,7 @@ def parser() -> argparse.ArgumentParser:
     start = commands.add_parser("project-start", help=argparse.SUPPRESS)
     start.add_argument("--path", type=Path, default=Path.cwd())
     start.add_argument("--preview", action="store_true")
+    start.add_argument("--app", choices=("codex", "claude"))
     start.add_argument("--profile", action="append", default=[])
     start.add_argument("--default-profile", action="append", default=[])
     start.add_argument("--bundle", type=Path)
@@ -118,7 +119,9 @@ def prepare(args, path: Path) -> dict:
             UUID(profile)
     except (ValueError, TypeError):
         raise LocalError("select assigned policy profiles with --profile UUID-or-alias; no Dev CVM is needed") from None
-    bundle = (args.bundle or Path(previous.get("bundle", str(DEFAULT_BUNDLE)))).expanduser().resolve()
+    user_bundle = args.config / "local-preview-bundle"
+    default_bundle = user_bundle if user_bundle.is_dir() else DEFAULT_BUNDLE
+    bundle = (args.bundle or Path(previous.get("bundle", str(default_bundle)))).expanduser().resolve()
     binary = str(args.umbra) if getattr(args, "umbra", None) else shutil.which("umbra")
     if not binary:
         raise LocalError("umbra is not installed; install the existing Umbra CLI and log in first")
@@ -269,6 +272,8 @@ def project_command(args) -> int:
         summary = projects.sync(path, binding)
         payload = project_payload(path, binding, directory)
         payload.update(imported_files=summary["files"], changed_files=summary["changed"])
+        if args.app:
+            payload.update(desktop.launch(args.app, path, binding, payload["guest_workspace"]))
         emit(args, payload)
         return 0
     binding = projects.select(args.config, directory)
@@ -399,7 +404,7 @@ def main() -> int:
             print("[WARN] editor-hosted tools are outside the VM boundary; run agents and MCP servers inside the VM.", file=sys.stderr)
             return subprocess.call([binary, "--user-data-dir", str(profile), "--remote", f"ssh-remote+umbra-local-{path.name}", "/home/dev/workspaces"])
         return 0
-    except (LocalError, OSError, ValueError, TimeoutError) as error:
+    except (LocalError, OSError, ValueError, TimeoutError, subprocess.TimeoutExpired) as error:
         message = str(error) if isinstance(error, LocalError) else "local operation failed; inspect the private workspace log and configuration"
         print(f"[error] {message}", file=sys.stderr)
         return 1

@@ -84,6 +84,11 @@ async def bootstrap(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) 
         if len(payload) > MAX_BOOT:
             return
         ca, key = validate_bootstrap(payload)
+        # The service uses umask 0077, but this directory contains public CAs
+        # and must be traversable by the unprivileged agent user.
+        public_trust = Path("/run/umbra")
+        public_trust.mkdir(mode=0o755, exist_ok=True)
+        public_trust.chmod(0o755)
         # The CA is replaced, never appended to an old intercepted trust root.
         roots = Path("/etc/ssl/certs/ca-certificates.crt").read_bytes()
         atomic_write(Path("/run/umbra/ca-bundle.pem"), roots + b"\n" + ca, 0o644)

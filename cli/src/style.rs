@@ -30,6 +30,9 @@ pub fn local_workspace_card(payload: &Value) -> String {
         "security_cvm_id",
         "profiles",
         "changed_files",
+        "desktop_app",
+        "ssh_host",
+        "next_step",
     ] {
         if let Some(field) = payload.get(key) {
             let raw = field

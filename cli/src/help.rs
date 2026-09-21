@@ -119,7 +119,7 @@ const EXAMPLES: &[(&str, &[&str])] = &[
         &[
             "umbra start local --preview",
             "umbra start local",
-            "umbra start local --relay-cvm <CVM_ID|alias> --bundle /path/to/bundle",
+            "umbra start local --preview --app codex",
         ],
     ),
     ("stop local", &["umbra stop local", "umbra stop local --path ~/projects/myrepo"]),

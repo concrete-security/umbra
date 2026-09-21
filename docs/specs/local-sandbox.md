@@ -32,6 +32,16 @@ assigned profiles on first launch. Explicit flags override remembered profiles;
 remembered profiles override configured defaults on subsequent starts. `--bundle`, `--cpus` and `--memory` configure the local runtime.
 A remote Dev CVM MUST NOT be required for admission, bootstrap, or egress.
 
+`start local --app codex|claude` MUST complete admission, boot, project import,
+and guest SSH/proxy readiness before opening a desktop app. It MUST register
+only that workspace using its dedicated identity and pinned host key. Existing
+SSH/Claude settings MUST be retained and backed up; no provider credentials are
+copied into desktop settings. The command MUST report the SSH alias and guest
+folder and state that app selection is still required. It MUST NOT open the host
+project as a local desktop session or claim an agent was started. The standard
+first-launch `--preview` gate still applies. A per-user `local-preview-bundle`
+directory is the default when present; explicit and remembered bundles win.
+
 Session resolution order is explicit remote positional target or `--cvm`, then
 nearest registered local ancestor, then existing cloud defaults. Explicit remote
 targets bypass even malformed local registries.

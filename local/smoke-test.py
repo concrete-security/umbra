@@ -119,6 +119,25 @@ else:
         assert status()["assurance"] == "local-preview"
         assert command("uname -m") == "aarch64"
         assert command("codex --version").startswith("codex-cli ")
+        # Exercise the desktop's SSH login environment and named connection,
+        # without opening apps or modifying the real user's SSH/Claude settings.
+        desktop_check = """
+from pathlib import Path
+import json, subprocess, sys
+from umbra_local import desktop
+config, home = map(Path, sys.argv[1:])
+home.mkdir(mode=0o700)
+binding = json.loads((config / 'local-projects.json').read_text())['projects'][0]
+path = config / 'local' / binding['name']
+desktop.check_guest('codex', path, binding, '/home/dev/workspaces/project')
+alias = desktop.register_ssh(path, binding, home)
+settings = home / '.ssh/config'
+settings.write_text(settings.read_text().replace('~/.ssh', str(home / '.ssh')))
+result = subprocess.check_output(['/usr/bin/ssh', '-F', str(settings), alias, 'uname -m'], text=True)
+assert result.strip() == 'aarch64'
+"""
+        run([str(python), '-I', '-c', desktop_check, str(config), str(root / 'desktop-home')], env=environment)
+        print("Verified desktop SSH alias and guest login proxy/CA environment (apps not opened).", flush=True)
         assert command("pwd", cwd=source / "src") == "/home/dev/workspaces/project/src"
         assert command("test -x executable && test -f .git/config && test -f .env && cat relative-link") == "initial"
         assert command("ls /sys/class/net") == "lo"

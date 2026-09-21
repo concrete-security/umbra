@@ -210,6 +210,10 @@ pub enum StopCommand {
 
 #[derive(clap::Args, Debug)]
 pub struct LocalStartArgs {
+    /// Prepare an SSH workspace and open its desktop app (one-time selection in app).
+    #[arg(long, value_parser = ["codex", "claude"])]
+    pub app: Option<String>,
+
     /// Project folder to import. Defaults to the current directory.
     #[arg(long)]
     pub path: Option<PathBuf>,

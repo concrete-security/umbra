@@ -29,6 +29,40 @@ are remembered per project. `--bundle DIRECTORY`, `--cpus N` and `--memory MIB`
 are advanced setup options. Console and Security CVM must run this revision
 before direct local admission works; an older server fails closed.
 
+## Desktop apps
+
+From any project, use `umbra start local --app codex` for ChatGPT/Codex or
+`umbra start local --app claude` for Claude Desktop. Add `--preview` on the first
+launch of each project. Normal `--profile` and `--path` flags still apply.
+
+The command starts/resumes the VM, imports host changes, verifies SSH and the
+guest proxy/CA environment, registers a named SSH connection, and opens the app.
+It prints the exact SSH host and guest folder. In ChatGPT, select the host in
+Settings → Connections; in Claude's Code tab, select the Umbra connection in the
+environment menu. Choose the printed guest folder. This handoff does **not**
+start an agent or select a remote project automatically: the apps do not document
+a launch URL that selects an SSH host and folder. Never select the Mac source
+folder as a local session when sandboxed execution is intended.
+
+Only explicitly launched desktop workspaces are registered under
+`~/.ssh/umbra-local/`. A scoped Include is prepended to `~/.ssh/config`; existing
+text is retained, with a private content-addressed backup before changes. Claude
+connections are added to its documented `~/.claude/settings.json` `sshConfigs`
+array, preserving other settings and hosts. Symlinked or shared-writable settings
+are rejected. Guest SSH ports remain private vsock paths, with pinned keys and
+no host agent forwarding.
+
+Codex is bundled; its guest authentication must match the profile's SC injection.
+Claude Desktop installs its remote backend on first connection, requiring approved
+download destinations. Desktop authentication/backend compatibility still require
+live validation. Host-side browser, computer-use and connector tools are outside
+the guest boundary. Opening an existing desktop session alone does not refresh
+host files: rerun the launch command to import them while preserving guest edits.
+
+The default per-user guest bundle is `~/.umbra/local-preview-bundle` when present;
+`--bundle` overrides it and existing workspaces retain their recorded bundle.
+Stop from the source project with `umbra stop local` when finished.
+
 ## Folder selection
 
 `start local` binds the canonical current directory to a private local workspace.
