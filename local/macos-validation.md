@@ -118,6 +118,9 @@ NIC-less VM booted with a stale image clock and rejected current certificates.
 Bootstrap now sets the guest clock from the trusted Mac and refreshes it at lease
 renewal. Bundle version 2 rejects incompatible old guest disks explicitly.
 
-Codex desktop SSH registration and app opening passed on this Mac. An actual
-desktop-controlled agent session and Claude subscription/model authentication
-remain pending. The successful model test used the CLI inside the same VM.
+Both desktop SSH registrations and app openings passed on this Mac, including
+the real aliases' proxy/CA environment. A second fresh project also passed a Codex
+model request after automatic non-secret placeholder setup. Claude's native CLI
+2.1.278 starts in its demo VM. Actual desktop-controlled agent sessions and Claude
+subscription/model authentication remain pending. Successful model tests used the
+CLI inside the VMs.
