@@ -36,7 +36,7 @@ class LocalWorkspaceCreate(BaseModel):
 
 def security_bundle(row: Any) -> dict:
     metadata = json_payload(row["metadata"] or {})
-    policy = metadata.get("atls_policy") if isinstance(metadata, dict) else None
+    policy = json_payload(metadata.get("atls_policy_json", metadata.get("atls_policy"))) if isinstance(metadata, dict) else None
     if (row["state"] != "RUNNING" or row["deleted_at"] is not None
         or not row["expected_image_measurement"] or row["image_measurement"] != row["expected_image_measurement"]
         or row["attestation_verified_at"] is None or row["error_reason"] == "ATTESTATION_DRIFT"

@@ -103,3 +103,8 @@ Security CVM together before enabling clients. No Dev CVM is required. The local
 client checks strict SC runtime attestation; old SC images do not admit local
 identities. See [the contract](../docs/specs/local-sandbox.md) for lease,
 profile, traffic attribution and trusted-host semantics.
+
+Security CVM policy metadata retains an ordered JSON serialization because Atlas
+hashes compose bytes and PostgreSQL JSONB reorders keys. Normal SC provisioning
+and updates refresh both representations. Update an existing SC once after this
+upgrade so local admission receives the preserved authoritative policy.

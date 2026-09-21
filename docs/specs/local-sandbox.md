@@ -153,6 +153,12 @@ No ordinary guest NIC, shared host directory, or direct-network fallback exists.
 The native helper observes its supervisor; stop uses bounded child handles, not
 stored PIDs. Forced shutdown may interrupt guest writes.
 
+Security CVM policy storage must preserve the authoritative compose JSON key order
+through PostgreSQL and local create/renew responses: Atlas hashes its serialized
+bytes. Store an ordered policy serialization alongside the JSONB object; legacy
+Security CVMs require a normal update to refresh that material. No runtime
+verification check may be disabled to compensate for serialization drift.
+
 ## 4. Local state and trust
 
 Private runtime state is `~/.umbra/local/<derived-name>/`: config, guest disk,

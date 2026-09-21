@@ -609,6 +609,7 @@ def test_local_admission_without_dev_cvm_success(migrated_database):
         from umbra_console.routes_local import LocalWorkspaceCreate, create_local_workspace, renew_local_workspace, revoke_local_workspace, local_control_entries
         from umbra_console.routes_internal import TrafficLogIn, validate_traffic_log_cvms
         from umbra_console.crypto import sha256_hex
+        from umbra_console.scheduler import metadata_with_atls_policy
         pool = await asyncpg.create_pool(_asyncpg_form(migrated_database))
         try:
             async with pool.acquire() as conn:
@@ -617,13 +618,14 @@ def test_local_admission_without_dev_cvm_success(migrated_database):
                 await conn.execute("INSERT INTO user_permissions(user_id,permission) VALUES($1,'CVM_LAUNCH')", OWNER_FULL)
                 await conn.execute("INSERT INTO entity_profiles(id,entity_id,name,policy) VALUES($1,$2,'Local policy',$3::jsonb)", PROF_DEST, ENTITY_ID, json.dumps(DEST_POLICY))
                 await conn.execute("INSERT INTO profile_users(profile_id,user_id) VALUES($1,$2)", PROF_DEST, OWNER_FULL)
-                policy = {"type":"dstack_tdx", "expected_bootchain":{"mrtd":"a"}, "app_compose":{"runner":"docker-compose"}, "os_image_hash":"b"}
+                policy = {"type":"dstack_tdx", "expected_bootchain":{"mrtd":"a"}, "app_compose":{"allowed_envs":[], "docker_compose_file":"services: {}", "runner":"docker-compose"}, "os_image_hash":"b"}
                 await conn.execute("""INSERT INTO security_cvms(id,entity_id,state,fqdn,ca_cert_pem,metadata,
                     expected_image_measurement,image_measurement,attestation_verified_at)
-                    VALUES($1,$2,'RUNNING','sc.local.example','public-ca',$3::jsonb,$4,$4,now())""", SC_ID, ENTITY_ID, json.dumps({"atls_policy":policy}), "a"*64)
+                    VALUES($1,$2,'RUNNING','sc.local.example','public-ca',$3::jsonb,$4,$4,now())""", SC_ID, ENTITY_ID, json.dumps(metadata_with_atls_policy({}, policy)), "a"*64)
             user = CurrentUser(OWNER_FULL, "local@local.example", "Local", ENTITY_ID, "Local", frozenset({"CVM_LAUNCH"}))
             created = await create_local_workspace(LocalWorkspaceCreate(profile_ids=[PROF_DEST]), Response(), user, pool)
             local_id = uuid.UUID(created["id"])
+            assert json.dumps(created["atls_policy"]["app_compose"]) == json.dumps(policy["app_compose"])
             async with pool.acquire() as conn:
                 assert await conn.fetchval("SELECT count(*) FROM cvms") == 0
                 stored = await conn.fetchrow("SELECT * FROM local_workspaces WHERE id=$1", local_id)
@@ -645,6 +647,7 @@ def test_local_admission_without_dev_cvm_success(migrated_database):
                 await conn.execute("INSERT INTO profile_users(profile_id,user_id) VALUES($1,$2)", PROF_DEST, OWNER_FULL)
             renewed = await renew_local_workspace(local_id, Response(), user, pool)
             assert renewed["id"] == created["id"] and "proxy_token" not in renewed
+            assert json.dumps(renewed["atls_policy"]["app_compose"]) == json.dumps(policy["app_compose"])
             await revoke_local_workspace(local_id, user, pool)
             async with pool.acquire() as conn:
                 assert not await local_control_entries(conn, ENTITY_ID, SC_ID)

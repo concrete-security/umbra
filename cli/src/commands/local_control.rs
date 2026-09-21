@@ -141,7 +141,7 @@ pub fn tunnel() -> ExitStatus {
                 .map_err(|_| "cannot connect to Security CVM")?;
             // Deliberately no Dev-side temporary runtime-policy exception here.
             let (mut tls, _) = atlas_rs::atls_connect(tcp, &request.fqdn, policy, None).await
-                .map_err(|_| "Security CVM attestation failed; no sandbox traffic was sent")?;
+                .map_err(|error| format!("Security CVM attestation failed; no sandbox traffic was sent: {error}"))?;
             tls.write_all(format!("GET /umbra/proxy HTTP/1.1\r\nHost: {}\r\nConnection: Upgrade\r\nUpgrade: umbra-proxy\r\n\r\n", request.fqdn).as_bytes()).await
                 .map_err(|_| "Security CVM tunnel upgrade failed")?;
             let mut header = Vec::new();
