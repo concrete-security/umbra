@@ -60,7 +60,8 @@ Local `--workspace` stays within this guest project. Named sessions use guest
 `dtach`. Local `--identity-file` and `--alias` MUST be rejected, not ignored; local
 workspaces use dedicated identities and folder context. Agent executables must
 already be installed in the guest and configured with non-secret placeholders.
-This preview does not ship preinstalled Claude/Codex binaries.
+The guest ships integrity-pinned Codex. Claude must be installed through an
+assigned policy or by its desktop SSH backend.
 
 ## 2. Whole-folder import and update semantics
 
@@ -174,8 +175,13 @@ trusted. No claim is made that a remote server can prove this local software is
 unmodified. Local-preview MUST NOT be labeled managed-local or attested-remote.
 A live authorization lease is not proof that the host has no other network paths.
 
-An SSH key is created per workspace; bootstrap conveys only its public half and
-public SC trust material. Strict host-key checking is required after guest
+The no-NIC guest MUST receive bounded host wall time at boot and after each
+successful lease renewal, before HTTPS use. The preview trusts its host clock;
+TLS certificate validity checks MUST remain enabled. Bundle version 2 is required
+for this bootstrap contract; older bundles fail before VM launch.
+
+An SSH key is created per workspace; bootstrap conveys only its public half,
+public SC trust material and host wall time. Strict host-key checking is required after guest
 bootstrap. Host agent forwarding, reverse forwarding, X11, local SSH commands,
 global SSH control sockets and writable host directories are forbidden. Editor
 profiles may forward only to guest loopback. Local/cloud-hosted editor tools and

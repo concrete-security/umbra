@@ -27,12 +27,11 @@ checkout was preserved.
   Bash 3.2 does not support its existing `declare -A`. Later Makefile checks were
   not run by that invocation; no unrelated installer changes were made.
 
-The hardware run used synthetic Console and attested-transport workers confined
-to the test harness. Production code contains no test transport override. This
-proves Mac runtime behavior, not a real TEE handshake, live Console admission,
-live SC policy/DLP/secret injection, or a successful model call. Those require
-this branch's Console migration and SC image to be deployed. Editor integration,
-CA rotation, sleep/wake, VPN changes and nested Docker remain unverified.
+The repeatable hardware smoke uses synthetic Console and attested-transport
+workers confined to the test harness. Production code contains no test transport
+override. Separate authorized staging checks below exercise live attestation,
+policy, DLP and a model request. Desktop agent sessions, CA rotation, sleep/wake,
+VPN changes and nested Docker remain unverified.
 
 The checked-in OpenAPI file had unrelated pre-existing drift. Only API nodes
 changed by this feature were regenerated, by comparing generated schemas before
@@ -91,3 +90,34 @@ existing workspace remains rejected.
 Desktop app selection and authentication still require live verification; opening
 an app is not evidence that a remote agent session started. SSH and Claude settings
 registration preserves unrelated configuration and retains private backups.
+
+## Live staging follow-up
+
+The Console and Security CVM were deployed to an authorized staging environment.
+The existing database was backed up and migrated through normal startup; the
+previous checkout was preserved. Production was not changed.
+
+- Strict Mac aTLS connected directly to the Security CVM with the complete
+  runtime policy. No Dev CVM was used.
+- A fresh guest passed HTTPS 200, denied-destination 403, DLP 403 and failed
+  direct-network checks. CONNECT status and inner HTTPS status were asserted
+  separately, and TLS certificate validation stayed enabled.
+- Codex executed a real model request in the VM and returned the expected short
+  response. The guest held only dummy authentication; the SC supplied the managed
+  provider credential. Optional connector endpoints stayed policy-blocked.
+- Console traffic logs attributed policy, DLP and model traffic to the distinct
+  local workspace, with no Dev CVM identity.
+- All 99 local Python tests passed. The complete real-Mac smoke passed with the
+  version-2 guest, including host-aligned time on boot and resume.
+
+Live testing found two defects. Postgres JSONB reordered authoritative compose
+keys, so Console now retains the policy's serialized JSON and returns it without
+changing attestation inputs. The real-Postgres regression and all 741 Console
+tests passed; normal SC update refreshed the stored policy. Separately, the
+NIC-less VM booted with a stale image clock and rejected current certificates.
+Bootstrap now sets the guest clock from the trusted Mac and refreshes it at lease
+renewal. Bundle version 2 rejects incompatible old guest disks explicitly.
+
+Codex desktop SSH registration and app opening passed on this Mac. An actual
+desktop-controlled agent session and Claude subscription/model authentication
+remain pending. The successful model test used the CLI inside the same VM.

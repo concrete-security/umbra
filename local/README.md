@@ -152,6 +152,11 @@ Virtualization.framework directly, not the macOS 26-only Containerization APIs.
 The installer respects `UMBRA_CONFIG_DIR` or `--config DIRECTORY`. It is a source
 preview installer, not a signed managed distribution or an automatic downloader.
 
+Preview bundle version 2 adds required host clock bootstrap. Older bundles are
+rejected; retain existing disks and use a newly created workspace when upgrading.
+The host supplies wall time at boot and each lease renewal because the no-NIC
+guest cannot use NTP. Certificate validity checks remain enabled.
+
 The VM bundle builder requires a new directory and makes a 12 GiB disk, ARM64
 kernel/initrd and ad-hoc signed native helper with a drift-check manifest. Those
 hashes and signatures do not establish release provenance or hostile-host safety.

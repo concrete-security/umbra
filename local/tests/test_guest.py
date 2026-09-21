@@ -17,6 +17,8 @@ spec.loader.exec_module(guest)
 ])
 def test_guest_bootstrap_rejects_untrusted_fields_failure(payload):
     """Guest bootstrap accepts no command, path, private key or malformed CA field."""
+    if isinstance(payload, dict):
+        payload = {"unix_time": 1790000000, **payload}
     with pytest.raises((ValueError, TypeError)):
         guest.validate_bootstrap(json.dumps(payload).encode())
 
@@ -24,3 +26,24 @@ def test_guest_bootstrap_rejects_untrusted_fields_failure(payload):
 def test_guest_fixed_destination_success():
     """The guest cannot request a host destination through the bootstrap protocol."""
     assert (guest.HOST_CID, guest.EGRESS_PORT, guest.BOOT_PORT) == (2, 4050, 4051)
+
+
+@pytest.fixture
+def valid_bootstrap(monkeypatch):
+    """Isolate clock validation from certificate parsing, which has separate cases."""
+    from types import SimpleNamespace
+    monkeypatch.setattr(guest.ssl, "SSLContext", lambda *_: SimpleNamespace(load_verify_locations=lambda **_: None))
+    return {"ca_pem": "public-test-ca", "authorized_key": "ssh-ed25519 " + "A" * 44, "unix_time": 1790000000}
+
+
+def test_guest_bootstrap_clock_success(valid_bootstrap):
+    """The public host bootstrap carries wall time for the no-NIC guest."""
+    assert guest.validate_bootstrap(json.dumps(valid_bootstrap).encode())[2] == 1790000000
+
+
+@pytest.mark.parametrize("value", [None, True, "1790000000", 1790000000.5, -1, 4102444801])
+def test_guest_bootstrap_invalid_clock_failure(valid_bootstrap, value):
+    """Only bounded integer timestamps may reach the privileged clock setter."""
+    valid_bootstrap["unix_time"] = value
+    with pytest.raises(ValueError):
+        guest.validate_bootstrap(json.dumps(valid_bootstrap).encode())

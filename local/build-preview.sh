@@ -19,7 +19,7 @@ files = {}
 for name in ("Image", "initrd", "rootfs.raw", "umbra-local-vm"):
     with (folder / name).open("rb") as source:
         files[name] = hashlib.file_digest(source, "sha256").hexdigest()
-(folder / "manifest.json").write_text(json.dumps({"version": 1, "architecture": "aarch64", "files": files}, indent=2) + "\n")
+(folder / "manifest.json").write_text(json.dumps({"version": 2, "architecture": "aarch64", "files": files}, indent=2) + "\n")
 PY
 printf 'Preview bundle: %s\n' "$out"
 printf '%s\n' 'Ad-hoc signed for local testing only. Not a managed or release-signed installation.' >&2

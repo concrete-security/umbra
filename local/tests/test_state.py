@@ -18,7 +18,7 @@ def bundle(tmp_path):
         path.write_bytes(b"test artifact " + name.encode())
         path.chmod(0o700)
         files[name] = state.digest_file(path)
-    (folder / "manifest.json").write_text(json.dumps({"version": 1, "architecture": "aarch64", "files": files}))
+    (folder / "manifest.json").write_text(json.dumps({"version": 2, "architecture": "aarch64", "files": files}))
     return folder
 
 
@@ -102,3 +102,13 @@ def test_editor_guest_loopback_forwarding_success():
     """The editor may reach its guest backend without enabling agent forwarding."""
     config = state.ssh_config(Path("/tmp/umbra"), "dev", Path("/tmp/umbra"), "/usr/bin/python3", editor=True)
     assert "ClearAllForwardings no" in config and "ForwardAgent no" in config
+
+
+def test_legacy_bootstrap_bundle_failure(bundle):
+    """A guest without clock bootstrap support fails before VM launch."""
+    path = bundle / "manifest.json"
+    value = json.loads(path.read_text())
+    value["version"] = 1
+    path.write_text(json.dumps(value))
+    with pytest.raises(state.LocalError):
+        state.verify_bundle(bundle)

@@ -118,6 +118,7 @@ else:
         assert start()["state"] == "running"
         assert status()["assurance"] == "local-preview"
         assert command("uname -m") == "aarch64"
+        assert abs(int(command("date +%s")) - time.time()) < 10
         assert command("codex --version").startswith("codex-cli ")
         # Exercise the desktop's SSH login environment and named connection,
         # without opening apps or modifying the real user's SSH/Claude settings.
@@ -160,6 +161,7 @@ assert result.strip() == 'aarch64'
         assert status()["state"] == "stopped"
         assert start()["state"] == "running"
         assert command("cat guest-only") == "guest-only"
+        assert abs(int(command("date +%s")) - time.time()) < 10
         print("Verified host updates, conflict preservation, and stop/resume persistence.", flush=True)
         # A bounded payload verifies guest console logging cannot grow without limit.
         command("sudo python3 -c \"open('/dev/hvc0','wb').write(b'x' * 1572864)\"")

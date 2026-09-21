@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import re
 import signal
+import time
 
 from .direct import DirectBroker
 from .state import LocalError, lock, write_file, write_json
@@ -33,7 +34,7 @@ async def bootstrap(path: Path, ca: str, public_key: str) -> str:
     try:
         async with asyncio.timeout(5):
             reader, writer = await asyncio.open_unix_connection(str(path / "boot.sock"), limit=4096)
-            writer.write(json.dumps({"ca_pem": ca, "authorized_key": public_key}).encode() + b"\n")
+            writer.write(json.dumps({"ca_pem": ca, "authorized_key": public_key, "unix_time": int(time.time())}).encode() + b"\n")
             await writer.drain()
             value = json.loads(await reader.readuntil(b"\n"))
             if set(value) != {"host_key"} or not re.fullmatch(r"ssh-ed25519 [A-Za-z0-9+/]{40,200}={0,2}", value["host_key"]):
@@ -80,11 +81,11 @@ async def _serve(path: Path, config_dir: Path) -> None:
         while True:
             await asyncio.sleep(60)
             await broker.renew()
-            if broker.lease["ca_pem"] != current_ca:
-                current_ca = broker.lease["ca_pem"]
-                returned_key = await bootstrap(path, current_ca, public_key)
-                if returned_key != initial_key:
-                    raise LocalError("guest SSH identity changed during CA rotation")
+            current_ca = broker.lease["ca_pem"]
+            # Refresh wall time as well as public trust, including after Mac sleep.
+            returned_key = await bootstrap(path, current_ca, public_key)
+            if returned_key != initial_key:
+                raise LocalError("guest SSH identity changed during bootstrap refresh")
 
     async def bounded_console(reader) -> None:
         # Guest root controls serial output; drain it without unbounded host disk growth.

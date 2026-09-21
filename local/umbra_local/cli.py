@@ -20,7 +20,7 @@ import time
 from . import desktop, projects, service
 from .state import LocalError, lock, private_dir, ssh_config, verify_bundle, workspace, write_file, write_json
 
-DEFAULT_BUNDLE = Path("/Library/Application Support/Umbra/Local/preview-v1")
+DEFAULT_BUNDLE = Path("/Library/Application Support/Umbra/Local/preview-v2")
 
 
 def parser() -> argparse.ArgumentParser:

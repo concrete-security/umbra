@@ -11,6 +11,7 @@ import re
 import socket
 import ssl
 import tempfile
+import time
 
 HOST_CID = 2
 EGRESS_PORT = 4050
@@ -31,10 +32,13 @@ def atomic_write(path: Path, data: bytes, mode: int) -> None:
             os.unlink(name)
 
 
-def validate_bootstrap(payload: bytes) -> tuple[bytes, bytes]:
+def validate_bootstrap(payload: bytes) -> tuple[bytes, bytes, int]:
     value = json.loads(payload)
-    if not isinstance(value, dict) or set(value) != {"ca_pem", "authorized_key"}:
+    if not isinstance(value, dict) or set(value) != {"ca_pem", "authorized_key", "unix_time"}:
         raise ValueError("invalid bootstrap fields")
+    unix_time = value["unix_time"]
+    if type(unix_time) is not int or not 1577836800 <= unix_time <= 4102444800:
+        raise ValueError("invalid host clock")
     ca, key = value["ca_pem"], value["authorized_key"]
     if not isinstance(ca, str) or not isinstance(key, str) or len(ca) > 32768:
         raise ValueError("invalid bootstrap types")
@@ -44,7 +48,7 @@ def validate_bootstrap(payload: bytes) -> tuple[bytes, bytes]:
         ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT).load_verify_locations(cadata=ca)
     except (ssl.SSLError, UnicodeError) as error:
         raise ValueError("invalid public CA") from error
-    return ca.encode("ascii"), key.encode("ascii") + b"\n"
+    return ca.encode("ascii"), key.encode("ascii") + b"\n", unix_time
 
 
 async def splice(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
@@ -83,7 +87,10 @@ async def bootstrap(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) 
         payload = await asyncio.wait_for(reader.readuntil(b"\n"), 10)
         if len(payload) > MAX_BOOT:
             return
-        ca, key = validate_bootstrap(payload)
+        ca, key, unix_time = validate_bootstrap(payload)
+        # There is no NIC/NTP. A stale image clock otherwise rejects current TLS
+        # certificates; the preview already trusts this fixed host bootstrap peer.
+        time.clock_settime(time.CLOCK_REALTIME, unix_time)
         # The service uses umask 0077, but this directory contains public CAs
         # and must be traversable by the unprivileged agent user.
         public_trust = Path("/run/umbra")

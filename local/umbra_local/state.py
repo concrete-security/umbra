@@ -80,7 +80,7 @@ def verify_bundle(path: Path) -> dict:
         if path.is_symlink():
             raise ValueError
         manifest = json.loads((path / "manifest.json").read_text())
-        if set(manifest) != {"version", "architecture", "files"} or manifest["version"] != 1:
+        if set(manifest) != {"version", "architecture", "files"} or manifest["version"] != 2:
             raise ValueError
         if manifest["architecture"] != "aarch64" or set(manifest["files"]) != BUNDLE_FILES:
             raise ValueError
@@ -94,7 +94,7 @@ def verify_bundle(path: Path) -> dict:
             raise ValueError
         return manifest
     except (OSError, ValueError, TypeError, KeyError, AttributeError) as error:
-        raise LocalError("guest bundle is absent, incomplete or changed; build/install the preview bundle described in local/README.md") from error
+        raise LocalError("guest bundle is absent, incompatible, incomplete or changed; build/install the preview bundle described in local/README.md") from error
 
 
 def ssh_config(path: Path, name: str, config: Path, python: str, *, editor: bool = False) -> str:
