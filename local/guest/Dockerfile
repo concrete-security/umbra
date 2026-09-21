@@ -50,3 +50,5 @@ RUN mkdir /out \
     && python3 -c 'from pathlib import Path; import gzip; p=Path("/out/Image"); b=p.read_bytes(); b=gzip.decompress(b) if b[:2]==b"\x1f\x8b" else b; assert b[56:60]==b"ARM\x64", "expected an ARM64 Linux Image"; p.write_bytes(b)'
 FROM scratch AS bundle
 COPY --from=pack /out/ /
+# This stage exports files only; it has no runtime entrypoint.
+USER 65532:65532

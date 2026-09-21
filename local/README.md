@@ -41,8 +41,8 @@ Subsequent `ssh`, `claude`, `codex`, `code`, `cursor` and `status` resolve the n
 registered ancestor. The relative current directory is preserved in the guest.
 Local `--workspace` overrides must stay within the imported guest project.
 
-An explicit positional remote target or `--cvm ID-or-alias` always wins. This also
-prevents the preview's own remote egress relay from recursing into local mode:
+An explicit positional remote target or `--cvm ID-or-alias` always selects that
+cloud workspace:
 
 ```bash
 umbra ssh --cvm my-cloud-box
