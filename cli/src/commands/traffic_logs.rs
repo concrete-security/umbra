@@ -25,6 +25,7 @@ struct TrafficLog {
     timestamp: String,
     security_cvm_id: String,
     cvm_id: Option<String>,
+    local_workspace_id: Option<String>,
     source_ip: String,
     destination_ip: String,
     destination_host: Option<String>,
@@ -55,6 +56,9 @@ fn validate_args(args: &TrafficLogsArgs) -> Result<(), String> {
     if args.limit == 0 || args.limit > 1000 {
         return Err("[usage] --limit must be between 1 and 1000".to_string());
     }
+    if let Some(id) = args.local_workspace.as_deref() {
+        validate_uuid("--local-workspace", id)?;
+    }
     if let Some(cvm_id) = args.cvm.as_deref() {
         validate_uuid("--cvm", cvm_id)?;
     }
@@ -77,6 +81,7 @@ fn fetch_traffic_logs(
 ) -> Result<ListPage<TrafficLog>, (ExitStatus, String)> {
     let mut query = vec![("limit", args.limit.to_string())];
     push_query(&mut query, "cvm_id", &args.cvm);
+    push_query(&mut query, "local_workspace_id", &args.local_workspace);
     push_query(&mut query, "security_cvm_id", &args.security_cvm);
     push_query(&mut query, "from", &args.from);
     push_query(&mut query, "to", &args.to);
@@ -117,6 +122,7 @@ fn print_traffic_logs(page: ListPage<TrafficLog>, json_output: bool, args: &Traf
         .map(|log| style::TrafficLogView {
             timestamp: &log.timestamp,
             cvm_id: log.cvm_id.as_deref(),
+            local_workspace_id: log.local_workspace_id.as_deref(),
             security_cvm_id: Some(log.security_cvm_id.as_str()),
             method: log.method.as_deref(),
             destination_host: log.destination_host.as_deref(),
@@ -146,6 +152,7 @@ mod tests {
     #[test]
     fn validate_args_rejects_bad_cvm_uuid() {
         let args = TrafficLogsArgs {
+            local_workspace: None,
             cvm: Some("not-a-uuid".to_string()),
             security_cvm: None,
             from: None,

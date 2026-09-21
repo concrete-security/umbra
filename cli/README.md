@@ -78,6 +78,23 @@ Run the **Release Umbra CLI** workflow manually. Its dry run validates crates.io
 
 Every Console write (POST/PATCH/DELETE) goes through the shared `src/console.rs` client (`send` / `post_json`), and GET reads that need only a typed JSON body use `fetch_json`. Reads that need the raw response — ETag capture, custom 404 handling — and the OAuth device flow still build their own request.
 
+## Local projects
+
+Start from a folder with `umbra start local --preview` on first use. Thereafter
+`umbra ssh`, `umbra claude`, `umbra codex`, `umbra code` and `umbra cursor` select
+that folder's local sandbox, including from subdirectories. `umbra status` reports
+its local state; `umbra stop local` preserves its files and binding.
+Assigned `--profile` policies and Console-issued leases authorize a distinct
+local identity. Its host broker verifies and connects directly to Security CVM;
+no Dev CVM is required. `traffic-logs --local-workspace UUID` selects its traffic.
+
+The source-preview runtime is installed privately; it exposes no `umbra-local`
+executable. See [local setup and file-copy behavior](../local/README.md) and the
+[local contract](../docs/specs/local-sandbox.md). Dotfiles and untracked files are
+copied; guest edits are never automatically written back to the host. Explicit
+remote targets still select cloud execution. A stopped/broken local binding never
+silently falls back to the configured cloud default.
+
 ## Local State
 
 By default the CLI uses `~/.umbra`:

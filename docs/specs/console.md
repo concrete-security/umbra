@@ -4202,3 +4202,16 @@ Deliberately excluded from this specification.
 - **Arbitrary live Security CVM rebinding.** §10.4 binds an SC's identity to RTMR-extended boot values (`CONSOLE_URL`, bearer hashes, etc.). The supported live rebind is the provider-backed `security_cvm.update` saga. Arbitrary in-process mutation of RTMR-bound values without a provider update, and `CONSOLE_URL` rotation for an existing SC, remain out of scope; those require `DELETE` + re-`POST` on `/entities/{id}/security-cvm` (§3.7).
 - **Public JWKS endpoint.** §5.2 deliberately omits the `GET /api/v1/.well-known/jwks.json` route in v1 because no v1 component verifies Console-issued JWTs externally. A future revision MAY add it when (and only when) a real external verifier appears (e.g. a service-to-service consumer of Console-issued user JWTs); the SC binding is rooted in TEE attestation, not in JWT signature verification, so this endpoint is not load-bearing for SC trust.
 - **Comprehensive PII erasure beyond the §11.9 procedure.** The user-erase procedure covers `users.email` / `users.name` (tombstoned) plus `audit_events.actor_email` and `audit_events.before/after.email` (rewritten under the redactor role). The following residues survive erasure today and would need separate handling in a future revision: (a) `audit_events.ip_address` — IPs are PII per GDPR Art. 4 but the redactor role's column allow-list does not include this column; (b) `audit_events.before/after.name` and other non-email PII keys nested in the JSONB payloads (the procedure only walks `.email`); (c) `operations.actor_email` — denormalised on `operations` rows and not part of the audit-events redaction walk; (d) `idempotency_keys.response_body` for routes that returned `<User>` within the 24 h cache window before erasure; (e) `traffic_logs` rows tied to the user's terminated CVMs, which survive until the configured retention window prunes them naturally. Operator DSAR responses today MUST flag these residues to the data subject. A future revision MAY extend the redactor role's grants to cover (a)–(c) and add a runtime-role pass that hard-DELETEs (d)–(e) at erase time.
+
+## Local workspace extension
+
+See [local sandbox execution](local-sandbox.md) for the direct local-workspace
+admission contract. Console adds owner-bound `POST /api/v1/local-workspaces`,
+`POST /api/v1/local-workspaces/{id}/renew`, and idempotent
+`DELETE /api/v1/local-workspaces/{id}`. Create accepts `profile_ids` and returns
+the local ID, host-only bearer, expiry, SC ID/FQDN, strict aTLS policy and public
+CA/digest; renew returns the same public material and expiry without a bearer.
+The SC control feed adds `local_entries`, and traffic APIs accept and emit
+`local_workspace_id` separately from nullable `cvm_id`. Expired local identities
+fail closed even when the control map has not refreshed. This does not attest
+the Mac or change the cloud Dev transport's existing documented exception.

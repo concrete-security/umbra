@@ -85,7 +85,10 @@ const GROUPS: &[(&str, &[&str])] = &[
             "ssh", "code", "cursor", "claude", "codex", "ps", "attach", "kill", "tunnel",
         ],
     ),
-    ("Manage sandboxes", &["cvm", "security-cvm"]),
+    (
+        "Manage sandboxes",
+        &["start", "stop", "cvm", "security-cvm"],
+    ),
     (
         "Org, policy & access",
         &["user", "profile", "key", "secret", "quota", "entity"],
@@ -111,6 +114,15 @@ const GROUPS: &[(&str, &[&str])] = &[
 /// arg-bearing leaf MUST have an entry so its `Examples:` block renders (guarded
 /// by `test_help_level_3_leaves_have_usage_and_examples_success`).
 const EXAMPLES: &[(&str, &[&str])] = &[
+    (
+        "start local",
+        &[
+            "umbra start local --preview",
+            "umbra start local",
+            "umbra start local --relay-cvm <CVM_ID|alias> --bundle /path/to/bundle",
+        ],
+    ),
+    ("stop local", &["umbra stop local", "umbra stop local --path ~/projects/myrepo"]),
     // Top-level leaves.
     (
         "ssh",
@@ -850,7 +862,7 @@ fn render_global_options(root: &Command) -> String {
 fn render_group_body(cmd: &Command, path: &str) -> String {
     let children: Vec<&Command> = cmd
         .get_subcommands()
-        .filter(|sub| sub.get_name() != "help")
+        .filter(|sub| sub.get_name() != "help" && !sub.is_hide_set())
         .collect();
 
     // Usage block: `umbra <path> <COMMAND>`, then a synopsis per subcommand
@@ -1142,7 +1154,7 @@ mod tests {
     fn helper_declared_subcommands(group: &Command) -> BTreeMap<String, String> {
         group
             .get_subcommands()
-            .filter(|sub| sub.get_name() != "help")
+            .filter(|sub| sub.get_name() != "help" && !sub.is_hide_set())
             .map(|sub| (sub.get_name().to_string(), helper_description_of(sub)))
             .collect()
     }
@@ -1157,7 +1169,7 @@ mod tests {
         // (`help` is clap's built-in, absent from the declared enum — exempt it).
         let real_structure: BTreeMap<String, String> = Cli::command()
             .get_subcommands()
-            .filter(|sub| sub.get_name() != "help")
+            .filter(|sub| sub.get_name() != "help" && !sub.is_hide_set())
             .map(|sub| (sub.get_name().to_string(), helper_description_of(sub)))
             .collect();
         // general-options: the declared global flags and their help text.
@@ -1207,7 +1219,7 @@ mod tests {
         // 1. Ground truth.
         let real_structure: BTreeMap<String, String> = Cli::command()
             .get_subcommands()
-            .filter(|sub| sub.get_name() != "help")
+            .filter(|sub| sub.get_name() != "help" && !sub.is_hide_set())
             .map(|sub| (sub.get_name().to_string(), helper_description_of(sub)))
             .collect();
 

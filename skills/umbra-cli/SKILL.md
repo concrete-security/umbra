@@ -34,6 +34,22 @@ umbra cursor --workspace ~/workspaces/myrepo
 
 The explicit workspace is cached per CVM and reused by later bare agent/editor commands.
 
+## Local project sessions
+
+From a project folder, `umbra start local --preview` creates the preview on first
+use; later `umbra start local` resumes it. `umbra ssh`, `umbra claude`,
+`umbra codex`, `umbra code`, `umbra cursor` and `umbra status` use the nearest
+bound project, preserving relative cwd. `umbra stop local` keeps its files.
+An explicit `--cvm` or positional remote target overrides local selection.
+Local workspaces use assigned `--profile` selectors and Console-issued leases.
+They connect directly to the Security CVM; no Dev CVM is needed. Inspect their
+traffic with `umbra traffic-logs --local-workspace UUID`.
+
+The initial folder copy includes dotfiles and untracked files; later host edits
+are pushed without silently overwriting divergent guest edits. No guest changes
+are automatically written back to the Mac. There is no public `umbra-local` CLI.
+Runtime/bundle setup and remaining preview limits are in `local/README.md`.
+
 ## Command map
 
 | Group | Important verbs | Purpose |

@@ -124,3 +124,37 @@ def test_sc_control_client_handles_not_modified() -> None:
     assert result.not_modified is True
     assert result.control_map is None
     assert result.etag == '"same"'
+
+
+def local_entry(seconds=300):
+    from datetime import datetime, timedelta, timezone
+    value = entry()
+    value["local_workspace_id"] = value.pop("cvm_id")
+    value.pop("fqdn")
+    value["expires_at"] = (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat()
+    return value
+
+
+def test_local_identity_and_traffic_success():
+    """An admitted local bearer applies the profile and produces a distinct log ID."""
+    from umbra_security_cvm.enforcement import ProxyRequest, enforce_request
+    control = ControlMap.from_console_payload({"entries": [], "local_entries": [local_entry()]})
+    result = enforce_request(ProxyRequest(source_ip="127.0.0.1", destination_ip="198.51.100.1",
+        scheme="https", host="api.github.com", port=443, method="GET", path="/repos",
+        headers={"Proxy-Authorization": "Bearer proxy-token"}), control)
+    payload = result.traffic_log.to_json()
+    assert result.allowed and payload["cvm_id"] is None and payload["local_workspace_id"] == local_entry()["local_workspace_id"]
+
+
+def test_local_stale_control_expiry_failure():
+    """A stale control snapshot cannot preserve bearer or CONNECT identity past expiry."""
+    control = ControlMap.from_console_payload({"entries": [], "local_entries": [local_entry(-1)]})
+    assert control.lookup_proxy_token("proxy-token") is None and control.lookup_cvm_id(UUID(local_entry()["local_workspace_id"])) is None
+
+
+def test_local_missing_expiry_failure():
+    """A partial/old local identity document never creates an unbounded lease."""
+    value = local_entry()
+    value.pop("expires_at")
+    control = ControlMap.from_console_payload({"entries": [], "local_entries": [value]})
+    assert control.lookup_proxy_token("proxy-token") is None

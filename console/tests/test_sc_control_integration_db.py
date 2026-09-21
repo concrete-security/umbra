@@ -468,7 +468,7 @@ def test_sc_control_query_and_migration_real_postgres_success(monkeypatch, migra
     """The head schema and SC-control query work together on real Postgres."""
     monkeypatch.setenv("SECRET_INJECTION_KEK_B64", KEK_B64)
     version = asyncio.run(_admin_fetchval(migrated_database, "SELECT version_num FROM alembic_version"))
-    assert version == "0034_connect_oauth_schema"
+    assert version == "0035_local_workspaces"
     asyncio.run(_run_assertions(migrated_database))
 
 
@@ -486,7 +486,7 @@ def test_legacy_0032_upgrade_public_head_success(migrated_database: str) -> None
     upgraded = _run_alembic(migrated_database, "upgrade", "head")
     assert upgraded.returncode == 0, f"alembic upgrade failed:\n{upgraded.stdout}\n{upgraded.stderr}"
     version = asyncio.run(_admin_fetchval(migrated_database, "SELECT version_num FROM alembic_version"))
-    assert version == "0034_connect_oauth_schema"
+    assert version == "0035_local_workspaces"
 
     connect_table_count = asyncio.run(
         _admin_fetchval(
@@ -599,3 +599,55 @@ def test_secret_envelope_v2_downgrade_with_v1_rows_success(monkeypatch, migrated
         assert all_v1 is True
         assert "v1:%" in constraint
         assert "v2:%" not in constraint
+
+
+def test_local_admission_without_dev_cvm_success(migrated_database):
+    """Console admits, attributes and revokes a local identity with no Dev CVM."""
+    async def scenario():
+        from fastapi import Response
+        from umbra_console.auth import CurrentUser
+        from umbra_console.routes_local import LocalWorkspaceCreate, create_local_workspace, renew_local_workspace, revoke_local_workspace, local_control_entries
+        from umbra_console.routes_internal import TrafficLogIn, validate_traffic_log_cvms
+        from umbra_console.crypto import sha256_hex
+        pool = await asyncpg.create_pool(_asyncpg_form(migrated_database))
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute("INSERT INTO entities(id,name,domain) VALUES($1,'Local test','local.example')", ENTITY_ID)
+                await conn.execute("INSERT INTO users(id,email,entity_id) VALUES($1,'local@local.example',$2)", OWNER_FULL, ENTITY_ID)
+                await conn.execute("INSERT INTO user_permissions(user_id,permission) VALUES($1,'CVM_LAUNCH')", OWNER_FULL)
+                await conn.execute("INSERT INTO entity_profiles(id,entity_id,name,policy) VALUES($1,$2,'Local policy',$3::jsonb)", PROF_DEST, ENTITY_ID, json.dumps(DEST_POLICY))
+                await conn.execute("INSERT INTO profile_users(profile_id,user_id) VALUES($1,$2)", PROF_DEST, OWNER_FULL)
+                policy = {"type":"dstack_tdx", "expected_bootchain":{"mrtd":"a"}, "app_compose":{"runner":"docker-compose"}, "os_image_hash":"b"}
+                await conn.execute("""INSERT INTO security_cvms(id,entity_id,state,fqdn,ca_cert_pem,metadata,
+                    expected_image_measurement,image_measurement,attestation_verified_at)
+                    VALUES($1,$2,'RUNNING','sc.local.example','public-ca',$3::jsonb,$4,$4,now())""", SC_ID, ENTITY_ID, json.dumps({"atls_policy":policy}), "a"*64)
+            user = CurrentUser(OWNER_FULL, "local@local.example", "Local", ENTITY_ID, "Local", frozenset({"CVM_LAUNCH"}))
+            created = await create_local_workspace(LocalWorkspaceCreate(profile_ids=[PROF_DEST]), Response(), user, pool)
+            local_id = uuid.UUID(created["id"])
+            async with pool.acquire() as conn:
+                assert await conn.fetchval("SELECT count(*) FROM cvms") == 0
+                stored = await conn.fetchrow("SELECT * FROM local_workspaces WHERE id=$1", local_id)
+                assert stored["proxy_token_hash"] == sha256_hex(created["proxy_token"]) and "proxy_token" not in dict(stored)
+                feed = await local_control_entries(conn, ENTITY_ID, SC_ID)
+                assert feed[0]["local_workspace_id"] == created["id"] and "cvm_id" not in feed[0]
+                assert not await local_control_entries(conn, ENTITY_ID, uuid.uuid4())
+                log = TrafficLogIn(timestamp=datetime.now(timezone.utc), local_workspace_id=local_id,
+                    source_ip="127.0.0.1", destination_ip="198.51.100.1", protocol="https", port=443, bytes_transferred=1)
+                await validate_traffic_log_cvms(conn, entity_id=ENTITY_ID, security_cvm_id=SC_ID, logs=[log])
+                from fastapi import HTTPException
+                with pytest.raises(HTTPException):
+                    await validate_traffic_log_cvms(conn, entity_id=ENTITY_ID, security_cvm_id=uuid.uuid4(), logs=[log])
+                await conn.execute("DELETE FROM profile_users WHERE profile_id=$1 AND user_id=$2", PROF_DEST, OWNER_FULL)
+                assert not await local_control_entries(conn, ENTITY_ID, SC_ID)
+            with pytest.raises(HTTPException):
+                await renew_local_workspace(local_id, Response(), user, pool)
+            async with pool.acquire() as conn:
+                await conn.execute("INSERT INTO profile_users(profile_id,user_id) VALUES($1,$2)", PROF_DEST, OWNER_FULL)
+            renewed = await renew_local_workspace(local_id, Response(), user, pool)
+            assert renewed["id"] == created["id"] and "proxy_token" not in renewed
+            await revoke_local_workspace(local_id, user, pool)
+            async with pool.acquire() as conn:
+                assert not await local_control_entries(conn, ENTITY_ID, SC_ID)
+        finally:
+            await pool.close()
+    asyncio.run(scenario())

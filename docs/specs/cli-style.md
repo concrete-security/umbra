@@ -8,6 +8,20 @@ The keywords MUST, MUST NOT, SHOULD, SHOULD NOT, MAY, and OPTIONAL in this docum
 
 **Definition of done.** The implementation is complete when, for every command listed in section 7, running the command against a live (or mocked at the wire level) Console produces output that matches the corresponding section 7 example, modulo the live data substitution (UUIDs, timestamps, hostnames). The 13 acceptance criteria in section 9 are the testable checklist; the section 7 examples are the visual ground truth.
 
+## Local workspace command catalog extension
+
+`start local`, `stop local` and folder-scoped `status` use the single-section
+card renderer `style::local_workspace_card`. Title: `> Local workspace`.
+Fields, when present, are `state`, `assurance`, `project`, `guest_workspace`,
+`local_workspace_id`, `security_cvm_id`, `profiles`, and `changed_files`. The label width is 15,
+with six leading spaces and two spaces before values. Running is green;
+stopped/starting/stopping are warnings. The `local-preview` assurance remains a
+warning even when the VM is running. Paths MUST be sanitized ASCII single-line
+values. JSON renders the complete runtime payload without styling.
+
+All startup/import progress stays on stderr. A failed structured command leaves
+stdout empty. Raw session streams retain their existing documented exception.
+
 ## 1. Overview
 
 The `umbra` CLI produces three kinds of output:
@@ -2856,3 +2870,6 @@ pub fn cvm_list_cards(cvms: &[Cvm], _filter: &CvmListFilter) -> String {
 - Golden-file integration tests in `cli/tests/style/` -- one fixture file per (command, color-on/color-off) tuple. The test reads the fixture, calls the matching renderer with a hardcoded input, and asserts byte equality.
 - The steps template test MAY use a `Vec<u8>` as the writer and assert against the cursor-control sequences it produced.
 - Existing tests in `cli/src/commands/*.rs` that asserted on the legacy plain-text output need to be adjusted to either (a) call the new renderer directly, or (b) be replaced by golden-file tests in `cli/tests/style/`.
+
+Local traffic rows use a `WORKSPACE` identity column with `local:<UUID>` when a
+page contains local identities. Cloud-only pages retain the existing CVM column.

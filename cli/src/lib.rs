@@ -73,7 +73,10 @@ pub fn run() -> ExitCode {
     );
     let quiet_stderr = matches!(
         args.command,
-        cli::Command::Completions { .. } | cli::Command::Tunnel { .. }
+        cli::Command::Completions { .. }
+            | cli::Command::Tunnel { .. }
+            | cli::Command::LocalControl
+            | cli::Command::LocalTunnel
     );
     if let (false, Some(reason)) = (quiet_stderr, &config.config_file_error) {
         style::eprintln_warn(&format!(
@@ -96,6 +99,12 @@ pub fn run() -> ExitCode {
     let update_notice_eligible = !quiet_stderr && !matches!(args.command, cli::Command::Update(_));
     if update_notice_eligible {
         commands::update::maybe_spawn_background_refresh(&config);
+    }
+    if let Some(status) = commands::local::try_session(&args.command, &config) {
+        if update_notice_eligible {
+            commands::update::maybe_print_update_notice(&config);
+        }
+        return ExitCode::from(status);
     }
     let status = match args.command {
         cli::Command::Admin(command) => commands::admin::run(command, &config, json_output),
@@ -146,12 +155,16 @@ pub fn run() -> ExitCode {
             commands::security_cvm::run(command, &config, json_output)
         }
         cli::Command::Skill(command) => commands::skill::run(command, &config, json_output),
+        cli::Command::Start(command) => commands::local::start(command, &config),
+        cli::Command::Stop(command) => commands::local::stop(command, &config),
         cli::Command::Ssh(args) => commands::ssh::run(args, &config),
         cli::Command::Status => commands::status::run(&config, json_output),
         cli::Command::TrafficLogs(traffic_args) => {
             commands::traffic_logs::run(traffic_args, &config, json_output)
         }
         cli::Command::Tunnel { target } => commands::tunnel::run(&target, &config),
+        cli::Command::LocalControl => commands::local_control::run(&config),
+        cli::Command::LocalTunnel => commands::local_control::tunnel(),
         cli::Command::Update(update_args) => {
             commands::update::run(update_args, &config, json_output)
         }

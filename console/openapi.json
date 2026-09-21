@@ -356,6 +356,26 @@
         "title": "HTTPValidationError",
         "type": "object"
       },
+      "LocalWorkspaceCreate": {
+        "additionalProperties": false,
+        "properties": {
+          "profile_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 16,
+            "minItems": 1,
+            "title": "Profile Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "profile_ids"
+        ],
+        "title": "LocalWorkspaceCreate",
+        "type": "object"
+      },
       "LogoutRequest": {
         "additionalProperties": false,
         "properties": {
@@ -714,6 +734,18 @@
             "minLength": 1,
             "title": "Destination Ip",
             "type": "string"
+          },
+          "local_workspace_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Local Workspace Id"
           },
           "method": {
             "anyOf": [
@@ -5132,6 +5164,171 @@
         "summary": "Get Instance Types"
       }
     },
+    "/api/v1/local-workspaces": {
+      "post": {
+        "operationId": "create_local_workspace_api_v1_local_workspaces_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LocalWorkspaceCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Create Local Workspace Api V1 Local Workspaces Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Local Workspace"
+      }
+    },
+    "/api/v1/local-workspaces/{workspace_id}": {
+      "delete": {
+        "operationId": "revoke_local_workspace_api_v1_local_workspaces__workspace_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Revoke Local Workspace"
+      }
+    },
+    "/api/v1/local-workspaces/{workspace_id}/renew": {
+      "post": {
+        "operationId": "renew_local_workspace_api_v1_local_workspaces__workspace_id__renew_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Renew Local Workspace Api V1 Local Workspaces  Workspace Id  Renew Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Renew Local Workspace"
+      }
+    },
     "/api/v1/me": {
       "get": {
         "operationId": "get_me_api_v1_me_get",
@@ -6027,6 +6224,23 @@
           },
           {
             "in": "query",
+            "name": "local_workspace_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Local Workspace Id"
+            }
+          },
+          {
+            "in": "query",
             "name": "security_cvm_id",
             "required": false,
             "schema": {
@@ -6189,6 +6403,23 @@
           },
           {
             "in": "query",
+            "name": "local_workspace_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Local Workspace Id"
+            }
+          },
+          {
+            "in": "query",
             "name": "security_cvm_id",
             "required": false,
             "schema": {
@@ -6313,6 +6544,23 @@
                 }
               ],
               "title": "Cvm Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "local_workspace_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Local Workspace Id"
             }
           },
           {

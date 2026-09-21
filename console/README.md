@@ -94,3 +94,12 @@ Generic self-host setup and deployment guidance lives in `docs/operator-setup.md
 ## Scope
 
 The v0 Console supports Google OIDC, one Security CVM per entity, provider-backed Dev CVMs, profile policy, OAuth Connect and managed-secret rotation, audit, traffic logs, and the operator dashboard. Additional identity providers, high availability, and connector/tool CVMs are outside the current v0 contract unless their specifications say otherwise.
+
+## Local workspace admission
+
+Local macOS workspaces connect directly to Security CVM with a Console-issued,
+expiring identity. Deploy Console migration `0035_local_workspaces` and the new
+Security CVM together before enabling clients. No Dev CVM is required. The local
+client checks strict SC runtime attestation; old SC images do not admit local
+identities. See [the contract](../docs/specs/local-sandbox.md) for lease,
+profile, traffic attribution and trusted-host semantics.

@@ -1,0 +1,11 @@
+HTTP_PROXY=http://127.0.0.1:3128
+HTTPS_PROXY=http://127.0.0.1:3128
+http_proxy=http://127.0.0.1:3128
+https_proxy=http://127.0.0.1:3128
+NO_PROXY=localhost,127.0.0.1,::1
+no_proxy=localhost,127.0.0.1,::1
+SSL_CERT_FILE=/run/umbra/ca-bundle.pem
+REQUESTS_CA_BUNDLE=/run/umbra/ca-bundle.pem
+CURL_CA_BUNDLE=/run/umbra/ca-bundle.pem
+GIT_SSL_CAINFO=/run/umbra/ca-bundle.pem
+NODE_EXTRA_CA_CERTS=/run/umbra/ca-bundle.pem

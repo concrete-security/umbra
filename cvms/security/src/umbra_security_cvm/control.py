@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 import hashlib
 import logging
 from types import MappingProxyType
@@ -25,6 +25,11 @@ class DevCVMControlEntry:
     policy_version: int
     updated_at: str
     policy_error: str | None = None
+    local_workspace_id: UUID | None = None
+    expires_at: datetime | None = None
+
+    def active(self) -> bool:
+        return self.expires_at is None or self.expires_at > datetime.now(timezone.utc)
 
 
 @dataclass(frozen=True)
@@ -44,14 +49,36 @@ class ControlMap:
             entry = _parse_entry(raw_entry, index, errors)
             if entry is not None:
                 entries[entry.proxy_token_hash] = entry
+        # A separate array is invisible to old SC images, which must never admit locals
+        # without understanding their lease expiry and traffic identity.
+        local_entries = payload.get("local_entries", [])
+        if not isinstance(local_entries, list):
+            errors.append("local_entries must be an array")
+            local_entries = []
+        for index, raw in enumerate(local_entries):
+            try:
+                if not isinstance(raw, dict) or "cvm_id" in raw:
+                    raise ValueError("invalid local principal")
+                local_id = UUID(str(raw["local_workspace_id"]))
+                expires = datetime.fromisoformat(raw["expires_at"].replace("Z", "+00:00"))
+                if expires.tzinfo is None:
+                    raise ValueError("expiry must have timezone")
+                entry = _parse_entry({**raw, "cvm_id": str(local_id), "fqdn": "local-workspace"}, index, errors)
+                if entry:
+                    from dataclasses import replace
+                    entry = replace(entry, local_workspace_id=local_id, expires_at=expires)
+                    entries[entry.proxy_token_hash] = entry
+            except (ValueError, TypeError, KeyError, AttributeError):
+                errors.append(f"local_entries.{index}: invalid identity or lease expiry")
         return cls(MappingProxyType(entries), tuple(errors), etag)
 
     def lookup_proxy_token(self, token: str) -> DevCVMControlEntry | None:
-        return self.entries_by_proxy_token_hash.get(hashlib.sha256(token.encode("utf-8")).hexdigest())
+        entry = self.entries_by_proxy_token_hash.get(hashlib.sha256(token.encode("utf-8")).hexdigest())
+        return entry if entry is not None and entry.active() else None
 
     def lookup_cvm_id(self, cvm_id: UUID) -> DevCVMControlEntry | None:
         for entry in self.entries_by_proxy_token_hash.values():
-            if entry.cvm_id == cvm_id:
+            if entry.cvm_id == cvm_id and entry.active():
                 return entry
         return None
 

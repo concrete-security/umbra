@@ -52,6 +52,7 @@ class SecurityCVMProxyAddon:
         self.response_factory = response_factory or mitmproxy_response_factory
         self.websocket_injector: WebsocketInjector = mitmproxy_websocket_injector
         self._connect_identities: dict[str, tuple[str, float]] = {}
+        self._local_connections: set[str] = set()
 
     def http_connect(self, flow: Any) -> None:
         self._handle_proxy_flow(flow, connect_only=True)
@@ -92,6 +93,8 @@ class SecurityCVMProxyAddon:
             metadata = _metadata(flow)
             if result.cvm is not None:
                 metadata["umbra_cvm_id"] = str(result.cvm.cvm_id)
+                if result.cvm.local_workspace_id is not None:
+                    metadata["umbra_local_workspace_id"] = str(result.cvm.local_workspace_id)
                 metadata["umbra_websocket_governed"] = result.cvm.merged_policy.websocket_governed(
                     scheme=proxy_request.scheme,
                     host=proxy_request.host,
@@ -104,11 +107,23 @@ class SecurityCVMProxyAddon:
                 metadata["umbra_connect_allowed"] = True
                 if key := _client_connection_key(flow):
                     self._remember_connect_identity(key, result.cvm.cvm_id)
+                    if result.cvm.local_workspace_id:
+                        self._local_connections.add(key)
                 return
             if result.traffic_log is not None:
                 metadata["umbra_traffic_log"] = result.traffic_log
             return
         self._reject(flow, result)
+
+    def tcp_start(self, flow: Any) -> None:
+        # Local workspaces support inspected HTTP(S)/WebSockets only, never a raw
+        # TCP fallback after CONNECT. Remember the kind even after lease expiry.
+        key = _client_connection_key(flow)
+        if key in self._local_connections or key not in self._connect_identities:
+            flow.kill()
+
+    def tcp_message(self, flow: Any) -> None:
+        self.tcp_start(flow)
 
     def websocket_message(self, flow: Any) -> None:
         # Bound retained frames first, on every call regardless of verdict, so passed/dropped/
@@ -116,6 +131,13 @@ class SecurityCVMProxyAddon:
         _trim_websocket_messages(flow)
         message = _latest_websocket_message(flow)
         if message is None:
+            return
+        # Local lease checks cover both directions, including ungoverned sockets.
+        if _metadata(flow).get("umbra_local_workspace_id") and not _connect_cvm(
+            flow, self.control_state.snapshot().control_map, self._connect_identities
+        ):
+            message.drop()
+            flow.kill()
             return
         # Inbound only (server -> sandbox); a re-entrancy guard skips the ack
         # frames this hook itself injects.
@@ -206,7 +228,9 @@ class SecurityCVMProxyAddon:
                 # under the SC bound; emit a contents-free traffic log so the
                 # bounded telemetry channel is auditable (cf. dropped frames).
                 self.traffic_emitter.enqueue(
-                    _websocket_traffic_log_record(proxy_request, cvm.cvm_id, decision="allowed")
+                    replace(_websocket_traffic_log_record(proxy_request, cvm.cvm_id, decision="allowed"),
+                        cvm_id=None if cvm.local_workspace_id else cvm.cvm_id,
+                        local_workspace_id=cvm.local_workspace_id)
                 )
             return
         self._drop_websocket_frame(
@@ -222,6 +246,7 @@ class SecurityCVMProxyAddon:
     def client_disconnected(self, client_conn: Any) -> None:
         if key := _connection_key_from_connection(client_conn):
             self._connect_identities.pop(key, None)
+            self._local_connections.discard(key)
 
     def _drop_websocket_frame(
         self,
@@ -237,7 +262,10 @@ class SecurityCVMProxyAddon:
         message.drop()
         if request is not None and cvm_id is not None:
             self.traffic_emitter.enqueue(
-                _websocket_traffic_log_record(request, cvm_id, decision="websocket_frame_dropped")
+                replace(_websocket_traffic_log_record(request, cvm_id, decision="websocket_frame_dropped"),
+                    cvm_id=None if _metadata(flow).get("umbra_local_workspace_id") else cvm_id,
+                    local_workspace_id=UUID(_metadata(flow)["umbra_local_workspace_id"])
+                        if _metadata(flow).get("umbra_local_workspace_id") else None)
             )
         if ack_frame is not None:
             self.websocket_injector(flow, False, ack_frame)
@@ -259,8 +287,10 @@ class SecurityCVMProxyAddon:
         stale_keys = [item_key for item_key, (_cvm_id, seen_at) in self._connect_identities.items() if seen_at < cutoff]
         for item_key in stale_keys:
             self._connect_identities.pop(item_key, None)
+            self._local_connections.discard(item_key)
         if len(self._connect_identities) > MAX_CONNECT_IDENTITIES:
             self._connect_identities.clear()
+            self._local_connections.clear()
 
     def responseheaders(self, flow: Any) -> None:
         # Stream the response body straight through instead of buffering the
@@ -277,6 +307,11 @@ class SecurityCVMProxyAddon:
         metadata["umbra_streamed_bytes"] = 0
 
         def _count_streamed(chunk: bytes) -> bytes:
+            if metadata.get("umbra_local_workspace_id") and not _connect_cvm(
+                flow, self.control_state.snapshot().control_map, self._connect_identities
+            ):
+                flow.kill()
+                return b""
             metadata["umbra_streamed_bytes"] += len(chunk)
             return chunk
 

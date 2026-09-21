@@ -18,6 +18,41 @@ use serde_json::Value;
 
 static COLOR_ENABLED: AtomicBool = AtomicBool::new(false);
 
+/// Folder-scoped local workspace rendering; trust level is never inferred from health.
+pub fn local_workspace_card(payload: &Value) -> String {
+    let mut out = format!("{}{}", bullet(), header("Local workspace"));
+    for key in [
+        "state",
+        "assurance",
+        "project",
+        "guest_workspace",
+        "local_workspace_id",
+        "security_cvm_id",
+        "profiles",
+        "changed_files",
+    ] {
+        if let Some(field) = payload.get(key) {
+            let raw = field
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| field.to_string());
+            let text = sanitize_ascii(&single_line(&raw));
+            let rendered = match (key, raw.to_ascii_lowercase().as_str()) {
+                ("state", "running") => success(text),
+                ("state", "stopped" | "starting" | "stopping") => warn(text),
+                ("assurance", _) => warn(text),
+                _ => value(text),
+            };
+            out.push_str(&format!(
+                "\n      {}  {}",
+                label(format!("{key:<15}")),
+                rendered
+            ));
+        }
+    }
+    out
+}
+
 /// Configure the color toggle. MUST be called exactly once at process start,
 /// after the resolved config is known. Subsequent calls overwrite the toggle.
 pub fn init(enabled: bool) {
@@ -1060,6 +1095,7 @@ pub fn audit_events_cards(events: &[AuditEventView<'_>], filter: &AuditEventsFil
 pub struct TrafficLogView<'a> {
     pub timestamp: &'a str,
     pub cvm_id: Option<&'a str>,
+    pub local_workspace_id: Option<&'a str>,
     pub security_cvm_id: Option<&'a str>,
     pub method: Option<&'a str>,
     pub destination_host: Option<&'a str>,
@@ -1143,7 +1179,11 @@ fn render_traffic_logs_block(
 
     let mut headers: Vec<&'static str> = vec!["TIMESTAMP"];
     if include_cvm_col {
-        headers.push("CVM");
+        headers.push(if logs.iter().any(|log| log.local_workspace_id.is_some()) {
+            "WORKSPACE"
+        } else {
+            "CVM"
+        });
     }
     if include_sc_col {
         headers.push("SECURITY CVM");
@@ -1166,7 +1206,10 @@ fn render_traffic_logs_block(
 
         if include_cvm_col {
             // Full UUID (no truncation) per section 7.6.
-            let cvm_full = log.cvm_id.unwrap_or("-").to_string();
+            let cvm_full = log
+                .local_workspace_id
+                .map(|id| format!("local:{id}"))
+                .unwrap_or_else(|| log.cvm_id.unwrap_or("-").to_string());
             raw.push(cvm_full.clone());
             styled.push(cvm_full);
         }
@@ -4358,6 +4401,7 @@ mod tests {
         init(false);
         let extra = empty_extra();
         let logs = vec![TrafficLogView {
+            local_workspace_id: None,
             timestamp: "2026-05-18T15:38:00Z",
             cvm_id: Some("cvm-aaa"),
             security_cvm_id: Some("sc-1"),
@@ -4402,6 +4446,7 @@ mod tests {
         init(false);
         let extra = empty_extra();
         let logs = vec![TrafficLogView {
+            local_workspace_id: None,
             timestamp: "2026-05-18T15:38:00Z",
             cvm_id: Some("cvm-aaa"),
             security_cvm_id: Some("sc-1"),

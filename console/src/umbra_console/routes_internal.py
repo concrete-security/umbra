@@ -49,6 +49,7 @@ class TrafficLogIn(BaseModel):
 
     timestamp: datetime
     cvm_id: UUID | None = None
+    local_workspace_id: UUID | None = None
     source_ip: str = Field(min_length=1, max_length=45)
     destination_ip: str = Field(min_length=1, max_length=45)
     destination_host: str | None = Field(default=None, max_length=255)
@@ -189,6 +190,9 @@ async def list_sc_control_cvms(
             for row in rows
         ]
     }
+    from umbra_console.routes_local import local_control_entries
+    async with pool.acquire() as conn:
+        body["local_entries"] = await local_control_entries(conn, current_principal.entity_id, current_principal.principal_id)
     etag = sc_control_etag(body)
     async with pool.acquire() as conn:
         await record_sc_control_pull_observation(
@@ -405,7 +409,7 @@ async def ingest_traffic_logs(
                 return {"accepted": cached["row_count"], "deduplicated": True}
 
             validate_traffic_log_timestamps(body.logs)
-            await validate_traffic_log_cvms(conn, entity_id=current_principal.entity_id, logs=body.logs)
+            await validate_traffic_log_cvms(conn, entity_id=current_principal.entity_id, logs=body.logs, security_cvm_id=current_principal.principal_id)
             await enforce_traffic_log_volume_limit(
                 conn,
                 security_cvm_id=current_principal.principal_id,
@@ -441,9 +445,10 @@ async def ingest_traffic_logs(
                     response_code,
                     bytes_transferred,
                     attributes,
-                    decision
+                    decision,
+                    local_workspace_id
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb, $15)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb, $15, $16)
                 """,
                 [
                     (
@@ -462,6 +467,7 @@ async def ingest_traffic_logs(
                         log.bytes_transferred,
                         json.dumps(log.attributes, sort_keys=True),
                         log.decision,
+                        log.local_workspace_id,
                     )
                     for log in body.logs
                 ],
@@ -644,8 +650,10 @@ def validate_traffic_log_batch_shape(body: TrafficLogBatch) -> None:
         )
     errors: list[dict[str, Any]] = []
     for index, log in enumerate(body.logs):
-        if log.cvm_id is None:
+        if log.cvm_id is None and log.local_workspace_id is None:
             errors.append({"type": "missing_cvm_id", "field": f"logs.{index}.cvm_id"})
+        elif log.cvm_id is not None and log.local_workspace_id is not None:
+            errors.append({"type": "ambiguous_identity", "field": f"logs.{index}.local_workspace_id"})
     if errors:
         raise api_error(422, "VALIDATION_ERROR", "invalid traffic log batch", {"errors": errors})
 
@@ -667,7 +675,13 @@ async def validate_traffic_log_cvms(
     *,
     entity_id: UUID,
     logs: list[TrafficLogIn],
+    security_cvm_id: UUID | None = None,
 ) -> None:
+    local_ids = sorted({log.local_workspace_id for log in logs if log.local_workspace_id is not None}, key=str)
+    if local_ids:
+        local_rows = await conn.fetch("SELECT id FROM local_workspaces WHERE entity_id=$1 AND id=ANY($2::uuid[]) AND ($3::uuid IS NULL OR security_cvm_id=$3)", entity_id, local_ids, security_cvm_id)
+        if {row["id"] for row in local_rows} != set(local_ids):
+            raise api_error(422, "VALIDATION_ERROR", "local workspace outside the principal entity")
     cvm_ids = sorted({log.cvm_id for log in logs if log.cvm_id is not None}, key=str)
     rows = await conn.fetch(
         """

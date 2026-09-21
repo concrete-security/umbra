@@ -24,6 +24,7 @@ from umbra_console.readiness import run_ready_checks, verify_configured_phala_cl
 from umbra_console.request_context import resolved_client_ip
 from umbra_console.routes_auth import router as auth_router
 from umbra_console.routes_internal import router as internal_router
+from umbra_console.routes_local import router as local_router
 from umbra_console.routes import router
 from umbra_console.routes_connect import connect_router
 from umbra_console.routes_oauth import oauth_router, public_oauth_router
@@ -113,6 +114,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(title="Umbra Console", version="0.1.0", lifespan=lifespan)
 app.include_router(auth_router)
 app.include_router(internal_router)
+app.include_router(local_router)
 app.include_router(router)
 app.include_router(oauth_router)
 app.include_router(public_oauth_router)
