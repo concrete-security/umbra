@@ -225,6 +225,9 @@ fn start_local(args: LocalStartArgs, config: &ResolvedConfig) -> ExitStatus {
         directory.into_os_string(),
     ];
     text_option(&mut request, "--app", args.app.as_deref());
+    for exclude in &args.exclude {
+        text_option(&mut request, "--exclude", Some(exclude));
+    }
     if args.preview {
         request.push("--preview".into());
     }

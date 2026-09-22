@@ -100,6 +100,11 @@ command and local `umbra codex`/`umbra claude` prepare non-secret guest authenti
 placeholders for the selected profiles' Security CVM injection. Existing guest
 authentication is preserved; provider enrollment remains a one-time prerequisite.
 
+Use repeatable `start local --exclude NAME_OR_PATH` for host-only virtualenvs or
+build outputs. A bare name matches at any depth; a path is relative to the project.
+These explicit exclusions are remembered and never delete host or existing guest
+files. Included external/absolute symlinks still fail closed with a named error.
+
 ## Local State
 
 By default the CLI uses `~/.umbra`:

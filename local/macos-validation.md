@@ -138,3 +138,18 @@ a fresh project, prepared authentication and registered SSH. An in-VM Codex mode
 request succeeded through staging. The built-in Claude handoff then passed in the
 same project. Claude account authorization/model access and actual desktop agent
 sessions remain pending; no desktop UI automation was used.
+
+## Existing checkout import — 2026-09-22
+
+A real working checkout exposed an uncaught preflight `TransferError` when a Mac
+virtualenv linked to Homebrew Python. A CLI regression reproduced the traceback.
+Preflight now emits a named, escaped symlink diagnostic and rejects invalid roots
+before scanning them. Explicit, remembered `--exclude` options omit host-only
+generated trees; neither host files nor previously imported guest files are deleted.
+
+The updated binary and runtime successfully booted/imported the actual checkout
+with `.venv`, `target` and `artifacts` explicitly excluded: 2,039 entries, about
+29 MB. SSH verified source presence, exclusion persistence and loopback-only guest
+networking. The source checkout was unchanged. The original unsupported import
+now returns exit 1, empty stdout and a clean diagnostic without a traceback.
+All 119 local tests, 14 CLI dispatch tests and strict CLI Clippy passed.

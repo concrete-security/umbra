@@ -101,10 +101,21 @@ def open_file(root: Path, name: str):
             os.close(fd)
 
 
-def scan(root: Path, *, guest: bool = False) -> dict:
+def validate_exclusions(value) -> list[str]:
+    if not isinstance(value, (list, tuple)) or len(value) > 128 or any(not valid_path(item) or any(c in item for c in '*?[') for item in value):
+        raise TransferError('exclusions must be relative names or paths without globs, dot components or control characters')
+    return sorted(set(value))
+
+
+def excluded(name: str, rules) -> bool:
+    return any((rule in name.split('/')) if '/' not in rule else (name == rule or name.startswith(rule + '/')) for rule in rules)
+
+
+def scan(root: Path, *, guest: bool = False, excludes=()) -> dict:
     if root.is_symlink() or not root.is_dir():
         raise TransferError("project root is absent or was replaced by a symlink")
     result = {}
+    rules = validate_exclusions(excludes)
 
     def scan_error(error: OSError) -> None:
         raise error
@@ -112,8 +123,12 @@ def scan(root: Path, *, guest: bool = False) -> dict:
     # redirect the scan into the employee's home or credential directories.
     for directory, directories, files, fd in os.fwalk(root, follow_symlinks=False, onerror=scan_error):
         prefix = Path(directory).relative_to(root)
+        if not guest:
+            directories[:] = [leaf for leaf in directories if not excluded((prefix / leaf).as_posix(), rules)]
         for leaf in sorted(directories + files):
             name = (prefix / leaf).as_posix()
+            if not guest and excluded(name, rules):
+                continue
             if not guest and not valid_path(name):
                 raise TransferError("project contains a filename with control characters or an unsupported path")
             info = os.stat(leaf, dir_fd=fd, follow_symlinks=False)
@@ -121,10 +136,10 @@ def scan(root: Path, *, guest: bool = False) -> dict:
             if stat.S_ISLNK(info.st_mode):
                 target = os.readlink(leaf, dir_fd=fd)
                 if not guest and not safe_link(name, target):
-                    raise TransferError("project has an external or absolute symlink; keep its target inside the project")
+                    raise TransferError(f"project symlink {ascii(name)} is external or absolute; keep its target inside the project or exclude its generated folder with --exclude")
                 # Also catch chains that escape through another in-tree symlink.
                 if not guest and not (root / name).resolve().is_relative_to(root.resolve()):
-                    raise TransferError("project symlink resolves outside the project")
+                    raise TransferError(f"project symlink {ascii(name)} resolves outside the project; exclude its generated folder with --exclude")
                 result[name] = {"kind": "link", "target": target}
             elif stat.S_ISDIR(info.st_mode):
                 result[name] = {"kind": "dir", "mode": mode}

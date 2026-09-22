@@ -80,6 +80,17 @@ is not an import filter. Project-local `.env` files are included; this operation
 is not a secret scanner. The home directory, filesystem root and directories
 containing/contained by Umbra's private configuration MUST be rejected as roots.
 
+Repeatable `start local --exclude NAME_OR_PATH` explicitly omits matching entries
+and directory subtrees before scan/import. Bare names match any path component;
+paths containing `/` match only that project-relative subtree. Globs, absolute
+paths, control characters and dot components MUST be rejected. The list is
+remembered per workspace; an explicitly supplied list replaces it, while absence
+reuses it. Changes to running workspace settings require stop first. Excluded
+entries MUST be removed from the transfer merge base so omission cannot delete
+previously imported guest files. There are no default or implicit Git exclusions.
+Preflight transfer failures MUST produce a safe CLI error, never a traceback;
+unsafe symlink diagnostics MUST identify the escaped project-relative path.
+
 The importer MUST NOT dereference symlinks out of the source tree. Absolute or
 escaping symlinks, devices, sockets, FIFOs, unsupported control-character paths,
 unreadable directories and concurrent file-content changes fail explicitly.

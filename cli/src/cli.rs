@@ -210,6 +210,10 @@ pub enum StopCommand {
 
 #[derive(clap::Args, Debug)]
 pub struct LocalStartArgs {
+    /// Omit a name at any depth or a project-relative path. Repeatable; remembered.
+    #[arg(long, value_name = "NAME_OR_PATH")]
+    pub exclude: Vec<String>,
+
     /// Prepare an SSH workspace and open its desktop app (one-time selection in app).
     #[arg(long, value_parser = ["codex", "claude"])]
     pub app: Option<String>,

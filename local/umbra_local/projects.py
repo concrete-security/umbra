@@ -62,7 +62,7 @@ def select(config: Path, directory: Path) -> dict | None:
     return max(matches, key=lambda item: len(Path(item["root"]).parts)) if matches else None
 
 
-def bind(config: Path, directory: Path) -> dict:
+def validate_root(config: Path, directory: Path) -> Path:
     root = directory.resolve(strict=True)
     config = config.resolve()
     if not root.is_dir() or root == Path(root.anchor) or root == Path.home().resolve():
@@ -71,6 +71,11 @@ def bind(config: Path, directory: Path) -> dict:
         raise LocalError("project and Umbra configuration directories must not contain each other")
     if any(ord(c) < 32 or ord(c) == 127 for c in str(root)):
         raise LocalError("project path must not contain control characters")
+    return root
+
+
+def bind(config: Path, directory: Path) -> dict:
+    root = validate_root(config, directory)
     private_dir(config)
     with lock(config / "local-projects.lock"):
         registry = read_registry(config)
@@ -110,6 +115,11 @@ def guest_directory(binding: dict, directory: Path, override: str | None = None)
     return result
 
 
+def exclusions(path: Path) -> list[str]:
+    config = json.loads((path / 'config.json').read_text()) if (path / 'config.json').exists() else {}
+    return project_files.validate_exclusions(config.get('excludes', []))
+
+
 def sync(path: Path, binding: dict) -> dict:
     """Push changed host files; retain VM-only edits and never write host files."""
     root = Path(binding["root"])
@@ -117,9 +127,16 @@ def sync(path: Path, binding: dict) -> dict:
         with lock(path / "import.lock"):
             manifest_path = path / "host-manifest.json"
             base = project_files.validate_manifest(json.loads(manifest_path.read_text())) if manifest_path.exists() else {}
-            desired = project_files.scan(root)
+            original_base = base
+            rules = exclusions(path)
+            # Excluded entries leave the merge base as well, so omission never
+            # becomes a deletion of files previously imported into the guest.
+            base = {name: entry for name, entry in base.items() if not project_files.excluded(name, rules)}
+            desired = project_files.scan(root, excludes=rules)
             # Still initialize an empty project on its first import.
             if manifest_path.exists() and desired == base:
+                if base != original_base:
+                    write_json(manifest_path, desired)
                 return {"changed": 0, "files": len(desired)}
             envelope = json.dumps({"version": 1, "base": base, "desired": desired}, separators=(",", ":")).encode()
             if len(envelope) > project_files.MAX_MANIFEST:

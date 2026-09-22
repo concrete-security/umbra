@@ -142,9 +142,22 @@ fn explicit_remote_dispatch_success(#[case] args: &[&str]) {
 fn local_desktop_dispatch_success(#[case] app: &str) {
     let project = Project::new();
     project.worker("printf '%s\\n' \"$@\" >&2; printf '%s\\n' '{}' ");
-    let output = project.run(&["--json", "start", "local", "--app", app, "--preview"]);
+    let output = project.run(&[
+        "--json",
+        "start",
+        "local",
+        "--app",
+        app,
+        "--preview",
+        "--exclude",
+        ".venv",
+        "--exclude",
+        "target",
+    ]);
     assert!(
         output.status.success()
             && String::from_utf8_lossy(&output.stderr).contains(&format!("--app\n{app}\n"))
+            && String::from_utf8_lossy(&output.stderr)
+                .contains("--exclude\n.venv\n--exclude\ntarget\n")
     );
 }

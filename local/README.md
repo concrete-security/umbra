@@ -29,6 +29,21 @@ are remembered per project. `--bundle DIRECTORY`, `--cpus N` and `--memory MIB`
 are advanced setup options. Console and Security CVM must run this revision
 before direct local admission works; an older server fails closed.
 
+Mac virtualenvs and generated caches often contain links to host-only programs.
+Keep those on the Mac and recreate dependencies in the Linux guest. For example:
+
+```bash
+umbra start local --preview --app codex --exclude .venv --exclude target --exclude artifacts
+```
+
+Exclusions are explicit and remembered per project. A bare name matches at any
+depth; a path containing `/` matches that exact project-relative subtree. Globs,
+absolute paths and `..` are rejected. No `.gitignore` rules are implied. Omitted
+files remain untouched on the host, and previously imported guest files are not
+deleted by a new exclusion. Stop before changing a running workspace's exclusions;
+an explicit list replaces the remembered list. Unsafe included symlinks still
+fail with a diagnostic naming the path, without a Python traceback.
+
 ## Desktop apps
 
 From any project, use `umbra start local --app codex` for ChatGPT/Codex or

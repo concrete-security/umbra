@@ -38,6 +38,85 @@ def transfer(host, guest, base):
     return desired
 
 
+def test_project_preflight_symlink_diagnostic_failure(tree, monkeypatch, capsys):
+    """The real CLI preflight reports the offending link instead of a traceback."""
+    config, root = tree
+    (root / '.venv').mkdir()
+    (root / '.venv/python').symlink_to('/usr/bin/python3')
+    monkeypatch.setattr(cli, 'check_platform', lambda: None)
+    monkeypatch.setattr(sys, 'argv', ['umbra', '--config', str(config), '--json', 'project-start', '--preview', '--path', str(root)])
+    assert cli.main() == 1
+    output = capsys.readouterr()
+    assert output.out == '' and '.venv/python' in output.err and 'Traceback' not in output.err
+
+
+def test_home_preflight_before_scan_failure(tree, monkeypatch, capsys):
+    """Reject home as a project before scanning any personal files."""
+    config, root = tree
+    monkeypatch.setattr(Path, 'home', lambda: root)
+    monkeypatch.setattr(cli, 'check_platform', lambda: None)
+    def unexpected_scan(*args, **kwargs):
+        pytest.fail('home must not be scanned')
+    monkeypatch.setattr(files, 'scan', unexpected_scan)
+    monkeypatch.setattr(sys, 'argv', ['umbra', '--config', str(config), '--json', 'project-start', '--preview', '--path', str(root)])
+    assert cli.main() == 1 and 'home directory' in capsys.readouterr().err
+
+
+def test_explicit_generated_folder_exclusions_success(tmp_path):
+    """Only explicitly named generated trees are pruned, including their unsafe links."""
+    for folder in ['console/.venv', 'target', 'artifacts']:
+        path = tmp_path / folder
+        path.mkdir(parents=True)
+        (path / 'python').symlink_to('/usr/bin/python3')
+    (tmp_path / 'source.py').write_text('source')
+    (tmp_path / '.env').write_text('synthetic')
+    result = files.scan(tmp_path, excludes=['.venv', 'target', 'artifacts'])
+    assert set(result) == {'console', 'source.py', '.env'}
+
+
+def test_new_exclusion_preserves_guest_files_success(tmp_path, monkeypatch):
+    """Excluding previously imported files must never turn them into guest deletions."""
+    host, guest = tmp_path / 'host', tmp_path / 'guest'
+    host.mkdir(); guest.mkdir()
+    (host / 'generated').mkdir()
+    (host / 'generated/cache').write_text('keep')
+    base = transfer(host, guest, {})
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    state.write_json(workspace / 'host-manifest.json', base)
+    state.write_json(workspace / 'config.json', {'excludes': ['generated']})
+    (host / 'source.py').write_text('new')
+    async def receive(command, request):
+        return files.receive(request, guest)
+    monkeypatch.setattr(files, 'bounded_run', receive)
+    projects.sync(workspace, {'root': str(host)})
+    assert (guest / 'generated/cache').read_text() == 'keep'
+
+
+@pytest.mark.parametrize('rule', ['../secrets', '/absolute', '**', './.venv', 'bad\nname'])
+def test_invalid_exclusion_failure(tmp_path, rule):
+    """Only explicit relative names/paths can alter the import selection."""
+    with pytest.raises(files.TransferError, match='exclusions'):
+        files.scan(tmp_path, excludes=[rule])
+
+
+def test_remembered_exclusions_preflight_success(tree, monkeypatch, capsys):
+    """A repeat start reuses exclusions before inspecting host virtualenv links."""
+    config, root = tree
+    binding = projects.bind(config, root)
+    path = state.workspace(config, binding['name'])
+    path.mkdir(parents=True)
+    state.write_json(path / 'config.json', {'excludes': ['.venv']})
+    (root / '.venv').mkdir()
+    (root / '.venv/python').symlink_to('/usr/bin/python3')
+    monkeypatch.setattr(cli, 'check_platform', lambda: None)
+    monkeypatch.setattr(cli, 'up', lambda *args: None)
+    monkeypatch.setattr(cli, 'status', lambda *args: {'state': 'running'})
+    monkeypatch.setattr(projects, 'sync', lambda *args: {'files': 0, 'changed': 0})
+    args = cli.parser().parse_args(['--config', str(config), 'project-start', '--path', str(root)])
+    assert cli.project_command(args) == 0 and args.exclude == ['.venv']
+
+
 def test_folder_binding_is_private_success(tree):
     """A checkout need not contain a config file or a committed binding."""
     config, root = tree

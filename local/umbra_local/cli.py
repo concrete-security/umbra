@@ -56,6 +56,7 @@ def parser() -> argparse.ArgumentParser:
     start.add_argument("--path", type=Path, default=Path.cwd())
     start.add_argument("--preview", action="store_true")
     start.add_argument("--app", choices=("codex", "claude"))
+    start.add_argument("--exclude", action="append", help="omit a name at any depth or a project-relative path; remembered per project")
     start.add_argument("--profile", action="append", default=[])
     start.add_argument("--default-profile", action="append", default=[])
     start.add_argument("--bundle", type=Path)
@@ -131,6 +132,10 @@ def prepare(args, path: Path) -> dict:
         raise LocalError("CPU or memory setting is outside the supported range")
     config = {"profiles": profiles, "bundle": str(bundle), "umbra": str(Path(binary).resolve()), "cpus": cpus,
               "memory": memory, "assurance": "local-preview"}
+    excludes = getattr(args, 'exclude', None)
+    excludes = projects.project_files.validate_exclusions(previous.get('excludes', []) if excludes is None else excludes)
+    if excludes or 'excludes' in previous:
+        config['excludes'] = excludes
     for key in ("source", "console_url", "atls_policy"):
         value = getattr(args, key, None) or previous.get(key)
         if value is not None:
@@ -262,7 +267,10 @@ def project_command(args) -> int:
         # Detect unsupported files before starting a VM. Do not execute Git hooks
         # or ignore untracked/dotfiles: this is the caller's whole folder.
         source = Path(selected["root"]) if selected else directory
-        projects.project_files.scan(source)
+        projects.validate_root(args.config, source)
+        if args.exclude is None:
+            args.exclude = projects.exclusions(workspace(args.config, selected['name'])) if selected else []
+        projects.project_files.scan(source, excludes=args.exclude)
         binding = projects.bind(args.config, directory)
         args.name = binding["name"]
         args.source = binding["root"]
@@ -406,8 +414,8 @@ def main() -> int:
             print("[WARN] editor-hosted tools are outside the VM boundary; run agents and MCP servers inside the VM.", file=sys.stderr)
             return subprocess.call([binary, "--user-data-dir", str(profile), "--remote", f"ssh-remote+umbra-local-{path.name}", "/home/dev/workspaces"])
         return 0
-    except (LocalError, OSError, ValueError, TimeoutError, subprocess.TimeoutExpired) as error:
-        message = str(error) if isinstance(error, LocalError) else "local operation failed; inspect the private workspace log and configuration"
+    except (LocalError, projects.project_files.TransferError, OSError, ValueError, TimeoutError, subprocess.TimeoutExpired) as error:
+        message = str(error) if isinstance(error, (LocalError, projects.project_files.TransferError)) else "local operation failed; inspect the private workspace log and configuration"
         print(f"[error] {message}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
