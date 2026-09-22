@@ -42,6 +42,14 @@ project as a local desktop session or claim an agent was started. The standard
 first-launch `--preview` gate still applies. A per-user `local-preview-bundle`
 directory is the default when present; explicit and remembered bundles win.
 
+Desktop launch and local `umbra codex`/`umbra claude` MUST prepare non-secret
+guest authentication placeholders for SC injection when authentication is absent.
+Existing guest authentication and unrelated Claude settings MUST be preserved;
+symlinked settings MUST be rejected. No Mac provider credential store is read.
+The selected profiles still require their normal provider enrollment; placeholders
+do not grant model access. These flows MUST use `umbra`, without separate public
+agent launchers.
+
 Session resolution order is explicit remote positional target or `--cvm`, then
 nearest registered local ancestor, then existing cloud defaults. Explicit remote
 targets bypass even malformed local registries.

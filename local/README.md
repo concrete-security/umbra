@@ -52,7 +52,11 @@ array, preserving other settings and hosts. Symlinked or shared-writable setting
 are rejected. Guest SSH ports remain private vsock paths, with pinned keys and
 no host agent forwarding.
 
-Codex is bundled; its guest authentication must match the profile's SC injection.
+Codex is bundled. Desktop launch and local `umbra codex`/`umbra claude` prepare
+dummy guest authentication for SC injection, preserving existing authentication
+and unrelated settings. No Mac provider credentials are copied. The profile must
+already hold the provider grant through the normal `umbra codex connect` or
+`umbra claude connect` enrollment. There are no separate agent launcher commands.
 Claude Desktop installs its remote backend on first connection, requiring approved
 download destinations. Desktop authentication/backend compatibility still require
 live validation. Host-side browser, computer-use and connector tools are outside

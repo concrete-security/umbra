@@ -17,7 +17,7 @@ import subprocess
 import sys
 import time
 
-from . import desktop, projects, service
+from . import agent, desktop, projects, service
 from .state import LocalError, lock, private_dir, ssh_config, verify_bundle, workspace, write_file, write_json
 
 DEFAULT_BUNDLE = Path("/Library/Application Support/Umbra/Local/preview-v2")
@@ -308,6 +308,8 @@ def project_command(args) -> int:
     guest = projects.guest_directory(binding, directory, args.workspace)
     if args.verb in {"code", "cursor"}:
         return project_editor(args, path, guest)
+    if args.verb in {"codex", "claude"}:
+        agent.prepare(args.verb, path, binding)
     script = session_script(args.verb, guest, args.name, args.remote_command)
     command = ["/usr/bin/ssh", "-F", str(path / "ssh.conf")]
     if args.remote_command is None:

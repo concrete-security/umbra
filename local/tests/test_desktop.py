@@ -1,12 +1,14 @@
 """Desktop registration exercises real OpenSSH resolution without opening apps."""
 import json
+import os
 from pathlib import Path
 import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
 
-from umbra_local import desktop, state
+from umbra_local import agent, desktop, state
 
 
 @pytest.fixture
@@ -87,14 +89,70 @@ def test_desktop_handoff_success(setup, monkeypatch, app):
     assert 'agent not started yet' in result['next_step']
 
 
-def test_guest_readiness_blocks_desktop_failure(setup, monkeypatch):
-    """An SSH/proxy readiness failure cannot open an unrelated desktop session."""
+@pytest.mark.parametrize('failed_step,diagnostic', [(1, 'readiness'), (2, 'agent settings')])
+def test_guest_preparation_blocks_desktop_failure(setup, monkeypatch, failed_step, diagnostic):
+    """Guest readiness or auth setup failure prevents desktop opening."""
     _, path, binding = setup
     calls = []
     def run(argv, **kwargs):
         calls.append(argv)
-        return SimpleNamespace(returncode=1)
+        return SimpleNamespace(returncode=int(len(calls) == failed_step))
     monkeypatch.setattr(subprocess, 'run', run)
-    with pytest.raises(state.LocalError, match='readiness'):
+    with pytest.raises(state.LocalError, match=diagnostic):
         desktop.launch('codex', path, binding, '/home/dev/workspaces/project')
-    assert len(calls) == 1 and calls[0][0] == '/usr/bin/ssh'
+    assert len(calls) == failed_step and all(call[0] == '/usr/bin/ssh' for call in calls)
+
+
+@pytest.mark.parametrize('app', ['codex', 'claude'])
+def test_guest_placeholder_setup_success(tmp_path, app):
+    """Fresh guest authentication contains only dummy tokens and is idempotent."""
+    command = [sys.executable, '-c', agent.GUEST_SETUP, app]
+    environment = dict(os.environ, HOME=str(tmp_path))
+    subprocess.run(command, env=environment, check=True)
+    path = tmp_path / ('.codex/auth.json' if app == 'codex' else '.claude/settings.json')
+    before = path.read_bytes()
+    subprocess.run(command, env=environment, check=True)
+    value = json.loads(before)
+    token = value['tokens']['refresh_token'] if app == 'codex' else value['env']['CLAUDE_CODE_OAUTH_TOKEN']
+    assert token == 'umbra-proxy-injected' and path.read_bytes() == before and path.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize('app', ['codex', 'claude'])
+def test_existing_guest_auth_preserved_success(tmp_path, app):
+    """Existing guest provider authentication is never replaced by dummy auth."""
+    path = tmp_path / ('.codex/auth.json' if app == 'codex' else '.claude/settings.json')
+    path.parent.mkdir()
+    original = {'custom': 'keep', 'env': {'ANTHROPIC_API_KEY': 'synthetic-existing'}}
+    path.write_text(json.dumps(original))
+    before = path.read_bytes()
+    subprocess.run([sys.executable, '-c', agent.GUEST_SETUP, app], env=dict(os.environ, HOME=str(tmp_path)), check=True)
+    assert path.read_bytes() == before
+
+
+def test_guest_claude_settings_retained_success(tmp_path):
+    """Adding the placeholder retains unrelated Claude settings and a private backup."""
+    folder = tmp_path / '.claude'
+    folder.mkdir()
+    path = folder / 'settings.json'
+    path.write_text('{"env":{"EXAMPLE":"keep"},"custom":true}')
+    before = path.read_bytes()
+    subprocess.run([sys.executable, '-c', agent.GUEST_SETUP, 'claude'], env=dict(os.environ, HOME=str(tmp_path)), check=True)
+    result = json.loads(path.read_text())
+    assert result['env']['EXAMPLE'] == 'keep' and result['custom'] is True and (folder / 'settings.before-umbra-agent.json').read_bytes() == before
+
+
+@pytest.mark.parametrize('app', ['codex', 'claude'])
+@pytest.mark.parametrize('kind', ['folder', 'file'])
+def test_guest_settings_symlink_failure(tmp_path, app, kind):
+    """Guest setup never follows settings links to unrelated files or directories."""
+    folder = tmp_path / ('.codex' if app == 'codex' else '.claude')
+    target = tmp_path / 'untouched'
+    if kind == 'folder':
+        target.mkdir()
+        folder.symlink_to(target)
+    else:
+        folder.mkdir()
+        target.write_text('{}')
+        (folder / ('auth.json' if app == 'codex' else 'settings.json')).symlink_to(target)
+    result = subprocess.run([sys.executable, '-c', agent.GUEST_SETUP, app], env=dict(os.environ, HOME=str(tmp_path)))
+    assert result.returncode != 0 and (not list(target.iterdir()) if target.is_dir() else target.read_text() == '{}')

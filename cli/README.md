@@ -95,6 +95,11 @@ copied; guest edits are never automatically written back to the host. Explicit
 remote targets still select cloud execution. A stopped/broken local binding never
 silently falls back to the configured cloud default.
 
+Use `umbra start local --app codex|claude` for desktop SSH handoff. Both that
+command and local `umbra codex`/`umbra claude` prepare non-secret guest authentication
+placeholders for the selected profiles' Security CVM injection. Existing guest
+authentication is preserved; provider enrollment remains a one-time prerequisite.
+
 ## Local State
 
 By default the CLI uses `~/.umbra`:

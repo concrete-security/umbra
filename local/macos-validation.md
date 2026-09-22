@@ -124,3 +124,17 @@ model request after automatic non-secret placeholder setup. Claude's native CLI
 2.1.278 starts in its demo VM. Actual desktop-controlled agent sessions and Claude
 subscription/model authentication remain pending. Successful model tests used the
 CLI inside the VMs.
+
+## Integrated agent setup — 2026-09-22
+
+Agent setup now belongs to `umbra start local --app codex|claude` and local
+`umbra codex`/`umbra claude`, without separate public launcher commands. It creates
+only dummy guest authentication when absent and preserves existing authentication
+and unrelated Claude settings. All 109 local tests passed, including preservation,
+symlink rejection and preventing app opening when guest setup fails.
+
+After installing the updated private runtime, the built-in desktop command booted
+a fresh project, prepared authentication and registered SSH. An in-VM Codex model
+request succeeded through staging. The built-in Claude handoff then passed in the
+same project. Claude account authorization/model access and actual desktop agent
+sessions remain pending; no desktop UI automation was used.

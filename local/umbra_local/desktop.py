@@ -11,6 +11,7 @@ import stat
 import subprocess
 
 from .state import LocalError, lock, private_dir, write_file
+from . import agent
 
 APPS = {"codex": "com.openai.codex", "claude": "com.anthropic.claudefordesktop"}
 
@@ -126,6 +127,7 @@ def check_guest(app: str, path: Path, binding: dict, guest: str) -> None:
 
 def launch(app: str, path: Path, binding: dict, guest: str) -> dict:
     check_guest(app, path, binding, guest)
+    agent.prepare(app, path, binding)
     home = Path.home()
     alias = register_ssh(path, binding, home)
     if app == "claude":
