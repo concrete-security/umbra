@@ -6509,6 +6509,7 @@ async def lock_security_cvm_for_decommission(conn: asyncpg.Connection, entity_id
 @router.get("/traffic-logs")
 async def list_traffic_logs(
     cvm_id: UUID | None = None,
+    local_workspace_id: UUID | None = None,
     security_cvm_id: UUID | None = None,
     destination_host: str | None = Query(default=None, max_length=255),
     from_: datetime | None = Query(default=None, alias="from"),
@@ -6529,6 +6530,8 @@ async def list_traffic_logs(
 
     if cvm_id is not None:
         clauses.append(f"tl.cvm_id = {bind(cvm_id)}")
+    if local_workspace_id is not None:
+        clauses.append(f"tl.local_workspace_id = {bind(local_workspace_id)}")
     if security_cvm_id is not None:
         clauses.append(f"tl.security_cvm_id = {bind(security_cvm_id)}")
     if destination_host is not None:
@@ -6548,6 +6551,7 @@ async def list_traffic_logs(
             tl.timestamp,
             tl.security_cvm_id,
             tl.cvm_id,
+            tl.local_workspace_id,
             tl.source_ip,
             tl.destination_ip,
             tl.destination_host,
@@ -6574,6 +6578,7 @@ async def list_traffic_logs(
 @router.get("/traffic-logs/summary")
 async def list_traffic_log_host_summary(
     cvm_id: UUID | None = None,
+    local_workspace_id: UUID | None = None,
     security_cvm_id: UUID | None = None,
     from_: datetime | None = Query(default=None, alias="from"),
     to: datetime | None = None,
@@ -6591,6 +6596,8 @@ async def list_traffic_log_host_summary(
 
     if cvm_id is not None:
         clauses.append(f"tl.cvm_id = {bind(cvm_id)}")
+    if local_workspace_id is not None:
+        clauses.append(f"tl.local_workspace_id = {bind(local_workspace_id)}")
     if security_cvm_id is not None:
         clauses.append(f"tl.security_cvm_id = {bind(security_cvm_id)}")
     if from_ is not None:
@@ -6616,6 +6623,7 @@ async def list_traffic_log_host_summary(
 @router.get("/traffic-logs/timeseries")
 async def list_traffic_log_timeseries(
     cvm_id: UUID | None = None,
+    local_workspace_id: UUID | None = None,
     security_cvm_id: UUID | None = None,
     destination_host: str | None = Query(default=None, max_length=255),
     from_: datetime | None = Query(default=None, alias="from"),
@@ -6638,6 +6646,8 @@ async def list_traffic_log_timeseries(
     clauses.append(f"tl.timestamp <= {bind(plan['hi'])}")
     if cvm_id is not None:
         clauses.append(f"tl.cvm_id = {bind(cvm_id)}")
+    if local_workspace_id is not None:
+        clauses.append(f"tl.local_workspace_id = {bind(local_workspace_id)}")
     if security_cvm_id is not None:
         clauses.append(f"tl.security_cvm_id = {bind(security_cvm_id)}")
     if destination_host is not None:

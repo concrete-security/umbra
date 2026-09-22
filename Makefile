@@ -21,6 +21,7 @@ install-cli:
 
 test:
 	cargo test
+	uv run --locked --project console python -m pytest -c local/pyproject.toml local/tests
 	uv run --locked --project console python -m pytest console/tests
 	uv run --locked --project cvms/security python -m pytest cvms/security/tests
 
@@ -50,6 +51,8 @@ check:
 	cd console && uv run --locked python -m alembic heads
 	uv run --locked --project cvms/security python -m compileall cvms/security/src cvms/security/tests
 	sh -n install.sh ops/installer/install.sh
+	bash -n local/build-preview.sh local/install-runtime.sh
+	$(UMBRA_PINNED_PYTHON) -m py_compile local/smoke-test.py
 	bash -n ops/buildkit-version.sh ops/deploy/cvm-redeploy-lib.sh ops/db/console-db-guard.sh ops/db/backup-console-db.sh ops/db/restore-console-db.sh ops/db/guard-console-state-cutover.sh ops/verify/verify-journey.sh ops/verify/verify-journey-lib.sh ops/db/reset-console-db.sh ops/deploy/delete-umbra-phala-cvms.sh ops/deploy/bootstrap.sh ops/deploy/deploy.sh ops/cli-release/install-cli.sh ops/cli-release/package-cli-release.sh ops/cli-release/prepare-cli-installer.sh ops/cli-release/sync-cli-release-artifacts.sh ops/cli-release/sync-cli-workflow-artifacts.sh ops/deploy/publish-cvm-image.sh ops/deploy/redeploy-security-cvm.sh ops/deploy/redeploy-dev-cvm.sh ops/deploy/measure-dev-cvm-image.sh ops/host/build-env.sh ops/host/provision-host.sh ops/host/setup-jwt-keys.sh ops/db/run-console-db-tests.sh
 	bash -n ops/installer/entrypoint.sh tests/test-build-env.sh tests/test-console-state-cutover-guard.sh tests/test-entrypoint-reverse-proxy.sh tests/test-provision-host.sh tests/test-setup-jwt-keys.sh tests/test-verify-journey.sh
 	$(UMBRA_PINNED_RUN) bash ops/installer/smoke_test.sh

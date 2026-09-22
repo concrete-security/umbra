@@ -9,6 +9,8 @@ pub(crate) mod connect_common;
 pub mod cvm;
 pub mod entity;
 pub mod key;
+pub mod local;
+pub mod local_control;
 pub(crate) mod operation_debug;
 pub mod profile;
 pub mod quota;

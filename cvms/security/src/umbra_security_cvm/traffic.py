@@ -24,7 +24,7 @@ RETRYABLE_STATUS_CODES = {429, 502, 503}
 @dataclass(frozen=True)
 class TrafficLogRecord:
     timestamp: datetime
-    cvm_id: UUID
+    cvm_id: UUID | None
     source_ip: str
     destination_ip: str
     destination_host: str | None
@@ -40,6 +40,7 @@ class TrafficLogRecord:
     # "websocket_frame_dropped". Lets a blocked request be diagnosed from the
     # logs by reason without reproducing it (docs/specs/security-cvm.md §6.1).
     decision: str | None = None
+    local_workspace_id: UUID | None = None
 
     def to_json(self) -> dict[str, Any]:
         timestamp = self.timestamp
@@ -47,7 +48,7 @@ class TrafficLogRecord:
             timestamp = timestamp.replace(tzinfo=timezone.utc)
         payload: dict[str, Any] = {
             "timestamp": timestamp.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
-            "cvm_id": str(self.cvm_id),
+            "cvm_id": str(self.cvm_id) if self.cvm_id else None,
             "source_ip": self.source_ip,
             "destination_ip": self.destination_ip,
             "destination_host": self.destination_host,
@@ -59,6 +60,8 @@ class TrafficLogRecord:
             "decision": self.decision,
             "bytes_transferred": self.bytes_transferred,
         }
+        if self.local_workspace_id is not None:
+            payload["local_workspace_id"] = str(self.local_workspace_id)
         if self.attributes:
             payload["attributes"] = dict(self.attributes)
         return payload

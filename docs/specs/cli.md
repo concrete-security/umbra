@@ -11,13 +11,41 @@ This document is the authoritative specification for the `umbra` command-line in
 - Orchestrates long-running dtach sessions on those CVMs for interactive SSH and AI agents.
 - Manages Console-side resources (CVMs, SSH keys, profiles, Security CVMs).
 
-Two audiences: developers (the session verbs in §3.2 and tunnel in §3.3) and admins / platform operators (the resource-management verbs in §3.4 and maintenance commands in §3.5). The CLI is stateless apart from a small set of files on disk (see §4). It has no daemon, no local dtach instance, and no telemetry.
+Two audiences: developers (the session verbs in §3.2 and tunnel in §3.3) and admins / platform operators (the resource-management verbs in §3.4 and maintenance commands in §3.5). Cloud sessions have no local session daemon. The local preview additionally uses a private per-workspace supervisor and disk, as specified in `local-sandbox.md`. There is no local dtach instance or telemetry.
 
 **Non-goals:**
 
 - No telemetry or analytics. The only non-Console network call the CLI makes on its own initiative is the passive latest-version probe against the install service (§3.6 `umbra update`): a bare GET carrying no user or session data, at most once per 24 hours, active only in interactive terminals, and disabled entirely by `no_update_check` / `UMBRA_NO_UPDATE_CHECK`.
 - No silent auto-install. Installing a new version is always an explicit `umbra update` run; the passive check only prints a one-line stderr notice naming that command.
 - No server-side state beyond what the Console itself stores.
+
+### Local execution extension
+
+`umbra start local [--path DIRECTORY]` MUST bind the current/selected project
+folder, start or resume its VM, and copy the folder's files before reporting
+success. This source preview requires `--preview` on first launch; profiles, bundle
+and resource options are remembered. `umbra stop local [--path DIRECTORY]` MUST
+retain the project binding and disk.
+
+For `ssh`, `claude`, `codex`, `code`, `cursor` and `status`, an explicit remote
+positional target or `--cvm` wins, then the nearest registered local ancestor,
+then the existing cloud default. A broken/stopped local binding MUST fail locally,
+not fall back. Connect subcommands keep their existing semantics. Relative cwd
+is preserved inside `/home/dev/workspaces/project`; local `--workspace` stays
+within that root. Local `--identity-file` and `--alias` are rejected rather than
+silently ignored. Named sessions use guest dtach.
+
+Only the main `umbra` CLI is public. The private helper MUST use isolated Python
+import mode and MUST NOT execute project-controlled hooks on the host. Bindings
+are owner-only in `~/.umbra/local-projects.json`, never committed to the project.
+Whole-folder imports include untracked and hidden files. Content-based push
+synchronization MUST preserve guest-only edits and refuse conflicting overwrites.
+There is no automatic host write-back or writable shared host directory.
+
+Start, stop and status follow the structured-output contract. Raw interactive
+sessions reject `--json`; like existing session commands, they may have streamed
+output before a nonzero child exit. The full runtime, transfer, trust and release
+contract is `docs/specs/local-sandbox.md`.
 
 ## 2. Global conventions
 
@@ -2274,3 +2302,11 @@ The following are deliberately excluded from this specification. They may be add
 - Generic `umbra operation` noun. Async commands today (§2.6) submit and either wait or return a handle; the user who runs `--no-wait` must record the `operation_id` and re-poll out of band. A future revision will add `umbra operation show <op_id>` (single GET) and `umbra operation wait <op_id>` (poll until terminal) so a `--no-wait` caller has a first-class re-poll surface. `umbra operation list` is on the wishlist but not yet committed.
 - Console-routed admin verbs not yet realized in CLI commands. The Console exposes routes for these flows (cited below against `docs/specs/console.md`); each will get a matching CLI verb in a follow-up revision. Until then, operators drive them via direct HTTP:
   - Golden-measurement / aTLS policy fetch (`umbra policy fetch`) — today the CLI consumes a policy file via `--atls-policy` (§6.1) and a per-CVM policy bundle at launch (§3.4); distribution of refreshed templates remains out-of-band until this verb lands.
+
+### Local desktop handoff
+
+`umbra start local --app codex|claude` prepares the folder-bound preview and
+registers its SSH connection before opening the desktop app. The result includes
+`desktop_app`, `ssh_host`, and `next_step`. Select the printed SSH host and guest
+folder in the app; this command does not create an agent session. See
+[local sandbox contract](local-sandbox.md) for first-start and security rules.

@@ -3463,7 +3463,7 @@ def stored_security_cvm_atls_policy(snapshot: Any) -> dict[str, Any] | None:
     metadata = json_payload(_row_value(snapshot, "security_cvm_metadata") or {})
     if not isinstance(metadata, dict):
         return None
-    policy = metadata.get("atls_policy")
+    policy = json_payload(metadata.get("atls_policy_json", metadata.get("atls_policy")))
     return policy if isinstance(policy, dict) else None
 
 
@@ -3702,6 +3702,9 @@ def metadata_with_atls_policy(metadata: Any, policy: dict[str, Any]) -> dict[str
         current = {}
     updated = dict(current)
     updated["atls_policy"] = policy
+    # Atlas hashes serialized compose bytes. JSONB reorders object keys, so retain
+    # the authoritative serialization alongside the queryable policy object.
+    updated["atls_policy_json"] = json.dumps(policy, separators=(",", ":"))
     return updated
 
 

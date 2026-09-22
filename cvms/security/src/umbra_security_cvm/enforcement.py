@@ -108,6 +108,8 @@ def enforce_authenticated_request(
     dlp_timeout_seconds: float = DLP_SCAN_TIMEOUT_SECONDS,
     dlp_now: Callable[[], float] = time.monotonic,
 ) -> EnforcementResult:
+    if not cvm.active():
+        return _blocked_result(request, cvm, {}, "local_lease_expired", None)
     headers = normalize_headers(request.headers)
     upstream_headers = strip_proxy_authorization(headers)
     decision = cvm.merged_policy.decide(
@@ -339,7 +341,8 @@ def traffic_log_record(
 ) -> TrafficLogRecord:
     return TrafficLogRecord(
         timestamp=request.timestamp or datetime.now(timezone.utc),
-        cvm_id=cvm.cvm_id,
+        cvm_id=None if cvm.local_workspace_id else cvm.cvm_id,
+        local_workspace_id=cvm.local_workspace_id,
         source_ip=request.source_ip,
         destination_ip=request.destination_ip,
         destination_host=request.host,

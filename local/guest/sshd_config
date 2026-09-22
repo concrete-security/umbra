@@ -1,0 +1,19 @@
+ListenAddress 127.0.0.1
+Port 22
+HostKey /etc/ssh/ssh_host_ed25519_key
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitEmptyPasswords no
+PubkeyAuthentication yes
+PermitRootLogin no
+AllowUsers dev
+UsePAM yes
+X11Forwarding no
+AllowAgentForwarding no
+AllowTcpForwarding local
+PermitOpen 127.0.0.1:* localhost:* [::1]:*
+AllowStreamLocalForwarding no
+PermitTunnel no
+PermitUserEnvironment no
+PrintMotd no
+Subsystem sftp internal-sftp

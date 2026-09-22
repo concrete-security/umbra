@@ -367,3 +367,16 @@ The following capabilities are excluded from the v0 SC specification:
 - **Dynamic SSH Key Revocation**: Managing SSH key access on Dev CVMs via the SC is a post-v0 feature.
 - **Request-signature injection**: AWS SigV4, GCP signed requests, Azure Shared Key, and similar body-signing schemes are not supported by v0 proxy injection (§5.4).
 - **Outbound WebSocket and HTTP response-body filtering**: `websocket_assertions` (§4.3, §5.5) are inbound-only in v0. Filtering of WebSocket frames sent by the sandbox (`direction: "outbound"`) and declarative filtering of HTTP response bodies — e.g. capping enumeration or paging in an allowed response — are reserved sibling primitives that reuse the same JSON-pointer matcher engine. They are deferred; the schema reserves `direction` so an outbound mode can be added without a breaking change.
+
+## Local workspace extension
+
+See [local sandbox execution](local-sandbox.md) for the direct local-workspace
+admission contract. Console adds owner-bound `POST /api/v1/local-workspaces`,
+`POST /api/v1/local-workspaces/{id}/renew`, and idempotent
+`DELETE /api/v1/local-workspaces/{id}`. Create accepts `profile_ids` and returns
+the local ID, host-only bearer, expiry, SC ID/FQDN, strict aTLS policy and public
+CA/digest; renew returns the same public material and expiry without a bearer.
+The SC control feed adds `local_entries`, and traffic APIs accept and emit
+`local_workspace_id` separately from nullable `cvm_id`. Expired local identities
+fail closed even when the control map has not refreshed. This does not attest
+the Mac or change the cloud Dev transport's existing documented exception.

@@ -154,7 +154,15 @@ pub enum Command {
     #[command(subcommand)]
     Skill(SkillCommand),
 
-    /// Show your current entity, session, and visible resources.
+    /// Start or resume a sandbox for the current project folder.
+    #[command(subcommand)]
+    Start(StartCommand),
+
+    /// Stop a folder's sandbox without deleting its files.
+    #[command(subcommand)]
+    Stop(StopCommand),
+
+    /// Show this folder's local workspace, or your cloud session and resources.
     Status,
 
     /// Open an SSH session to the selected Dev CVM.
@@ -170,6 +178,12 @@ pub enum Command {
         target: String,
     },
 
+    #[command(hide = true)]
+    LocalControl,
+
+    #[command(hide = true)]
+    LocalTunnel,
+
     /// Update the umbra binary to the latest published release.
     #[command(visible_alias = "upgrade")]
     Update(UpdateArgs),
@@ -180,6 +194,56 @@ pub enum Command {
 
     /// Print version and build information.
     Version,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum StartCommand {
+    /// Start or resume a local VM and copy this project folder into it.
+    Local(LocalStartArgs),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum StopCommand {
+    /// Stop this folder's local VM, retaining its files and folder binding.
+    Local(LocalProjectArgs),
+}
+
+#[derive(clap::Args, Debug)]
+pub struct LocalStartArgs {
+    /// Omit a name at any depth or a project-relative path. Repeatable; remembered.
+    #[arg(long, value_name = "NAME_OR_PATH")]
+    pub exclude: Vec<String>,
+
+    /// Prepare an SSH workspace and open its desktop app (one-time selection in app).
+    #[arg(long, value_parser = ["codex", "claude"])]
+    pub app: Option<String>,
+
+    /// Project folder to import. Defaults to the current directory.
+    #[arg(long)]
+    pub path: Option<PathBuf>,
+
+    /// Acknowledge local-preview assurance on this project's first launch.
+    #[arg(long)]
+    pub preview: bool,
+
+    /// Installed local guest bundle. Remembered after first launch.
+    #[arg(long)]
+    pub bundle: Option<PathBuf>,
+
+    /// Virtual CPUs. Defaults to 4, then the remembered project setting.
+    #[arg(long, value_parser = clap::value_parser!(u32).range(2..=32))]
+    pub cpus: Option<u32>,
+
+    /// Guest memory in MiB. Defaults to 4096, then the remembered setting.
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1024..=65536))]
+    pub memory: Option<u32>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct LocalProjectArgs {
+    /// Bound project folder. Defaults to the current directory.
+    #[arg(long)]
+    pub path: Option<PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -1059,6 +1123,10 @@ pub struct SkillInstallArgs {
 
 #[derive(clap::Args, Debug)]
 pub struct TrafficLogsArgs {
+    /// Filter to logs for this local workspace UUID.
+    #[arg(long, conflicts_with = "cvm")]
+    pub local_workspace: Option<String>,
+
     /// Filter to logs for this Dev CVM UUID.
     #[arg(long)]
     pub cvm: Option<String>,

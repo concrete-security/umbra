@@ -198,6 +198,7 @@ def traffic_log_resource(row: Any) -> dict[str, Any]:
         "timestamp": timestamp(row["timestamp"]),
         "security_cvm_id": str(row["security_cvm_id"]),
         "cvm_id": str(row["cvm_id"]) if row["cvm_id"] else None,
+        "local_workspace_id": str(row["local_workspace_id"]) if row.get("local_workspace_id") else None,
         "source_ip": row["source_ip"],
         "destination_ip": row["destination_ip"],
         "destination_host": row["destination_host"],

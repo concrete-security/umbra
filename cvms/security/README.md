@@ -68,3 +68,12 @@ Security CVM reuses the Dev canary's private dstack guest MRTD measurement.
 ## Scope
 
 V0 does not provide multiple active Security CVMs per entity, outbound WebSocket frame filtering, response-body filtering, arbitrary request signing, dynamic SSH-key revocation, or multi-entity Security CVMs. Unknown identity or invalid policy fails closed.
+
+## Local workspace admission
+
+Local macOS workspaces connect directly to Security CVM with a Console-issued,
+expiring identity. Deploy Console migration `0035_local_workspaces` and the new
+Security CVM together before enabling clients. No Dev CVM is required. The local
+client checks strict SC runtime attestation; old SC images do not admit local
+identities. See [the contract](../../docs/specs/local-sandbox.md) for lease,
+profile, traffic attribution and trusted-host semantics.

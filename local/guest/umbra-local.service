@@ -1,0 +1,13 @@
+[Unit]
+Description=Umbra local guest channels (no external network device)
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/lib/umbra-local/guest.py
+Restart=on-failure
+RestartSec=3
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

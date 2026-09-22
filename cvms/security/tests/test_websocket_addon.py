@@ -547,3 +547,72 @@ def test_corrected_policy_delivers_assistant_thread_and_contains_slash_interacti
     for ok in (slash_command(), interactive()):
         proxy_addon.websocket_message(FakeFlow([ok]))
         assert ok.dropped is False
+
+
+def local_addon(seconds=300):
+    from dataclasses import replace
+    from datetime import datetime, timedelta, timezone
+    from types import MappingProxyType
+    proxy, queue, injected = addon()
+    original = control_map_for_policy(slack_policy()).lookup_proxy_token("proxy-token")
+    local = replace(original, local_workspace_id=CVM_ID, expires_at=datetime.now(timezone.utc) + timedelta(seconds=seconds))
+    proxy.control_state = ControlPlaneState(ControlMap(MappingProxyType({local.proxy_token_hash: local})))
+    return proxy, queue
+
+
+def test_local_websocket_lifecycle_attribution_success():
+    """Delivered lifecycle frames retain local rather than cloud traffic identity."""
+    proxy, queue = local_addon()
+    message = FakeWebSocketMessage(content=b'{"type":"hello","num_connections":1,"debug_info":{}}')
+    flow = FakeFlow([message], metadata={"umbra_cvm_id":str(CVM_ID), "umbra_local_workspace_id":str(CVM_ID)})
+    proxy.websocket_message(flow)
+    record = queue.drain_batch().records[0].to_json()
+    assert record["cvm_id"] is None and record["local_workspace_id"] == str(CVM_ID)
+
+
+def test_local_outbound_websocket_expired_failure():
+    """Expiry blocks outgoing frames even before inbound governance checks."""
+    proxy, queue = local_addon(-1)
+    message = FakeWebSocketMessage(content=b"outbound", from_client=True)
+    flow = FakeFlow([message], metadata={"umbra_cvm_id":str(CVM_ID), "umbra_local_workspace_id":str(CVM_ID)})
+    killed = []
+    flow.kill = lambda: killed.append(True)
+    proxy.websocket_message(flow)
+    assert message.dropped and killed == [True]
+
+
+def test_local_response_stream_expired_failure():
+    """An already-open response cannot continue delivering chunks after lease expiry."""
+    proxy, queue = local_addon(-1)
+    flow = FakeFlow([], metadata={"umbra_cvm_id":str(CVM_ID), "umbra_local_workspace_id":str(CVM_ID)})
+    flow.response = FakeResponse(200, b"", {})
+    killed = []
+    flow.kill = lambda: killed.append(True)
+    proxy.responseheaders(flow)
+    assert flow.response.stream(b"chunk") == b"" and killed == [True]
+
+
+def test_local_raw_tcp_fallback_failure():
+    """A CONNECT from a local workspace may not become an uninspected raw stream."""
+    from umbra_security_cvm.mitmproxy_addon import _client_connection_key
+    proxy, queue = local_addon()
+    flow = FakeFlow([])
+    key = _client_connection_key(flow)
+    proxy._remember_connect_identity(key, CVM_ID)
+    proxy._local_connections.add(key)
+    killed = []
+    flow.kill = lambda: killed.append(True)
+    proxy.tcp_start(flow)
+    assert killed == [True]
+
+
+def test_local_disconnect_releases_connection_kind_success():
+    """Reusing a client endpoint cannot inherit a previous local classification."""
+    from umbra_security_cvm.mitmproxy_addon import _client_connection_key
+    proxy, queue = local_addon()
+    flow = FakeFlow([])
+    key = _client_connection_key(flow)
+    proxy._remember_connect_identity(key, CVM_ID)
+    proxy._local_connections.add(key)
+    proxy.client_disconnected(flow.client_conn)
+    assert key not in proxy._local_connections

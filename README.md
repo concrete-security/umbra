@@ -17,6 +17,16 @@ Umbra runs AI coding agents in attested cloud sandboxes with governed network an
 
 The Console is a conventional HTTPS control plane. The attested Dev and Security CVMs are the confidential-compute boundary. The trust model and component contracts are described in [the v0 plan](docs/v0_plan.md), the [supply-chain threat model](docs/supply-chain-threat-model.md), and the documents under [docs/specs/](docs/specs/).
 
+## Local execution preview
+
+This branch adds `umbra start local` for folder-bound local Linux workspaces on
+Apple-silicon Macs. Existing `umbra ssh`, `umbra claude`, `umbra codex` and editor
+commands then use that workspace. See [local setup](local/README.md).
+
+Console authorizes a distinct, expiring local-workspace identity. Its host broker
+connects directly to the attested Security CVM; no Dev CVM is required. The Mac
+remains trusted. This source preview does not attest or manage the laptop.
+
 ## Try the CLI
 
 If an operator has already provisioned your account and assigned a profile:

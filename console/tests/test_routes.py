@@ -3445,6 +3445,8 @@ class SCControlConn:
         self.rows = rows
 
     async def fetch(self, sql, *args):
+        if "FROM local_workspaces l" in sql:
+            return []
         assert "FROM cvms c" in sql and "owner_secret_material" in sql
         return self.rows
 
