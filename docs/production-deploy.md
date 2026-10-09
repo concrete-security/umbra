@@ -256,4 +256,8 @@ curl -fsS "https://${CONSOLE_HOST}/readyz"
 - Use `umbra reconcile` for provider drift. Do not edit lifecycle state directly in Postgres.
 - Never inspect or mutate provider resources outside the deployment's dedicated workspace and Umbra-owned naming scope.
 
+For a certificate-only false `ATTESTATION_DRIFT`, deploy the Console and bundled verifier together, then run `umbra security-cvm attestation --probe`. The probe must prove the exact accepted RTMR3 prefix and a validated certificate-only extension before clearing the verdict; missing evidence or configuration changes remain blocked. An operator-approved `umbra security-cvm update` can recover a confirmed certificate-only incident on an older Console by deploying and verifying the current approved configuration, but it does not prevent the next renewal from triggering that older drift check. Do not edit stored digests or change profiles to bypass verification.
+
+After recovery, verify HTTPS egress from an existing Dev CVM to an allowed destination. Refresh-capable forwarders pull the SC policy and CA automatically; the sandbox watcher replaces its CA bundle atomically. Restart an already-running agent if it retains the old trust bundle. No manual public TLS certificate rebuild is needed: shade's certificate manager owns that renewal. Investigate failed prefix or runtime-policy checks under the compromise playbook in `docs/specs/console.md` §17.4.
+
 Operational incidents containing secrets, personal data, or live resource identifiers must be handled privately. Public vulnerability reporting follows [`SECURITY.md`](../SECURITY.md); general support follows [`SUPPORT.md`](../SUPPORT.md).

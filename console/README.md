@@ -80,6 +80,7 @@ The ordinary Console suite uses fake asyncpg connections and needs no database. 
 - After approved runtime images are published for anonymous reads, leaving every `DSTACK_DOCKER_*` value unset makes the Console forward no registry credential to the provider or CVM. Before that publication, and for any private registry, self-hosters must explicitly set the complete `DSTACK_DOCKER_REGISTRY`, `DSTACK_DOCKER_USERNAME`, and `DSTACK_DOCKER_PASSWORD` trio; partial configuration is rejected.
 - `GHCR_USER`, `GHCR_TOKEN`, and `GH_TOKEN` are one-shot host process inputs. `build-env` rejects them from merged runtime layers, and Compose keeps legacy values out of the Console and installer containers.
 - Attestation uses the bundled `umbra-atlas-verify` helper and complete shade runtime policy. Missing authoritative runtime fields fail closed.
+- Attestation refresh and on-demand probes accept an RTMR3 change only when the verified event history preserves the stored digest as an exact prefix and every subsequent event is a validated dstack TLS certificate event. Configuration changes, unknown extensions, and missing evidence remain drift. A late probe cannot overwrite a newer baseline.
 - Profile inline values and user secrets are write-only. They are decrypted only while materializing authenticated Security CVM control policy.
 - `SECRET_INJECTION_KEK_B64` must decode to 32 random bytes, remain stable with the database, and must not reuse JWT signing material.
 

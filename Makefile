@@ -21,6 +21,7 @@ install-cli:
 
 test:
 	cargo test
+	cargo test --locked --manifest-path console/atlas-verify/Cargo.toml
 	uv run --locked --project console python -m pytest console/tests
 	uv run --locked --project cvms/security python -m pytest cvms/security/tests
 
@@ -33,7 +34,9 @@ test-console-db:
 check:
 	$(UMBRA_PINNED_PYTHON) tools/check-cargo-keywords.py
 	cargo fmt --check
+	cargo fmt --manifest-path console/atlas-verify/Cargo.toml --check
 	cargo clippy --locked --all-targets -- -D warnings
+	cargo clippy --locked --manifest-path console/atlas-verify/Cargo.toml --all-targets -- -D warnings
 	uv lock --check --project console
 	uv lock --check --project cvms/security
 	$(UMBRA_PINNED_PYTHON) -m py_compile tools/check-cargo-keywords.py tools/check-dco.py tools/check-github-actions.py tools/generate-cargo-sbom.py tools/test_check_cargo_keywords.py tools/test_check_github_actions.py
