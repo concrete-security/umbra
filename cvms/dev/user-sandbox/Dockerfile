@@ -98,8 +98,8 @@ RUN sed -i \
       -e "s|http://archive.ubuntu.com/ubuntu|https://snapshot.ubuntu.com/ubuntu/${UBUNTU_SNAPSHOT}|g" \
       -e "s|http://security.ubuntu.com/ubuntu|https://snapshot.ubuntu.com/ubuntu/${UBUNTU_SNAPSHOT}|g" \
       /etc/apt/sources.list.d/ubuntu.sources \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends \
+    && apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=30 update --error-on=any \
+    && apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=30 install -y --no-install-recommends \
       ca-certificates \
       curl \
       openssh-server \
@@ -139,8 +139,8 @@ RUN set -a \
       "${DOCKER_CE_CLI_SHA256}" /tmp/docker-ce-cli.deb \
       "${CONTAINERD_SHA256}" /tmp/containerd.deb \
       | sha256sum -c - \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends \
+    && apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=30 update --error-on=any \
+    && apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=30 install -y --no-install-recommends \
       /tmp/containerd.deb \
       /tmp/docker-ce-cli.deb \
       /tmp/docker-ce.deb \
