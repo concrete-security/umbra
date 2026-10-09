@@ -65,6 +65,11 @@ Public repositories must also have GitHub's dependency graph enabled. The
 dependency-review job deliberately fails when that repository prerequisite is
 missing; do not weaken or skip the gate to compensate for incomplete settings.
 
+The scoped Hickory DNSSEC advisory exception requires both locked Linux Cargo
+feature graphs to exclude DNSSEC. `make check` enforces that condition and
+requires reassessment when the resolver version changes. The exception expires
+on 2026-11-08; remove it when the upstream dependency permits a patched resolver.
+
 An `environment: release` declaration does not protect a publication by itself: GitHub will create an unprotected environment when the named environment is missing. Capture the `release` environment's deployment-branch policy and reviewer settings through the GitHub API before the first non-dry-run release.
 
 ## Host model
