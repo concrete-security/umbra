@@ -2085,7 +2085,9 @@ def test_run_cvm_update_attestation_verifier_generates_full_pending_policy(monke
     assert operation_updates == [(UUID("00000000-0000-4000-8000-000000000030"), "await_sc_pull", 60)]
 
 
-def test_reconcile_security_cvm_attestation_refresh_persists_success(monkeypatch) -> None:
+@pytest.mark.parametrize("certificate_renewal", [False, True], ids=["initial", "certificate-renewal"])
+def test_reconcile_security_cvm_attestation_refresh_persists_success(monkeypatch, certificate_renewal) -> None:
+    """A verified certificate-only extension refreshes the accepted measurement."""
     security_cvm_id = UUID("00000000-0000-4000-8000-000000000041")
     conn = ReconcileAttestationConn(
         security_rows=[
@@ -2095,10 +2097,10 @@ def test_reconcile_security_cvm_attestation_refresh_persists_success(monkeypatch
                 "fqdn": "sc.example.com",
                 "compose_config": "services: {}\n",
                 "expected_image_measurement": "a" * 96,
-                "image_measurement": None,
-                "rtmr3_digest": None,
+                "image_measurement": "a" * 96 if certificate_renewal else None,
+                "rtmr3_digest": "c" * 96 if certificate_renewal else None,
                 "attestation_verified_at": None,
-                "error_reason": None,
+                "error_reason": "ATTESTATION_DRIFT" if certificate_renewal else None,
             }
         ],
         token_rows=[
@@ -2112,7 +2114,14 @@ def test_reconcile_security_cvm_attestation_refresh_persists_success(monkeypatch
         async def verify(self, request, *, timeout_seconds):
             captured_request.update(request)
             assert timeout_seconds == 30
-            return attestation.AttestationReport(image_measurement="a" * 96, rtmr3_digest="d" * 96)
+            return attestation.parse_attestation_report(json.dumps({
+                "image_measurement": "a" * 96,
+                "rtmr3_digest": "d" * 96,
+                "rtmr3_history": [
+                    {"digest": "c" * 96, "tls_certificate_event": False},
+                    {"digest": "d" * 96, "tls_certificate_event": True},
+                ],
+            }).encode())
 
     async def fake_insert_audit_event(_conn, **kwargs):
         conn.audit_calls.append(kwargs)
@@ -2144,7 +2153,9 @@ def test_reconcile_security_cvm_attestation_refresh_persists_success(monkeypatch
     assert conn.audit_calls[0]["after"]["source"] == "reconciler"
 
 
-def test_reconcile_dev_cvm_attestation_refresh_records_drift(monkeypatch) -> None:
+@pytest.mark.parametrize("certificate_renewal", [False, True], ids=["configuration-drift", "certificate-renewal"])
+def test_reconcile_dev_cvm_attestation_refresh_classifies_evidence_success(monkeypatch, certificate_renewal) -> None:
+    """Dev CVMs use the same certificate exception and configuration drift rule."""
     cvm_id = UUID("00000000-0000-4000-8000-000000000031")
     policy_bundle = {
         "compose_template": "services: {}\n",
@@ -2172,7 +2183,11 @@ def test_reconcile_dev_cvm_attestation_refresh_records_drift(monkeypatch) -> Non
     class FakeVerifier:
         async def verify(self, request, *, timeout_seconds):
             assert request["kind"] == "dev_cvm"
-            return attestation.AttestationReport(image_measurement="e" * 96, rtmr3_digest="f" * 96)
+            return attestation.AttestationReport(
+                image_measurement="a" * 96 if certificate_renewal else "e" * 96,
+                rtmr3_digest="f" * 96,
+                rtmr3_history=(("d" * 96, False), ("f" * 96, True)) if certificate_renewal else (),
+            )
 
     async def fake_insert_audit_event(_conn, **kwargs):
         conn.audit_calls.append(kwargs)
@@ -2183,10 +2198,91 @@ def test_reconcile_dev_cvm_attestation_refresh_records_drift(monkeypatch) -> Non
     advanced = asyncio.run(scheduler.reconcile_dev_cvm_attestations(conn))
 
     assert advanced == [str(cvm_id)]
-    drift_updates = [args for query, args in conn.execute_calls if "SET error_reason = 'ATTESTATION_DRIFT'" in query]
-    assert drift_updates == [(cvm_id,)]
-    assert conn.audit_calls[0]["action"] == "CVM_ATTESTATION_DRIFT"
-    assert conn.audit_calls[0]["after"]["drift_kind"] == "both"
+    if certificate_renewal:
+        accepted_updates = [args for query, args in conn.execute_calls if "SET image_measurement" in query]
+        assert accepted_updates[0][:3] == (cvm_id, "a" * 96, "f" * 96)
+        assert conn.audit_calls[0]["action"] == "CVM_ATTESTATION_VERIFIED"
+    else:
+        drift_updates = [args for query, args in conn.execute_calls if "SET error_reason = 'ATTESTATION_DRIFT'" in query]
+        assert drift_updates == [(cvm_id, "d" * 96, conn.dev_rows[0]["attestation_verified_at"])]
+        assert conn.audit_calls[0]["action"] == "CVM_ATTESTATION_DRIFT"
+        assert conn.audit_calls[0]["after"]["drift_kind"] == "both"
+
+
+@pytest.mark.parametrize("history", [
+    pytest.param((("c" * 96, False), ("d" * 96, True)), id="one-renewal"),
+    pytest.param((("c" * 96, False), ("e" * 96, True), ("d" * 96, True)), id="two-renewals"),
+])
+def test_attestation_drift_kind_certificate_prefix_success(history) -> None:
+    """Any number of validated certificate events may extend the stored prefix."""
+    assert scheduler.attestation_drift_kind(
+        expected_image_measurement="a" * 96,
+        persisted_image_measurement="a" * 96,
+        persisted_rtmr3_digest="c" * 96,
+        reported_image_measurement="a" * 96,
+        reported_rtmr3_digest="d" * 96,
+        verified_rtmr3_history=history,
+    ) is None
+
+
+@pytest.mark.parametrize("history", [
+    pytest.param((), id="missing-evidence"),
+    pytest.param((("e" * 96, False), ("d" * 96, True)), id="replaced-prefix"),
+    pytest.param((("c" * 96, False), ("d" * 96, False)), id="configuration-or-unknown-event"),
+    pytest.param((("c" * 96, False), ("e" * 96, False), ("d" * 96, True)), id="configuration-then-certificate"),
+    pytest.param((("c" * 96, False), ("e" * 96, True)), id="unanchored-terminal"),
+])
+def test_attestation_drift_kind_unproven_extension_failure(history) -> None:
+    """A certificate label cannot hide other changes or a replaced accepted prefix."""
+    assert scheduler.attestation_drift_kind(
+        expected_image_measurement="a" * 96,
+        persisted_image_measurement="a" * 96,
+        persisted_rtmr3_digest="c" * 96,
+        reported_image_measurement="a" * 96,
+        reported_rtmr3_digest="d" * 96,
+        verified_rtmr3_history=history,
+    ) == "rtmr3"
+
+
+def test_attestation_drift_kind_certificate_does_not_override_image_failure() -> None:
+    """A valid certificate suffix never excuses a changed guest image."""
+    assert scheduler.attestation_drift_kind(
+        expected_image_measurement="a" * 96,
+        persisted_image_measurement="a" * 96,
+        persisted_rtmr3_digest="c" * 96,
+        reported_image_measurement="b" * 96,
+        reported_rtmr3_digest="d" * 96,
+        verified_rtmr3_history=(("c" * 96, False), ("d" * 96, True)),
+    ) == "image"
+
+
+@pytest.mark.parametrize("kind", [scheduler.DEV_CVM, scheduler.SECURITY_CVM], ids=["dev", "security"])
+def test_persist_attestation_certificate_refresh_stale_prefix_failure(monkeypatch, kind) -> None:
+    """A late verifier cannot overwrite a newer accepted certificate prefix."""
+    row = {
+        "id": UUID("00000000-0000-4000-8000-000000000041"),
+        "image_measurement": "a" * 96,
+        "rtmr3_digest": "c" * 96,
+        "attestation_verified_at": scheduler.datetime.now(scheduler.timezone.utc),
+    }
+
+    class ConcurrentRefreshConn:
+        async def execute(self, query, *args):
+            assert "rtmr3_digest IS NOT DISTINCT FROM $6" in query
+            assert "attestation_verified_at IS NOT DISTINCT FROM $7" in query
+            assert args[4:] == (row["image_measurement"], row["rtmr3_digest"], row["attestation_verified_at"])
+            return "UPDATE 0"
+
+    async def unexpected_audit(_conn, **kwargs):
+        raise AssertionError("a stale report must not emit a verified audit event")
+
+    monkeypatch.setattr(scheduler, "insert_audit_event", unexpected_audit)
+    report = attestation.AttestationReport(
+        image_measurement="a" * 96,
+        rtmr3_digest="d" * 96,
+        rtmr3_history=(("c" * 96, False), ("d" * 96, True)),
+    )
+    assert asyncio.run(scheduler._persist_cvm_attestation_refresh(ConcurrentRefreshConn(), row, report, kind)) is False
 
 
 @pytest.mark.parametrize(

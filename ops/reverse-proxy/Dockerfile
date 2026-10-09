@@ -9,14 +9,15 @@ RUN apk add --no-cache \
       gdbm=1.26-r0 \
       gettext=1.0-r0 \
       gettext-libs=1.0-r0 \
-      libcrypto3=3.5.8-r0 \
-      libexpat=2.8.4-r0 \
+      libcrypto3=3.5.9-r0 \
+      libexpat=2.8.5-r0 \
       libffi=3.5.2-r1 \
       libgomp=15.2.0-r5 \
       libpanelw=6.6_p20260516-r0 \
       libuuid=2.42.3-r1 \
-      libssl3=3.5.8-r0 \
+      libssl3=3.5.9-r0 \
       mpdecimal=4.0.1-r0 \
+      pcre2=10.49-r0 \
       py3-acme=5.6.0-r0 \
       py3-acme-pyc=5.6.0-r0 \
       py3-certifi=2026.2.25-r1 \
@@ -61,12 +62,13 @@ RUN apk add --no-cache \
       py3-tz-pyc=2026.2-r0 \
       py3-urllib3=2.7.0-r0 \
       py3-urllib3-pyc=2.7.0-r0 \
-      pyc=3.14.7-r1 \
-      python3=3.14.7-r1 \
-      python3-pyc=3.14.7-r1 \
-      python3-pycache-pyc0=3.14.7-r1 \
+      pyc=3.14.8-r0 \
+      python3=3.14.8-r0 \
+      python3-pyc=3.14.8-r0 \
+      python3-pycache-pyc0=3.14.8-r0 \
       readline=8.3.3-r1 \
-      sqlite-libs=3.53.4-r0
+      sqlite-libs=3.53.4-r0 \
+      tiff=4.7.2-r0
 
 COPY entrypoint.sh /entrypoint.sh
 COPY default.conf.template /etc/nginx/templates/default.conf.template
