@@ -60,7 +60,7 @@ Buildx:              0.34.0 exactly
 BuildKit:            moby/buildkit:v0.32.2@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8
 Dockerfile frontend: docker/dockerfile:1.26.0@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
 SBOM generator:      docker.io/docker/buildkit-syft-scanner:stable-1@sha256:79e7b013cbec16bbb436f312819a49a4a57752b2270c1a9332ae1a10fcc82a68
-Dev bases:           golang:1.26.6-bookworm@sha256:116d58cbd88c1297624acc6e967a060012422bacf9930927e23fb719189c6f36
+Dev bases:           golang:1.27.2-bookworm@sha256:5cf287a799e6b94384bad13d16b14904c531f51ba65792237e122ce42b392f61
                      rust:1-bookworm@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa
                      ghcr.io/astral-sh/uv:0.12.1@sha256:cf4eedcaa81655197f625739489effcbe71b61ceb1506f332c3facae5deceded
                      ubuntu:24.04@sha256:561618e2c15bf2397621dd04f96926663a3b5616c189cf7e38db7e82f5c538ea
@@ -68,7 +68,7 @@ Security bases:      ghcr.io/astral-sh/uv:0.12.1@sha256:cf4eedcaa81655197f625739
                      python:3.12-slim-trixie@sha256:229a2c5bfa27522db7815ea81f9bed70af17ccb9de9fc7ad142b1877b5830d36
 ```
 
-`ops/buildkit-version.sh` and the two Dockerfiles are authoritative for these values. The Dev image also fixes an Ubuntu snapshot, pins the SHA-256 of its `linux-libc-dev` 6.8.0-139.139 userspace-header update, and verifies exact Docker `.deb` digests; the Security image fixes a Debian snapshot and the SHA-256 of its `linux-libc-dev` 6.12.107-1 update. The sandbox packages pin Docker Engine/CLI 29.8.0, Buildx 0.37.0, Compose 5.5.1, and GitHub CLI 2.99.0; this in-sandbox Buildx is separate from the release-host Buildx above. Installer and reverse-proxy images pin `libuuid` 2.42.3-r1 and `libexpat` 2.8.4-r0. A pin change must be reviewed together with this guide. The host Docker Engine itself is not pinned by the repository: treat its daemon and root-equivalent socket as a trusted release-host boundary and record `docker version` with the build evidence.
+`ops/buildkit-version.sh` and the two Dockerfiles are authoritative for these values. The Dev and Security images resolve system packages, including userspace headers, from their reviewed 20261008T120000Z Ubuntu and Debian snapshots. The Dev build retries failed archive requests three times and fails if any package index remains unavailable. Exact Docker `.deb` digests are pinned separately. The sandbox packages pin Docker Engine/CLI 29.9.0, Buildx 0.38.0+umbra.1, Compose 5.6.0, and GitHub CLI 2.102.0; this in-sandbox Buildx is separate from the release-host Buildx above. Buildx, Compose, and GitHub CLI compile from checksum-pinned upstream source with the patched Go builder. Buildx also pins its fixed archive module source; GitHub CLI preserves its upstream module lock. Installer and reverse-proxy images pin `libuuid` 2.42.3-r1 and `libexpat` 2.8.5-r0. A pin change must be reviewed together with this guide. The host Docker Engine itself is not pinned by the repository: treat its daemon and root-equivalent socket as a trusted release-host boundary and record `docker version` with the build evidence.
 
 Run both independent-worktree reproducibility gates before publication:
 
@@ -255,5 +255,9 @@ curl -fsS "https://${CONSOLE_HOST}/readyz"
 - Keep process supervision and restart-on-boot configured for the Compose stack.
 - Use `umbra reconcile` for provider drift. Do not edit lifecycle state directly in Postgres.
 - Never inspect or mutate provider resources outside the deployment's dedicated workspace and Umbra-owned naming scope.
+
+For a certificate-only false `ATTESTATION_DRIFT`, deploy the Console and bundled verifier together, then run `umbra security-cvm attestation --probe`. The probe must prove the exact accepted RTMR3 prefix and a validated certificate-only extension before clearing the verdict; missing evidence or configuration changes remain blocked. An operator-approved `umbra security-cvm update` can recover a confirmed certificate-only incident on an older Console by deploying and verifying the current approved configuration, but it does not prevent the next renewal from triggering that older drift check. Do not edit stored digests or change profiles to bypass verification.
+
+After recovery, verify HTTPS egress from an existing Dev CVM to an allowed destination. Refresh-capable forwarders pull the SC policy and CA automatically; the sandbox watcher replaces its CA bundle atomically. Restart an already-running agent if it retains the old trust bundle. No manual public TLS certificate rebuild is needed: shade's certificate manager owns that renewal. Investigate failed prefix or runtime-policy checks under the compromise playbook in `docs/specs/console.md` §17.4.
 
 Operational incidents containing secrets, personal data, or live resource identifiers must be handled privately. Public vulnerability reporting follows [`SECURITY.md`](../SECURITY.md); general support follows [`SUPPORT.md`](../SUPPORT.md).

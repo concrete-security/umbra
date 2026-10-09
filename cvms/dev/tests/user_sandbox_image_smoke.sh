@@ -16,7 +16,7 @@ docker run --rm --platform linux/amd64 --entrypoint bash "${IMAGE_TAG}" -lc '
     command -v "${cmd}" >/dev/null
   done
   read -r linux_headers_package linux_headers_version < <(dpkg-query --show linux-libc-dev)
-  dpkg --compare-versions "$linux_headers_version" ge 6.8.0-139.139
+  dpkg --compare-versions "$linux_headers_version" ge 6.8.0-142.142
   test -x /usr/local/lib/umbra/claude.real
   test -s /usr/local/lib/umbra/claude.version
   test -f /usr/local/lib/umbra/codex/node_modules/@openai/codex/bin/codex.js
