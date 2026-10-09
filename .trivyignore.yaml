@@ -1,4 +1,16 @@
 vulnerabilities:
+  - id: GHSA-5j98-2g5x-46v6
+    paths:
+      - Cargo.lock
+      - console/atlas-verify/Cargo.lock
+    statement: >-
+      The affected DNSSEC validation path is not compiled: dcap-qvl enables
+      reqwest's system resolver without Hickory DNSSEC features. make check
+      verifies that both locked Linux feature graphs keep DNSSEC disabled and
+      rejects a resolver version change for reassessment. TLS certificate and
+      attestation verification remain required. Remove this exception when the
+      upstream dependency accepts hickory-resolver 0.26.2 or newer.
+    expired_at: 2026-11-08
   - id: CVE-2026-34040
     paths:
       - usr/libexec/docker/cli-plugins/docker-buildx
