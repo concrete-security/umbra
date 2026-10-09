@@ -6335,6 +6335,7 @@ async def run_security_cvm_attestation_probe(conn: asyncpg.Connection, row: Any,
         persisted_rtmr3_digest=row_value(row, "rtmr3_digest"),
         reported_image_measurement=report.image_measurement,
         reported_rtmr3_digest=report.rtmr3_digest,
+        verified_rtmr3_history=report.rtmr3_history,
     )
     if drift_kind is not None:
         await record_security_cvm_attestation_drift(conn, row, report, drift_kind=drift_kind, current_user=current_user)
@@ -6398,7 +6399,7 @@ async def persist_security_cvm_attestation_probe(
 ) -> dict[str, Any]:
     verified_at = datetime.now(timezone.utc)
     async with conn.transaction():
-        await conn.execute(
+        result = await conn.execute(
             """
             UPDATE security_cvms
             SET image_measurement = $2,
@@ -6407,13 +6408,27 @@ async def persist_security_cvm_attestation_probe(
                 error_reason = NULL,
                 updated_at = now()
             WHERE id = $1
+              AND state = 'RUNNING'
               AND deleted_at IS NULL
+              AND image_measurement IS NOT DISTINCT FROM $5
+              AND rtmr3_digest IS NOT DISTINCT FROM $6
+              AND attestation_verified_at IS NOT DISTINCT FROM $7
             """,
             row_value(row, "id"),
             report.image_measurement,
             report.rtmr3_digest,
             verified_at,
+            row_value(row, "image_measurement"),
+            row_value(row, "rtmr3_digest"),
+            row_value(row, "attestation_verified_at"),
         )
+        if result != "UPDATE 1":
+            raise api_error(
+                409,
+                "CONFLICT",
+                "Security CVM changed during attestation; retry the probe",
+                {"state": "attestation_snapshot_changed"},
+            )
         await insert_audit_event(
             conn,
             entity_id=row_value(row, "entity_id"),

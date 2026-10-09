@@ -27,6 +27,10 @@ IMAGE_MEASUREMENT_RE = HEX96_RE
 class AttestationReport:
     image_measurement: str
     rtmr3_digest: str
+    # Intermediate replay states, authenticated by the verifier's original quote.
+    # Each flag classifies the event which produced that state. No payloads leave
+    # the verifier. Older helpers omit this evidence and cannot authorize drift.
+    rtmr3_history: tuple[tuple[str, bool], ...] = ()
 
 
 class AttestationVerifierUnavailable(RuntimeError):
@@ -346,7 +350,24 @@ def parse_attestation_report(stdout: bytes) -> AttestationReport:
         )
     image_measurement = image_measurement.lower()
     rtmr3_digest = rtmr3_digest.lower()
-    return AttestationReport(image_measurement=image_measurement, rtmr3_digest=rtmr3_digest)
+    history: list[tuple[str, bool]] = []
+    if "rtmr3_history" in payload:
+        raw_history = payload["rtmr3_history"]
+        if not isinstance(raw_history, list) or not 1 <= len(raw_history) <= 512:
+            raise AttestationVerifierError("ATTESTATION_QUOTE_INVALID", {"reason": "invalid_rtmr3_history"})
+        for entry in raw_history:
+            if (
+                not isinstance(entry, dict)
+                or set(entry) != {"digest", "tls_certificate_event"}
+                or not isinstance(entry["digest"], str)
+                or not HEX96_RE.fullmatch(entry["digest"])
+                or type(entry["tls_certificate_event"]) is not bool
+            ):
+                raise AttestationVerifierError("ATTESTATION_QUOTE_INVALID", {"reason": "invalid_rtmr3_history"})
+            history.append((entry["digest"].lower(), entry["tls_certificate_event"]))
+        if history[-1][0] != rtmr3_digest or len({digest for digest, _ in history}) != len(history):
+            raise AttestationVerifierError("ATTESTATION_QUOTE_INVALID", {"reason": "invalid_rtmr3_history"})
+    return AttestationReport(image_measurement=image_measurement, rtmr3_digest=rtmr3_digest, rtmr3_history=tuple(history))
 
 
 def _row_value(row: Any, key: str) -> Any:
