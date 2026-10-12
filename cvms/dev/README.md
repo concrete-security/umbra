@@ -73,6 +73,8 @@ leaves the shared guest MRTD unset for the private provider canary to measure.
 
 Updates use `umbra cvm update <cvm-id>` and preserve provider-managed named volumes. Published images must use immutable digests, never `latest`.
 
+Upgrading the client from Concrete to Umbra does not require a Dev CVM redeploy for the tunnel URL rename. The Umbra CLI retries `/concrete/tunnel` only after an attested 404 on `/umbra/tunnel`, with fresh aTLS verification on the second connection. Existing attestation errors and legacy Security CVM rebind markers remain fail-closed.
+
 Live key rotation, host-level nested-virtualization alternatives, and guaranteed hitless migration are outside v0.
 
 The pinned sandbox tools include Docker Engine/CLI 29.9.0, Buildx 0.38.0+umbra.2, Compose 5.6.0, and GitHub CLI 2.102.0. Their Go dependencies include the upstream security fixes; source archives and binary packages remain checksum-verified. The image smoke test exercises each Docker command and Compose configuration parsing.

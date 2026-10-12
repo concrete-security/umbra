@@ -17,6 +17,7 @@ mod cvm_state;
 mod exit;
 mod fsutil;
 mod help;
+mod migration;
 mod operation;
 mod prompt;
 mod session;
@@ -53,6 +54,10 @@ pub fn run() -> ExitCode {
             };
         }
     };
+    if let Err(message) = migration::prepare(args.config.as_deref()) {
+        style::eprintln_error(&message);
+        return ExitCode::from(ExitStatus::Error);
+    }
     let config = config::ResolvedConfig::resolve(config::ConfigOverrides {
         config_dir: args.config.clone(),
         console_url: args.console_url.clone(),

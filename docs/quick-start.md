@@ -21,6 +21,12 @@ Local prerequisites:
 - A browser for Google login, or device-flow access from another browser
 - VS Code `code` or Cursor `cursor` on `PATH` if you want editor attach
 
+## Migrating from Concrete
+
+Install the Umbra CLI using the installation path below, then run `umbra config show`. When `~/.umbra` is absent or empty, the first command imports the existing `~/.concrete` config, session, aliases, SSH identity mappings, CVM trust policies, and cached workspaces. The old files remain intact. Existing Umbra state takes precedence; to deliberately use the Concrete store instead, pass `--config "$HOME/.concrete"`.
+
+The renamed CLI can connect to CVMs that still expose `/concrete/tunnel`. It retries that URL only after an attested 404 on `/umbra/tunnel` and verifies the new connection fully. The rename alone does not require a CVM update. Existing attestation errors or legacy Security CVM rebind markers still need their documented recovery. The old `concrete update` command is not the Umbra installer.
+
 ## Install
 
 The verified prebuilt path below is intentionally inactive until maintainers prove control of `concrete-security/umbra` and publish the first approved release and provenance. Before that launch gate is satisfied, build the CLI from a reviewed source checkout with `cargo build --release -p umbra-cli` and use `target/release/umbra`; the prebuilt flow will fail closed because no eligible release exists.

@@ -183,6 +183,10 @@ Governed inbound WebSocket filtering is fail-closed. A frame must be selected by
 
 ## Local state
 
+On first use, Umbra atomically imports Concrete's durable state from `~/.concrete` into an absent or empty `~/.umbra`, preserving config, session, aliases, SSH mappings, pinned policies, and cached workspaces. Existing Umbra state wins as a whole. Explicit `--config`, `UMBRA_CONFIG_DIR`, or `CONCRETE_CONFIG_DIR` bypasses import; use `umbra --config "$HOME/.concrete" ...` to deliberately retain the old store. Config environment variables accept the old `CONCRETE_*` names, with `UMBRA_*` taking precedence. Install Umbra through its documented installation path; the Concrete updater is not redirected to renamed release artifacts.
+
+Old CVMs serving `/concrete/tunnel` remain reachable: the tunnel retries that route only after an attested 404 on `/umbra/tunnel`, using a new fully verified connection. This does not bypass attestation, replace trust files, or clear legacy Security CVM rebind markers.
+
 ```text
 ~/.umbra/
   config.toml                     resolved defaults

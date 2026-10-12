@@ -90,6 +90,12 @@ By default the CLI uses `~/.umbra`:
 | `cvms/<cvm-id>.atls-policy.json` | Per-CVM policy bundle written after successful launch/update or lazy policy-bundle fetch. |
 | `update-check.json` | Cached latest-version probe for the passive new-version notice. Safe to delete. |
 
+On first use, Umbra imports Concrete's config, session, aliases, SSH identity mappings, pinned CVM policies, and cached workspaces from `~/.concrete` into an absent or empty `~/.umbra`. The import is atomic and owner-only; the original store remains available. A populated Umbra store wins as a whole. An explicit `--config`, `UMBRA_CONFIG_DIR`, or `CONCRETE_CONFIG_DIR` bypasses the import. Config environment variables also accept the old `CONCRETE_*` names, with `UMBRA_*` taking precedence.
+
+Install the Umbra binary through the documented installation path before its first command; the old Concrete updater is not redirected to Umbra artifacts. If you already have Umbra state and deliberately want to use Concrete's state, run `umbra --config "$HOME/.concrete" ...`.
+
+The tunnel tries `/umbra/tunnel`, then retries `/concrete/tunnel` only on an attested HTTP 404, using a fresh fully verified connection. Old CVMs need no route update for this CLI transition. Attestation and authorization failures still stop the connection; legacy Security CVM rebind markers retain their replacement requirement.
+
 Important overrides:
 
 | Override | Purpose |

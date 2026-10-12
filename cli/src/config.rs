@@ -151,7 +151,7 @@ impl ResolvedConfig {
     pub fn resolve(overrides: ConfigOverrides) -> Self {
         let (config_dir, config_dir_source) = if let Some(value) = overrides.config_dir {
             (value, ConfigSource::Flag)
-        } else if let Some(value) = env::var_os("UMBRA_CONFIG_DIR").map(PathBuf::from) {
+        } else if let Some(value) = config_env_os("UMBRA_CONFIG_DIR").map(PathBuf::from) {
             (value, ConfigSource::Env)
         } else {
             (default_config_dir(), ConfigSource::Default)
@@ -160,7 +160,7 @@ impl ResolvedConfig {
         let unknown_config_keys: Vec<String> = file.unknown.keys().cloned().collect();
         let (console_url, console_url_source) = if let Some(value) = overrides.console_url {
             (Some(value), ConfigSource::Flag)
-        } else if let Some(value) = env::var("UMBRA_CONSOLE_URL")
+        } else if let Some(value) = config_env("UMBRA_CONSOLE_URL")
             .ok()
             .filter(|value| !value.is_empty())
         {
@@ -176,7 +176,7 @@ impl ResolvedConfig {
         // target flag resolved at the command layer (see commands::select_cvm),
         // which sits above this default. So `default_cvm` only carries the env var
         // and config-file layers.
-        let (default_cvm, default_cvm_source) = if let Some(value) = env::var("UMBRA_DEFAULT_CVM")
+        let (default_cvm, default_cvm_source) = if let Some(value) = config_env("UMBRA_DEFAULT_CVM")
             .ok()
             .filter(|value| !value.is_empty())
         {
@@ -188,7 +188,7 @@ impl ResolvedConfig {
         };
 
         let (default_ssh_identity, default_ssh_identity_source) = if let Some(value) =
-            env::var("UMBRA_DEFAULT_SSH_IDENTITY")
+            config_env("UMBRA_DEFAULT_SSH_IDENTITY")
                 .ok()
                 .filter(|value| !value.is_empty())
         {
@@ -201,7 +201,7 @@ impl ResolvedConfig {
 
         let (profiles, profile_source) = if !overrides.profile.is_empty() {
             (overrides.profile.clone(), ConfigSource::Flag)
-        } else if let Some(values) = env::var("UMBRA_DEFAULT_PROFILE")
+        } else if let Some(values) = config_env("UMBRA_DEFAULT_PROFILE")
             .ok()
             .map(|value| split_list(&value))
             .filter(|values| !values.is_empty())
@@ -219,7 +219,7 @@ impl ResolvedConfig {
 
         let (atls_policy, atls_policy_source) = if let Some(value) = overrides.atls_policy {
             (Some(value), ConfigSource::Flag)
-        } else if let Some(value) = env::var_os("UMBRA_ATLS_POLICY").map(PathBuf::from) {
+        } else if let Some(value) = config_env_os("UMBRA_ATLS_POLICY").map(PathBuf::from) {
             (Some(value), ConfigSource::Env)
         } else if let Some(value) = file.atls_policy {
             (Some(value), ConfigSource::File)
@@ -239,7 +239,7 @@ impl ResolvedConfig {
             };
 
         let (default_instance_type, default_instance_type_source) = if let Some(value) =
-            env::var("UMBRA_DEFAULT_INSTANCE_TYPE")
+            config_env("UMBRA_DEFAULT_INSTANCE_TYPE")
                 .ok()
                 .filter(|value| !value.is_empty())
         {
@@ -250,7 +250,7 @@ impl ResolvedConfig {
             (None, ConfigSource::Missing)
         };
         let (default_region, default_region_source) = if let Some(value) =
-            env::var("UMBRA_DEFAULT_REGION")
+            config_env("UMBRA_DEFAULT_REGION")
                 .ok()
                 .filter(|value| !value.is_empty())
         {
@@ -262,7 +262,7 @@ impl ResolvedConfig {
         };
 
         let (oidc_client_id, oidc_client_id_source) = if let Some(value) =
-            env::var("UMBRA_OIDC_CLIENT_ID")
+            config_env("UMBRA_OIDC_CLIENT_ID")
                 .ok()
                 .filter(|value| !value.is_empty())
         {
@@ -273,7 +273,7 @@ impl ResolvedConfig {
             ("umbra-cli-v1".to_string(), ConfigSource::Default)
         };
         let (oidc_provider, oidc_provider_source) = if let Some(value) =
-            env::var("UMBRA_OIDC_PROVIDER")
+            config_env("UMBRA_OIDC_PROVIDER")
                 .ok()
                 .filter(|value| !value.is_empty())
         {
@@ -286,7 +286,7 @@ impl ResolvedConfig {
 
         let (request_id, request_id_source) = if let Some(value) = overrides.request_id {
             (value, ConfigSource::Flag)
-        } else if let Some(value) = env::var("UMBRA_REQUEST_ID")
+        } else if let Some(value) = config_env("UMBRA_REQUEST_ID")
             .ok()
             .filter(|value| !value.is_empty())
         {
@@ -309,7 +309,7 @@ impl ResolvedConfig {
 
         let (output, output_source) = if overrides.json {
             (OutputFormat::Json, ConfigSource::Flag)
-        } else if let Some(value) = env::var("UMBRA_OUTPUT")
+        } else if let Some(value) = config_env("UMBRA_OUTPUT")
             .ok()
             .filter(|value| !value.is_empty())
         {
@@ -343,7 +343,7 @@ impl ResolvedConfig {
                 verbose_log_level(overrides.verbose).to_string(),
                 ConfigSource::Flag,
             )
-        } else if let Some(value) = env::var("UMBRA_LOG_LEVEL")
+        } else if let Some(value) = config_env("UMBRA_LOG_LEVEL")
             .ok()
             .filter(|value| !value.is_empty())
         {
@@ -369,7 +369,7 @@ impl ResolvedConfig {
         };
 
         let (install_base_url, install_base_url_source) = if let Some(value) =
-            env::var("UMBRA_INSTALL_BASE_URL")
+            config_env("UMBRA_INSTALL_BASE_URL")
                 .ok()
                 .filter(|value| !value.is_empty())
         {
@@ -578,8 +578,24 @@ fn default_config_dir() -> PathBuf {
         .join(".umbra")
 }
 
+/// Current environment names win, including an explicitly empty value.
+/// Keep the old prefix during the CLI rename without modifying the environment.
+pub(crate) fn config_env_os(name: &str) -> Option<std::ffi::OsString> {
+    env::var_os(name).or_else(|| {
+        name.strip_prefix("UMBRA_")
+            .and_then(|suffix| env::var_os(format!("CONCRETE_{suffix}")))
+    })
+}
+
+fn config_env(name: &str) -> Result<String, env::VarError> {
+    match config_env_os(name) {
+        Some(value) => value.into_string().map_err(env::VarError::NotUnicode),
+        None => Err(env::VarError::NotPresent),
+    }
+}
+
 fn env_bool(name: &str) -> Option<bool> {
-    env::var(name)
+    config_env(name)
         .ok()
         .filter(|value| !value.is_empty())
         .and_then(|value| parse_bool(&value))

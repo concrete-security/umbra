@@ -4,6 +4,11 @@ Umbra follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and will 
 
 ## Unreleased
 
+### Fixed
+
+- Preserve Concrete CLI configuration, sessions, aliases, SSH identity mappings, pinned CVM policies, and cached workspaces on first use of Umbra. Existing Umbra state takes precedence; Concrete's original state remains intact.
+- Accept legacy `CONCRETE_*` configuration variables and retry the old `/concrete/tunnel` URL after an attested 404, with fresh verification. The transition requires a one-time Umbra installation; `concrete update` remains on its separate release channel.
+
 ## [0.1.0] - 2026-08-19
 
 First public release of `umbra-cli`.

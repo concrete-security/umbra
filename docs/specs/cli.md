@@ -1883,9 +1883,11 @@ The table below is authoritative. For every row, the config key, the environment
 | *(env only)* | `UMBRA_SLSA_VERIFIER` | *(none)* | absolute executable path | absolute-`PATH` lookup for `slsa-verifier` | Select the trusted external verifier used by `umbra update`. A relative override, missing executable, or verifier rejection fails closed before the staged binary is executed or installed. |
 | *(env only)* | `UMBRA_CONFIG_DIR` | `--config` | filesystem path | platform-dependent (§4.3) | Override the config directory. Controls where `config.toml`, the session file, and the aliases file are read and written. |
 
-All environment variables MUST use the `UMBRA_` prefix. Boolean env vars accept `1`/`0`, `true`/`false`, `yes`/`no` (case-insensitive).
+New environment variables MUST use the `UMBRA_` prefix; legacy config aliases are described in §4.2. Boolean env vars accept `1`/`0`, `true`/`false`, `yes`/`no` (case-insensitive).
 
 ### 4.2 Config precedence
+
+For configuration fields and directory overrides in §4.1, the CLI MUST also accept the corresponding `CONCRETE_*` name during the CLI rename. The `UMBRA_*` value wins whenever present, including when empty; otherwise the legacy value participates at the environment layer. This compatibility does not apply to the trusted `UMBRA_SLSA_VERIFIER` override or change installer provenance identities or verifier requirements.
 
 Every per-field value is resolved by this chain, stopping at the first layer that supplies a value:
 
@@ -1924,6 +1926,14 @@ Platform defaults for the config directory:
 | Linux | `$HOME/.umbra`. |
 | macOS | `$HOME/.umbra`. |
 | Windows | `%USERPROFILE%\\.umbra`. |
+
+#### Concrete CLI migration
+
+On first use with the default config directory, the CLI MUST import the durable state from `$HOME/.concrete` when `$HOME/.umbra` is absent or empty. The import includes `config.toml`, `session.json`, `aliases.toml`, `ssh-identities.toml`, and the regular `cvms/*.atls-policy.json` and `cvms/*.state.toml` files. It MUST preserve their bytes, including pinned trust material and cached workspaces, and retain the original Concrete store. Existing absolute paths remain valid because the original store is retained. Generated editor SSH configuration, control sockets, locks, and release-check caches MUST NOT be imported.
+
+The CLI MUST stage the complete import before publishing it atomically, serialize simultaneous imports, create directories with mode `0700` and files with mode `0600`, and reject symlinked or non-regular selected state files and symlinked state directories. A failed import MUST return exit `1` with empty stdout and leave the destination unpublished. A populated Umbra store MUST win as a whole: the CLI MUST NOT merge accounts, defaults, or trust files. `--config`, `UMBRA_CONFIG_DIR`, and the legacy `CONCRETE_CONFIG_DIR` explicitly select a store and bypass automatic import.
+
+The transition installs the Umbra binary through the normal Umbra installation path, then imports state on its first command. It does not redirect the Concrete updater to differently named artifacts or relax the fixed release provenance identity. Operators who already have a populated Umbra store can deliberately reuse the old store with `umbra --config "$HOME/.concrete" ...`.
 
 ### 4.4 File formats
 
@@ -2087,6 +2097,8 @@ A network or API failure during the Console notification MUST NOT cause a non-ze
 ## 6. Transport and remote execution
 
 ### 6.1 aTLS tunnel
+
+The CLI MUST try `/umbra/tunnel` first. Only an HTTP `404` response after successful aTLS verification permits one retry on `/concrete/tunnel` for pre-rename Dev CVMs. The retry MUST use a new TCP/TLS connection and repeat all attestation checks with the same FQDN and policy. No SSH or agent bytes may be sent before a valid WebSocket upgrade. Attestation, certificate, authorization, transport, and malformed upgrade failures MUST NOT trigger the legacy retry. This route compatibility requires no CVM redeploy and does not clear `SECURITY_CVM_REBIND_REQUIRED` or accept changed local trust material.
 
 `umbra tunnel <TARGET>` opens a WebSocket connection to `wss://<fqdn>/umbra/tunnel`, relays bytes between WebSocket frames and stdin/stdout, and verifies that the remote end of the WebSocket lives inside the expected TEE. The Dev CVM's `nginx-cert-manager` (a shade-owned service; see `docs/specs/dev-cvm.md` §2.1) terminates publicly-trusted TLS at `<fqdn>` with a Let's Encrypt certificate; the local TLS endpoint is normal browser-trusted TLS. The WebSocket payload is the underlying TCP stream that the Dev CVM's `dev-tunnel` service relays to (sshd:22 in v0), so SSH and any other protocol run over the tunnel byte-transparently. The verification library is `atlas-rs`; every check below is implemented in that crate.
 
