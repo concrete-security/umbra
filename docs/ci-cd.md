@@ -48,7 +48,7 @@ The CVM publisher receives only the workflow's package-scoped `GITHUB_TOKEN`.
 It publishes tagless GHCR indexes, records their stable runtime subjects and
 attestation-index references, and leaves both guest measurements null. The
 private deployment authority measures the Dev image through its provider canary
-and applies that shared dstack guest MRTD to both components before staging.
+and applies that shared dstack guest MRTD to both components before deployment.
 
 The private deployment repository is authoritative for environment lock files, Workload Identity Federation conditions, service accounts, hosts, databases, provider workspaces, approval gates, session caches, rollback state, and recovery material. It consumes only immutable public artifacts and never rebuilds product source for deployment.
 
@@ -126,12 +126,12 @@ No external issue-tracker integration is required by this repository.
 
 ## Promotion procedure
 
-1. Merge a reviewed, green PR into `dev`.
-2. Open a reviewed `dev` to `main` PR after the public source gates pass for the exact candidate SHA.
+1. Open a PR to `main` from `dev` or a feature branch.
+2. Merge after public source gates, security checks, and maintainer review pass for the exact candidate SHA.
 3. Tag and publish immutable CLI and image artifacts with their SBOMs and provenance.
-4. Update the private deployment repository to pin those exact public identifiers, verify them in staging, then promote the same digests to production under the private deployment gates.
+4. Update the private deployment repository to pin those exact public identifiers, then deploy to production under its production approval gates.
 
-The Concrete migration in PR #18 has an explicitly approved one-time direct production path. Set the repository variable `UMBRA_DIRECT_PRODUCTION_SHA` to the full reviewed PR head SHA. The exception requires PR #18, the same repository, its `codex/concrete-to-umbra-migration` branch, and that exact revision; all other promotions keep the staging requirement. Linux source gates, security checks, maintainer review, and protected release approval still apply. Clear the pin after promotion. A new push invalidates the existing pin.
+Staging verification is optional for now. Promotion does not require an internal staging status or a PR-specific SHA exception. Linux source gates, security checks, maintainer review, and protected release and production approvals still apply. Operators may run the live verification journey in an isolated DEV or STAGING environment before production.
 
 No public-repository workflow deploys a maintainer-operated environment.
 

@@ -108,7 +108,7 @@ same gate on every trusted `dev` push. It uploads a lock-shaped candidate whose
 image fields are runnable manifest refs and whose provenance fields identify the
 validated immutable attestation indexes. Measurements remain null because the
 public publisher has no provider identity; the private deployment authority
-fills them from the Dev canary before staging. The commands below remain the
+fills them from the Dev canary before deployment. The commands below remain the
 self-hosted/operator publication path.
 
 ```text
@@ -270,7 +270,7 @@ curl -fsS "https://${CONSOLE_HOST}/readyz"
 - Use `make up` or the protected deployment workflow for a Console rollout.
 - Use `umbra security-cvm update` and `umbra cvm update <id>` for provider-neutral runtime updates.
 - Use immutable image digests from one tested release set; do not mix arbitrary CLI, Console, or CVM versions.
-- Back up before migration and test the release in staging before production.
+- Back up before migration. Staging verification is optional under the current [promotion procedure](ci-cd.md#promotion-procedure).
 - A database at the exact pre-Umbra head `0032_attn_unreachable` upgrades through the lineage-only compatibility branch to `0033_public_legacy_merge`, then `0034_connect_oauth_schema` installs public Connect schema. Use full Alembic revision IDs, and restore the pre-upgrade backup rather than attempting a downgrade across that merge.
 - Keep process supervision and restart-on-boot configured for the Compose stack.
 - Use `umbra reconcile` for provider drift. Do not edit lifecycle state directly in Postgres.
