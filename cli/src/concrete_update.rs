@@ -10,7 +10,7 @@ use std::{
 };
 
 #[cfg(unix)]
-use std::os::unix::fs::symlink;
+use std::os::unix::fs::{symlink, OpenOptionsExt, PermissionsExt};
 
 use crate::{config, exit::ExitStatus, fsutil, migration, style};
 
@@ -130,7 +130,7 @@ fn prepare(executable: &Path, search_path: Option<std::ffi::OsString>) -> io::Re
 fn install_verifier(directory: &Path) -> io::Result<()> {
     let destination = directory.join(VERIFIER_NAME);
     match fs::symlink_metadata(&destination) {
-        Ok(metadata) if metadata.is_file() && fs::read(&destination)? == VERIFIER => return Ok(()),
+        Ok(metadata) if metadata.is_file() => return check_existing_verifier(&destination),
         Ok(_) => {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
@@ -148,12 +148,36 @@ fn install_verifier(directory: &Path) -> io::Result<()> {
     let _ = fs::remove_file(temporary);
     match published {
         Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
-            if fs::symlink_metadata(&destination)?.is_file() && fs::read(destination)? == VERIFIER {
-                Ok(())
-            } else {
-                Err(err)
-            }
+            check_existing_verifier(&destination)
         }
         result => result,
     }
+}
+
+// Retry after an interrupted update must also restore executable permissions.
+fn check_existing_verifier(path: &Path) -> io::Result<()> {
+    use std::io::Read;
+
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    let mut file = options.open(path)?;
+    let mut bytes = Vec::new();
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "migration verifier must be a regular file",
+        ));
+    }
+    file.read_to_end(&mut bytes)?;
+    if bytes != VERIFIER {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "an existing migration verifier has different contents",
+        ));
+    }
+    #[cfg(unix)]
+    file.set_permissions(fs::Permissions::from_mode(0o755))?;
+    Ok(())
 }

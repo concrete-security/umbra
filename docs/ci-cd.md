@@ -10,7 +10,7 @@ feature branch --PR--> dev --reviewed promotion--> main --tag/release--> immutab
 
 | Stage | Trigger | Workflow | Purpose |
 | --- | --- | --- | --- |
-| PR gate | PR to `dev` | `.github/workflows/pr-gate.yml` | Run `make check` and `make test` without live credentials. |
+| PR gate | PR to `dev` or `main` | `.github/workflows/pr-gate.yml` | Run `make check`, `make test`, and the Linux Concrete-to-Umbra migration without live credentials. |
 | Security checks | repository security triggers | `.github/workflows/security.yml` | Run public dependency, source, and artifact security gates. |
 | CVM image candidate | push to `dev`; manual after promotion | `.github/workflows/publish-cvm-images.yml` | Reproduce and publish digest-only Dev/Security images with SBOM and provenance, then emit a lock-shaped candidate. |
 | CLI release | manual | `.github/workflows/publish-cli.yml` | Package and publish one reviewed version and its installer tree. |
@@ -22,6 +22,8 @@ All third-party Actions references use full commit SHAs except the SLSA generato
 ## Contributor boundary
 
 Pull-request jobs run on GitHub-hosted runners with read-only repository permissions and no deployment secrets. Fork pull requests must never receive cloud federation, registry publishing, OIDC clients, provider credentials, production environments, or caches containing private material.
+
+The Linux migration job installs published Concrete 0.4.1, builds the bridge with its pinned verifier, and exercises the real updater against loopback fixtures. It checks state preservation, symlink installs, retries, checksum and command collisions, and rejection of unsigned future updates. It uses no live CVMs or deployment credentials.
 
 The local contributor contract is:
 

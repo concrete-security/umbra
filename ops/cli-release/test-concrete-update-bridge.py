@@ -19,7 +19,7 @@ def run(command: list[str], environment: dict[str, str]) -> subprocess.Completed
     return subprocess.run(command, env=environment, capture_output=True, text=True, timeout=60)
 
 
-def check(concrete: Path, bridge: Path, bridge_version: str, corrupt_checksum: bool = False, shim: bool = False, conflict: bool = False, saved_origin: bool = True) -> None:
+def check(concrete: Path, bridge: Path, bridge_version: str, corrupt_checksum: bool = False, shim: bool = False, conflict: bool = False, saved_origin: bool = True, retry: bool = False) -> None:
     with tempfile.TemporaryDirectory(prefix="umbra-update-bridge-") as name:
         root = Path(name)
         binaries = root / "bin"
@@ -116,6 +116,13 @@ def check(concrete: Path, bridge: Path, bridge_version: str, corrupt_checksum: b
                 imported = tomllib.loads((root / ".umbra/config.toml").read_text())
                 assert imported["install_base_url"].startswith("https://")
             assert (binaries / ".umbra-slsa-verifier-v2.7.1").is_file()
+            if retry:
+                (binaries / ".umbra-slsa-verifier-v2.7.1").chmod(0o600)
+                shutil.copyfile(concrete, old.resolve())
+                repeated = run([str(old), "--json", "update"], environment)
+                assert repeated.returncode == 0, repeated.stderr
+                assert hashlib.sha256(old.read_bytes()).hexdigest() == digest
+                assert (root / ".umbra/session.json").read_text() == state["session.json"]
             verifier = run([str(binaries / ".umbra-slsa-verifier-v2.7.1"), "version"], environment)
             assert verifier.returncode == 0, verifier.stderr
             future = root / "releases/umbra-cli/0.1.1" / target
@@ -142,6 +149,7 @@ def main() -> None:
     args = parser.parse_args()
     check(args.concrete.resolve(), args.bridge.resolve(), args.bridge_version)
     check(args.concrete.resolve(), args.bridge.resolve(), args.bridge_version, shim=True)
+    check(args.concrete.resolve(), args.bridge.resolve(), args.bridge_version, retry=True)
     check(args.concrete.resolve(), args.bridge.resolve(), args.bridge_version, saved_origin=False)
     check(args.concrete.resolve(), args.bridge.resolve(), args.bridge_version, corrupt_checksum=True)
     check(args.concrete.resolve(), args.bridge.resolve(), args.bridge_version, conflict=True)
