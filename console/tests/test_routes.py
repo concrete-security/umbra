@@ -9,7 +9,7 @@ import pytest
 import yaml
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
-from fastapi import HTTPException
+from fastapi import HTTPException, Response
 from pydantic import ValidationError
 
 from umbra_console import attestation
@@ -267,6 +267,71 @@ def test_apply_provider_cvm_lifecycle_action_wraps_phala_error(monkeypatch) -> N
     assert exc.value.status_code == 502
     assert exc.value.detail["error"]["code"] == "UPSTREAM_ERROR"
     assert exc.value.detail["error"]["details"] == {"adapter": "cvm_provider", "reason": "cli_failed"}
+
+
+@pytest.mark.parametrize(
+    "action,state",
+    [("start", "RUNNING"), ("stop", "STOPPED")],
+    ids=["already_running", "already_stopped"],
+)
+def test_cvm_idempotent_lifecycle_etag_success(monkeypatch, action, state) -> None:
+    """An already-applied start or stop returns the current ETag to the CLI."""
+    user = SimpleNamespace(
+        id=UUID("00000000-0000-4000-8000-000000000020"),
+        entity_id=UUID("00000000-0000-4000-8000-000000000002"),
+        permissions=[],
+    )
+    row = cvm_row(
+        state=state,
+        owner_id=user.id,
+        owner_email="dev@example.com",
+        entity_id=user.entity_id,
+        instance_type="tdx.small",
+        region="test-region",
+        disk_size_gb=40,
+        fqdn="cvm-test.dev.example.com",
+        expected_image_measurement="a" * 96,
+        image_measurement=None,
+        rtmr3_digest=None,
+        attestation_verified_at=None,
+        error_reason=None,
+        created_at=datetime(2026, 5, 15, 18, 40, tzinfo=timezone.utc),
+    )
+
+    class LifecycleConn:
+        def transaction(self):
+            return AsyncContext()
+
+        async def fetchrow(self, query, *args):
+            assert "FOR UPDATE" in query
+            assert args == (row["id"], user.entity_id)
+            return row
+
+        async def fetch(self, query, *args):
+            assert "JOIN users owner" in query
+            assert args == (row["id"],)
+            return [row]
+
+    async def unexpected_mutation(*args, **kwargs):
+        raise AssertionError("idempotent lifecycle action must not mutate")
+
+    monkeypatch.setattr(routes_module, "apply_provider_cvm_lifecycle_action", unexpected_mutation)
+    monkeypatch.setattr(routes_module, "insert_audit_event", unexpected_mutation)
+    response = Response()
+    handler = routes_module.start_cvm if action == "start" else routes_module.stop_cvm
+
+    asyncio.run(
+        handler(
+            cvm_id=row["id"],
+            response=response,
+            if_match=cvm_etag(row),
+            idempotency_key=None,
+            current_user=user,
+            pool=FakePool(LifecycleConn()),
+        )
+    )
+
+    assert response.headers.get("ETag") == cvm_etag(row)
 
 
 def test_security_cvm_provider_app_id_reads_phala_metadata() -> None:
