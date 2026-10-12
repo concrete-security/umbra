@@ -579,7 +579,7 @@ fn resolve_slsa_verifier_from(
     })
 }
 
-fn executable_file(path: &Path) -> bool {
+pub(crate) fn executable_file(path: &Path) -> bool {
     let Ok(metadata) = fs::metadata(path) else {
         return false;
     };

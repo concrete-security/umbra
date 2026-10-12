@@ -23,7 +23,7 @@ All third-party Actions references use full commit SHAs except the SLSA generato
 
 Pull-request jobs run on GitHub-hosted runners with read-only repository permissions and no deployment secrets. Fork pull requests must never receive cloud federation, registry publishing, OIDC clients, provider credentials, production environments, or caches containing private material.
 
-The Linux migration job installs published Concrete 0.4.1, builds the bridge with its pinned verifier, and exercises the real updater against loopback fixtures. It checks state preservation, symlink installs, retries, checksum and command collisions, and rejection of unsigned future updates. It uses no live CVMs or deployment credentials.
+The Linux migration job installs published Concrete 0.4.1, builds the bridge with its pinned verifier, and exercises the real updater against loopback fixtures. It checks state preservation, symlink and shared installs, retries, checksum and PATH command collisions, and rejection of unsigned future updates. It uses no live CVMs or deployment credentials.
 
 The local contributor contract is:
 

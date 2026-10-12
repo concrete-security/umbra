@@ -154,4 +154,5 @@ jobs:
         run: |
           python3 ops/cli-release/test-concrete-update-bridge.py \
             --concrete "${RUNNER_TEMP}/legacy-concrete/bin/concrete" \
-            --bridge target/debug/concrete-update-bridge
+            --bridge target/debug/concrete-update-bridge \
+            --shared-user nobody

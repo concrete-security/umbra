@@ -62,14 +62,14 @@ fn prepare(executable: &Path, search_path: Option<std::ffi::OsString>) -> io::Re
     let concrete = fs::canonicalize(concrete)?;
     // The old updater resolves symlinks before replacing the executable. Find
     // the PATH-visible Concrete shim so the new name is visible there too.
-    let public_directory = search_path
-        .and_then(|path| {
-            env::split_paths(&path)
-                .filter(|entry| entry.is_absolute())
-                .find(|entry| {
-                    fs::canonicalize(entry.join("concrete")).ok().as_ref() == Some(&concrete)
-                })
-        })
+    let search_directories = search_path
+        .map(|path| env::split_paths(&path).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let public_directory = search_directories
+        .iter()
+        .filter(|entry| entry.is_absolute())
+        .find(|entry| fs::canonicalize(entry.join("concrete")).ok().as_ref() == Some(&concrete))
+        .cloned()
         .unwrap_or_else(|| directory.to_path_buf());
     let umbra = public_directory.join("umbra");
     let alias_present = match fs::symlink_metadata(&umbra) {
@@ -88,6 +88,20 @@ fn prepare(executable: &Path, search_path: Option<std::ffi::OsString>) -> io::Re
         Err(err) if err.kind() == io::ErrorKind::NotFound => false,
         Err(err) => return Err(err),
     };
+    // An alias in this directory must not hide another installation on PATH
+    // or leave an earlier, unrelated Umbra command selected by the shell.
+    for entry in &search_directories {
+        let candidate = entry.join("umbra");
+        if candidate != umbra
+            && crate::commands::update::executable_file(&candidate)
+            && fs::canonicalize(&candidate).ok().as_ref() != Some(&concrete)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "an existing Umbra command is preserved; update that installation separately",
+            ));
+        }
+    }
     install_verifier(&public_directory)?;
     migration::prepare(None).map_err(io::Error::other)?;
     let origin = url::Url::parse(INSTALL_ORIGIN).map_err(io::Error::other)?;
@@ -178,6 +192,8 @@ fn check_existing_verifier(path: &Path) -> io::Result<()> {
         ));
     }
     #[cfg(unix)]
-    file.set_permissions(fs::Permissions::from_mode(0o755))?;
+    if file.metadata()?.permissions().mode() & 0o777 != 0o755 {
+        file.set_permissions(fs::Permissions::from_mode(0o755))?;
+    }
     Ok(())
 }

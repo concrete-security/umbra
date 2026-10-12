@@ -19,7 +19,7 @@ def run(command: list[str], environment: dict[str, str]) -> subprocess.Completed
     return subprocess.run(command, env=environment, capture_output=True, text=True, timeout=60)
 
 
-def check(concrete: Path, bridge: Path, bridge_version: str, corrupt_checksum: bool = False, shim: bool = False, conflict: bool = False, saved_origin: bool = True, retry: bool = False) -> None:
+def check(concrete: Path, bridge: Path, bridge_version: str, corrupt_checksum: bool = False, shim: bool = False, conflict: bool = False, saved_origin: bool = True, retry: bool = False, collision: str | None = None, shared_user: str | None = None) -> None:
     with tempfile.TemporaryDirectory(prefix="umbra-update-bridge-") as name:
         root = Path(name)
         binaries = root / "bin"
@@ -37,7 +37,14 @@ def check(concrete: Path, bridge: Path, bridge_version: str, corrupt_checksum: b
             key: value for key, value in os.environ.items()
             if not key.startswith(("UMBRA_", "CONCRETE_"))
         }
-        environment.update(HOME=str(root), PATH=str(binaries) + os.pathsep + environment["PATH"])
+        environment.update(HOME=str(root), PATH=str(binaries))
+        if collision:
+            other = root / "other-bin"
+            other.mkdir()
+            (other / "umbra").write_text("preserve PATH installation")
+            (other / "umbra").chmod(0o755)
+            ordered = [other, binaries] if collision == "earlier" else [binaries, other]
+            environment["PATH"] = os.pathsep.join(map(str, ordered))
         environment["CONCRETE_NO_UPDATE_CHECK"] = "1"
         environment["UMBRA_NO_UPDATE_CHECK"] = "1"
         metadata = run([str(old), "--json", "version"], environment)
@@ -86,6 +93,14 @@ def check(concrete: Path, bridge: Path, bridge_version: str, corrupt_checksum: b
                 (legacy / filename).write_text(contents)
             original = hashlib.sha256(old.read_bytes()).hexdigest()
             update = run([str(old), "--json", "update"], environment)
+            if collision:
+                assert update.returncode != 0, "unrelated PATH command was shadowed"
+                assert hashlib.sha256(old.read_bytes()).hexdigest() == original
+                assert (other / "umbra").read_text() == "preserve PATH installation"
+                assert not (binaries / "umbra").exists()
+                assert not (root / ".umbra").exists()
+                print("Existing Umbra command elsewhere on PATH is preserved.")
+                return
             if conflict:
                 assert update.returncode != 0, "existing Umbra command was replaced"
                 assert hashlib.sha256(old.read_bytes()).hexdigest() == original
@@ -125,6 +140,28 @@ def check(concrete: Path, bridge: Path, bridge_version: str, corrupt_checksum: b
                 assert (root / ".umbra/session.json").read_text() == state["session.json"]
             verifier = run([str(binaries / ".umbra-slsa-verifier-v2.7.1"), "version"], environment)
             assert verifier.returncode == 0, verifier.stderr
+            if shared_user:
+                sudo = shutil.which("sudo")
+                assert sudo is not None, "shared-user qualification requires sudo"
+                root.chmod(0o755)
+                shared_home = root / "other-home"
+                shared_home.mkdir()
+                shared_home.chmod(0o777)
+                try:
+                    shared = run([
+                        sudo, "-n", "-u", shared_user, "--", "/usr/bin/env",
+                        "HOME=" + str(shared_home), "PATH=" + str(binaries),
+                        "UMBRA_NO_UPDATE_CHECK=1", "CONCRETE_NO_UPDATE_CHECK=1",
+                        str(old), "--json", "config", "show",
+                    ], environment)
+                    assert shared.returncode == 0, shared.stderr
+                    print("Shared installation runs Concrete commands as a non-owner user.")
+                finally:
+                    cleanup = run([
+                        sudo, "-n", "-u", shared_user, "--", "/bin/rm", "-rf", "--",
+                        str(shared_home / ".umbra"),
+                    ], environment)
+                    assert cleanup.returncode == 0, cleanup.stderr
             future = root / "releases/umbra-cli/0.1.1" / target
             future.mkdir(parents=True)
             (future / "umbra").write_bytes(bridge.read_bytes())
@@ -146,13 +183,16 @@ def main() -> None:
     parser.add_argument("--concrete", type=Path, required=True)
     parser.add_argument("--bridge", type=Path, required=True)
     parser.add_argument("--bridge-version", default="1.0.0")
+    parser.add_argument("--shared-user", help="optional Linux qualification user, invoked through sudo")
     args = parser.parse_args()
-    check(args.concrete.resolve(), args.bridge.resolve(), args.bridge_version)
+    check(args.concrete.resolve(), args.bridge.resolve(), args.bridge_version, shared_user=args.shared_user)
     check(args.concrete.resolve(), args.bridge.resolve(), args.bridge_version, shim=True)
     check(args.concrete.resolve(), args.bridge.resolve(), args.bridge_version, retry=True)
     check(args.concrete.resolve(), args.bridge.resolve(), args.bridge_version, saved_origin=False)
     check(args.concrete.resolve(), args.bridge.resolve(), args.bridge_version, corrupt_checksum=True)
     check(args.concrete.resolve(), args.bridge.resolve(), args.bridge_version, conflict=True)
+    check(args.concrete.resolve(), args.bridge.resolve(), args.bridge_version, collision="earlier")
+    check(args.concrete.resolve(), args.bridge.resolve(), args.bridge_version, collision="later")
 
 
 if __name__ == "__main__":
