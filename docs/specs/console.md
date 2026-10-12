@@ -1081,7 +1081,7 @@ Update a Dev CVM deployment in place. Async: returns an `<Operation>`; the calle
 Synchronous lifecycle actions; Phala start / stop is bounded (~5 s).
 
 - **Auth.** `JWT`. **Permission.** implicit if the caller is the CVM owner; otherwise `CVM_MANAGE`. **Idempotency-Key.** `optional`. **If-Match.** `optional`.
-- **Response body.** `200 <CVM>` reflecting the new `state`.
+- **Response body.** `200 <CVM>` reflecting the current `state`, with its `ETag` header. If the CVM is already in the requested state, return the same resource and ETag without a provider call, state write, or audit row.
 - **Errors.** `404` (§6.4). `409 CONFLICT` (`details.state=<current state>`) if the action is illegal in the current state (§8). `502 UPSTREAM_ERROR` if Phala fails.
 - **Side effects.** `CVM_STARTED` / `CVM_STOPPED` audit row.
 
