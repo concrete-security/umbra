@@ -3,15 +3,20 @@
 //!
 //! Contract (must match AtlasVerifierClient):
 //!   stdin : {"kind":"dev_cvm"|"security_cvm","fqdn":"<host>","policy":{...}}
-//!   exit 0: {"image_measurement":"<hex>","rtmr3_digest":"<hex>"}
+//!   exit 0: {"image_measurement":"<hex>","rtmr3_digest":"<hex>","rtmr3_history":[...]}
 //!   exit 1: {"error":{"code":"<ATTESTATION_*>","details":{...}}}
 //!
 //! It connects to <fqdn>:443, runs aTLS via atlas-rs (which POSTs /tdx_quote, binds the
 //! quote to the TLS session via EKM, and verifies the policy), then returns mr_td and
 //! rt_mr3 read straight from the TD report inside the quote. `policy.rtmr3_binding` is
 //! passed by the Console but not consumed here: the Console persists rtmr3_digest and
-//! does drift detection on it. atlas is consumed as a published dependency, never patched.
-use atlas_rs::{atls_connect, AtlsVerificationError, Policy, Report};
+//! does drift detection on it. `rtmr3_history` contains replay states and validated
+//! certificate classifications from the same quote response Atlas consumed. Event
+//! payloads never leave this process. Atlas remains an unpatched published dependency.
+mod evidence;
+
+use atlas_rs::{connect::tls_handshake, AtlsVerificationError, AtlsVerifier, Policy, Report};
+use evidence::{replay_evidence, RecordingStream};
 use rustls::crypto::aws_lc_rs::default_provider;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -98,11 +103,20 @@ async fn run() -> Result<String, CliError> {
     let tcp = TcpStream::connect((fqdn, 443)).await.map_err(|exc| {
         CliError::new(ATTESTATION_FETCH_FAILED, "tcp_connect_failed").message(exc.to_string())
     })?;
-    let (_tls, report) = atls_connect(tcp, fqdn, policy, None)
+    // Capture the plaintext response consumed by Atlas, on the same EKM-bound
+    // session. Never fetch separate, unauthenticated event-log evidence.
+    let (tls, peer_cert, ekm) = tls_handshake(tcp, fqdn, None)
+        .await
+        .map_err(CliError::from_atlas)?;
+    let mut stream = RecordingStream::new(tls);
+    let verifier = policy.into_verifier().map_err(CliError::from_atlas)?;
+    let report = verifier
+        .verify(&mut stream, &peer_cert, &ekm, fqdn)
         .await
         .map_err(CliError::from_atlas)?;
 
     let (image_measurement, rtmr3_digest) = tdx_measurements(&report)?;
+    let history = replay_evidence(stream.response(), &rtmr3_digest, &peer_cert)?;
     if let Some(expected) = expected_image_measurement {
         if image_measurement != expected {
             return Err(
@@ -116,6 +130,7 @@ async fn run() -> Result<String, CliError> {
     Ok(json!({
         "image_measurement": image_measurement,
         "rtmr3_digest": rtmr3_digest,
+        "rtmr3_history": history,
     })
     .to_string())
 }
