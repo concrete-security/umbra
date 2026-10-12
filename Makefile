@@ -42,7 +42,7 @@ check:
 	uv lock --check --project cvms/security
 	$(UMBRA_PINNED_PYTHON) -m py_compile tools/check-cargo-keywords.py tools/check-dco.py tools/check-github-actions.py tools/generate-cargo-sbom.py tools/test_check_cargo_keywords.py tools/test_check_github_actions.py
 	$(UMBRA_PINNED_PYTHON) -m py_compile tools/generate-slsa-verifier-sbom.py ops/cli-release/prepare-concrete-update-channel.py ops/cli-release/test-concrete-update-bridge.py
-	uv run --locked --project console python -m pytest -q tools/test_check_cargo_keywords.py tools/test_check_github_actions.py tools/test_concrete_update_release.py
+	uv run --locked --project console python -m pytest -q tools/test_check_cargo_keywords.py tools/test_check_github_actions.py tools/test_concrete_update_release.py tools/test_internal_staging_gate.py
 	uv run --locked --project console python tools/check-github-actions.py
 	cd console && npm ci --ignore-scripts --no-audit --no-fund
 	@css_tmp="$$(mktemp)"; \

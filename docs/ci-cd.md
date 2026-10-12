@@ -131,6 +131,8 @@ No external issue-tracker integration is required by this repository.
 3. Tag and publish immutable CLI and image artifacts with their SBOMs and provenance.
 4. Update the private deployment repository to pin those exact public identifiers, verify them in staging, then promote the same digests to production under the private deployment gates.
 
+The Concrete migration in PR #18 has an explicitly approved one-time direct production path. Set the repository variable `UMBRA_DIRECT_PRODUCTION_SHA` to the full reviewed PR head SHA. The exception requires PR #18, the same repository, its `codex/concrete-to-umbra-migration` branch, and that exact revision; all other promotions keep the staging requirement. Linux source gates, security checks, maintainer review, and protected release approval still apply. Clear the pin after promotion. A new push invalidates the existing pin.
+
 No public-repository workflow deploys a maintainer-operated environment.
 
 ## One-time CLI 0.1.0 draft recovery
