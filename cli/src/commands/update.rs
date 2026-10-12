@@ -559,7 +559,12 @@ fn resolve_slsa_verifier_from(
         search_path.and_then(|path| {
             env::split_paths(&path)
                 .filter(|dir| dir.is_absolute())
-                .map(|dir| dir.join("slsa-verifier"))
+                .flat_map(|dir| {
+                    [
+                        dir.join("slsa-verifier"),
+                        dir.join(".umbra-slsa-verifier-v2.7.1"),
+                    ]
+                })
                 .find(|candidate| executable_file(candidate))
         })
     };
@@ -574,7 +579,7 @@ fn resolve_slsa_verifier_from(
     })
 }
 
-fn executable_file(path: &Path) -> bool {
+pub(crate) fn executable_file(path: &Path) -> bool {
     let Ok(metadata) = fs::metadata(path) else {
         return false;
     };
@@ -1226,6 +1231,25 @@ set -eu
 
         assert_eq!(resolved, verifier);
         fs::remove_dir_all(&dir).expect("test dir removed");
+    }
+
+    /// Bootstrap and bridge verifier names resolve only from an absolute PATH directory.
+    #[cfg(unix)]
+    #[rstest]
+    #[case::bootstrap("slsa-verifier")]
+    #[case::migration_bridge(".umbra-slsa-verifier-v2.7.1")]
+    fn resolve_slsa_verifier_absolute_search_success(#[case] filename: &str) {
+        let dir = temp_config_dir();
+        fs::create_dir_all(&dir).expect("test dir created");
+        let original = fake_verifier(&dir);
+        let verifier = dir.join(filename);
+        if original != verifier {
+            fs::rename(original, &verifier).expect("bridge verifier name");
+        }
+        let resolved = resolve_slsa_verifier_from(None, Some(dir.clone().into_os_string()))
+            .expect("absolute PATH verifier accepted");
+        assert_eq!(resolved, verifier);
+        fs::remove_dir_all(&dir).expect("cleanup");
     }
 
     /// Transport rule for the release channel: https anywhere, plaintext only

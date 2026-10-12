@@ -35,6 +35,12 @@ server {
         add_header X-Content-Type-Options nosniff;
     }
 
+    location /releases/concrete-cli/ {
+        alias /opt/umbra/cli-releases/concrete-updates/;
+        add_header Cache-Control "public, max-age=300";
+        add_header X-Content-Type-Options nosniff;
+    }
+
     location / {
         default_type text/plain;
         return 404 "not found\n";

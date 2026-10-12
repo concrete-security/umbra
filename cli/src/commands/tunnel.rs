@@ -1,5 +1,6 @@
 use std::{
     fs,
+    future::Future,
     path::{Path, PathBuf},
 };
 
@@ -20,10 +21,12 @@ use crate::{
 const WEBSOCKET_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 const MAX_HANDSHAKE_BYTES: usize = 16 * 1024;
 const RELAY_CHUNK_BYTES: usize = 16 * 1024;
+const TUNNEL_PATHS: [&str; 2] = ["/umbra/tunnel", "/concrete/tunnel"];
 
 enum TunnelError {
     Atls { host: String, detail: String },
     Unreachable { host: String, detail: String },
+    RouteMissing(String),
     Other(String),
 }
 
@@ -40,7 +43,7 @@ impl TunnelError {
                  [info] Check `umbra cvm list`: if it is RUNNING, wait a few seconds and retry; otherwise start it with `umbra cvm start <cvm-id>`.\n\
                  [info] detail: {detail}"
             ),
-            Self::Other(message) => message.clone(),
+            Self::Other(message) | Self::RouteMissing(message) => message.clone(),
         }
     }
 }
@@ -153,17 +156,43 @@ fn load_policy(path: &Path) -> Result<Policy, String> {
 }
 
 async fn run_tunnel(host: String, policy: Policy) -> Result<(), TunnelError> {
-    let tcp = TcpStream::connect((host.as_str(), 443))
-        .await
-        .map_err(|err| {
-            TunnelError::Other(format!("[error] failed to connect to {host}:443: {err}"))
-        })?;
-    let (mut tls_stream, _report) = atlas_rs::atls_connect(tcp, &host, policy, None)
-        .await
-        .map_err(|err| classify_atls_error(host.clone(), err))?;
-    websocket_handshake(&mut tls_stream, &host).await?;
+    let tls_stream = connect_websocket(&host, || {
+        let policy = policy.clone();
+        let host = &host;
+        async move {
+            let tcp = TcpStream::connect((host.as_str(), 443))
+                .await
+                .map_err(|err| {
+                    TunnelError::Other(format!("[error] failed to connect to {host}:443: {err}"))
+                })?;
+            let (stream, _report) = atlas_rs::atls_connect(tcp, host, policy, None)
+                .await
+                .map_err(|err| classify_atls_error(host.clone(), err))?;
+            Ok(stream)
+        }
+    })
+    .await?;
     let (reader, writer) = io::split(tls_stream);
     relay_websocket(reader, writer).await.map_err(Into::into)
+}
+
+async fn connect_websocket<S, F, Fut>(host: &str, mut connect: F) -> Result<S, TunnelError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<S, TunnelError>>,
+{
+    for (index, path) in TUNNEL_PATHS.iter().enumerate() {
+        // Every attempt uses a fresh, fully attested connection. A missing
+        // route does not authorize reuse of TLS or a weaker verification policy.
+        let mut stream = connect().await?;
+        match websocket_handshake(&mut stream, host, path).await {
+            Ok(()) => return Ok(stream),
+            Err(TunnelError::RouteMissing(_)) if index == 0 => continue,
+            Err(err) => return Err(err),
+        }
+    }
+    unreachable!("the final route attempt always returns")
 }
 
 impl From<String> for TunnelError {
@@ -310,7 +339,7 @@ fn is_app_compose_hash_mismatch(detail: &str) -> bool {
     detail.contains("app compose hash mismatch") || detail.contains("app_compose_hash_mismatch")
 }
 
-async fn websocket_handshake<S>(stream: &mut S, host: &str) -> Result<(), String>
+async fn websocket_handshake<S>(stream: &mut S, host: &str, path: &str) -> Result<(), TunnelError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -319,7 +348,7 @@ where
         .map_err(|err| format!("[error] failed to generate WebSocket nonce: {err}"))?;
     let key = BASE64.encode(nonce);
     let request = format!(
-        "GET /umbra/tunnel HTTP/1.1\r\n\
+        "GET {path} HTTP/1.1\r\n\
          Host: {host}\r\n\
          Upgrade: websocket\r\n\
          Connection: Upgrade\r\n\
@@ -337,7 +366,16 @@ where
         .map_err(|err| format!("[error] failed to flush WebSocket handshake: {err}"))?;
 
     let response = read_http_headers(stream).await?;
-    validate_websocket_response(&response, &key)
+    let status = response
+        .split(|byte| *byte == b'\r')
+        .next()
+        .unwrap_or_default();
+    if status.starts_with(b"HTTP/1.1 404 ") || status == b"HTTP/1.1 404" {
+        return Err(TunnelError::RouteMissing(format!(
+            "[error] WebSocket tunnel route {path} was not found"
+        )));
+    }
+    validate_websocket_response(&response, &key).map_err(Into::into)
 }
 
 async fn read_http_headers<S>(stream: &mut S) -> Result<Vec<u8>, String>
@@ -540,6 +578,123 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use rstest::rstest;
+
+    fn serve_handshake(
+        status: u16,
+        path: &'static str,
+    ) -> (io::DuplexStream, tokio::task::JoinHandle<()>) {
+        let (client, mut server) = io::duplex(2048);
+        let task = tokio::spawn(async move {
+            let headers = read_http_headers(&mut server).await.unwrap();
+            let text = String::from_utf8(headers).unwrap();
+            assert!(text.starts_with(&format!("GET {path} HTTP/1.1\r\n")));
+            let reply = if status == 101 {
+                let key = text
+                    .lines()
+                    .find_map(|line| line.strip_prefix("Sec-WebSocket-Key: "))
+                    .unwrap();
+                format!("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n\r\n", websocket_accept(key))
+            } else if status == 0 {
+                "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: invalid\r\n\r\n".to_string()
+            } else {
+                format!(
+                    "HTTP/1.1 {status} Rejected\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+            };
+            server.write_all(reply.as_bytes()).await.unwrap();
+            if status == 101 {
+                server.write_all(b"\x82\x0eSSH-2.0-test\r\n").await.unwrap();
+            }
+        });
+        (client, task)
+    }
+
+    /// Both current and legacy CVMs deliver SSH bytes; only a 404 opens a second connection.
+    #[rstest]
+    #[case::current(false)]
+    #[case::legacy(true)]
+    #[tokio::test]
+    async fn compatible_tunnel_route_success(#[case] legacy: bool) {
+        let mut calls = 0;
+        let mut servers = Vec::new();
+        let result = connect_websocket("cvm.example.com", || {
+            calls += 1;
+            let status = if legacy && calls == 1 { 404 } else { 101 };
+            let path = if calls == 1 {
+                "/umbra/tunnel"
+            } else {
+                "/concrete/tunnel"
+            };
+            let (client, task) = serve_handshake(status, path);
+            servers.push(task);
+            std::future::ready(Ok(client))
+        })
+        .await;
+        for server in servers {
+            server.await.unwrap();
+        }
+        let mut stream = result.unwrap_or_else(|err| panic!("{}", err.message()));
+        assert_eq!(
+            read_server_frame(&mut stream).await.unwrap().payload,
+            b"SSH-2.0-test\r\n"
+        );
+        assert_eq!(calls, if legacy { 2 } else { 1 });
+    }
+
+    /// Authentication failures and malformed upgrades cannot trigger the legacy route.
+    #[rstest]
+    #[case::unauthorized(401)]
+    #[case::forbidden(403)]
+    #[case::server_error(500)]
+    #[case::invalid_upgrade(0)]
+    #[tokio::test]
+    async fn tunnel_upgrade_does_not_retry_failure(#[case] status: u16) {
+        let mut calls = 0;
+        let mut servers = Vec::new();
+        let result = connect_websocket("cvm.example.com", || {
+            calls += 1;
+            let (client, task) = serve_handshake(status, "/umbra/tunnel");
+            servers.push(task);
+            std::future::ready(Ok(client))
+        })
+        .await;
+        for server in servers {
+            server.await.unwrap();
+        }
+        assert!(result.is_err());
+        assert_eq!(calls, 1);
+    }
+
+    /// A verification failure on either route stops before sending a WebSocket request there.
+    #[rstest]
+    #[case::current(false)]
+    #[case::legacy(true)]
+    #[tokio::test]
+    async fn tunnel_attestation_does_not_retry_failure(#[case] legacy: bool) {
+        let mut calls = 0;
+        let mut servers = Vec::new();
+        let result = connect_websocket("cvm.example.com", || {
+            calls += 1;
+            if legacy && calls == 1 {
+                let (client, task) = serve_handshake(404, "/umbra/tunnel");
+                servers.push(task);
+                std::future::ready(Ok(client))
+            } else {
+                std::future::ready(Err(TunnelError::Atls {
+                    host: "cvm.example.com".to_string(),
+                    detail: "test policy mismatch".to_string(),
+                }))
+            }
+        })
+        .await;
+        for server in servers {
+            server.await.unwrap();
+        }
+        assert!(matches!(result, Err(TunnelError::Atls { .. })));
+        assert_eq!(calls, if legacy { 2 } else { 1 });
+    }
 
     #[test]
     fn websocket_accept_matches_rfc_example() {

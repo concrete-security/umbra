@@ -199,6 +199,32 @@ jobs:
           echo "max glibc symbol required: ${max} (baseline ${baseline})"
           test "$(printf '%s\n%s\n' "$max" "$baseline" | sort -V | tail -1)" = "$baseline"
           docker run --rm -v "${PWD}/${bin}:/umbra:ro" almalinux:8 /umbra --version
+      - name: Build legacy update bridge with pinned verifier
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p bridge-tools
+          env GOPRIVATE= GONOSUMDB= GONOPROXY= \
+            GOPROXY=https://proxy.golang.org GOSUMDB=sum.golang.org CGO_ENABLED=0 \
+            GOBIN="${PWD}/bridge-tools" \
+            go install github.com/slsa-framework/slsa-verifier/v2/cli/slsa-verifier@v2.7.1
+          export UMBRA_BRIDGE_VERIFIER_PATH="${PWD}/bridge-tools/slsa-verifier"
+          export UMBRA_BRIDGE_INSTALL_BASE_URL="${{ needs.metadata.outputs.install_base_url }}"
+          if [ -n "${{ matrix.glibc }}" ]; then
+            cargo zigbuild --release --locked -p umbra-cli --features concrete-update-bridge \
+              --bin concrete-update-bridge --target "${{ matrix.target }}.${{ matrix.glibc }}"
+          else
+            cargo build --release --locked -p umbra-cli --features concrete-update-bridge \
+              --bin concrete-update-bridge --target "${{ matrix.target }}"
+          fi
+          python3 tools/generate-slsa-verifier-sbom.py bridge-tools/slsa-verifier \
+            "bridge-sboms/umbra-slsa-verifier-${{ matrix.target }}.cdx.json"
+          if [ -n "${{ matrix.glibc }}" ]; then
+            bin="target/${{ matrix.target }}/release/concrete-update-bridge"
+            baseline="${{ matrix.glibc }}"
+            max="$(objdump -T "$bin" | grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' | sed 's/^GLIBC_//' | sort -uV | tail -1)"
+            test "$(printf '%s\n%s\n' "$max" "$baseline" | sort -V | tail -1)" = "$baseline"
+          fi
       - name: Stage artifact
         shell: bash
         run: |
@@ -220,6 +246,18 @@ jobs:
             (cd "dist/${version}/${target}" && shasum -a 256 umbra > umbra.sha256)
             (cd "dist/latest/${target}" && shasum -a 256 umbra > umbra.sha256)
           fi
+          bridge_version="$(sed -n 's/^pub(crate) const BRIDGE_VERSION: &str = "\([^"]*\)";$/\1/p' cli/src/concrete_update.rs)"
+          test -n "$bridge_version"
+          for channel in "${version}" latest; do
+            cp "target/${target}/release/concrete-update-bridge" "dist/${channel}/${target}/concrete-update-bridge"
+            chmod 0755 "dist/${channel}/${target}/concrete-update-bridge"
+            printf '%s\n' "$bridge_version" > "dist/${channel}/concrete-update-version"
+            if command -v sha256sum >/dev/null 2>&1; then
+              (cd "dist/${channel}/${target}" && sha256sum concrete-update-bridge > concrete-update-bridge.sha256)
+            else
+              (cd "dist/${channel}/${target}" && shasum -a 256 concrete-update-bridge > concrete-update-bridge.sha256)
+            fi
+          done
       - name: Upload target artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -227,6 +265,12 @@ jobs:
           path: |
             dist/${{ needs.metadata.outputs.version }}/
             dist/latest/
+
+      - name: Upload verifier SBOM
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: umbra-bridge-verifier-sbom-${{ matrix.target }}
+          path: bridge-sboms/
 
   validate-binary-artifacts:
     needs: [metadata, binary-artifacts]
@@ -425,6 +469,12 @@ jobs:
         with:
           name: umbra-cli-sboms
           path: umbra-cli-sboms
+      - name: Download verifier SBOMs
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: umbra-bridge-verifier-sbom-*
+          path: umbra-cli-sboms
+          merge-multiple: true
       - name: Assemble release tree
         run: |
           set -euo pipefail
@@ -488,7 +538,7 @@ jobs:
           while IFS= read -r -d '' binary; do
             digest="$(sha256sum "${binary}" | awk '{print $1}')"
             printf '%s  %s\n' "${digest}" "${binary#release-tree/}" >> SHA256SUMS
-          done < <(find "release-tree/${VERSION}" -mindepth 2 -maxdepth 2 -type f -name umbra -print0 | sort -z)
+          done < <(find "release-tree/${VERSION}" -mindepth 2 -maxdepth 2 -type f \( -name umbra -o -name concrete-update-bridge \) -print0 | sort -z)
           LC_ALL=C sort -o SHA256SUMS SHA256SUMS
           cp SHA256SUMS provenance-subjects.sha256
           sha256sum SHA256SUMS >> provenance-subjects.sha256

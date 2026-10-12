@@ -1,7 +1,7 @@
-# Hermetic PR gate for the `dev` trunk.
+# Hermetic PR gate for the `dev` and `main` trunks.
 #
-# Every change reaches `dev` through a PR, and a PR cannot merge until both jobs
-# below are green (enforced by branch protection on `dev` — see docs/ci-cd.md).
+# Source gates also cover direct, reviewed production fixes to `main`
+# (enforced by branch protection — see docs/ci-cd.md).
 # Neither job touches live infrastructure (no Phala / Cloudflare / Console): they
 # are the same `make check` + `make test` an operator runs locally. `make check`
 # does build Docker images for its smoke tests, which the GitHub-hosted runner's
@@ -10,7 +10,7 @@ name: PR gate
 
 on:
   pull_request:
-    branches: [dev]
+    branches: [dev, main]
 
 # Newer pushes to the same PR supersede in-flight runs; safe here because these
 # jobs are hermetic and stateless (unlike the staging verify journey).
@@ -119,3 +119,40 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: uv run --python "$(cat .python-version)" --no-project python tools/check-dco.py "${BASE_SHA}" "${HEAD_SHA}"
+
+  concrete-migration:
+    name: Concrete migration (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: 'false'
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - name: Install the published Concrete CLI
+        run: cargo install concrete-cli --version 0.4.1 --locked --root "${RUNNER_TEMP}/legacy-concrete"
+      - name: Build the pinned provenance verifier
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/bridge-tools"
+          env GOPRIVATE= GONOSUMDB= GONOPROXY= \
+            GOPROXY=https://proxy.golang.org GOSUMDB=sum.golang.org CGO_ENABLED=0 \
+            GOBIN="${RUNNER_TEMP}/bridge-tools" \
+            go install github.com/slsa-framework/slsa-verifier/v2/cli/slsa-verifier@v2.7.1
+      - name: Build and check the migration bridge
+        env:
+          UMBRA_BRIDGE_INSTALL_BASE_URL: https://install.example.com
+        run: |
+          set -euo pipefail
+          export UMBRA_BRIDGE_VERIFIER_PATH="${RUNNER_TEMP}/bridge-tools/slsa-verifier"
+          cargo build --locked -p umbra-cli --features concrete-update-bridge --bin concrete-update-bridge
+          cargo test --locked -p umbra-cli --features concrete-update-bridge
+          cargo clippy --locked -p umbra-cli --all-targets --features concrete-update-bridge -- -D warnings
+      - name: Migrate through the real Concrete updater
+        run: |
+          python3 ops/cli-release/test-concrete-update-bridge.py \
+            --concrete "${RUNNER_TEMP}/legacy-concrete/bin/concrete" \
+            --bridge target/debug/concrete-update-bridge \
+            --shared-user nobody

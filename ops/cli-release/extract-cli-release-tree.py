@@ -44,10 +44,10 @@ def allowed_member(parts: tuple[str, ...], version: str, is_dir: bool) -> bool:
         return False
     if is_dir:
         return len(parts) == 1 or (len(parts) == 2 and parts[1] in TARGETS)
-    return (len(parts) == 2 and parts[1] == "version") or (
+    return (len(parts) == 2 and parts[1] in {"version", "concrete-update-version"}) or (
         len(parts) == 3
         and parts[1] in TARGETS
-        and parts[2] in {"umbra", "umbra.sha256"}
+        and parts[2] in {"umbra", "umbra.sha256", "concrete-update-bridge", "concrete-update-bridge.sha256"}
     )
 
 
@@ -93,6 +93,16 @@ def extract(archive_path: Path, destination: Path, version: str) -> None:
             for target in TARGETS
             for filename in ("umbra", "umbra.sha256")
         }
+        bridge_members = {parts for parts in files if parts[-1].startswith("concrete-update-")}
+        if bridge_members:
+            required_files |= {
+                (channel, "concrete-update-version") for channel in (version, "latest")
+            } | {
+                (channel, target, filename)
+                for channel in (version, "latest")
+                for target in TARGETS
+                for filename in ("concrete-update-bridge", "concrete-update-bridge.sha256")
+            }
         missing = required_files - files.keys()
         if missing:
             fail(f"archive is incomplete; missing {sorted('/'.join(path) for path in missing)}")
@@ -109,7 +119,7 @@ def extract(archive_path: Path, destination: Path, version: str) -> None:
                 fail(f"cannot read archive member: {member.name}")
             with source, output.open("xb") as target:
                 shutil.copyfileobj(source, target)
-            output.chmod(0o755 if parts[-1] == "umbra" else 0o644)
+            output.chmod(0o755 if parts[-1] in {"umbra", "concrete-update-bridge"} else 0o644)
 
     for channel in (version, "latest"):
         version_path = destination / channel / "version"
@@ -123,6 +133,18 @@ def extract(archive_path: Path, destination: Path, version: str) -> None:
                 fail(f"malformed checksum: {checksum.relative_to(destination)}")
             if hashlib.sha256(binary.read_bytes()).hexdigest() != match.group(1):
                 fail(f"checksum mismatch: {binary.relative_to(destination)}")
+        if bridge_members:
+            bridge_version = (destination / channel / "concrete-update-version").read_text(encoding="utf-8")
+            if not re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\n", bridge_version):
+                fail("invalid Concrete bridge version")
+            if bridge_version != (destination / version / "concrete-update-version").read_text(encoding="utf-8"):
+                fail("Concrete bridge version differs between channels")
+            for target in TARGETS:
+                binary = destination / channel / target / "concrete-update-bridge"
+                checksum = destination / channel / target / "concrete-update-bridge.sha256"
+                match = re.fullmatch(r"([0-9a-f]{64})  concrete-update-bridge\n?", checksum.read_text(encoding="utf-8"))
+                if not match or hashlib.sha256(binary.read_bytes()).hexdigest() != match.group(1):
+                    fail(f"invalid Concrete bridge checksum for {channel}/{target}")
 
 
 def main() -> None:

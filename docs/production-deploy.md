@@ -20,6 +20,26 @@ make backup-console-db
 
 Read [versioning and compatibility](versioning.md) and the release's [changelog](../CHANGELOG.md) before applying migrations.
 
+## Concrete CLI migration channel
+
+Keep the existing Concrete HTTPS install origin available during migration and serve both `/releases/concrete-cli/` and `/releases/umbra-cli/` there. Retain historical immutable Concrete artifacts in the `concrete-updates` directory before changing the route; do not replace an old version's bytes. The canonical CLI release workflow builds a separately versioned bridge and its pinned verifier, records the verifier SBOM, and includes the bridge in the SLSA subjects.
+
+Register `umbra-cli-v1` in the Console's `OIDC_CLIENT_ALLOWLIST` before offering the bridge so migrated users can log in again when needed. Existing saved client overrides and login sessions are preserved.
+
+After approval, the normal verified installer sync prepares `concrete-updates/<bridge-version>/` and atomically points its `latest` symlink at that version. The installer serves this directory at the legacy URL. No bare rewrite from `concrete` to the canonical Umbra 0.1.x binary is sufficient: the old updater checks its own version before installation. Bump the bridge's `BRIDGE_VERSION` whenever its bundled implementation changes; sync rejects different bytes under an existing bridge version.
+
+Users then run `concrete update` once, followed by `umbra config show` and `umbra ssh`. Existing unrelated Umbra executables are preserved and prevent this legacy update; those users update their Umbra installation separately. The old client's first download retains its HTTPS/checksum trust boundary; future Umbra updates use the retained verifier and fixed canonical provenance identity.
+
+Qualify a release locally with an installed Concrete 0.4.1 binary:
+
+```bash
+python3 ops/cli-release/test-concrete-update-bridge.py \
+  --concrete /absolute/path/to/concrete \
+  --bridge /absolute/path/to/concrete-update-bridge
+```
+
+This test uses a loopback mirror, isolated home directories, and copies of the old binary; it leaves the installed CLI and deployed CVMs unchanged.
+
 ## 2. Validate the release
 
 ```bash
@@ -88,7 +108,7 @@ same gate on every trusted `dev` push. It uploads a lock-shaped candidate whose
 image fields are runnable manifest refs and whose provenance fields identify the
 validated immutable attestation indexes. Measurements remain null because the
 public publisher has no provider identity; the private deployment authority
-fills them from the Dev canary before staging. The commands below remain the
+fills them from the Dev canary before deployment. The commands below remain the
 self-hosted/operator publication path.
 
 ```text
@@ -250,7 +270,7 @@ curl -fsS "https://${CONSOLE_HOST}/readyz"
 - Use `make up` or the protected deployment workflow for a Console rollout.
 - Use `umbra security-cvm update` and `umbra cvm update <id>` for provider-neutral runtime updates.
 - Use immutable image digests from one tested release set; do not mix arbitrary CLI, Console, or CVM versions.
-- Back up before migration and test the release in staging before production.
+- Back up before migration. Staging verification is optional under the current [promotion procedure](ci-cd.md#promotion-procedure).
 - A database at the exact pre-Umbra head `0032_attn_unreachable` upgrades through the lineage-only compatibility branch to `0033_public_legacy_merge`, then `0034_connect_oauth_schema` installs public Connect schema. Use full Alembic revision IDs, and restore the pre-upgrade backup rather than attempting a downgrade across that merge.
 - Keep process supervision and restart-on-boot configured for the Compose stack.
 - Use `umbra reconcile` for provider drift. Do not edit lifecycle state directly in Postgres.
