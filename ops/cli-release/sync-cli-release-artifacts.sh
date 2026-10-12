@@ -186,6 +186,8 @@ if [ -e "$latest_destination" ] || [ -L "$latest_destination" ]; then
   mv -T -- "$latest_destination" "$previous_latest"
 fi
 mv -T -- "${publish_stage}/latest" "$latest_destination"
+python3 "${script_dir}/prepare-concrete-update-channel.py" \
+  "$staged_release_dir" "$release_dir" "$version"
 if [ -n "$previous_latest" ]; then
   rm -rf -- "$previous_latest"
   previous_latest=""

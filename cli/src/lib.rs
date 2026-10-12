@@ -11,6 +11,8 @@ mod cli_macros;
 mod atls_policy_store;
 mod cli;
 mod commands;
+#[cfg(feature = "concrete-update-bridge")]
+mod concrete_update;
 mod config;
 mod console;
 mod cvm_state;
@@ -28,6 +30,11 @@ mod style;
 pub mod test_support;
 
 pub use exit::ExitStatus;
+
+#[cfg(feature = "concrete-update-bridge")]
+pub fn run_concrete_update_bridge() -> ExitCode {
+    concrete_update::run()
+}
 
 pub fn run() -> ExitCode {
     install_default_crypto_provider();

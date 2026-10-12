@@ -39,6 +39,14 @@ The pull-request gate caches only public Cargo registries and git checkouts, Car
 
 GitHub scopes caches created for a pull request's merge ref away from protected branches. A pull request may consume a default-branch cache containing only public build material, but protected release and deployment workflows consume no pull-request build cache at all. Any future cache path or restore rule needs a fresh review of both directions across this trust boundary.
 
+## Legacy Concrete update transition
+
+The Concrete 0.4.1 updater predates SLSA verification. It authenticates the first bridge download through its existing HTTPS install origin and checks transfer integrity against a same-origin checksum. A signed bridge published by the verified mirror does not retroactively give that installed client independent provenance verification. Operators must retain control of the legacy HTTPS origin during this one-time transition.
+
+The bridge is a separately versioned artifact in the canonical Umbra release's signed tree and checksum subjects. It includes a verifier built from the pinned `slsa-verifier` v2.7.1 Go module with public checksum-database verification; the verifier's compiled Go modules have a release SBOM. The existing mirror sync verifies fixed-identity Umbra SLSA provenance before extracting and preparing `/releases/concrete-cli/`. It refuses to change an immutable bridge version or downgrade the legacy version pointer.
+
+Concrete invokes the staged bridge's `--version` probe before replacing its executable. The bridge prepares the new command alias and private local state during that probe, then reports its own newer legacy version. The original Concrete binary remains installed if the probe or final rename fails. A prepared alias can still point at that original binary after a rename failure; retrying the update completes the handoff. Original default Concrete state remains intact. Later `umbra update` calls verify canonical Umbra provenance locally with the retained verifier; no legacy checksum-only update path remains in the bridge's command implementation.
+
 ## High-risk review questions
 
 - Can a fork-controlled expression, cache, artifact, matrix value, or script reach a secret-bearing job?

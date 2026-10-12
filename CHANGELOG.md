@@ -7,7 +7,7 @@ Umbra follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and will 
 ### Fixed
 
 - Preserve Concrete CLI configuration, sessions, aliases, SSH identity mappings, pinned CVM policies, and cached workspaces on first use of Umbra. Existing Umbra state takes precedence; Concrete's original state remains intact.
-- Accept legacy `CONCRETE_*` configuration variables and retry the old `/concrete/tunnel` URL after an attested 404, with fresh verification. The transition requires a one-time Umbra installation; `concrete update` remains on its separate release channel.
+- Accept legacy `CONCRETE_*` configuration variables and retry the old `/concrete/tunnel` URL after an attested 404, with fresh verification. A separately versioned bridge lets Concrete 0.4.1 users migrate with `concrete update` once after their operator enables the legacy channel. The bridge installs the Umbra command and pinned update verifier; later updates retain Umbra's fixed SLSA identity.
 
 ## [0.1.0] - 2026-08-19
 

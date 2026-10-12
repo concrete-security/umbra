@@ -20,6 +20,26 @@ make backup-console-db
 
 Read [versioning and compatibility](versioning.md) and the release's [changelog](../CHANGELOG.md) before applying migrations.
 
+## Concrete CLI migration channel
+
+Keep the existing Concrete HTTPS install origin available during migration and serve both `/releases/concrete-cli/` and `/releases/umbra-cli/` there. Retain historical immutable Concrete artifacts in the `concrete-updates` directory before changing the route; do not replace an old version's bytes. The canonical CLI release workflow builds a separately versioned bridge and its pinned verifier, records the verifier SBOM, and includes the bridge in the SLSA subjects.
+
+Register `umbra-cli-v1` in the Console's `OIDC_CLIENT_ALLOWLIST` before offering the bridge so migrated users can log in again when needed. Existing saved client overrides and login sessions are preserved.
+
+After approval, the normal verified installer sync prepares `concrete-updates/<bridge-version>/` and atomically points its `latest` symlink at that version. The installer serves this directory at the legacy URL. No bare rewrite from `concrete` to the canonical Umbra 0.1.x binary is sufficient: the old updater checks its own version before installation. Bump the bridge's `BRIDGE_VERSION` whenever its bundled implementation changes; sync rejects different bytes under an existing bridge version.
+
+Users then run `concrete update` once, followed by `umbra config show` and `umbra ssh`. Existing unrelated Umbra executables are preserved and prevent this legacy update; those users update their Umbra installation separately. The old client's first download retains its HTTPS/checksum trust boundary; future Umbra updates use the retained verifier and fixed canonical provenance identity.
+
+Qualify a release locally with an installed Concrete 0.4.1 binary:
+
+```bash
+python3 ops/cli-release/test-concrete-update-bridge.py \
+  --concrete /absolute/path/to/concrete \
+  --bridge /absolute/path/to/concrete-update-bridge
+```
+
+This test uses a loopback mirror, isolated home directories, and copies of the old binary; it leaves the installed CLI and deployed CVMs unchanged.
+
 ## 2. Validate the release
 
 ```bash

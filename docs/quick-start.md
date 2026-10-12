@@ -23,9 +23,9 @@ Local prerequisites:
 
 ## Migrating from Concrete
 
-Install the Umbra CLI using the installation path below, then run `umbra config show`. When `~/.umbra` is absent or empty, the first command imports the existing `~/.concrete` config, session, aliases, SSH identity mappings, CVM trust policies, and cached workspaces. The old files remain intact. Existing Umbra state takes precedence; to deliberately use the Concrete store instead, pass `--config "$HOME/.concrete"`.
+When your operator has enabled the migration bridge, run `concrete update`, then `umbra config show` and `umbra ssh`. This flow is qualified with Concrete 0.4.1 and needs no separate installation. If your old channel has not enabled the bridge, install the Umbra CLI using the verified installation path below. When `~/.umbra` is absent or empty, the first command imports the existing `~/.concrete` config, session, aliases, SSH identity mappings, CVM trust policies, and cached workspaces. The old files remain intact. Existing Umbra state takes precedence; to deliberately use the Concrete store instead, pass `--config "$HOME/.concrete"`.
 
-The renamed CLI can connect to CVMs that still expose `/concrete/tunnel`. It retries that URL only after an attested 404 on `/umbra/tunnel` and verifies the new connection fully. The rename alone does not require a CVM update. Existing attestation errors or legacy Security CVM rebind markers still need their documented recovery. The old `concrete update` command is not the Umbra installer.
+The renamed CLI can connect to CVMs that still expose `/concrete/tunnel`. It retries that URL only after an attested 404 on `/umbra/tunnel` and verifies the new connection fully. The rename alone does not require a CVM update. Existing attestation errors or legacy Security CVM rebind markers still need their documented recovery. The bridge retains `concrete` as an Umbra entry point and installs the pinned verifier needed by future `umbra update` calls. An existing unrelated `umbra` executable is preserved and prevents the bridge update; update that installation separately.
 
 ## Install
 

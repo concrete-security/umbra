@@ -133,5 +133,7 @@ rm -rf "${release_dir}/latest"
 cp -a "${staged_release_dir}/." "$release_dir/"
 
 find "$release_dir" -type f -name umbra -exec chmod 0755 {} +
+python3 "${script_dir}/prepare-concrete-update-channel.py" \
+  "$staged_release_dir" "$release_dir" "$expected_version"
 
 info "synced CLI version ${expected_version} from verified workflow artifacts"
