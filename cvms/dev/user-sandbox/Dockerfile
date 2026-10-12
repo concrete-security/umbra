@@ -7,6 +7,8 @@ FROM golang:1.27.2-bookworm@sha256:5cf287a799e6b94384bad13d16b14904c531f51ba6579
 ENV CGO_ENABLED=0 GOTOOLCHAIN=local
 
 FROM go-base AS compose-builder
+COPY cvms/dev/user-sandbox/tool-versions.env /tmp/tool-versions.env
+COPY cvms/dev/user-sandbox/go-net.sum /tmp/go-net.sum
 ARG COMPOSE_VERSION=5.6.0
 ARG COMPOSE_SOURCE_SHA256=51ad60cc28d38a0850678053f0a259dfee931d150dd1d50ee9e6d758125b1d47
 RUN curl -fsSL "https://github.com/docker/compose/archive/refs/tags/v${COMPOSE_VERSION}.tar.gz" -o /tmp/compose.tar.gz \
@@ -17,35 +19,55 @@ RUN curl -fsSL "https://github.com/docker/compose/archive/refs/tags/v${COMPOSE_V
 WORKDIR /src
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 make build VERSION="v${COMPOSE_VERSION}" GO_BUILDTAGS=e2e DESTDIR=/out
+    set -a \
+    && . /tmp/tool-versions.env \
+    && set +a \
+    && grep -Fq 'golang.org/x/net v0.58.0' go.mod \
+    && awk '$2 !~ /\/go.mod$/ {print "-require=" $1 "@" $2}' /tmp/go-net.sum | xargs go mod edit \
+    && cat /tmp/go-net.sum >>go.sum \
+    && LC_ALL=C sort -u go.sum -o go.sum \
+    && cp go.sum /tmp/locked-go.sum \
+    && CGO_ENABLED=0 GOFLAGS=-mod=readonly make build VERSION="v${COMPOSE_VERSION}" GO_BUILDTAGS=e2e DESTDIR=/out \
+    && cmp go.sum /tmp/locked-go.sum \
+    && go version -m /out/docker-compose | awk -v version="v${GO_NET_VERSION}" '$1 == "dep" && $2 == "golang.org/x/net" && $3 == version {found=1} END {exit !found}'
 
 FROM go-base AS buildx-builder
 COPY cvms/dev/user-sandbox/tool-versions.env /tmp/tool-versions.env
 WORKDIR /src
 # The released Buildx binary still embeds an older Go compiler and archive
-# dependency. Replace only its vendored archive module with a pinned release.
+# dependencies. Replace the vendored archive and network modules with pinned releases.
 RUN set -a \
     && . /tmp/tool-versions.env \
     && set +a \
     && curl -fsSL "https://github.com/docker/buildx/archive/refs/tags/v${BUILDX_VERSION}.tar.gz" -o /tmp/buildx.tar.gz \
     && curl -fsSL "https://github.com/moby/go-archive/archive/refs/tags/v${BUILDX_GO_ARCHIVE_VERSION}.tar.gz" -o /tmp/go-archive.tar.gz \
+    && curl -fsSL "https://github.com/golang/net/archive/refs/tags/v${GO_NET_VERSION}.tar.gz" -o /tmp/go-net.tar.gz \
     && printf '%s  %s\n' \
       "${BUILDX_SOURCE_SHA256}" /tmp/buildx.tar.gz \
       "${BUILDX_GO_ARCHIVE_SHA256}" /tmp/go-archive.tar.gz \
+      "${GO_NET_SOURCE_SHA256}" /tmp/go-net.tar.gz \
       | sha256sum -c - \
     && tar -xzf /tmp/buildx.tar.gz -C /src --strip-components=1 \
     && grep -Fq 'github.com/moby/go-archive v0.2.0' go.mod \
     && grep -Fq 'github.com/moby/go-archive v0.2.0' vendor/modules.txt \
+    && grep -Fq 'golang.org/x/net v0.59.0' go.mod \
+    && grep -Fq 'golang.org/x/net v0.59.0' vendor/modules.txt \
     && rm -rf vendor/github.com/moby/go-archive \
     && mkdir -p vendor/github.com/moby/go-archive \
     && tar -xzf /tmp/go-archive.tar.gz -C vendor/github.com/moby/go-archive --strip-components=1 \
     && sed -i "s|github.com/moby/go-archive v0.2.0|github.com/moby/go-archive v${BUILDX_GO_ARCHIVE_VERSION}|g" go.mod vendor/modules.txt \
+    && rm -rf vendor/golang.org/x/net \
+    && mkdir -p vendor/golang.org/x/net \
+    && tar -xzf /tmp/go-net.tar.gz -C vendor/golang.org/x/net --strip-components=1 \
+    && sed -i "s|golang.org/x/net v0.59.0|golang.org/x/net v${GO_NET_VERSION}|g" go.mod vendor/modules.txt \
     && go build -mod=vendor -trimpath -buildvcs=false \
-      -ldflags "-s -w -X github.com/docker/buildx/version.Version=v${BUILDX_VERSION}+umbra.1" \
-      -o /out/docker-buildx ./cmd/buildx
+      -ldflags "-s -w -X github.com/docker/buildx/version.Version=v${BUILDX_VERSION}+umbra.2" \
+      -o /out/docker-buildx ./cmd/buildx \
+    && go version -m /out/docker-buildx | awk -v version="v${GO_NET_VERSION}" '$1 == "dep" && $2 == "golang.org/x/net" && $3 == version {found=1} END {exit !found}'
 
 FROM go-base AS gh-builder
 COPY cvms/dev/user-sandbox/tool-versions.env /tmp/tool-versions.env
+COPY cvms/dev/user-sandbox/go-net.sum /tmp/go-net.sum
 WORKDIR /src
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
@@ -55,11 +77,16 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     && curl -fsSL "https://github.com/cli/cli/archive/refs/tags/v${GH_VERSION}.tar.gz" -o /tmp/gh.tar.gz \
     && echo "${GH_SOURCE_SHA256}  /tmp/gh.tar.gz" | sha256sum -c - \
     && tar -xzf /tmp/gh.tar.gz -C /src --strip-components=1 \
+    && grep -Fq 'golang.org/x/net v0.58.0' go.mod \
+    && awk '$2 !~ /\/go.mod$/ {print "-require=" $1 "@" $2}' /tmp/go-net.sum | xargs go mod edit \
+    && cat /tmp/go-net.sum >>go.sum \
+    && LC_ALL=C sort -u go.sum -o go.sum \
     && cp go.sum /tmp/locked-go.sum \
     && go build -mod=readonly -trimpath -buildvcs=false \
       -ldflags "-s -w -X github.com/cli/cli/v2/internal/build.Version=${GH_VERSION}" \
       -o /out/gh ./cmd/gh \
-    && cmp go.sum /tmp/locked-go.sum
+    && cmp go.sum /tmp/locked-go.sum \
+    && go version -m /out/gh | awk -v version="v${GO_NET_VERSION}" '$1 == "dep" && $2 == "golang.org/x/net" && $3 == version {found=1} END {exit !found}'
 
 FROM rust:1-bookworm@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa AS rust-base
 
