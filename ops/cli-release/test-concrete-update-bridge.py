@@ -162,12 +162,17 @@ def check(concrete: Path, bridge: Path, bridge_version: str, corrupt_checksum: b
                         str(shared_home / ".umbra"),
                     ], environment)
                     assert cleanup.returncode == 0, cleanup.stderr
-            future = root / "releases/umbra-cli/0.1.1" / target
+            current = run(["umbra", "--json", "version"], environment)
+            assert current.returncode == 0, current.stderr
+            version = json.loads(current.stdout)["version"].split("+", 1)[0].split("-", 1)[0]
+            major, minor, patch = map(int, version.split("."))
+            future_version = f"{major}.{minor}.{patch + 1}"
+            future = root / "releases/umbra-cli" / future_version / target
             future.mkdir(parents=True)
             (future / "umbra").write_bytes(bridge.read_bytes())
             (future / "umbra.sha256").write_text(digest + "  umbra\n")
             (future.parent / "umbra-cli.intoto.jsonl").write_text("not signed provenance\n")
-            upgrade = run(["umbra", "--json", "update", "--version", "0.1.1"], environment)
+            upgrade = run(["umbra", "--json", "update", "--version", future_version], environment)
             assert upgrade.returncode != 0 and "provenance" in upgrade.stderr.lower(), upgrade.stderr
             assert "is required for self-update" not in upgrade.stderr, upgrade.stderr
             assert hashlib.sha256(old.read_bytes()).hexdigest() == digest
