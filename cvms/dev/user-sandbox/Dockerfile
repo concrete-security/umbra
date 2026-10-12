@@ -3,9 +3,14 @@
 # reviewed value. Release builds override it with the source commit timestamp.
 ARG SOURCE_DATE_EPOCH=0
 
-FROM golang:1.26.6-bookworm@sha256:116d58cbd88c1297624acc6e967a060012422bacf9930927e23fb719189c6f36 AS compose-builder
-ARG COMPOSE_VERSION=5.5.1
-ARG COMPOSE_SOURCE_SHA256=311077662698fd8e34769a894f9d5240befb1730990efa8ed58e0fa8725d2d84
+FROM golang:1.27.2-bookworm@sha256:5cf287a799e6b94384bad13d16b14904c531f51ba65792237e122ce42b392f61 AS go-base
+ENV CGO_ENABLED=0 GOTOOLCHAIN=local
+
+FROM go-base AS compose-builder
+COPY cvms/dev/user-sandbox/tool-versions.env /tmp/tool-versions.env
+COPY cvms/dev/user-sandbox/go-net.sum /tmp/go-net.sum
+ARG COMPOSE_VERSION=5.6.0
+ARG COMPOSE_SOURCE_SHA256=51ad60cc28d38a0850678053f0a259dfee931d150dd1d50ee9e6d758125b1d47
 RUN curl -fsSL "https://github.com/docker/compose/archive/refs/tags/v${COMPOSE_VERSION}.tar.gz" -o /tmp/compose.tar.gz \
     && echo "${COMPOSE_SOURCE_SHA256}  /tmp/compose.tar.gz" | sha256sum -c - \
     && mkdir -p /src \
@@ -14,7 +19,74 @@ RUN curl -fsSL "https://github.com/docker/compose/archive/refs/tags/v${COMPOSE_V
 WORKDIR /src
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 make build VERSION="v${COMPOSE_VERSION}" GO_BUILDTAGS=e2e DESTDIR=/out
+    set -a \
+    && . /tmp/tool-versions.env \
+    && set +a \
+    && grep -Fq 'golang.org/x/net v0.58.0' go.mod \
+    && awk '$2 !~ /\/go.mod$/ {print "-require=" $1 "@" $2}' /tmp/go-net.sum | xargs go mod edit \
+    && cat /tmp/go-net.sum >>go.sum \
+    && LC_ALL=C sort -u go.sum -o go.sum \
+    && cp go.sum /tmp/locked-go.sum \
+    && CGO_ENABLED=0 GOFLAGS=-mod=readonly make build VERSION="v${COMPOSE_VERSION}" GO_BUILDTAGS=e2e DESTDIR=/out \
+    && cmp go.sum /tmp/locked-go.sum \
+    && go version -m /out/docker-compose | awk -v version="v${GO_NET_VERSION}" '$1 == "dep" && $2 == "golang.org/x/net" && $3 == version {found=1} END {exit !found}'
+
+FROM go-base AS buildx-builder
+COPY cvms/dev/user-sandbox/tool-versions.env /tmp/tool-versions.env
+WORKDIR /src
+# The released Buildx binary still embeds an older Go compiler and archive
+# dependencies. Replace the vendored archive and network modules with pinned releases.
+RUN set -a \
+    && . /tmp/tool-versions.env \
+    && set +a \
+    && curl -fsSL "https://github.com/docker/buildx/archive/refs/tags/v${BUILDX_VERSION}.tar.gz" -o /tmp/buildx.tar.gz \
+    && curl -fsSL "https://github.com/moby/go-archive/archive/refs/tags/v${BUILDX_GO_ARCHIVE_VERSION}.tar.gz" -o /tmp/go-archive.tar.gz \
+    && curl -fsSL "https://github.com/golang/net/archive/refs/tags/v${GO_NET_VERSION}.tar.gz" -o /tmp/go-net.tar.gz \
+    && printf '%s  %s\n' \
+      "${BUILDX_SOURCE_SHA256}" /tmp/buildx.tar.gz \
+      "${BUILDX_GO_ARCHIVE_SHA256}" /tmp/go-archive.tar.gz \
+      "${GO_NET_SOURCE_SHA256}" /tmp/go-net.tar.gz \
+      | sha256sum -c - \
+    && tar -xzf /tmp/buildx.tar.gz -C /src --strip-components=1 \
+    && grep -Fq 'github.com/moby/go-archive v0.2.0' go.mod \
+    && grep -Fq 'github.com/moby/go-archive v0.2.0' vendor/modules.txt \
+    && grep -Fq 'golang.org/x/net v0.59.0' go.mod \
+    && grep -Fq 'golang.org/x/net v0.59.0' vendor/modules.txt \
+    && rm -rf vendor/github.com/moby/go-archive \
+    && mkdir -p vendor/github.com/moby/go-archive \
+    && tar -xzf /tmp/go-archive.tar.gz -C vendor/github.com/moby/go-archive --strip-components=1 \
+    && sed -i "s|github.com/moby/go-archive v0.2.0|github.com/moby/go-archive v${BUILDX_GO_ARCHIVE_VERSION}|g" go.mod vendor/modules.txt \
+    && rm -rf vendor/golang.org/x/net \
+    && mkdir -p vendor/golang.org/x/net \
+    && tar -xzf /tmp/go-net.tar.gz -C vendor/golang.org/x/net --strip-components=1 \
+    && sed -i "s|golang.org/x/net v0.59.0|golang.org/x/net v${GO_NET_VERSION}|g" go.mod vendor/modules.txt \
+    && go build -mod=vendor -trimpath -buildvcs=false \
+      -ldflags "-s -w -X github.com/docker/buildx/version.Version=v${BUILDX_VERSION}+umbra.2" \
+      -o /out/docker-buildx ./cmd/buildx \
+    && go version -m /out/docker-buildx | awk -v version="v${GO_NET_VERSION}" '$1 == "dep" && $2 == "golang.org/x/net" && $3 == version {found=1} END {exit !found}'
+
+FROM go-base AS gh-builder
+COPY cvms/dev/user-sandbox/tool-versions.env /tmp/tool-versions.env
+COPY cvms/dev/user-sandbox/go-net.sum /tmp/go-net.sum
+WORKDIR /src
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    set -a \
+    && . /tmp/tool-versions.env \
+    && set +a \
+    && curl -fsSL "https://github.com/cli/cli/archive/refs/tags/v${GH_VERSION}.tar.gz" -o /tmp/gh.tar.gz \
+    && echo "${GH_SOURCE_SHA256}  /tmp/gh.tar.gz" | sha256sum -c - \
+    && tar -xzf /tmp/gh.tar.gz -C /src --strip-components=1 \
+    && grep -Fq 'golang.org/x/net v0.58.0' go.mod \
+    && awk '$2 !~ /\/go.mod$/ {print "-require=" $1 "@" $2}' /tmp/go-net.sum | xargs go mod edit \
+    && cat /tmp/go-net.sum >>go.sum \
+    && LC_ALL=C sort -u go.sum -o go.sum \
+    && cp go.sum /tmp/locked-go.sum \
+    && go build -mod=readonly -trimpath -buildvcs=false \
+      -ldflags "-s -w -X github.com/cli/cli/v2/internal/build.Version=${GH_VERSION}" \
+      -o /out/gh ./cmd/gh \
+    && cmp go.sum /tmp/locked-go.sum \
+    && go version -m /out/gh | awk -v version="v${GO_NET_VERSION}" '$1 == "dep" && $2 == "golang.org/x/net" && $3 == version {found=1} END {exit !found}'
 
 FROM rust:1-bookworm@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa AS rust-base
 
@@ -40,7 +112,7 @@ COPY --from=rust-base /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certi
 # after rebuilding and exercising the sandbox image; it deliberately freezes
 # all packages from the Ubuntu archive. Docker's exact amd64 package filenames
 # and content digests are pinned separately in tool-versions.env below.
-ARG UBUNTU_SNAPSHOT=20260826T120000Z
+ARG UBUNTU_SNAPSHOT=20261008T120000Z
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1
@@ -53,8 +125,8 @@ RUN sed -i \
       -e "s|http://archive.ubuntu.com/ubuntu|https://snapshot.ubuntu.com/ubuntu/${UBUNTU_SNAPSHOT}|g" \
       -e "s|http://security.ubuntu.com/ubuntu|https://snapshot.ubuntu.com/ubuntu/${UBUNTU_SNAPSHOT}|g" \
       /etc/apt/sources.list.d/ubuntu.sources \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends \
+    && apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=30 update --error-on=any \
+    && apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=30 install -y --no-install-recommends \
       ca-certificates \
       curl \
       openssh-server \
@@ -89,17 +161,14 @@ RUN set -a \
     && curl -fsSL "${DOCKER_DEB_BASE_URL}/${DOCKER_CE_DEB}" -o /tmp/docker-ce.deb \
     && curl -fsSL "${DOCKER_DEB_BASE_URL}/${DOCKER_CE_CLI_DEB}" -o /tmp/docker-ce-cli.deb \
     && curl -fsSL "${DOCKER_DEB_BASE_URL}/${CONTAINERD_DEB}" -o /tmp/containerd.deb \
-    && curl -fsSL "${DOCKER_DEB_BASE_URL}/${DOCKER_BUILDX_DEB}" -o /tmp/docker-buildx.deb \
     && printf '%s  %s\n' \
       "${DOCKER_CE_SHA256}" /tmp/docker-ce.deb \
       "${DOCKER_CE_CLI_SHA256}" /tmp/docker-ce-cli.deb \
       "${CONTAINERD_SHA256}" /tmp/containerd.deb \
-      "${DOCKER_BUILDX_SHA256}" /tmp/docker-buildx.deb \
       | sha256sum -c - \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends \
+    && apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=30 update --error-on=any \
+    && apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=30 install -y --no-install-recommends \
       /tmp/containerd.deb \
-      /tmp/docker-buildx.deb \
       /tmp/docker-ce-cli.deb \
       /tmp/docker-ce.deb \
     && rm -rf \
@@ -111,6 +180,8 @@ RUN set -a \
       /tmp/*.deb
 
 COPY --from=compose-builder --chmod=0755 /out/docker-compose /usr/libexec/docker/cli-plugins/docker-compose
+COPY --from=buildx-builder --chmod=0755 /out/docker-buildx /usr/libexec/docker/cli-plugins/docker-buildx
+COPY --from=gh-builder --chmod=0755 /out/gh /usr/local/bin/gh
 COPY cvms/dev/user-sandbox/docker-daemon.json /etc/docker/daemon.json
 COPY cvms/dev/user-sandbox/codex-package ./tmp/codex-package
 COPY --from=uv /uv /uvx /bin/
@@ -123,31 +194,37 @@ RUN set -a \
     && tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 \
     && rm /tmp/node.tar.xz \
     && npm install --global "npm@${NPM_VERSION}" --ignore-scripts --no-audit --no-fund \
-    # npm 12.0.2 predates fixed releases of three top-level bundled dependencies.
+    # npm 12.0.2 predates fixed releases of four top-level bundled dependencies.
     # Keep these checksummed replacements until NPM_VERSION bundles them itself.
     && curl -fsSL "https://registry.npmjs.org/brace-expansion/-/brace-expansion-${NPM_BRACE_EXPANSION_VERSION}.tgz" -o /tmp/npm-brace-expansion.tgz \
     && curl -fsSL "https://registry.npmjs.org/ip-address/-/ip-address-${NPM_IP_ADDRESS_VERSION}.tgz" -o /tmp/npm-ip-address.tgz \
     && curl -fsSL "https://registry.npmjs.org/tar/-/tar-${NPM_TAR_VERSION}.tgz" -o /tmp/npm-tar.tgz \
+    && curl -fsSL "https://registry.npmjs.org/undici/-/undici-${NPM_UNDICI_VERSION}.tgz" -o /tmp/npm-undici.tgz \
     && printf '%s  %s\n' \
       "${NPM_BRACE_EXPANSION_SHA256}" /tmp/npm-brace-expansion.tgz \
       "${NPM_IP_ADDRESS_SHA256}" /tmp/npm-ip-address.tgz \
       "${NPM_TAR_SHA256}" /tmp/npm-tar.tgz \
+      "${NPM_UNDICI_SHA256}" /tmp/npm-undici.tgz \
       | sha256sum -c - \
     && rm -rf \
       /usr/local/lib/node_modules/npm/node_modules/brace-expansion \
       /usr/local/lib/node_modules/npm/node_modules/ip-address \
       /usr/local/lib/node_modules/npm/node_modules/tar \
+      /usr/local/lib/node_modules/npm/node_modules/undici \
     && install -d \
       /usr/local/lib/node_modules/npm/node_modules/brace-expansion \
       /usr/local/lib/node_modules/npm/node_modules/ip-address \
       /usr/local/lib/node_modules/npm/node_modules/tar \
+      /usr/local/lib/node_modules/npm/node_modules/undici \
     && tar -xzf /tmp/npm-brace-expansion.tgz -C /usr/local/lib/node_modules/npm/node_modules/brace-expansion --strip-components=1 \
     && tar -xzf /tmp/npm-ip-address.tgz -C /usr/local/lib/node_modules/npm/node_modules/ip-address --strip-components=1 \
     && tar -xzf /tmp/npm-tar.tgz -C /usr/local/lib/node_modules/npm/node_modules/tar --strip-components=1 \
-    && rm /tmp/npm-brace-expansion.tgz /tmp/npm-ip-address.tgz /tmp/npm-tar.tgz \
+    && tar -xzf /tmp/npm-undici.tgz -C /usr/local/lib/node_modules/npm/node_modules/undici --strip-components=1 \
+    && rm /tmp/npm-brace-expansion.tgz /tmp/npm-ip-address.tgz /tmp/npm-tar.tgz /tmp/npm-undici.tgz \
     && test "$(node -p "require('/usr/local/lib/node_modules/npm/node_modules/brace-expansion/package.json').version")" = "${NPM_BRACE_EXPANSION_VERSION}" \
     && test "$(node -p "require('/usr/local/lib/node_modules/npm/node_modules/ip-address/package.json').version")" = "${NPM_IP_ADDRESS_VERSION}" \
     && test "$(node -p "require('/usr/local/lib/node_modules/npm/node_modules/tar/package.json').version")" = "${NPM_TAR_VERSION}" \
+    && test "$(node -p "require('/usr/local/lib/node_modules/npm/node_modules/undici/package.json').version")" = "${NPM_UNDICI_VERSION}" \
     && test "$(npm --version)" = "${NPM_VERSION}" \
     && curl -fsSL "https://github.com/anthropics/claude-code/releases/download/v${CLAUDE_VERSION}/claude-linux-x64.tar.gz" -o /tmp/claude.tar.gz \
     && echo "${CLAUDE_SHA256}  /tmp/claude.tar.gz" | sha256sum -c - \
@@ -158,11 +235,6 @@ RUN set -a \
     && printf '%s\n' "${CLAUDE_VERSION}" >/usr/local/lib/umbra/claude.version \
     && chmod 0644 /usr/local/lib/umbra/claude.version \
     && rm /tmp/claude.tar.gz \
-    && curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz" -o /tmp/gh.tar.gz \
-    && echo "${GH_SHA256}  /tmp/gh.tar.gz" | sha256sum -c - \
-    && tar -xzf /tmp/gh.tar.gz -C /tmp \
-    && install -m 0755 "/tmp/gh_${GH_VERSION}_linux_amd64/bin/gh" /usr/local/bin/gh \
-    && rm -rf /tmp/gh.tar.gz "/tmp/gh_${GH_VERSION}_linux_amd64" \
     && test "$(node -p "require('/tmp/codex-package/package-lock.json').packages['node_modules/@openai/codex'].version")" = "${CODEX_VERSION}" \
     && npm ci --prefix /tmp/codex-package --omit=dev --ignore-scripts --no-audit --no-fund \
     && install -d /usr/local/lib/umbra/codex \

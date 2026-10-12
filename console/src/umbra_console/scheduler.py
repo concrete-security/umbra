@@ -6166,6 +6166,7 @@ async def reconcile_security_cvm_attestations(conn: Any) -> list[str]:
             persisted_rtmr3_digest=_row_value(row, "rtmr3_digest"),
             reported_image_measurement=report.image_measurement,
             reported_rtmr3_digest=report.rtmr3_digest,
+            verified_rtmr3_history=report.rtmr3_history,
         )
         async with conn.transaction():
             if drift_kind is None:
@@ -6253,6 +6254,7 @@ async def reconcile_dev_cvm_attestations(conn: Any) -> list[str]:
             persisted_rtmr3_digest=_row_value(row, "rtmr3_digest"),
             reported_image_measurement=report.image_measurement,
             reported_rtmr3_digest=report.rtmr3_digest,
+            verified_rtmr3_history=report.rtmr3_history,
         )
         async with conn.transaction():
             if drift_kind is None:
@@ -6291,11 +6293,19 @@ def attestation_drift_kind(
     persisted_rtmr3_digest: str | None,
     reported_image_measurement: str,
     reported_rtmr3_digest: str,
+    verified_rtmr3_history: tuple[tuple[str, bool], ...] = (),
 ) -> str | None:
     image_drift = reported_image_measurement != expected_image_measurement
     if persisted_image_measurement is not None and persisted_image_measurement != reported_image_measurement:
         image_drift = True
     rtmr3_drift = persisted_rtmr3_digest is not None and persisted_rtmr3_digest != reported_rtmr3_digest
+    if rtmr3_drift and verified_rtmr3_history and verified_rtmr3_history[-1][0] == reported_rtmr3_digest:
+        for index, (digest, _) in enumerate(verified_rtmr3_history[:-1]):
+            if digest == persisted_rtmr3_digest:
+                # Preserve the complete accepted prefix. Only digest-validated
+                # certificate events may extend it; missing evidence fails closed.
+                rtmr3_drift = not all(flag is True for _, flag in verified_rtmr3_history[index + 1 :])
+                break
     if image_drift and rtmr3_drift:
         return "both"
     if image_drift:
@@ -6309,8 +6319,8 @@ async def _persist_cvm_attestation_refresh(conn: Any, row: Any, report: Any, kin
     """Shared reconciler attestation-refresh writer for Dev CVMs and Security CVMs. Returns
     True iff the row was still RUNNING and persisted. The reconciler claims candidates then
     releases the row lock before the (slow) verify, so the CVM may have been terminated/failed
-    concurrently — if the state-guarded UPDATE matches 0 rows, skip the (otherwise misleading)
-    audit event and report no progress, mirroring the per-operation verifier guard."""
+    concurrently. The accepted prefix may also have advanced on another probe. Guard both
+    state and the captured baseline; a stale report emits no verified audit or progress."""
     verified_at = datetime.now(timezone.utc)
     result = await conn.execute(
         f"""
@@ -6323,12 +6333,18 @@ async def _persist_cvm_attestation_refresh(conn: Any, row: Any, report: Any, kin
         WHERE id = $1
           AND state = 'RUNNING'
           AND deleted_at IS NULL
+          AND image_measurement IS NOT DISTINCT FROM $5
+          AND rtmr3_digest IS NOT DISTINCT FROM $6
+          AND attestation_verified_at IS NOT DISTINCT FROM $7
           {kind.protected_error_reason_guard("error_reason")}
         """,
         _row_value(row, "id"),
         report.image_measurement,
         report.rtmr3_digest,
         verified_at,
+        _row_value(row, "image_measurement"),
+        _row_value(row, "rtmr3_digest"),
+        _row_value(row, "attestation_verified_at"),
     )
     if result != "UPDATE 1":
         log.warning(
@@ -6372,9 +6388,13 @@ async def _record_cvm_attestation_refresh_drift(
         WHERE id = $1
           AND state = 'RUNNING'
           AND deleted_at IS NULL
+          AND rtmr3_digest IS NOT DISTINCT FROM $2
+          AND attestation_verified_at IS NOT DISTINCT FROM $3
           {kind.protected_error_reason_guard("error_reason")}
         """,
         _row_value(row, "id"),
+        _row_value(row, "rtmr3_digest"),
+        _row_value(row, "attestation_verified_at"),
     )
     if result != "UPDATE 1":
         log.warning(

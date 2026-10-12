@@ -17,13 +17,15 @@ from umbra_console.attestation import (
 )
 
 
-def test_parse_attestation_report_accepts_measurements() -> None:
+def test_parse_attestation_report_accepts_measurements_success() -> None:
+    """Legacy reports remain usable but supply no exception for a changed digest."""
     report = parse_attestation_report(
         json.dumps({"image_measurement": "A" * 96, "rtmr3_digest": "B" * 96}).encode("utf-8")
     )
 
     assert report.image_measurement == "a" * 96
     assert report.rtmr3_digest == "b" * 96
+    assert report.rtmr3_history == ()
 
 
 def test_parse_attestation_report_rejects_malformed_measurement() -> None:
@@ -32,6 +34,44 @@ def test_parse_attestation_report_rejects_malformed_measurement() -> None:
 
     assert exc.value.code == "ATTESTATION_QUOTE_INVALID"
     assert exc.value.details["reason"] == "invalid_image_measurement"
+
+
+def test_parse_attestation_report_certificate_history_success() -> None:
+    """Only normalized, terminally anchored replay states leave the parser."""
+    report = parse_attestation_report(json.dumps({
+        "image_measurement": "A" * 96,
+        "rtmr3_digest": "D" * 96,
+        "rtmr3_history": [
+            {"digest": "C" * 96, "tls_certificate_event": False},
+            {"digest": "D" * 96, "tls_certificate_event": True},
+        ],
+    }).encode())
+
+    assert report.rtmr3_history == (("c" * 96, False), ("d" * 96, True))
+
+
+@pytest.mark.parametrize("history", [
+    pytest.param(None, id="null"),
+    pytest.param([], id="empty"),
+    pytest.param([{"digest": "d" * 96, "tls_certificate_event": 1}], id="non-boolean"),
+    pytest.param([{"digest": "z" * 96, "tls_certificate_event": True}], id="non-hex"),
+    pytest.param([{"digest": "c" * 96, "tls_certificate_event": True}], id="wrong-terminal-state"),
+    pytest.param([{"digest": "d" * 96, "tls_certificate_event": True}] * 2, id="duplicate-state"),
+    pytest.param([{"digest": "d" * 96, "tls_certificate_event": True, "event": "TLS"}], id="unknown-field"),
+    pytest.param([{"digest": "d" * 96}], id="missing-classification"),
+    pytest.param([{"digest": "d" * 96, "tls_certificate_event": True}] * 513, id="too-many-states"),
+])
+def test_parse_attestation_report_malformed_history_failure(history) -> None:
+    """Malformed or unanchored evidence cannot authorize changed measurements."""
+    with pytest.raises(AttestationVerifierError) as exc:
+        parse_attestation_report(json.dumps({
+            "image_measurement": "a" * 96,
+            "rtmr3_digest": "d" * 96,
+            "rtmr3_history": history,
+        }).encode())
+
+    assert exc.value.code == "ATTESTATION_QUOTE_INVALID"
+    assert exc.value.details["reason"] == "invalid_rtmr3_history"
 
 
 def test_verifier_error_from_output_preserves_known_code() -> None:

@@ -1154,7 +1154,9 @@ def current_user(**overrides):
     return SimpleNamespace(**row)
 
 
-def test_run_security_cvm_attestation_probe_persists_success(monkeypatch) -> None:
+@pytest.mark.parametrize("certificate_renewal", [False, True], ids=["initial", "certificate-renewal"])
+def test_run_security_cvm_attestation_probe_persists_success(monkeypatch, certificate_renewal) -> None:
+    """An on-demand probe accepts the same certificate suffix as reconciliation."""
     conn = SecurityCvmAttestationProbeConn()
     captured_request: dict[str, object] = {}
 
@@ -1162,7 +1164,11 @@ def test_run_security_cvm_attestation_probe_persists_success(monkeypatch) -> Non
         async def verify(self, request, *, timeout_seconds):
             captured_request.update(request)
             assert timeout_seconds == 30
-            return attestation.AttestationReport(image_measurement="a" * 96, rtmr3_digest="d" * 96)
+            return attestation.AttestationReport(
+                image_measurement="a" * 96,
+                rtmr3_digest="d" * 96,
+                rtmr3_history=(("c" * 96, False), ("d" * 96, True)),
+            )
 
     async def fake_insert_audit_event(_conn, **kwargs):
         conn.audit_calls.append(kwargs)
@@ -1185,7 +1191,11 @@ def test_run_security_cvm_attestation_probe_persists_success(monkeypatch) -> Non
     result = asyncio.run(
         routes_module.run_security_cvm_attestation_probe(
             conn,
-            security_cvm_attestation_row(),
+            security_cvm_attestation_row(
+                image_measurement="a" * 96 if certificate_renewal else None,
+                rtmr3_digest="c" * 96 if certificate_renewal else None,
+                error_reason="ATTESTATION_DRIFT" if certificate_renewal else None,
+            ),
             current_user=current_user(),
         )
     )
@@ -1207,12 +1217,22 @@ def test_run_security_cvm_attestation_probe_persists_success(monkeypatch) -> Non
     assert conn.audit_calls[0]["after"]["source"] == "on_demand"
 
 
-def test_run_security_cvm_attestation_probe_reports_drift_without_update(monkeypatch) -> None:
+@pytest.mark.parametrize("reported_image, history", [
+    pytest.param("e" * 96, (), id="image-and-rtmr3"),
+    pytest.param("a" * 96, (), id="missing-evidence"),
+    pytest.param("a" * 96, (("d" * 96, False), ("f" * 96, False)), id="configuration-extension"),
+])
+def test_run_security_cvm_attestation_probe_reports_drift_without_update_failure(
+    monkeypatch, reported_image, history
+) -> None:
+    """Missing evidence and measured configuration changes leave the baseline intact."""
     conn = SecurityCvmAttestationProbeConn()
 
     class FakeVerifier:
         async def verify(self, request, *, timeout_seconds):
-            return attestation.AttestationReport(image_measurement="e" * 96, rtmr3_digest="f" * 96)
+            return attestation.AttestationReport(
+                image_measurement=reported_image, rtmr3_digest="f" * 96, rtmr3_history=history
+            )
 
     async def fake_insert_audit_event(_conn, **kwargs):
         conn.audit_calls.append(kwargs)
@@ -1244,6 +1264,31 @@ def test_run_security_cvm_attestation_probe_reports_drift_without_update(monkeyp
     assert exc.value.detail["error"]["details"]["state"] == "attestation_drift"
     assert conn.audit_calls[0]["action"] == "SECURITY_CVM_ATTESTATION_DRIFT"
     assert not [query for query, _args in conn.execute_calls if "UPDATE security_cvms" in query]
+
+
+def test_persist_security_cvm_attestation_probe_stale_prefix_failure(monkeypatch) -> None:
+    """An overlapping refresh must force a retry rather than roll back its baseline."""
+    row = security_cvm_attestation_row(image_measurement="a" * 96, rtmr3_digest="c" * 96)
+
+    class ConcurrentProbeConn(SecurityCvmAttestationProbeConn):
+        async def execute(self, query, *args):
+            assert "rtmr3_digest IS NOT DISTINCT FROM $6" in query
+            assert "attestation_verified_at IS NOT DISTINCT FROM $7" in query
+            assert args[4:] == (row["image_measurement"], row["rtmr3_digest"], row["attestation_verified_at"])
+            return "UPDATE 0"
+
+    async def unexpected_audit(_conn, **kwargs):
+        raise AssertionError("a stale probe must not emit a verified audit event")
+
+    monkeypatch.setattr(routes_module, "insert_audit_event", unexpected_audit)
+    report = attestation.AttestationReport(image_measurement="a" * 96, rtmr3_digest="d" * 96)
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(routes_module.persist_security_cvm_attestation_probe(
+            ConcurrentProbeConn(), row, report, current_user=current_user(),
+        ))
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail["error"]["details"]["state"] == "attestation_snapshot_changed"
 
 
 class FakeFetchValConn:
@@ -3834,4 +3879,3 @@ def test_ensure_profile_secret_material_complete_skips_lookup_without_injections
     )
 
     assert conn.fetch_calls == []
-

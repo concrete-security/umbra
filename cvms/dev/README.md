@@ -53,7 +53,7 @@ The forwarder MAY bind `:3128` without a policy so the Dev CVM remains reachable
 | `user-sandbox/` | Dockerfile, entrypoint, SSH, tunnel, forwarder, watcher, and helper crate. |
 | `tests/` | Local smoke and package tests. |
 
-The sandbox image is amd64-only. Its Ubuntu packages resolve from a dated Canonical snapshot. Exact Docker Engine, CLI, containerd, and Buildx `.deb` filenames and SHA-256 digests are reviewed in `user-sandbox/tool-versions.env`; the Compose source archive, checksum, and Go builder are pinned in the Dockerfile. Architecture or digest drift fails closed.
+The sandbox image is amd64-only. Its Ubuntu packages, including userspace headers, resolve from the dated Canonical snapshot in the Dockerfile. Container headers do not change the provider-managed guest kernel. Exact Docker Engine, CLI, and containerd `.deb` filenames and SHA-256 digests are reviewed in `user-sandbox/tool-versions.env`. Buildx and GitHub CLI compile from checksum-pinned upstream source with the patched Go builder. All three tools pin `golang.org/x/net` v0.60.0. Buildx replaces its vendored network and archive modules with separately checksum-pinned releases. Compose and GitHub CLI apply the reviewed module checksums from `user-sandbox/go-net.sum`, then build without changing those locks. The Compose source archive, checksum, and Go builder are pinned in the Dockerfile. Architecture or digest drift fails closed.
 
 ```bash
 make check
@@ -75,4 +75,4 @@ Updates use `umbra cvm update <cvm-id>` and preserve provider-managed named volu
 
 Live key rotation, host-level nested-virtualization alternatives, and guaranteed hitless migration are outside v0.
 
-The pinned sandbox tools include Docker Engine/CLI 29.8.0, Buildx 0.37.0, Compose 5.5.1, and GitHub CLI 2.99.0. Their Go dependencies include the upstream security fixes; source archives and binary packages remain checksum-verified. The image smoke test exercises each Docker command and Compose configuration parsing.
+The pinned sandbox tools include Docker Engine/CLI 29.9.0, Buildx 0.38.0+umbra.2, Compose 5.6.0, and GitHub CLI 2.102.0. Their Go dependencies include the upstream security fixes; source archives and binary packages remain checksum-verified. The image smoke test exercises each Docker command and Compose configuration parsing.
