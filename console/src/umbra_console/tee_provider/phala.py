@@ -86,6 +86,8 @@ PHALA_STATUS_MAP = {
     "removed": "TERMINATED",
 }
 SUBPROCESS_ENV_ALLOWLIST = ("PATH", "HOME", "LANG", "LC_ALL")
+# Preserve provider response contracts across Phala CLI/SDK dependency upgrades.
+PHALA_API_VERSION = "2026-05-22"
 PHALA_COMPOSE_FILE_HASH_HELPER = r"""
 import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
@@ -111,7 +113,7 @@ async function main() {
 
   const appId = cleanAppId(rawAppId);
   const { createClient, getCvmComposeFile } = await importPhalaCloud();
-  const client = createClient({ apiKey: process.env.PHALA_CLOUD_API_KEY });
+  const client = createClient({ apiKey: process.env.PHALA_CLOUD_API_KEY, version: "2026-05-22" });
   const appCompose = await getCvmComposeFile(client, { app_id: appId }, { schema: false });
   const composeYaml = appCompose && typeof appCompose.docker_compose_file === "string" ? appCompose.docker_compose_file : "";
   if (!composeYaml) {
@@ -329,7 +331,7 @@ class PhalaClient:
             raise PhalaError("invalid_json", output=scrub_output(stdout, self.api_token, self.redaction_patterns)) from exc
 
     async def _run_text(self, args: list[str]) -> str:
-        return await self._run_command_text(self.cli_path, args)
+        return await self._run_command_text(self.cli_path, [*args, "--api-version", PHALA_API_VERSION])
 
     async def _run_node_text(self, args: list[str]) -> str:
         return await self._run_command_text(self.node_path, args)

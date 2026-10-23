@@ -15,6 +15,7 @@ const execute = promisify(execFile);
 const consoleRoot = fileURLToPath(new URL("../", import.meta.url));
 const cli = path.join(consoleRoot, "node_modules/phala/dist/index.js");
 const appId = "a".repeat(40);
+const apiVersion = "2026-05-22";
 
 async function cliEnvironment(t) {
   const home = await mkdtemp(path.join(tmpdir(), "umbra-phala-test-"));
@@ -25,7 +26,7 @@ async function cliEnvironment(t) {
 async function mockProvider(t, payload) {
   const requests = [];
   const server = createServer((request, response) => {
-    requests.push({ method: request.method, path: request.url });
+    requests.push({ method: request.method, path: request.url, apiVersion: request.headers["x-phala-version"] });
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify(payload));
   });
@@ -83,7 +84,7 @@ test("test_phala_catalog_fixture_success", async t => {
   const fixture = JSON.parse(await readFile(new URL("fixtures/phala_instance_types.json", import.meta.url), "utf8"));
   const payload = { result: fixture.result };
   const { baseURL } = await mockProvider(t, payload);
-  const client = createClient({ baseURL, apiKey: "offline-test-key", retry: 0 });
+  const client = createClient({ baseURL, apiKey: "offline-test-key", version: apiVersion, retry: 0 });
   assert.deepEqual(await listAllInstanceTypeFamilies(client), payload);
 });
 
@@ -91,17 +92,17 @@ test("test_phala_catalog_fixture_success", async t => {
 test("test_phala_compose_raw_sdk_success", async t => {
   const payload = { docker_compose_file: "services: {}\n", allowed_envs: [42] };
   const { baseURL, requests } = await mockProvider(t, payload);
-  const client = createClient({ baseURL, apiKey: "offline-test-key", retry: 0 });
+  const client = createClient({ baseURL, apiKey: "offline-test-key", version: apiVersion, retry: 0 });
   const result = await getCvmComposeFile(client, { app_id: appId }, { schema: false });
   assert.deepEqual({ result, requests }, {
-    result: payload, requests: [{ method: "GET", path: `/cvms/app_${appId}/compose_file` }],
+    result: payload, requests: [{ method: "GET", path: `/cvms/app_${appId}/compose_file`, apiVersion }],
   });
 });
 
 // Run the adapter's actual embedded helper against the real SDK and loopback API.
 test("test_phala_compose_hash_helper_success", async t => {
   const compose = "services:\n  app:\n    image: example.invalid/test:1\n";
-  const { baseURL } = await mockProvider(t, { docker_compose_file: compose });
+  const { baseURL, requests } = await mockProvider(t, { docker_compose_file: compose });
   const source = await readFile(path.join(consoleRoot, "src/umbra_console/tee_provider/phala.py"), "utf8");
   const helper = source.match(/PHALA_COMPOSE_FILE_HASH_HELPER = r"""\n([\s\S]*?)"""/)[1];
   const { stdout } = await execute(process.execPath, ["--input-type=module", "-e", helper, `app_0x${appId.toUpperCase()}`], {
@@ -109,7 +110,10 @@ test("test_phala_compose_hash_helper_success", async t => {
     env: { ...await cliEnvironment(t), PHALA_CLOUD_API_PREFIX: baseURL, PHALA_CLOUD_API_KEY: "offline-test-key" },
     timeout: 5000,
   });
-  assert.deepEqual(JSON.parse(stdout), { sha256: createHash("sha256").update(compose).digest("hex") });
+  assert.deepEqual({ result: JSON.parse(stdout), requests }, {
+    result: { sha256: createHash("sha256").update(compose).digest("hex") },
+    requests: [{ method: "GET", path: `/cvms/app_${appId}/compose_file`, apiVersion }],
+  });
 });
 
 // Exercise the real CLI response schema used by info, status and update lookups.
@@ -121,7 +125,7 @@ test("test_phala_cvm_get_json_success", async t => {
     compose_file: { services: { app: { image: "example.invalid/test:1" } } },
   };
   const { baseURL, requests } = await mockProvider(t, payload);
-  const { stdout } = await execute(process.execPath, [cli, "cvms", "get", appId, "--json"], {
+  const { stdout } = await execute(process.execPath, [cli, "cvms", "get", appId, "--json", "--api-version", apiVersion], {
     cwd: consoleRoot,
     env: { ...await cliEnvironment(t), PHALA_CLOUD_API_PREFIX: baseURL, PHALA_CLOUD_API_KEY: "offline-test-key" },
     timeout: 5000,
@@ -133,7 +137,7 @@ test("test_phala_cvm_get_json_success", async t => {
   }, {
     app_id: appId, status: "running", gateway: payload.gateway,
     services: payload.services, compose_file: payload.compose_file,
-    requests: [{ method: "GET", path: `/cvms/app_${appId}` }],
+    requests: [{ method: "GET", path: `/cvms/app_${appId}`, apiVersion }],
   });
 });
 
@@ -141,7 +145,7 @@ test("test_phala_cvm_get_json_success", async t => {
 test("test_phala_catalog_cli_json_success", async t => {
   const fixture = JSON.parse(await readFile(new URL("fixtures/phala_instance_types.json", import.meta.url), "utf8"));
   const { baseURL } = await mockProvider(t, { result: fixture.result });
-  const { stdout } = await execute(process.execPath, [cli, "instance-types", "--json"], {
+  const { stdout } = await execute(process.execPath, [cli, "instance-types", "--json", "--api-version", apiVersion], {
     cwd: consoleRoot,
     env: { ...await cliEnvironment(t), PHALA_CLOUD_API_PREFIX: baseURL, PHALA_CLOUD_API_KEY: "offline-test-key" },
     timeout: 5000,

@@ -2829,7 +2829,7 @@ The Console depends on three external systems and acts as a client to a fourth (
 
 ### 10.1 Phala / dstack
 
-Phala Cloud is the CVM provider. The Console drives it through a pinned Node/npm adapter boundary: the `phala` CLI for lifecycle calls and in-place updates, and `@phala/cloud` SDK actions in a Node subprocess for provider compose-file hash reads.
+Phala Cloud is the CVM provider. The Console drives it through a pinned Node/npm adapter boundary: the `phala` CLI for lifecycle calls and in-place updates, and `@phala/cloud` SDK actions in a Node subprocess for provider compose-file hash reads. CLI lifecycle/catalog calls and the compose SDK helper pin provider API version `2026-05-22`; dependency upgrades preserve that contract until a separately reviewed API migration.
 
 #### Distribution integrity (T-13, T-19)
 
