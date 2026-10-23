@@ -5,8 +5,8 @@
 
 UMBRA_BUILDX_VERSION="0.34.0"
 UMBRA_BUILDKIT_BUILDER="umbra-release"
-UMBRA_BUILDKIT_VERSION="0.32.2"
-UMBRA_BUILDKIT_IMAGE="moby/buildkit:v${UMBRA_BUILDKIT_VERSION}@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8"
+UMBRA_BUILDKIT_VERSION="0.34.1"
+UMBRA_BUILDKIT_IMAGE="moby/buildkit:v${UMBRA_BUILDKIT_VERSION}@sha256:99368f3e46177c6405b9740e4461d91cee004128daeecca78d4ceac50ec1da5c"
 UMBRA_BUILDKIT_COMPATIBILITY_VERSION="30"
 UMBRA_BUILD_SOURCE_REPOSITORY_URL="${UMBRA_BUILD_SOURCE_REPOSITORY_URL:-https://github.com/concrete-security/umbra}"
 UMBRA_DOCKERFILE_FRONTEND_DIGEST="ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32"
@@ -334,6 +334,22 @@ umbra_attestation_manifest_valid() {
   ' >/dev/null
 }
 
+# Named local OCI exports must bind each original in-toto body to the selected
+# runtime. The predicate-only registry adapter below cannot recover this field
+# from imagetools' .Provenance/.SBOM views; do not synthesize a subject there.
+umbra_statement_subject_valid() {
+  local runtime_digest="$1"
+
+  [[ "$runtime_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
+  jq -e --arg runtime_sha "${runtime_digest#sha256:}" '
+    .subject | type == "array" and length > 0
+      and all(.[];
+        (.name | type == "string" and length > 0)
+        and .digest.sha256 == $runtime_sha
+      )
+  ' >/dev/null
+}
+
 umbra_provenance_statement_valid() {
   local git_sha="$1" source_date_epoch="$2"
 
@@ -449,9 +465,15 @@ umbra_oci_layout_runtime_digest() {
   ')" || return 1
   umbra_oci_layout_blob_valid "$archive" "$provenance_digest" || return 1
   tar -xOf "$archive" "blobs/sha256/${provenance_digest#sha256:}" \
+    | umbra_statement_subject_valid "$runtime_digest" \
+    || return 1
+  tar -xOf "$archive" "blobs/sha256/${provenance_digest#sha256:}" \
     | umbra_provenance_statement_valid "$git_sha" "$source_date_epoch" \
     || return 1
   umbra_oci_layout_blob_valid "$archive" "$sbom_digest" || return 1
+  tar -xOf "$archive" "blobs/sha256/${sbom_digest#sha256:}" \
+    | umbra_statement_subject_valid "$runtime_digest" \
+    || return 1
   tar -xOf "$archive" "blobs/sha256/${sbom_digest#sha256:}" \
     | umbra_sbom_statement_valid \
     || return 1

@@ -352,6 +352,40 @@ test_attested_index_descriptors() {
   pass "requires one source-labelled runtime with subject-bound SBOM and provenance"
 }
 
+test_attestation_statement_subject_success() {
+  # Each named subject must identify the selected runtime manifest.
+  local runtime_digest statement
+  runtime_digest="sha256:$(printf 'b%.0s' {1..64})"
+  statement="$(jq -cn --arg sha "${runtime_digest#sha256:}" '
+    {subject: [{name: "pkg:docker/fixture@local", digest: {sha256: $sha}}]}
+  ')"
+  printf '%s' "$statement" | umbra_statement_subject_valid "$runtime_digest" \
+    || fail "expected the original statement subject to bind the runtime"
+  printf '%s' "$statement" | jq -c '.subject += [.subject[0] | .name = "other-alias"]' \
+    | umbra_statement_subject_valid "$runtime_digest" \
+    || fail "expected multiple names for the same runtime to pass"
+  pass "accepts a statement subject bound to the runtime"
+}
+
+test_attestation_statement_subject_failure() {
+  # Missing, unnamed, or unrelated subjects must fail before predicate checks.
+  local runtime_digest variant
+  runtime_digest="sha256:$(printf 'b%.0s' {1..64})"
+  for variant in \
+    '{}' \
+    '{"subject":null}' \
+    '{"subject":[]}' \
+    '{"subject":[{"name":"fixture","digest":{}}]}' \
+    '{"subject":[{"name":"fixture","digest":{"sha256":"0000000000000000000000000000000000000000000000000000000000000000"}}]}' \
+    "$(jq -cn --arg sha "${runtime_digest#sha256:}" '{subject:[{name:"",digest:{sha256:$sha}}]}')" \
+    "$(jq -cn --arg sha "${runtime_digest#sha256:}" '{subject:[{name:"fixture",digest:{sha256:$sha}},{name:"other",digest:{sha256:"wrong"}}]}')"; do
+    if printf '%s' "$variant" | umbra_statement_subject_valid "$runtime_digest"; then
+      fail "expected an absent, unnamed, or unrelated statement subject to fail"
+    fi
+  done
+  pass "rejects statements without exact runtime subject binding"
+}
+
 test_nested_oci_layout_resolution() {
   local archive attestation_digest config_digest git_sha layout provenance_digest
   local result_digest runtime_digest sbom_digest source_date_epoch
@@ -422,8 +456,11 @@ test_nested_oci_layout_resolution() {
     config: {digest: $config}
   }' > "${layout}/blobs/sha256/${runtime_digest#sha256:}"
   printf '{}\n' > "${layout}/blobs/sha256/${config_digest#sha256:}"
-  printf '{}\n' > "${layout}/blobs/sha256/${provenance_digest#sha256:}"
-  printf '{}\n' > "${layout}/blobs/sha256/${sbom_digest#sha256:}"
+  jq -cn --arg sha "${runtime_digest#sha256:}" \
+    '{subject: [{name: "fixture", digest: {sha256: $sha}}]}' \
+    > "${layout}/blobs/sha256/${provenance_digest#sha256:}"
+  cp "${layout}/blobs/sha256/${provenance_digest#sha256:}" \
+    "${layout}/blobs/sha256/${sbom_digest#sha256:}"
   tar -cf "$archive" -C "$layout" index.json blobs
 
   umbra_oci_layout_blob_valid() { return 0; }
@@ -439,6 +476,29 @@ test_nested_oci_layout_resolution() {
   # shellcheck source=ops/buildkit-version.sh
   source "${REPO_ROOT}/ops/buildkit-version.sh"
   pass "resolves the pinned builder's nested attested OCI layout"
+}
+
+test_nested_oci_layout_subject_failure() {
+  # Both original attestation bodies must bind the selected runtime.
+  local layer archive layout
+  layout="${VERIFIER_FIXTURE}/oci-layout"
+  archive="${VERIFIER_FIXTURE}/wrong-subject.oci.tar"
+  umbra_oci_layout_blob_valid() { return 0; }
+  umbra_provenance_statement_valid() { cat >/dev/null; }
+  umbra_sbom_statement_valid() { cat >/dev/null; }
+  umbra_runtime_image_config_valid() { cat >/dev/null; }
+  for layer in "$(printf 'e%.0s' {1..64})" "$(printf 'f%.0s' {1..64})"; do
+    cp "${layout}/blobs/sha256/${layer}" "${VERIFIER_FIXTURE}/saved-statement"
+    printf '{"subject":[]}\n' > "${layout}/blobs/sha256/${layer}"
+    tar -cf "$archive" -C "$layout" index.json blobs
+    if umbra_oci_layout_runtime_digest "$archive" "$(printf '1%.0s' {1..40})" 1700000000; then
+      fail "an unbound original OCI statement body must fail"
+    fi
+    cp "${VERIFIER_FIXTURE}/saved-statement" "${layout}/blobs/sha256/${layer}"
+  done
+  # Restore validators after isolating the statement-binding seam.
+  source "${REPO_ROOT}/ops/buildkit-version.sh"
+  pass "rejects unbound provenance and SBOM bodies in OCI layouts"
 }
 
 test_release_source_path_guards() {
@@ -692,6 +752,7 @@ test_release_publication_trust_boundary() {
             }' > "$fixture_metadata_file"
           : > "$FIXTURE_PUSH_MARKER"
         elif [ "$fixture_output" = oci ]; then
+          contains "type=oci,name=${image_repo}," "$*" || return 95
           printf '%s\n' local-build >> "$FIXTURE_OPERATION_LOG"
         else
           return 97
@@ -1119,7 +1180,10 @@ test_buildkit_pinned_runtime_failure
 test_dry_run_skips_builder_bootstrap
 test_buildx_apt_candidate_selection
 test_attested_index_descriptors
+test_attestation_statement_subject_success
+test_attestation_statement_subject_failure
 test_nested_oci_layout_resolution
+test_nested_oci_layout_subject_failure
 test_release_source_path_guards
 test_publisher_credential_environment_boundary
 test_release_publication_trust_boundary

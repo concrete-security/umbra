@@ -5,7 +5,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -369,7 +368,7 @@ fn delete_key(
     key_id: &str,
 ) -> Result<(), (ExitStatus, String)> {
     let response = send(
-        Client::new()
+        crate::console::client(console_url)?
             .delete(format!("{console_url}{}", key_path(key_id)))
             .bearer_auth(access_token),
         "remove SSH key",

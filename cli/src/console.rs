@@ -18,6 +18,7 @@ use reqwest::{
 };
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use url::{Host, Url};
 
 use crate::{
     commands::{auth, operation_debug},
@@ -25,6 +26,60 @@ use crate::{
     exit::ExitStatus,
     session::Session,
 };
+
+/// Console credentials require HTTPS; local development may use loopback HTTP.
+pub(crate) fn validate_console_url(value: &str) -> Result<Url, String> {
+    let parsed = Url::parse(value).map_err(|_| "[usage] invalid Console URL".to_string())?;
+    if parsed.host().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(
+            "[usage] Console URL must have a host and no credentials, query, or fragment"
+                .to_string(),
+        );
+    }
+    if parsed.scheme() != "https" && !(parsed.scheme() == "http" && is_loopback(&parsed)) {
+        return Err(
+            "[usage] Console URL must use HTTPS; HTTP is allowed only for loopback hosts"
+                .to_string(),
+        );
+    }
+    Ok(parsed)
+}
+
+pub(crate) fn is_loopback(url: &Url) -> bool {
+    match url.host() {
+        Some(Host::Ipv4(addr)) => addr.is_loopback(),
+        Some(Host::Ipv6(addr)) => addr.is_loopback(),
+        Some(Host::Domain(name)) => name.eq_ignore_ascii_case("localhost"),
+        None => false,
+    }
+}
+
+/// Bind transport rules before any bearer, refresh token, or secret is attached.
+/// API redirects are rejected so credential-bearing bodies cannot change origin.
+pub(crate) fn client(console_url: &str) -> Result<Client, (ExitStatus, String)> {
+    let parsed =
+        validate_console_url(console_url).map_err(|message| (ExitStatus::Usage, message))?;
+    let builder = Client::builder()
+        .https_only(parsed.scheme() == "https")
+        .redirect(reqwest::redirect::Policy::none());
+    // Loopback HTTP must stay local even when proxy variables are present.
+    let builder = if parsed.scheme() == "http" {
+        builder.no_proxy()
+    } else {
+        builder
+    };
+    builder.build().map_err(|_| {
+        (
+            ExitStatus::Error,
+            "[error] failed to build Console HTTP client".to_string(),
+        )
+    })
+}
 
 /// Resolve `(console_url, Session)` for a Console-backed command, mapping
 /// "no console url" to `ExitStatus::Usage`. The session carries
@@ -166,7 +221,8 @@ pub(crate) fn resolve_entity_name(
     struct EntityResp {
         name: String,
     }
-    let response = reqwest::blocking::Client::new()
+    let response = client(console_url)
+        .ok()?
         .get(format!("{console_url}/api/v1/entities/{entity_id}"))
         .bearer_auth(access_token)
         .send()
@@ -192,7 +248,8 @@ pub(crate) fn resolve_user_email(
     struct UserResp {
         email: String,
     }
-    let response = reqwest::blocking::Client::new()
+    let response = client(console_url)
+        .ok()?
         .get(format!(
             "{console_url}/api/v1/entities/{}/users/{user_id}",
             session.entity.id
@@ -276,7 +333,7 @@ pub(crate) fn fetch_json<T: DeserializeOwned>(
     action: &str,
 ) -> Result<T, (ExitStatus, String)> {
     let response = send(
-        Client::new()
+        client(console_url)?
             .get(format!("{console_url}{path}"))
             .bearer_auth(&session.access_token)
             .query(query),
@@ -317,7 +374,7 @@ pub(crate) fn post_json<T: DeserializeOwned>(
     action: &str,
 ) -> Result<T, (ExitStatus, String)> {
     let response = send(
-        Client::new()
+        client(console_url)?
             .post(format!("{console_url}{path}"))
             .bearer_auth(access_token)
             .header("Idempotency-Key", uuid::Uuid::new_v4().to_string())
@@ -503,6 +560,241 @@ pub(crate) fn console_error_envelope(body: &str) -> Option<(String, Option<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
+
+    /// HTTPS and parsed loopback hosts preserve production and local workflows.
+    #[rstest]
+    #[case::https("https://console.example.com/prefix")]
+    #[case::localhost("http://localhost:8000")]
+    #[case::ipv4("http://127.3.2.1:8000")]
+    #[case::ipv6("http://[::1]:8000")]
+    fn console_transport_url_success(#[case] value: &str) {
+        assert!(validate_console_url(value).is_ok());
+    }
+
+    /// Remote plaintext and URL components that can conceal credentials fail closed.
+    #[rstest]
+    #[case::remote_http("http://console.example.com")]
+    #[case::lookalike("http://127.0.0.1.example.com")]
+    #[case::network("http://0.0.0.0:8000")]
+    #[case::scheme("ftp://localhost")]
+    #[case::credentials("https://user:password@console.example.com")]
+    #[case::query("https://console.example.com?token=fixture")]
+    #[case::fragment("https://console.example.com#fragment")]
+    #[case::missing_host("not a URL")]
+    fn console_transport_url_failure(#[case] value: &str) {
+        assert!(client(value).is_err());
+    }
+
+    /// Proxy environment variables cannot move local HTTP credentials off loopback.
+    #[rstest]
+    #[case::ipv4_http_proxy("127.0.0.1", "HTTP_PROXY", false)]
+    #[case::ipv4_all_proxy("127.0.0.1", "ALL_PROXY", false)]
+    #[case::localhost_lower_http("localhost", "http_proxy", false)]
+    #[case::ipv6_lower_all("::1", "all_proxy", false)]
+    #[case::https_proxy_preserved("127.0.0.1", "HTTPS_PROXY", true)]
+    fn console_proxy_routing_success(
+        #[case] host: &str,
+        #[case] proxy_variable: &str,
+        #[case] https: bool,
+    ) {
+        use std::io::{BufRead, Read, Write};
+        use std::net::TcpListener;
+        use std::process::{Command, Stdio};
+        use std::time::Instant;
+
+        let bind_host = if host == "::1" { "::1" } else { "127.0.0.1" };
+        let origin = TcpListener::bind((bind_host, 0)).expect("origin bound");
+        let proxy = TcpListener::bind("127.0.0.1:0").expect("proxy bound");
+        for listener in [&origin, &proxy] {
+            listener.set_nonblocking(true).unwrap();
+        }
+        let scheme = if https { "https" } else { "http" };
+        let authority = if host == "localhost" {
+            format!("localhost:{}", origin.local_addr().unwrap().port())
+        } else {
+            origin.local_addr().unwrap().to_string()
+        };
+        let console_url = format!("{scheme}://{authority}");
+        let proxy_url = format!("http://{}", proxy.local_addr().unwrap());
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "console::tests::console_proxy_request_success",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("UMBRA_TEST_CONSOLE_PROXY_URL", &console_url)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        for name in [
+            "HTTP_PROXY",
+            "http_proxy",
+            "HTTPS_PROXY",
+            "https_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+            "NO_PROXY",
+            "no_proxy",
+            "REQUEST_METHOD",
+        ] {
+            command.env_remove(name);
+        }
+        let mut child = command.env(proxy_variable, proxy_url).spawn().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut connections = [0, 0];
+        loop {
+            for (index, listener) in [&origin, &proxy].iter().enumerate() {
+                let mut stream = match listener.accept() {
+                    Ok((stream, _)) => stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
+                    Err(error) => panic!("fixture accept failed: {error}"),
+                };
+                connections[index] += 1;
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(1)))
+                    .unwrap();
+                stream
+                    .set_write_timeout(Some(Duration::from_secs(1)))
+                    .unwrap();
+                let mut reader = std::io::BufReader::new(&mut stream);
+                let mut headers = String::new();
+                loop {
+                    let mut line = String::new();
+                    assert!(reader.read_line(&mut line).unwrap() > 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    headers.push_str(&line);
+                }
+                if https {
+                    assert!(headers.starts_with("CONNECT "));
+                    stream.write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                } else {
+                    let length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().unwrap())
+                        })
+                        .expect("JSON request length");
+                    let mut body = vec![0_u8; length];
+                    reader.read_exact(&mut body).unwrap();
+                    assert!(headers.contains("fixture-bearer"));
+                    assert!(String::from_utf8(body).unwrap().contains("fixture-body"));
+                    let body = if index == 0 { "origin" } else { "proxy" };
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .unwrap();
+                }
+            }
+            if child.try_wait().unwrap().is_some() {
+                break;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let output = child.wait_with_output().unwrap();
+                panic!(
+                    "proxy test child timed out: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "proxy test child failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        assert_eq!(connections, if https { [0, 1] } else { [1, 0] });
+    }
+
+    /// The parent fixture gives this child an isolated proxy environment.
+    #[test]
+    #[ignore = "invoked by console_proxy_routing_success in a child process"]
+    fn console_proxy_request_success() {
+        let console_url = std::env::var("UMBRA_TEST_CONSOLE_PROXY_URL").unwrap();
+        let response = client(&console_url)
+            .unwrap()
+            .post(format!("{console_url}/proxy-probe"))
+            .bearer_auth("fixture-bearer")
+            .json(&serde_json::json!({ "value": "fixture-body" }))
+            .timeout(Duration::from_secs(3))
+            .send();
+        if console_url.starts_with("https:") {
+            assert!(response.is_err(), "the fixture rejects the CONNECT request");
+        } else {
+            assert_eq!(response.unwrap().text().unwrap(), "origin");
+        }
+    }
+
+    /// Redirects must never replay bearer tokens or JSON secrets to another endpoint.
+    #[rstest]
+    #[case::temporary(307)]
+    #[case::permanent(308)]
+    fn console_credential_redirect_failure(#[case] status: u16) {
+        use std::io::{BufRead, Read, Write};
+        use std::net::TcpListener;
+        let destination = TcpListener::bind("127.0.0.1:0").expect("destination bound");
+        destination
+            .set_nonblocking(true)
+            .expect("nonblocking destination");
+        let source = TcpListener::bind("127.0.0.1:0").expect("source bound");
+        let origin = format!("http://{}", source.local_addr().unwrap());
+        let target = format!("http://{}", destination.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = source.accept().expect("initial request accepted");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut reader = std::io::BufReader::new(&mut stream);
+            let mut headers = String::new();
+            loop {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).unwrap() > 0);
+                if line == "\r\n" {
+                    break;
+                }
+                headers.push_str(&line);
+            }
+            let length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().unwrap())
+                })
+                .expect("JSON request length");
+            let mut body = vec![0_u8; length];
+            reader.read_exact(&mut body).expect("complete JSON request");
+            assert!(headers.contains("fixture-bearer"));
+            assert!(String::from_utf8(body).unwrap().contains("fixture-secret"));
+            drop(reader);
+            write!(stream, "HTTP/1.1 {status} Redirect\r\nLocation: {target}/sink\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+        });
+        let response = client(&origin)
+            .expect("local client")
+            .post(format!("{origin}/api/v1/auth/refresh"))
+            .bearer_auth("fixture-bearer")
+            .json(&serde_json::json!({"refresh_token":"fixture-secret"}))
+            .timeout(Duration::from_secs(3))
+            .send()
+            .expect("redirect response received");
+        server.join().unwrap();
+        assert_eq!(response.status().as_u16(), status);
+        assert_eq!(
+            destination.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
 
     #[test]
     fn console_error_envelope_returns_message_and_typed_code() {

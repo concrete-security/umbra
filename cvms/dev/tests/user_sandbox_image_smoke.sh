@@ -66,6 +66,22 @@ docker run --rm --network none --platform linux/amd64 --entrypoint bash "${IMAGE
   claude --version >/dev/null
   codex --version >/dev/null
   node --version | grep -q "^v22\\."
+  # Image updates must advance an older managed copy on the persistent volume.
+  eval "$(sed -n "/^ensure_claude_native_install() {/,/^}/p" /entrypoint.sh)"
+  baked_version="$(cat /usr/local/lib/umbra/claude.version)"
+  versions=/home/dev/.local/share/claude/versions
+  mkdir -p "$versions" /home/dev/.local/bin
+  printf "#!/bin/sh\nexit 0\n" >"$versions/0.0.1"
+  chmod 0755 "$versions/0.0.1"
+  ln -sfn "$versions/0.0.1" /home/dev/.local/bin/claude
+  ensure_claude_native_install
+  test "$(readlink -f /home/dev/.local/bin/claude)" = "$versions/$baked_version"
+  test -x "$versions/0.0.1"
+  # A newer managed install must remain selected.
+  cp "$versions/0.0.1" "$versions/999.0.0"
+  ln -sfn "$versions/999.0.0" /home/dev/.local/bin/claude
+  ensure_claude_native_install
+  test "$(readlink -f /home/dev/.local/bin/claude)" = "$versions/999.0.0"
 '
 
 echo "user_sandbox_image_smoke: ok"

@@ -1,9 +1,13 @@
 # syntax=docker/dockerfile:1.26.0@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
 FROM nginx:1.30.6-alpine3.24@sha256:47928bf67eb62a1863cb08d9ecb52d3e704304ba614eaee17884204677702951
 
-# Pin the complete added package closure. Alpine stable repositories replace
-# revisions in place; an unavailable reviewed version must fail closed.
-RUN apk add --no-cache \
+# The urllib3 fix is not yet in stable; only these Python 3.14 packages may
+# resolve from the tagged edge repository. Keep the complete closure pinned.
+RUN printf '%s\n' '@urllib3-security https://dl-cdn.alpinelinux.org/alpine/edge/main' >> /etc/apk/repositories \
+    && apk add --no-cache \
+      brotli-libs=1.2.1-r0 \
+      ca-certificates=20261020-r0 \
+      ca-certificates-bundle=20261020-r0 \
       certbot=5.6.0-r0 \
       certbot-pyc=5.6.0-r0 \
       gdbm=1.26-r0 \
@@ -14,7 +18,6 @@ RUN apk add --no-cache \
       libffi=3.5.2-r1 \
       libgomp=15.2.0-r5 \
       libpanelw=6.6_p20260516-r0 \
-      libuuid=2.42.3-r1 \
       libssl3=3.5.9-r0 \
       mpdecimal=4.0.1-r0 \
       pcre2=10.49-r0 \
@@ -60,15 +63,19 @@ RUN apk add --no-cache \
       py3-typing-extensions-pyc=4.15.0-r1 \
       py3-tz=2026.2-r0 \
       py3-tz-pyc=2026.2-r0 \
-      py3-urllib3=2.7.0-r0 \
-      py3-urllib3-pyc=2.7.0-r0 \
+      py3-urllib3@urllib3-security=2.8.0-r0 \
+      py3-urllib3-pyc@urllib3-security=2.8.0-r0 \
       pyc=3.14.8-r0 \
       python3=3.14.8-r0 \
       python3-pyc=3.14.8-r0 \
       python3-pycache-pyc0=3.14.8-r0 \
       readline=8.3.3-r1 \
       sqlite-libs=3.53.4-r0 \
-      tiff=4.7.2-r0
+    # Neither nginx nor Certbot needs the base image's curl/libcurl client.
+    && apk del --no-cache curl libcurl \
+    && ! apk info -e curl \
+    && ! apk info -e libcurl \
+    && rm -f /var/log/apk.log
 
 COPY entrypoint.sh /entrypoint.sh
 COPY default.conf.template /etc/nginx/templates/default.conf.template
