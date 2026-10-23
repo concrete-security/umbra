@@ -117,6 +117,7 @@ def fixture_tls(directory: Path, host: str = "127.0.0.1") -> tuple[ssl.SSLContex
     )
     key_path.chmod(0o600)
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_cert_chain(cert_path, key_path)
     return context, ca_path
 

@@ -156,6 +156,7 @@ def main() -> None:
     contexts = {}
     for issuer in ("trusted", "untrusted"):
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
         context.load_cert_chain(config[issuer + "_cert"], config[issuer + "_key"])
         contexts[issuer] = context
     servers = []
