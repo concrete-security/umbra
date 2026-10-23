@@ -72,6 +72,8 @@ feature graphs to exclude DNSSEC. `make check` enforces that condition and
 requires reassessment when the resolver version changes. The exception expires
 on 2026-11-08; remove it when the upstream dependency permits a patched resolver.
 
+The two pip-vendor exceptions also expire on 2026-11-08. They match Trivy's Python target and exact affected package PURLs when present; Trivy also matches a missing PURL. Before applying them, the image gate runs `tools/check-pip-vendor.py` in a read-only container without network access. The guard checks the reviewed pip/vendor pins and rejects native msgpack, PackageIndex implementations, or actual installed distributions at the excepted vulnerable versions, including alternate Python environments. A guard failure stops the image gate and requires reassessment.
+
 An `environment: release` declaration does not protect a publication by itself: GitHub will create an unprotected environment when the named environment is missing. Capture the `release` environment's deployment-branch policy and reviewer settings through the GitHub API before the first non-dry-run release.
 
 ## Host model
