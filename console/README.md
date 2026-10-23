@@ -46,7 +46,7 @@ make check
 make test
 ```
 
-The repository pins Python 3.12 in `.python-version`, matching the Console container. `uv` provisions it when necessary; newer Python minors are not part of the supported or release-tested runtime. The Console image restores the dated Debian snapshots recorded by its digest-pinned Rust and Python bases before installing system packages, so a later repository update cannot silently change the same source build.
+The repository pins Python 3.12 in `.python-version`, matching the Console container. `uv` provisions it when necessary; newer Python minors are not part of the supported or release-tested runtime. The Console image uses reviewed Debian snapshots for its Rust build and Python runtime packages, including CA distrust updates. Node.js comes from a digest-pinned upstream image; npm is retained only in the web asset build stage. Both the system CA store and pip's bundled CA store are patched. pip stays at 26.2.2 with a local, hash-verified urllib3 2.8.0 vendor update; global pip and ensurepip use the same rebuilt wheel, with its license, SBOM and RECORD updated. Later repository updates cannot silently change the same source build.
 
 The final image normalizes application-tree permissions before switching to unprivileged UID/GID 10001. A restrictive source-checkout umask therefore cannot make Alembic metadata or installed application files unreadable at startup, while the runtime user remains unable to modify the image contents.
 

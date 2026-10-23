@@ -9,8 +9,8 @@ ENV CGO_ENABLED=0 GOTOOLCHAIN=local
 FROM go-base AS compose-builder
 COPY cvms/dev/user-sandbox/tool-versions.env /tmp/tool-versions.env
 COPY cvms/dev/user-sandbox/go-net.sum /tmp/go-net.sum
-ARG COMPOSE_VERSION=5.6.0
-ARG COMPOSE_SOURCE_SHA256=51ad60cc28d38a0850678053f0a259dfee931d150dd1d50ee9e6d758125b1d47
+ARG COMPOSE_VERSION=5.6.1
+ARG COMPOSE_SOURCE_SHA256=bd1318503f131bc7f02538f153a7ead52f27ea30a99aee09f153a5dab9e6230a
 RUN curl -fsSL "https://github.com/docker/compose/archive/refs/tags/v${COMPOSE_VERSION}.tar.gz" -o /tmp/compose.tar.gz \
     && echo "${COMPOSE_SOURCE_SHA256}  /tmp/compose.tar.gz" | sha256sum -c - \
     && mkdir -p /src \
@@ -67,7 +67,6 @@ RUN set -a \
 
 FROM go-base AS gh-builder
 COPY cvms/dev/user-sandbox/tool-versions.env /tmp/tool-versions.env
-COPY cvms/dev/user-sandbox/go-net.sum /tmp/go-net.sum
 WORKDIR /src
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
@@ -77,10 +76,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     && curl -fsSL "https://github.com/cli/cli/archive/refs/tags/v${GH_VERSION}.tar.gz" -o /tmp/gh.tar.gz \
     && echo "${GH_SOURCE_SHA256}  /tmp/gh.tar.gz" | sha256sum -c - \
     && tar -xzf /tmp/gh.tar.gz -C /src --strip-components=1 \
-    && grep -Fq 'golang.org/x/net v0.58.0' go.mod \
-    && awk '$2 !~ /\/go.mod$/ {print "-require=" $1 "@" $2}' /tmp/go-net.sum | xargs go mod edit \
-    && cat /tmp/go-net.sum >>go.sum \
-    && LC_ALL=C sort -u go.sum -o go.sum \
+    && grep -Fq "golang.org/x/net v${GO_NET_VERSION}" go.mod \
     && cp go.sum /tmp/locked-go.sum \
     && go build -mod=readonly -trimpath -buildvcs=false \
       -ldflags "-s -w -X github.com/cli/cli/v2/internal/build.Version=${GH_VERSION}" \
@@ -89,6 +85,15 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     && go version -m /out/gh | awk -v version="v${GO_NET_VERSION}" '$1 == "dep" && $2 == "golang.org/x/net" && $3 == version {found=1} END {exit !found}'
 
 FROM rust:1-bookworm@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa AS rust-base
+RUN sed -i \
+      -e 's|URIs: http://deb.debian.org/debian$|URIs: https://snapshot.debian.org/archive/debian/20261023T000000Z|' \
+      -e 's|URIs: http://deb.debian.org/debian-security$|URIs: https://snapshot.debian.org/archive/debian-security/20261023T000000Z|' \
+      /etc/apt/sources.list.d/debian.sources \
+    && printf '%s\n' 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99snapshot \
+    && apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=30 update --error-on=any \
+    && apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=30 upgrade -y \
+    && apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=30 install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
 FROM rust-base AS atls-connect-builder
 
@@ -99,9 +104,12 @@ COPY cvms/dev/user-sandbox/atls-connect/Cargo.toml cvms/dev/user-sandbox/atls-co
 COPY cvms/dev/user-sandbox/atls-connect/src cvms/dev/user-sandbox/atls-connect/src
 RUN cargo build --locked --release -p umbra-atls-connect --target-dir /tmp/atls-connect-target
 
-FROM ghcr.io/astral-sh/uv:0.12.1@sha256:cf4eedcaa81655197f625739489effcbe71b61ceb1506f332c3facae5deceded AS uv
+FROM ghcr.io/astral-sh/uv:0.13.5@sha256:32a7bb39b496babbd997b0a39a4d66c126bdaf5661b302bf6f06abda8deca6ff AS uv
 
 FROM ubuntu:24.04@sha256:561618e2c15bf2397621dd04f96926663a3b5616c189cf7e38db7e82f5c538ea
+# Global ARGs do not reach RUN; account tools also need the source timestamp
+# to keep shadow entries and backups independent of the wall-clock build day.
+ARG SOURCE_DATE_EPOCH
 
 # Ubuntu's minimal rootfs has no CA bundle, but the immutable archive is HTTPS.
 # Bootstrap trust from another immutable base; the snapshot-pinned
@@ -126,6 +134,7 @@ RUN sed -i \
       -e "s|http://security.ubuntu.com/ubuntu|https://snapshot.ubuntu.com/ubuntu/${UBUNTU_SNAPSHOT}|g" \
       /etc/apt/sources.list.d/ubuntu.sources \
     && apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=30 update --error-on=any \
+    && apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=30 upgrade -y \
     && apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=30 install -y --no-install-recommends \
       ca-certificates \
       curl \
@@ -135,7 +144,6 @@ RUN sed -i \
       xz-utils \
       build-essential \
       python3 \
-      python3-pip \
       rsync \
       jq \
       vim \
@@ -182,9 +190,149 @@ RUN set -a \
 COPY --from=compose-builder --chmod=0755 /out/docker-compose /usr/libexec/docker/cli-plugins/docker-compose
 COPY --from=buildx-builder --chmod=0755 /out/docker-buildx /usr/libexec/docker/cli-plugins/docker-buildx
 COPY --from=gh-builder --chmod=0755 /out/gh /usr/local/bin/gh
+COPY --from=compose-builder /src/LICENSE /src/NOTICE /usr/local/share/licenses/docker-compose/
+COPY --from=buildx-builder /src/LICENSE /usr/local/share/licenses/docker-buildx/LICENSE
+COPY --from=gh-builder /src/LICENSE /usr/local/share/licenses/gh/LICENSE
 COPY cvms/dev/user-sandbox/docker-daemon.json /etc/docker/daemon.json
 COPY cvms/dev/user-sandbox/codex-package ./tmp/codex-package
 COPY --from=uv /uv /uvx /bin/
+# pip's latest wheel fixes its CA store but still vendors urllib3 2.7.0.
+# Rebuild only that vendor, preserving pip's three upstream compatibility patches.
+# Use the same verified wheel for global pip and ensurepip-created environments.
+RUN python3 - <<'PYBOOTSTRAP'
+import base64
+import csv
+import hashlib
+import importlib.util
+import io
+import json
+from pathlib import Path
+import re
+import shutil
+import sys
+from urllib.request import urlopen
+import zipfile
+
+def download(url, digest):
+    data = urlopen(url, timeout=60).read()
+    if hashlib.sha256(data).hexdigest() != digest:
+        raise RuntimeError("bootstrap wheel checksum mismatch")
+    return zipfile.ZipFile(io.BytesIO(data))
+
+pip = download(
+    "https://files.pythonhosted.org/packages/3f/06/3e4420302363fbb71be3c7f35ce042f54bfca330e3e66b3a2e3c4cca579f/pip-26.2.2-py3-none-any.whl",
+    "fd7f4dfa8190e014013b9f08f3e973f4e4c26ffd179a204895533a7254813a70",
+)
+urllib3 = download(
+    "https://files.pythonhosted.org/packages/92/9d/c4e665119135114480843e7ab388fa94d8480650450e6f8e26b70d323a4c/urllib3-2.8.0-py3-none-any.whl",
+    "0cf3cae568d36aa9576b28dfb35f11328f1cb974ca7647d9475ebb86c75ac6e3",
+)
+files = {name: pip.read(name) for name in pip.namelist() if not name.startswith("pip/_vendor/urllib3/")}
+for name in urllib3.namelist():
+    if name.startswith("urllib3/") and not name.endswith("/"):
+        files["pip/_vendor/" + name] = urllib3.read(name)
+
+def replace(path, old, new, count=1):
+    source = files[path].decode()
+    if source.count(old) != count:
+        raise RuntimeError("unexpected vendored source: " + path)
+    files[path] = source.replace(old, new).encode()
+
+# Keep the same Brotli opt-out as pip's urllib3-disable-brotli.patch.
+for path, start, end, replacement in (
+    ("pip/_vendor/urllib3/response.py", "try:\n    try:\n        import brotlicffi", "\nfrom . import util", "brotli = None\n"),
+    ("pip/_vendor/urllib3/util/request.py", "try:\n    try:\n        import brotlicffi", "\ntry:\n    if sys.version_info", ""),
+):
+    source = files[path].decode()
+    if source.count(start) != 1 or source.count(end) != 1:
+        raise RuntimeError("unexpected Brotli patch context: " + path)
+    first = source.index(start)
+    last = source.index(end, first)
+    files[path] = (source[:first] + replacement + source[last:]).encode()
+replace("pip/_vendor/urllib3/contrib/pyopenssl.py",
+        "import urllib3.contrib.pyopenssl\n        urllib3.contrib.pyopenssl.inject_into_urllib3()",
+        "import urllib3.contrib.pyopenssl as pyopenssl\n        pyopenssl.inject_into_urllib3()")
+replace("pip/_vendor/urllib3/contrib/emscripten/__init__.py",
+        "import urllib3.connection\n", "import urllib3.connection as urllib3_connection\n")
+replace("pip/_vendor/urllib3/contrib/emscripten/__init__.py",
+        "    urllib3.connection.", "    urllib3_connection.", count=3)
+for name in list(files):
+    if name.startswith("pip/_vendor/urllib3/") and name.endswith(".py"):
+        source = files[name].decode()
+        source = re.sub(r"(?m)^(\s*)import (urllib3|idna)$", r"\1from pip._vendor import \2", source)
+        source = source.replace("import urllib3.", "import pip._vendor.urllib3.")
+        if re.search(r"(?m)^\s*(from|import) (urllib3|idna)\b", source):
+            raise RuntimeError("unrewritten vendor import: " + name)
+        files[name] = source.encode()
+
+license_bytes = urllib3.read("urllib3-2.8.0.dist-info/licenses/LICENSE.txt")
+files["pip/_vendor/urllib3/LICENSE.txt"] = license_bytes
+files["pip-26.2.2.dist-info/licenses/src/pip/_vendor/urllib3/LICENSE.txt"] = license_bytes
+replace("pip/_vendor/vendor.txt", "urllib3==2.7.0", "urllib3==2.8.0")
+bom_path = "pip/_vendor/bom.cdx.json"
+bom = json.loads(files[bom_path])
+components = [item for item in bom["components"] if item["name"] == "urllib3"]
+if len(components) != 1 or components[0]["version"] != "2.7.0":
+    raise RuntimeError("unexpected pip urllib3 SBOM")
+components[0]["version"] = "2.8.0"
+# Replace the component identity and every dependency reference; retain all others.
+bom_text = json.dumps(bom, indent=2, sort_keys=True)
+if bom_text.count("pkg:pypi/urllib3@2.7.0") != 4:
+    raise RuntimeError("unexpected pip urllib3 SBOM references")
+files[bom_path] = (bom_text.replace("pkg:pypi/urllib3@2.7.0", "pkg:pypi/urllib3@2.8.0") + "\n").encode()
+
+record_path = "pip-26.2.2.dist-info/RECORD"
+record = io.StringIO(newline="")
+writer = csv.writer(record, lineterminator="\n")
+for name in sorted(files):
+    if name != record_path:
+        digest = base64.urlsafe_b64encode(hashlib.sha256(files[name]).digest()).rstrip(b"=").decode()
+        writer.writerow((name, "sha256=" + digest, len(files[name])))
+writer.writerow((record_path, "", ""))
+files[record_path] = record.getvalue().encode()
+wheel_name = "pip-26.2.2-py3-none-any.whl"
+wheel_path = Path("/tmp") / wheel_name
+with zipfile.ZipFile(wheel_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as output:
+    for name in sorted(files):
+        info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+        info.compress_type = zipfile.ZIP_DEFLATED
+        info.create_system = 3
+        info.external_attr = 0o100644 << 16
+        output.writestr(info, files[name])
+# Check RECORD against the actual rebuilt archive before installation.
+with zipfile.ZipFile(wheel_path) as output:
+    rows = list(csv.reader(io.StringIO(output.read(record_path).decode())))
+    if {row[0] for row in rows} != set(output.namelist()):
+        raise RuntimeError("rebuilt pip RECORD file list mismatch")
+    for name, digest, size in rows:
+        if name != record_path:
+            data = output.read(name)
+            actual = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
+            if digest != "sha256=" + actual or size != str(len(data)):
+                raise RuntimeError("rebuilt pip RECORD checksum mismatch")
+sys.path.insert(0, str(wheel_path))
+from pip._vendor import urllib3 as patched_urllib3
+if patched_urllib3.__version__ != "2.8.0" or str(wheel_path) not in patched_urllib3.__file__:
+    raise RuntimeError("rebuilt pip did not load patched urllib3")
+if importlib.util.find_spec("ensurepip") is not None:
+    import ensurepip
+    module = Path(ensurepip.__file__)
+    source = module.read_text()
+    if source.count('_PIP_VERSION = "25.0.1"') != 1:
+        raise RuntimeError("unexpected Python ensurepip version")
+    for old in module.with_name("_bundled").glob("pip-*.whl"):
+        old.unlink()
+    shutil.copyfile(wheel_path, module.with_name("_bundled") / wheel_name)
+    module.write_text(source.replace('_PIP_VERSION = "25.0.1"', '_PIP_VERSION = "26.2.2"'))
+    shutil.rmtree(module.with_name("__pycache__"), ignore_errors=True)
+digest = hashlib.sha256(wheel_path.read_bytes()).hexdigest()
+Path("/tmp/umbra-pip-requirements.txt").write_text(
+    "pip @ file://" + str(wheel_path) + " --hash=sha256:" + digest + "\n"
+)
+PYBOOTSTRAP
+RUN uv pip install --python "$(command -v python3)" --system --no-deps --no-cache --no-installer-metadata --require-hashes -r /tmp/umbra-pip-requirements.txt \
+    && rm -f /tmp/pip-26.2.2-py3-none-any.whl /tmp/umbra-pip-requirements.txt \
+    && rm -rf /tmp/uv-*.lock
 
 RUN set -a \
     && . /tmp/tool-versions.env \
@@ -193,39 +341,15 @@ RUN set -a \
     && echo "${NODE_SHA256}  /tmp/node.tar.xz" | sha256sum -c - \
     && tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 \
     && rm /tmp/node.tar.xz \
-    && npm install --global "npm@${NPM_VERSION}" --ignore-scripts --no-audit --no-fund \
-    # npm 12.0.2 predates fixed releases of four top-level bundled dependencies.
-    # Keep these checksummed replacements until NPM_VERSION bundles them itself.
-    && curl -fsSL "https://registry.npmjs.org/brace-expansion/-/brace-expansion-${NPM_BRACE_EXPANSION_VERSION}.tgz" -o /tmp/npm-brace-expansion.tgz \
-    && curl -fsSL "https://registry.npmjs.org/ip-address/-/ip-address-${NPM_IP_ADDRESS_VERSION}.tgz" -o /tmp/npm-ip-address.tgz \
-    && curl -fsSL "https://registry.npmjs.org/tar/-/tar-${NPM_TAR_VERSION}.tgz" -o /tmp/npm-tar.tgz \
-    && curl -fsSL "https://registry.npmjs.org/undici/-/undici-${NPM_UNDICI_VERSION}.tgz" -o /tmp/npm-undici.tgz \
-    && printf '%s  %s\n' \
-      "${NPM_BRACE_EXPANSION_SHA256}" /tmp/npm-brace-expansion.tgz \
-      "${NPM_IP_ADDRESS_SHA256}" /tmp/npm-ip-address.tgz \
-      "${NPM_TAR_SHA256}" /tmp/npm-tar.tgz \
-      "${NPM_UNDICI_SHA256}" /tmp/npm-undici.tgz \
-      | sha256sum -c - \
-    && rm -rf \
-      /usr/local/lib/node_modules/npm/node_modules/brace-expansion \
-      /usr/local/lib/node_modules/npm/node_modules/ip-address \
-      /usr/local/lib/node_modules/npm/node_modules/tar \
-      /usr/local/lib/node_modules/npm/node_modules/undici \
-    && install -d \
-      /usr/local/lib/node_modules/npm/node_modules/brace-expansion \
-      /usr/local/lib/node_modules/npm/node_modules/ip-address \
-      /usr/local/lib/node_modules/npm/node_modules/tar \
-      /usr/local/lib/node_modules/npm/node_modules/undici \
-    && tar -xzf /tmp/npm-brace-expansion.tgz -C /usr/local/lib/node_modules/npm/node_modules/brace-expansion --strip-components=1 \
-    && tar -xzf /tmp/npm-ip-address.tgz -C /usr/local/lib/node_modules/npm/node_modules/ip-address --strip-components=1 \
-    && tar -xzf /tmp/npm-tar.tgz -C /usr/local/lib/node_modules/npm/node_modules/tar --strip-components=1 \
-    && tar -xzf /tmp/npm-undici.tgz -C /usr/local/lib/node_modules/npm/node_modules/undici --strip-components=1 \
-    && rm /tmp/npm-brace-expansion.tgz /tmp/npm-ip-address.tgz /tmp/npm-tar.tgz /tmp/npm-undici.tgz \
-    && test "$(node -p "require('/usr/local/lib/node_modules/npm/node_modules/brace-expansion/package.json').version")" = "${NPM_BRACE_EXPANSION_VERSION}" \
-    && test "$(node -p "require('/usr/local/lib/node_modules/npm/node_modules/ip-address/package.json').version")" = "${NPM_IP_ADDRESS_VERSION}" \
-    && test "$(node -p "require('/usr/local/lib/node_modules/npm/node_modules/tar/package.json').version")" = "${NPM_TAR_VERSION}" \
-    && test "$(node -p "require('/usr/local/lib/node_modules/npm/node_modules/undici/package.json').version")" = "${NPM_UNDICI_VERSION}" \
+    && curl -fsSL "https://registry.npmjs.org/npm/-/npm-${NPM_VERSION}.tgz" -o /tmp/npm.tgz \
+    && echo "${NPM_SHA256}  /tmp/npm.tgz" | sha256sum -c - \
+    && npm install --global /tmp/npm.tgz --offline --ignore-scripts --no-audit --no-fund \
+    && rm /tmp/npm.tgz \
     && test "$(npm --version)" = "${NPM_VERSION}" \
+    && test "$(node -p "require('/usr/local/lib/node_modules/npm/node_modules/brace-expansion/package.json').version")" = 5.0.12 \
+    && test "$(node -p "require('/usr/local/lib/node_modules/npm/node_modules/undici/package.json').version")" = 6.29.0 \
+    && test "$(node -p "require('/usr/local/lib/node_modules/npm/node_modules/ip-address/package.json').version")" = 10.7.2 \
+    && test "$(node -p "require('/usr/local/lib/node_modules/npm/node_modules/tar/package.json').version")" = 7.5.22 \
     && curl -fsSL "https://github.com/anthropics/claude-code/releases/download/v${CLAUDE_VERSION}/claude-linux-x64.tar.gz" -o /tmp/claude.tar.gz \
     && echo "${CLAUDE_SHA256}  /tmp/claude.tar.gz" | sha256sum -c - \
     && install -d /usr/local/lib/umbra \

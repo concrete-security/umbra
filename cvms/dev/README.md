@@ -53,7 +53,9 @@ The forwarder MAY bind `:3128` without a policy so the Dev CVM remains reachable
 | `user-sandbox/` | Dockerfile, entrypoint, SSH, tunnel, forwarder, watcher, and helper crate. |
 | `tests/` | Local smoke and package tests. |
 
-The sandbox image is amd64-only. Its Ubuntu packages, including userspace headers, resolve from the dated Canonical snapshot in the Dockerfile. Container headers do not change the provider-managed guest kernel. Exact Docker Engine, CLI, and containerd `.deb` filenames and SHA-256 digests are reviewed in `user-sandbox/tool-versions.env`. Buildx and GitHub CLI compile from checksum-pinned upstream source with the patched Go builder. All three tools pin `golang.org/x/net` v0.60.0. Buildx replaces its vendored network and archive modules with separately checksum-pinned releases. Compose and GitHub CLI apply the reviewed module checksums from `user-sandbox/go-net.sum`, then build without changing those locks. The Compose source archive, checksum, and Go builder are pinned in the Dockerfile. Architecture or digest drift fails closed.
+The sandbox image is amd64-only. Its Ubuntu packages, including userspace headers, resolve from the dated Canonical snapshot in the Dockerfile. Container headers do not change the provider-managed guest kernel. Exact Docker Engine, CLI, and containerd `.deb` filenames and SHA-256 digests are reviewed in `user-sandbox/tool-versions.env`. Buildx, Compose, and GitHub CLI compile from checksum-pinned upstream source with Go 1.27.3 and `GOTOOLCHAIN=local`. All three tools pin `golang.org/x/net` v0.60.0. Buildx replaces its vendored network and archive modules with separately checksum-pinned releases and reports `+umbra.2` for the local edits. Compose applies the reviewed module checksums from `user-sandbox/go-net.sum`; GitHub CLI retains its newer upstream module locks. Both build without changing their checksum locks. Architecture or digest drift fails closed.
+
+pip is installed separately with a hash pin so its bundled CA store includes current distrust updates. pip stays at 26.2.2 with a local, hash-verified urllib3 2.8.0 vendor update; its license, SBOM and wheel RECORD reflect the rebuilt contents. npm uses a checksum-pinned upstream tarball with its fixed bundled dependencies.
 
 ```bash
 make check
@@ -73,6 +75,8 @@ leaves the shared guest MRTD unset for the private provider canary to measure.
 
 Updates use `umbra cvm update <cvm-id>` and preserve provider-managed named volumes. Published images must use immutable digests, never `latest`.
 
+At startup, an older managed Claude install advances to the baked version without waiting for a network update. Newer managed versions and custom commands remain selected.
+
 Live key rotation, host-level nested-virtualization alternatives, and guaranteed hitless migration are outside v0.
 
-The pinned sandbox tools include Docker Engine/CLI 29.9.2, Buildx 0.38.0+umbra.2, Compose 5.6.0, and GitHub CLI 2.102.0. Their Go dependencies include the upstream security fixes; source archives and binary packages remain checksum-verified. The image smoke test exercises each Docker command and Compose configuration parsing.
+The pinned sandbox tools include Docker Engine/CLI 29.9.2, Buildx 0.38.1+umbra.2, Compose 5.6.1, and GitHub CLI 2.103.0. Their Go dependencies include the upstream security fixes; source archives and binary packages remain checksum-verified. The image smoke test exercises each Docker command and Compose configuration parsing.

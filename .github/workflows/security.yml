@@ -1,10 +1,12 @@
 name: Security analysis
 
 on:
+  workflow_dispatch:
   pull_request:
     branches: [dev, main]
   push:
-    branches: [dev, main]
+    # Scan security patch branches without the dev-only image publisher.
+    branches: [dev, main, "codex/security-*"]
   schedule:
     - cron: '23 4 * * 2'
 
@@ -162,6 +164,24 @@ jobs:
           name: sbom-${{ matrix.name }}
           path: sbom/${{ matrix.name }}.cdx.json
           if-no-files-found: error
+      - name: Verify pip vendor exception guarantees
+        if: ${{ matrix.name == 'console' || matrix.name == 'security-cvm' || matrix.name == 'dev-cvm' }}
+        timeout-minutes: 2
+        env:
+          IMAGE: umbra-security-scan:${{ matrix.name }}
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s tools -p test_check_pip_vendor.py
+          container="umbra-pip-vendor-${{ matrix.name }}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          trap 'docker rm -f "${container}" >/dev/null 2>&1 || true' EXIT
+          timeout --kill-after=5s 60s docker run --rm --name "${container}" \
+            --network none --read-only --user 0:0 --entrypoint /bin/sh \
+            --mount "type=bind,src=${PWD}/tools/check-pip-vendor.py,dst=/tmp/check-pip-vendor.py,readonly" \
+            "${IMAGE}" -c '
+              python=/usr/bin/python3
+              if [ -x /usr/local/bin/python3 ]; then python=/usr/local/bin/python3; fi
+              exec "${python}" -I -B /tmp/check-pip-vendor.py
+            '
       - name: Enforce image vulnerability policy
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:

@@ -50,7 +50,7 @@ Source IP is not the identity boundary; the per-CVM bearer is.
 
 ## Build and test
 
-The repository pins Python 3.12 in `.python-version`, matching the Security CVM container. `uv` provisions it when necessary; newer Python minors are not part of the supported or release-tested runtime. The image resolves system packages, including corrected userspace headers, from the reviewed Debian snapshot recorded in its Dockerfile. Container headers do not change the provider-managed guest kernel. Unavailable reviewed inputs fail the build instead of resolving newer packages.
+The repository pins Python 3.12 in `.python-version`, matching the Security CVM container. `uv` provisions it when necessary; newer Python minors are not part of the supported or release-tested runtime. The image uses a reviewed Debian snapshot for system package upgrades, including CA distrust updates. Container headers do not change the provider-managed guest kernel. pip stays at 26.2.2 with a local, hash-verified urllib3 2.8.0 vendor update; global pip and ensurepip use the same rebuilt wheel, with its license, SBOM and RECORD updated. Unavailable reviewed inputs fail the build instead of resolving newer packages.
 
 ```bash
 make check
