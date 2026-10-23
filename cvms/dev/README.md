@@ -61,7 +61,9 @@ make test
 make verify-dev-image-repro
 ```
 
-The local Compose smoke substitutes `runc` for hosts without Sysbox and proves that owned services start, key-only SSH works, and the tunnel reaches sshd. Full Sysbox, aTLS, and TEE evidence requires an authorized live environment.
+The local Compose smoke substitutes `runc` for hosts without Sysbox. It checks service startup, key-only SSH, tunnel relay, sandbox credential isolation, dev/root direct-egress denial, and fail-closed CONNECT without attestation policy. A controlled origin brackets denial probes with successful requests and confirms no denied request arrived. Full Sysbox, positive aTLS, and TEE evidence requires an authorized live environment.
+
+`make test-release-images` runs these checks against the selected published Dev digest without rebuilding. Supply the exact Dev/Security refs and source SHA as described in the [runner release-image gate](../../docs/ci-cd.md#runner-release-image-gate).
 
 The opt-in reproducibility gate creates two independent clean worktrees, performs cache-disabled builds with normalized timestamps, and requires identical linux/amd64 runtime-manifest digests. Each result index independently validates the release's pinned SBOM/provenance inputs. Top-level index digests are not compared because max-mode provenance includes a unique invocation ID and wall-clock timestamps. Publication exports the matching result from the fresh isolated cache populated by those two builds, revalidates the tagless push-by-digest registry result, and deploys its stable runtime digest. Both paths use the named `umbra-release` builder with digest-pinned BuildKit 0.32.2, compatibility version 30, a digest-pinned Dockerfile 1.26.0 frontend, and exactly Buildx 0.34.0.
 
@@ -75,4 +77,4 @@ Updates use `umbra cvm update <cvm-id>` and preserve provider-managed named volu
 
 Live key rotation, host-level nested-virtualization alternatives, and guaranteed hitless migration are outside v0.
 
-The pinned sandbox tools include Docker Engine/CLI 29.9.0, Buildx 0.38.0+umbra.2, Compose 5.6.0, and GitHub CLI 2.102.0. Their Go dependencies include the upstream security fixes; source archives and binary packages remain checksum-verified. The image smoke test exercises each Docker command and Compose configuration parsing.
+The pinned sandbox tools include Docker Engine/CLI 29.9.2, Buildx 0.38.0+umbra.2, Compose 5.6.0, and GitHub CLI 2.102.0. Their Go dependencies include the upstream security fixes; source archives and binary packages remain checksum-verified. The image smoke test exercises each Docker command and Compose configuration parsing.

@@ -97,7 +97,18 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
+    outputs:
+      source_sha: ${{ steps.images.outputs.source_sha }}
+      dev_image: ${{ steps.images.outputs.dev_image }}
+      security_image: ${{ steps.images.outputs.security_image }}
+      lock_sha256: ${{ steps.images.outputs.lock_sha256 }}
     steps:
+      - name: Checkout exact trusted source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: 'false'
+
       - name: Download component manifests
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -131,11 +142,20 @@ jobs:
               }
             end
           ' parts/*.json > artifacts/deployment-lock.candidate.json
-          jq -e '
-            .source.commit == env.GITHUB_SHA
-            and (.artifacts.dev_cvm.measurement == null)
-            and (.artifacts.security_cvm.measurement == null)
-          ' artifacts/deployment-lock.candidate.json >/dev/null
+
+      - name: Select exact published runtime images
+        id: images
+        run: |
+          set -euo pipefail
+          python3 ops/verify/select-release-test-images.py \
+            --lock artifacts/deployment-lock.candidate.json \
+            --expected-commit "$GITHUB_SHA" > "$RUNNER_TEMP/release-test-images.json"
+          jq -r '
+            "source_sha=\(.source_commit)",
+            "dev_image=\(.UMBRA_TEST_DEV_IMAGE)",
+            "security_image=\(.UMBRA_TEST_SECURITY_IMAGE)",
+            "lock_sha256=\(.lock_sha256)"
+          ' "$RUNNER_TEMP/release-test-images.json" >> "$GITHUB_OUTPUT"
 
       - name: Upload deployment candidate
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -144,3 +164,17 @@ jobs:
           path: artifacts/deployment-lock.candidate.json
           if-no-files-found: error
           retention-days: 30
+
+  release-images:
+    name: test exact release images
+    needs: manifest
+    permissions:
+      contents: read
+      actions: read
+      packages: read
+    uses: ./.github/workflows/verify-release-images.yml
+    with:
+      source_sha: ${{ needs.manifest.outputs.source_sha }}
+      dev_image: ${{ needs.manifest.outputs.dev_image }}
+      security_image: ${{ needs.manifest.outputs.security_image }}
+      lock_sha256: ${{ needs.manifest.outputs.lock_sha256 }}
