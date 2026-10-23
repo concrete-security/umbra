@@ -29,7 +29,7 @@ use std::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use url::{Host, Url};
+use url::Url;
 
 use crate::{
     cli::UpdateArgs, commands::audit::sha256_hex, config::ResolvedConfig, exit::ExitStatus, style,
@@ -401,14 +401,7 @@ fn redirect_target_allowed(initial: &Url, next: &Url) -> bool {
 /// Whether the URL's host is loopback. Matches on the parsed host so a
 /// look-alike name (`http://127.0.0.1.example.com`) cannot pass as local.
 fn is_loopback(url: &Url) -> bool {
-    match url.host() {
-        Some(Host::Ipv4(addr)) => addr.is_loopback(),
-        Some(Host::Ipv6(addr)) => addr.is_loopback(),
-        // Not resolved: `localhost` is reserved for loopback (RFC 6761), any
-        // other name could point anywhere.
-        Some(Host::Domain(name)) => name.eq_ignore_ascii_case("localhost"),
-        None => false,
-    }
+    crate::console::is_loopback(url)
 }
 
 fn http_client(timeout: Duration) -> Result<reqwest::blocking::Client, (ExitStatus, String)> {

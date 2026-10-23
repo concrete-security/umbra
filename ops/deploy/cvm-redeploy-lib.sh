@@ -562,7 +562,7 @@ cvm_redeploy_publish_image() {
     --no-cache \
     --platform "$platforms" \
     --file "$worktree_dockerfile" \
-    --output "type=oci,dest=${local_archive},rewrite-timestamp=true,compatibility-version=${UMBRA_BUILDKIT_COMPATIBILITY_VERSION},oci-mediatypes=true" \
+    --output "type=oci,name=${image_repo},dest=${local_archive},rewrite-timestamp=true,compatibility-version=${UMBRA_BUILDKIT_COMPATIBILITY_VERSION},oci-mediatypes=true" \
     "$worktree_context" >"${CVM_REDEPLOY_RELEASE_DIR}/first-build.log" 2>&1 \
     || cvm_redeploy_fail "first local release build failed; nothing was published"
   local_runtime_digest="$(
@@ -575,7 +575,7 @@ cvm_redeploy_publish_image() {
     --no-cache \
     --platform "$platforms" \
     --file "$second_worktree_dockerfile" \
-    --output "type=oci,dest=${second_archive},rewrite-timestamp=true,compatibility-version=${UMBRA_BUILDKIT_COMPATIBILITY_VERSION},oci-mediatypes=true" \
+    --output "type=oci,name=${image_repo},dest=${second_archive},rewrite-timestamp=true,compatibility-version=${UMBRA_BUILDKIT_COMPATIBILITY_VERSION},oci-mediatypes=true" \
     "$second_worktree_context" >"${CVM_REDEPLOY_RELEASE_DIR}/second-build.log" 2>&1 \
     || cvm_redeploy_fail "second independent local release build failed; nothing was published"
   second_runtime_digest="$(
