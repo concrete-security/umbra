@@ -182,6 +182,9 @@ class Origin(BaseHTTPRequestHandler):
 
 HTTPServer(("0.0.0.0", 18080), Origin).serve_forever()
 PY
+# The release job keeps a private umask; this public fixture must be readable
+# by the image process after its capabilities are dropped.
+chmod 0644 "$smoke_tmpdir/origin.py"
 
 rendered_compose="$(
   compose config
