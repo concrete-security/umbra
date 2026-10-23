@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use reqwest::blocking::{Client, Response};
+use reqwest::blocking::Response;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use uuid::Uuid;
@@ -156,7 +156,7 @@ fn fetch_security_cvm(
     console_url: &str,
     session: &Session,
 ) -> Result<SecurityCvm, (ExitStatus, String)> {
-    let response = Client::new()
+    let response = crate::console::client(console_url)?
         .get(format!(
             "{console_url}/api/v1/entities/{}/security-cvm",
             session.entity.id
@@ -185,7 +185,7 @@ fn submit_launch(
         body.insert("region".to_string(), Value::String(value.clone()));
     }
     let response = console::send(
-        Client::new()
+        crate::console::client(console_url)?
             .post(format!(
                 "{console_url}/api/v1/entities/{}/security-cvm",
                 session.entity.id
@@ -200,7 +200,7 @@ fn submit_launch(
 
 fn submit_update(console_url: &str, session: &Session) -> Result<Operation, (ExitStatus, String)> {
     let response = console::send(
-        Client::new()
+        crate::console::client(console_url)?
             .post(format!(
                 "{console_url}/api/v1/entities/{}/security-cvm/actions/update",
                 session.entity.id
@@ -217,7 +217,7 @@ fn submit_terminate(
     session: &Session,
 ) -> Result<SecurityCvm, (ExitStatus, String)> {
     let response = console::send(
-        Client::new()
+        crate::console::client(console_url)?
             .delete(format!(
                 "{console_url}/api/v1/entities/{}/security-cvm",
                 session.entity.id
@@ -233,7 +233,7 @@ fn fetch_attestation(
     session: &Session,
     probe: bool,
 ) -> Result<SecurityCvmAttestation, (ExitStatus, String)> {
-    let response = Client::new()
+    let response = crate::console::client(console_url)?
         .get(format!(
             "{console_url}/api/v1/entities/{}/security-cvm/attestation",
             session.entity.id

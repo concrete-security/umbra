@@ -211,6 +211,7 @@ ensure_claude_native_install() {
   local version
   local target
   local current
+  local current_version
   version="$(cat /usr/local/lib/umbra/claude.version 2>/dev/null || true)"
   if [ -z "$version" ]; then
     fail "missing Claude version metadata"
@@ -227,7 +228,16 @@ ensure_claude_native_install() {
 
   current="$(readlink -f /home/dev/.local/bin/claude 2>/dev/null || true)"
   if [ -x /home/dev/.local/bin/claude ] && [ "$current" != "/usr/local/bin/claude" ]; then
-    return
+    case "$current" in
+      /home/dev/.local/share/claude/versions/*)
+        current_version="${current##*/}"
+        if [[ ! "$current_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+          || ! dpkg --compare-versions "$current_version" lt "$version"; then
+          return
+        fi
+        ;;
+      *) return ;;
+    esac
   fi
   ln -sfn "$target" /home/dev/.local/bin/claude
   chown -h dev:dev /home/dev/.local/bin/claude

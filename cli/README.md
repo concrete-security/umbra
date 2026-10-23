@@ -4,6 +4,8 @@ The `umbra` CLI is the v0 product surface for developers, admins, and operators.
 
 The CLI talks to the Console over HTTPS, stores local session/config state, writes per-CVM aTLS policy files, opens verified tunnels to Dev CVMs, and wraps SSH/editor/agent workflows.
 
+Console URLs require HTTPS, with HTTP permitted only for parsed loopback hosts (`localhost`, `127.0.0.0/8`, or `::1`). Console API requests do not follow redirects. Loopback HTTP connections bypass ambient proxies; HTTPS connections retain normal proxy support. Secret output includes only reviewed metadata fields and discards unknown response fields in both output modes.
+
 The authoritative contract is `docs/specs/cli.md`. Human-readable output formatting is governed by `docs/specs/cli-style.md`.
 
 ## Main Jobs

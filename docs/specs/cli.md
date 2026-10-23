@@ -50,6 +50,8 @@ Every subcommand MUST accept these flags (parsed at the top level):
 
 Every global flag MUST have a corresponding config key and environment variable (see §4.1); the flag, env var, and config key are three ways of expressing the same value, and precedence is defined in §4.2.
 
+Console URLs MUST use HTTPS, except that HTTP is permitted for parsed loopback hosts (`localhost`, IPv4 loopback, or `::1`) for local development. Reject missing hosts, URL credentials, query strings, and fragments with exit `4` before sending credentials. Console API clients MUST NOT follow redirects, including same-origin redirects. HTTP loopback clients MUST bypass ambient proxies; HTTPS clients retain normal proxy support. Logout MUST still clear the local session when unsafe URL configuration prevents best-effort remote revocation.
+
 ### 2.3 Output formats
 
 - **Default** output is human-readable and adapts to the content: tables for list-like commands when the columns fit the terminal width; structured text (bulleted items with indented `key: value` fields) when a table would wrap or a record has too many fields to line up cleanly; short sentences for point commands. The per-command "Output" paragraphs in §3 describe the information returned; the exact rendering (table vs. structured list) is an implementation choice driven by fit.

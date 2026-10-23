@@ -32,6 +32,7 @@ APP_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 MANAGED_CVM_NAME_RE = re.compile(r"^umbra-v0-(?:cvm|sc)-[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$")
 DNS_HOST_RE = re.compile(r"^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$")
 ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+PRODUCTION_OS_IMAGE_RE = re.compile(r"^dstack-(?:nvidia-)?[0-9]+\.[0-9]+\.[0-9]+(?:\.[0-9]+)?$")
 INSTANCE_TYPE_CURRENCY = "USD"
 # Authoring-time snapshot of `phala instance-types` in the adapter's normalized
 # shape. Seeds the Console catalog on a virgin database until the first live
@@ -85,6 +86,8 @@ PHALA_STATUS_MAP = {
     "removed": "TERMINATED",
 }
 SUBPROCESS_ENV_ALLOWLIST = ("PATH", "HOME", "LANG", "LC_ALL")
+# Preserve provider response contracts across Phala CLI/SDK dependency upgrades.
+PHALA_API_VERSION = "2026-05-22"
 PHALA_COMPOSE_FILE_HASH_HELPER = r"""
 import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
@@ -110,7 +113,7 @@ async function main() {
 
   const appId = cleanAppId(rawAppId);
   const { createClient, getCvmComposeFile } = await importPhalaCloud();
-  const client = createClient({ apiKey: process.env.PHALA_CLOUD_API_KEY });
+  const client = createClient({ apiKey: process.env.PHALA_CLOUD_API_KEY, version: "2026-05-22" });
   const appCompose = await getCvmComposeFile(client, { app_id: appId }, { schema: false });
   const composeYaml = appCompose && typeof appCompose.docker_compose_file === "string" ? appCompose.docker_compose_file : "";
   if (!composeYaml) {
@@ -163,6 +166,7 @@ class PhalaClient:
     node_path: str = "node"
     redaction_patterns: tuple[re.Pattern[str], ...] = ()
     timeout_seconds: float = 300.0
+    os_image: str | None = None
 
     @classmethod
     def from_settings(cls, *, timeout_seconds: float | None = None) -> PhalaClient:
@@ -177,6 +181,7 @@ class PhalaClient:
             node_path=raw.get("PHALA_NODE_PATH", "node").strip() or "node",
             redaction_patterns=patterns,
             timeout_seconds=300.0 if timeout_seconds is None else timeout_seconds,
+            os_image=raw.get("PHALA_OS_IMAGE", "").strip() or None,
         )
 
     async def deploy(
@@ -190,6 +195,8 @@ class PhalaClient:
         disk_size_gb: int | None = None,
     ) -> PhalaDeployResult:
         validate_managed_cvm_name(name)
+        if self.os_image is not None and not PRODUCTION_OS_IMAGE_RE.fullmatch(self.os_image):
+            raise PhalaError("invalid_os_image", field="PHALA_OS_IMAGE")
         async with staged_compose_and_env(compose_yaml=compose_yaml, env=env) as staged:
             args = [
                 "deploy",
@@ -203,6 +210,7 @@ class PhalaClient:
             ]
             append_optional_arg(args, "--instance-type", instance_type)
             append_optional_arg(args, "--region", region)
+            append_optional_arg(args, "--image", self.os_image)
             # `phala deploy --disk-size` expects a size *with unit* (e.g. "50G");
             # a bare integer is not accepted. Omitting it uses Phala's own 40GB
             # default (matching DEV_CVM_DEFAULT_DISK_GB).
@@ -323,7 +331,7 @@ class PhalaClient:
             raise PhalaError("invalid_json", output=scrub_output(stdout, self.api_token, self.redaction_patterns)) from exc
 
     async def _run_text(self, args: list[str]) -> str:
-        return await self._run_command_text(self.cli_path, args)
+        return await self._run_command_text(self.cli_path, [*args, "--api-version", PHALA_API_VERSION])
 
     async def _run_node_text(self, args: list[str]) -> str:
         return await self._run_command_text(self.node_path, args)

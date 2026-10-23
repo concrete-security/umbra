@@ -16,6 +16,8 @@ feature branch --PR--> dev --reviewed promotion--> main --tag/release--> immutab
 | Selected CVM image verification | manual | `.github/workflows/verify-release-images.yml` | Repeat runner tests for immutable images selected from a successful publication candidate. |
 | CLI release | manual | `.github/workflows/publish-cli.yml` | Package and publish one reviewed version and its installer tree. |
 
+Security analysis runs on pushes to `dev`, `main`, and `codex/security-*`, on pull requests to `dev` or `main`, and by manual dispatch. Use a security patch branch to rerun source and image scans without the `dev` push publisher. These branch scans do not refresh default-branch Dependabot alerts; those reflect the dependency manifests on `main`.
+
 The public repository contains no staging or production deployment workflow. The maintainers' private deployment repository records the exact public commit, release tag, image digest, SBOM, and provenance selected for each environment, and owns all live deployment orchestration.
 
 All third-party Actions references use full commit SHAs except the SLSA generator, whose reviewed exception is exactly `slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0`. The generator requires a semver tag for builder-identity reconstruction. The repository checker recognizes quoted and unquoted YAML keys and cross-checks this exception against the CLI updater and bootstrap installer's exact builder IDs; update those trust pins and their tests together.
@@ -133,6 +135,10 @@ The scoped Hickory DNSSEC advisory exception requires both locked Linux Cargo
 feature graphs to exclude DNSSEC. `make check` enforces that condition and
 requires reassessment when the resolver version changes. The exception expires
 on 2026-11-08; remove it when the upstream dependency permits a patched resolver.
+
+The Hickory CNAME advisory GHSA-6f2x-v7q7-m7m5 also has a scoped exception until 2026-11-08. In 0.25.2, the affected recursive implementation is in the separate `hickory-recursor` crate. Umbra's reqwest 0.12.28 calls the stub `TokioResolver::lookup_ip`, rather than that full-recursion implementation. Both lockfiles and all native release graphs exclude `hickory-recursor`. Controlled CNAME-only DNS fixtures in Atlas cover unrelated answer, authority and additional records, plus legitimate-chain controls. This exception addresses the advisory's recursive fan-out, without claiming general DNS response safety. `tools/check-cargo-dnssec.py` checks all CLI release targets and Console Linux; it rejects version, registry source, resolver caller and DNSSEC feature drift. The DNSSEC exception has its own independent condition. See the [advisory](https://github.com/advisories/GHSA-6f2x-v7q7-m7m5), [answer-section fix](https://github.com/hickory-dns/hickory-dns/commit/4689fc8d3ddd3e3f99ec1b7be4e2e9e78afd2e6b), and [chain fix](https://github.com/hickory-dns/hickory-dns/commit/ccd6952378f250c714fc2af0cb1053e1c179f832).
+
+The two pip-vendor exceptions also expire on 2026-11-08. They match Trivy's Python target and exact affected package PURLs when present; Trivy also matches a missing PURL. Before applying them, the image gate runs `tools/check-pip-vendor.py` in a read-only container without network access. The guard checks the reviewed pip/vendor pins and rejects native msgpack, PackageIndex implementations, or actual installed distributions at the excepted vulnerable versions, including alternate Python environments. A guard failure stops the image gate and requires reassessment.
 
 An `environment: release` declaration does not protect a publication by itself: GitHub will create an unprotected environment when the named environment is missing. Capture the `release` environment's deployment-branch policy and reviewer settings through the GitHub API before the first non-dry-run release.
 
