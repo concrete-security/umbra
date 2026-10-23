@@ -4,6 +4,7 @@ FROM nginx:1.30.6-alpine3.24@sha256:47928bf67eb62a1863cb08d9ecb52d3e704304ba614e
 # Pin the complete added package closure. Alpine stable repositories replace
 # revisions in place; an unavailable reviewed version must fail closed.
 RUN apk add --no-cache \
+      brotli-libs=1.2.1-r0 \
       ca-certificates=20261020-r0 \
       ca-certificates-bundle=20261020-r0 \
       gettext=1.0-r0 \
