@@ -10,7 +10,7 @@ feature branch --PR--> dev --reviewed promotion--> main --tag/release--> immutab
 
 | Stage | Trigger | Workflow | Purpose |
 | --- | --- | --- | --- |
-| PR gate | PR to `dev` | `.github/workflows/pr-gate.yml` | Run `make check` and `make test` without live credentials. |
+| PR gate | PR to `dev` or `main` | `.github/workflows/pr-gate.yml` | Run `make check`, `make test`, and the Linux Concrete-to-Umbra migration without live credentials. |
 | Security checks | repository security triggers | `.github/workflows/security.yml` | Run public dependency, source, and artifact security gates. |
 | CVM image candidate | push to `dev`; manual after promotion | `.github/workflows/publish-cvm-images.yml` | Reproduce and publish digest-only Dev/Security images with SBOM and provenance, then emit a lock-shaped candidate. |
 | CLI release | manual | `.github/workflows/publish-cli.yml` | Package and publish one reviewed version and its installer tree. |
@@ -22,6 +22,8 @@ All third-party Actions references use full commit SHAs except the SLSA generato
 ## Contributor boundary
 
 Pull-request jobs run on GitHub-hosted runners with read-only repository permissions and no deployment secrets. Fork pull requests must never receive cloud federation, registry publishing, OIDC clients, provider credentials, production environments, or caches containing private material.
+
+The Linux migration job installs published Concrete 0.4.1, builds the bridge with its pinned verifier, and exercises the real updater against loopback fixtures. It checks state preservation, symlink and shared installs, retries, checksum and PATH command collisions, and rejection of unsigned future updates. It uses no live CVMs or deployment credentials.
 
 The local contributor contract is:
 
@@ -46,7 +48,7 @@ The CVM publisher receives only the workflow's package-scoped `GITHUB_TOKEN`.
 It publishes tagless GHCR indexes, records their stable runtime subjects and
 attestation-index references, and leaves both guest measurements null. The
 private deployment authority measures the Dev image through its provider canary
-and applies that shared dstack guest MRTD to both components before staging.
+and applies that shared dstack guest MRTD to both components before deployment.
 
 The private deployment repository is authoritative for environment lock files, Workload Identity Federation conditions, service accounts, hosts, databases, provider workspaces, approval gates, session caches, rollback state, and recovery material. It consumes only immutable public artifacts and never rebuilds product source for deployment.
 
@@ -124,10 +126,12 @@ No external issue-tracker integration is required by this repository.
 
 ## Promotion procedure
 
-1. Merge a reviewed, green PR into `dev`.
-2. Open a reviewed `dev` to `main` PR after the public source gates pass for the exact candidate SHA.
+1. Open a PR to `main` from `dev` or a feature branch.
+2. Merge after public source gates, security checks, and maintainer review pass for the exact candidate SHA.
 3. Tag and publish immutable CLI and image artifacts with their SBOMs and provenance.
-4. Update the private deployment repository to pin those exact public identifiers, verify them in staging, then promote the same digests to production under the private deployment gates.
+4. Update the private deployment repository to pin those exact public identifiers, then deploy to production under its production approval gates.
+
+Staging verification is optional for now. Promotion does not require an internal staging status or a PR-specific SHA exception. Linux source gates, security checks, maintainer review, and protected release and production approvals still apply. Operators may run the live verification journey in an isolated DEV or STAGING environment before production.
 
 No public-repository workflow deploys a maintainer-operated environment.
 

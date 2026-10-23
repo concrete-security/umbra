@@ -17,6 +17,11 @@ readme = "README.md"
 name = "umbra"
 path = "src/main.rs"
 
+[[bin]]
+name = "concrete-update-bridge"
+path = "src/concrete_update_bridge.rs"
+required-features = ["concrete-update-bridge"]
+
 [lib]
 name = "umbra_cli"
 path = "src/lib.rs"
@@ -53,6 +58,7 @@ zeroize = { version = "1", features = ["derive"] }
 # enable it for a release build: it would ship a test HTTP server in the binary.
 [features]
 test-support = []
+concrete-update-bridge = []
 
 [dev-dependencies]
 umbra-cli = { path = ".", features = ["test-support"] }

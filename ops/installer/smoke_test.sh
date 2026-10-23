@@ -801,7 +801,7 @@ if [ "${GH_TOKEN+x}" ]; then
   echo "workflow Python child inherited GH_TOKEN" >&2
   exit 2
 fi
-printf 'python\n' >> "$SYNC_NON_GH_LOG"
+printf '%s\n' "$(basename "$1")" >> "$SYNC_NON_GH_LOG"
 exec "$SYNC_REAL_PYTHON3" "$@"
 EOF
 chmod 0755 "$sync_fake_bin/python3"
@@ -942,6 +942,8 @@ grep -Fx 'workflow:umbra-cli-release-tree' "$sync_gh_log" >/dev/null
 grep -Fx 'verified:umbra-cli-release-tree.tar.gz' "$sync_verifier_log" >/dev/null
 grep -Fx 'verified:umbra-install.sh' "$sync_verifier_log" >/dev/null
 grep -Fx 'verified:SHA256SUMS' "$sync_verifier_log" >/dev/null
-test "$(wc -l < "$sync_non_gh_log")" -eq 2
+for helper in verify-cli-release-manifest.py extract-cli-release-tree.py prepare-concrete-update-channel.py; do
+  grep -Fx "$helper" "$sync_non_gh_log" >/dev/null
+done
 
 echo "installer smoke: ok"

@@ -11,12 +11,15 @@ mod cli_macros;
 mod atls_policy_store;
 mod cli;
 mod commands;
+#[cfg(feature = "concrete-update-bridge")]
+mod concrete_update;
 mod config;
 mod console;
 mod cvm_state;
 mod exit;
 mod fsutil;
 mod help;
+mod migration;
 mod operation;
 mod prompt;
 mod session;
@@ -27,6 +30,11 @@ mod style;
 pub mod test_support;
 
 pub use exit::ExitStatus;
+
+#[cfg(feature = "concrete-update-bridge")]
+pub fn run_concrete_update_bridge() -> ExitCode {
+    concrete_update::run()
+}
 
 pub fn run() -> ExitCode {
     install_default_crypto_provider();
@@ -53,6 +61,10 @@ pub fn run() -> ExitCode {
             };
         }
     };
+    if let Err(message) = migration::prepare(args.config.as_deref()) {
+        style::eprintln_error(&message);
+        return ExitCode::from(ExitStatus::Error);
+    }
     let config = config::ResolvedConfig::resolve(config::ConfigOverrides {
         config_dir: args.config.clone(),
         console_url: args.console_url.clone(),
