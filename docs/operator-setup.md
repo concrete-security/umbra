@@ -71,6 +71,12 @@ Create a dedicated provider workspace and least-privilege API token for each env
 
 Confirm quota for at least one Security CVM and one Dev CVM, then record the approved region and instance types. Install the exact provider CLI version and verify its package digest against `.env.common`.
 
+Set `PHALA_OS_IMAGE` in the environment's non-secret layer to a reviewed production guest OS name, such as `dstack-0.5.12`. Confirm that the provider still offers the selected version in the intended region. New Dev and Security CVMs then pass that exact name through `phala deploy --image`, alongside `--no-dev-os`; an unavailable pin fails deployment without falling back to another image. An unset or blank value preserves provider auto-selection for existing configurations, so production operators should set an explicit pin.
+
+Review the guest OS pin together with `DEV_CVM_IMAGE_MEASUREMENT` and `SECURITY_CVM_IMAGE_MEASUREMENT`. Use an approved canary to establish the selected guest's MRTD before changing both measurement values. An application-image release alone does not change those values. This setting applies to new CVMs; ordinary in-place application updates retain the existing guest OS and do not perform a guest OS migration.
+
+Existing CVMs retain their captured MRTD for reconciliation after a baseline rotation. However, `umbra cvm update` and `umbra security-cvm update` select the current configured MRTD while retaining the guest OS. An update of an older guest will therefore fail attestation after a different MRTD is configured. Plan an approved guest migration or replacement before updating those instances.
+
 Umbra also invokes a pinned shade checkout. Set `SHADE_DIR` in the private admin layer. The Console image builds and includes its atlas verification helper; `ATLAS_VERIFIER_CMD` normally remains `/usr/local/bin/umbra-atlas-verify`.
 
 ## 5. Container images
