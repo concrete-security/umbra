@@ -72,6 +72,21 @@ def test_from_settings_accepts_timeout_override(monkeypatch) -> None:
     assert client.cli_path == "/tmp/phala"
 
 
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [(None, None), ("", None), ("  ", None), (" dstack-0.5.9 ", "dstack-0.5.9")],
+)
+def test_from_settings_reads_os_image_success(monkeypatch, configured, expected) -> None:
+    """Read an optional guest OS pin without changing unconfigured deployments."""
+    monkeypatch.setenv("PHALA_API_TOKEN", "phala-token")
+    if configured is None:
+        monkeypatch.delenv("PHALA_OS_IMAGE", raising=False)
+    else:
+        monkeypatch.setenv("PHALA_OS_IMAGE", configured)
+
+    assert PhalaClient.from_settings().os_image == expected
+
+
 def test_render_env_file_rejects_smuggleable_values() -> None:
     with pytest.raises(PhalaError) as exc:
         render_env_file({"SECURITY_CVM_PROXY_TOKEN": "line1\nline2"})
@@ -131,7 +146,9 @@ def test_provider_adapter_reads_deployment_compose_hash() -> None:
     assert run(provider.deployment_compose_sha256("app-123")) == "a" * 64
 
 
-def test_deploy_stages_files_with_private_modes_and_cleans(tmp_path) -> None:
+@pytest.mark.parametrize("os_image", ["dstack-0.5.9", "dstack-0.5.9.1", "dstack-nvidia-0.5.12"])
+def test_deploy_stages_files_with_private_modes_and_cleans_success(tmp_path, os_image) -> None:
+    """Deploy the selected production guest with private, temporary inputs."""
     marker = tmp_path / "seen.json"
     cli = write_fake_cli(
         tmp_path,
@@ -146,6 +163,7 @@ def test_deploy_stages_files_with_private_modes_and_cleans(tmp_path) -> None:
         assert sys.argv[1:4] == ["deploy", "--name", "umbra-v0-cvm-smoke"]
         assert sys.argv[sys.argv.index("--instance-type") + 1] == "tdx.small"
         assert sys.argv[sys.argv.index("--region") + 1] == "FR-PARIS-1"
+        assert sys.argv[sys.argv.index("--image") + 1] == {os_image!r}
         assert "--no-dev-os" in sys.argv
         compose_path = sys.argv[sys.argv.index("--compose") + 1]
         env_path = sys.argv[sys.argv.index("-e") + 1]
@@ -157,7 +175,12 @@ def test_deploy_stages_files_with_private_modes_and_cleans(tmp_path) -> None:
         print(json.dumps({{"app_id": "app-123", "gateway_host": "gateway.example.com", "status": "running"}}))
         """,
     )
-    client = PhalaClient(cli_path=str(cli), api_token="phala-token", timeout_seconds=TEST_CLI_TIMEOUT_SECONDS)
+    client = PhalaClient(
+        cli_path=str(cli),
+        api_token="phala-token",
+        timeout_seconds=TEST_CLI_TIMEOUT_SECONDS,
+        os_image=os_image,
+    )
 
     result = run(
         client.deploy(
@@ -206,7 +229,8 @@ def test_deploy_appends_disk_size_with_unit(tmp_path) -> None:
     assert result.app_id == "app-123"
 
 
-def test_deploy_omits_disk_size_when_absent(tmp_path) -> None:
+def test_deploy_omits_optional_arguments_success(tmp_path) -> None:
+    """Keep provider defaults when neither disk size nor guest OS is configured."""
     cli = write_fake_cli(
         tmp_path,
         """
@@ -214,6 +238,7 @@ def test_deploy_omits_disk_size_when_absent(tmp_path) -> None:
         import sys
 
         assert "--disk-size" not in sys.argv
+        assert "--image" not in sys.argv
         print(json.dumps({"app_id": "app-123", "gateway_host": "gateway.example.com", "status": "running"}))
         """,
     )
@@ -228,6 +253,20 @@ def test_deploy_omits_disk_size_when_absent(tmp_path) -> None:
     )
 
     assert result.app_id == "app-123"
+
+
+@pytest.mark.parametrize(
+    "os_image",
+    ["", "latest", "dstack-dev-0.5.9", "dstack-0.5.9-dev", "dstack-0.5.9\n--debug"],
+)
+def test_deploy_rejects_invalid_os_image_failure(tmp_path, os_image) -> None:
+    """Reject an invalid or development guest OS pin before invoking Phala."""
+    client = PhalaClient(cli_path=str(tmp_path / "unused-phala"), api_token="phala-token", os_image=os_image)
+
+    with pytest.raises(PhalaError) as error:
+        run(client.deploy(name="umbra-v0-cvm-smoke", compose_yaml="services: {}\n", env={}))
+
+    assert (error.value.code, error.value.field) == ("invalid_os_image", "PHALA_OS_IMAGE")
 
 
 def test_deploy_falls_back_to_cvms_get_when_cli_stdout_is_empty(tmp_path) -> None:
@@ -324,6 +363,7 @@ def test_update_uses_phala_deploy_cvm_id(tmp_path) -> None:
         cli_path=str(cli),
         api_token="phala-token",
         timeout_seconds=TEST_CLI_TIMEOUT_SECONDS,
+        os_image="dstack-0.5.9",
     )
 
     result = run(client.update(app_id="app-123", compose_yaml="services: {}\n", env={"TOKEN": "value"}))
@@ -332,6 +372,7 @@ def test_update_uses_phala_deploy_cvm_id(tmp_path) -> None:
     argv = seen["argv"]
     assert argv[:3] == ["deploy", "--cvm-id", "a8dcb43d-7c46-4d5d-b026-192409368bbc"]
     assert "--no-dev-os" in argv
+    assert "--image" not in argv
     assert "--wait" not in argv
     assert "--json" in argv
     assert seen["compose"] == "services: {}\n"
