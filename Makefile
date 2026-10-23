@@ -40,8 +40,8 @@ check:
 	$(UMBRA_PINNED_PYTHON) tools/check-cargo-dnssec.py
 	uv lock --check --project console
 	uv lock --check --project cvms/security
-	$(UMBRA_PINNED_PYTHON) -m py_compile tools/check-cargo-keywords.py tools/check-dco.py tools/check-github-actions.py tools/check-pip-vendor.py tools/test_check_pip_vendor.py tools/generate-cargo-sbom.py tools/test_check_cargo_keywords.py tools/test_check_github_actions.py
-	uv run --locked --project console python -m pytest -q tools/test_check_cargo_keywords.py tools/test_check_github_actions.py tools/test_check_pip_vendor.py
+	$(UMBRA_PINNED_PYTHON) -m py_compile tools/check-cargo-keywords.py tools/check-dco.py tools/check-github-actions.py tools/check-pip-vendor.py tools/check-cargo-dnssec.py tools/test_check_cargo_dnssec.py tools/test_check_pip_vendor.py tools/generate-cargo-sbom.py tools/test_check_cargo_keywords.py tools/test_check_github_actions.py
+	uv run --locked --project console python -m pytest -q tools/test_check_cargo_keywords.py tools/test_check_github_actions.py tools/test_check_pip_vendor.py tools/test_check_cargo_dnssec.py
 	uv run --locked --project console python tools/check-github-actions.py
 	cd console && npm ci --ignore-scripts --no-audit --no-fund
 	@css_tmp="$$(mktemp)"; \
