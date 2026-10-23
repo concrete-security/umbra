@@ -35,8 +35,8 @@ Every row below is unapproved until a maintainer records a decision in this file
 | Rust — `atlas-verify-cli` | `webpki-roots` | 1.0.8 | CDLA-Permissive-2.0 | non-OSI permissive | — |
 | Python — Security CVM | `mitmproxy-linux` | 0.12.11 | _none declared_ | unknown | installed only when: sys_platform == 'linux' |
 | Python — Security CVM | `mitmproxy-rs` | 0.12.11 | _none declared_ | unknown | — |
-| Python — Console | `certifi` | 2026.7.22 | MPL-2.0 | weak copyleft | from trove classifiers |
-| Python — Security CVM | `certifi` | 2026.7.22 | MPL-2.0 | weak copyleft | from trove classifiers |
+| Python — Console | `certifi` | 2026.10.19 | MPL-2.0 | weak copyleft | from trove classifiers |
+| Python — Security CVM | `certifi` | 2026.10.19 | MPL-2.0 | weak copyleft | from trove classifiers |
 | Python — Security CVM | `ldap3` | 2.9.1 | LGPL-3.0-only | weak copyleft | from trove classifiers |
 | Python — Security CVM | `mitmproxy-windows` | 0.12.11 | LGPL-3.0-or-later | weak copyleft | installed only when: os_name == 'nt' |
 | Python — Security CVM | `publicsuffix2` | 2.20191221 | MIT AND MPL-2.0 | weak copyleft | from trove classifiers |
@@ -895,7 +895,7 @@ Locked runtime closure of `umbra-console` from `console/uv.lock` (`uv sync --fro
 | `annotated-types` | 0.8.0 | MIT | permissive | — |
 | `anyio` | 4.14.2 | MIT | permissive | — |
 | `asyncpg` | 0.31.0 | Apache-2.0 | permissive | — |
-| `certifi` | 2026.7.22 | MPL-2.0 | weak copyleft | from trove classifiers |
+| `certifi` | 2026.10.19 | MPL-2.0 | weak copyleft | from trove classifiers |
 | `cffi` | 2.1.1 | MIT-0 | permissive | installed only when: platform_python_implementation != 'PyPy' |
 | `click` | 8.4.2 | BSD-3-Clause | permissive | — |
 | `colorama` | 0.4.6 | BSD-3-Clause | permissive | from trove classifiers — installed only when: sys_platform == 'win32' |
@@ -913,7 +913,7 @@ Locked runtime closure of `umbra-console` from `console/uv.lock` (`uv sync --fro
 | `pycparser` | 3.0 | BSD-3-Clause | permissive | installed only when: implementation_name != 'PyPy' |
 | `pydantic` | 2.13.4 | MIT | permissive | — |
 | `pydantic-core` | 2.46.4 | MIT | permissive | — |
-| `pyjwt` | 2.13.0 | MIT | permissive | — |
+| `pyjwt` | 2.15.1 | MIT | permissive | — |
 | `python-dotenv` | 1.2.2 | BSD-3-Clause | permissive | from the prose `License` field |
 | `pyyaml` | 6.0.3 | MIT | permissive | from trove classifiers |
 | `sqlalchemy` | 2.0.52 | MIT | permissive | from the prose `License` field |
@@ -941,7 +941,7 @@ Locked runtime closure of `umbra-security-cvm` from `cvms/security/uv.lock` incl
 | `bcrypt` | 5.0.0 | Apache-2.0 | permissive | from trove classifiers |
 | `blinker` | 1.9.0 | MIT | permissive | from trove classifiers |
 | `brotli` | 1.2.0 | MIT | permissive | from the prose `License` field |
-| `certifi` | 2026.7.22 | MPL-2.0 | weak copyleft | from trove classifiers |
+| `certifi` | 2026.10.19 | MPL-2.0 | weak copyleft | from trove classifiers |
 | `cffi` | 2.1.1 | MIT-0 | permissive | — |
 | `click` | 8.4.2 | BSD-3-Clause | permissive | — |
 | `colorama` | 0.4.6 | BSD-3-Clause | permissive | from trove classifiers — installed only when: sys_platform == 'win32' |
@@ -977,7 +977,7 @@ Locked runtime closure of `umbra-security-cvm` from `cvms/security/uv.lock` incl
 | `ruamel-yaml` | 0.19.1 | MIT | permissive | from trove classifiers |
 | `service-identity` | 26.1.0 | MIT | permissive | — |
 | `sortedcontainers` | 2.4.0 | Apache-2.0 | permissive | from trove classifiers |
-| `tornado` | 6.5.8 | Apache-2.0 | permissive | from trove classifiers |
+| `tornado` | 6.5.10 | Apache-2.0 | permissive | from trove classifiers |
 | `typing-extensions` | 4.14.0 | PSF-2.0 | permissive | — |
 | `urwid` | 3.0.5 | LGPL-2.1-only | weak copyleft | — |
 | `wcwidth` | 0.8.2 | MIT | permissive | — |
@@ -1060,7 +1060,7 @@ Non-dev entries of `console/package-lock.json`. The Console image retains this g
 | `get-stream` | 6.0.1 | MIT | permissive | — |
 | `glob-parent` | 5.1.2 | ISC | permissive | — |
 | `graceful-fs` | 4.2.11 | ISC | permissive | — |
-| `handlebars` | 4.7.9 | MIT | permissive | — |
+| `handlebars` | 4.7.10 | MIT | permissive | — |
 | `human-signals` | 4.3.1 | Apache-2.0 | permissive | — |
 | `iconv-lite` | 0.7.2 | MIT | permissive | — |
 | `ieee754` | 1.2.1 | BSD-3-Clause | permissive | — |
@@ -1245,7 +1245,7 @@ Components installed into the container images (all version- and digest-/SHA-256
 | Python 3.12 | Console, Security CVM images | PSF-2.0 | Permissive; retained upstream image layers unmodified. |
 | Docker Engine, CLI, containerd, Buildx, Compose plugin | Dev CVM image | Apache-2.0 | Unmodified official `.deb`s (SHA-256-pinned); Apache-2.0 license/notice files ship in the packages; noticed here. |
 | GitHub CLI (`gh` 2.92.0) | Dev CVM image | MIT | License text ships in the upstream release tarball layout and package docs; noticed here. |
-| Node.js (22.22.3) | Dev CVM image | MIT (plus bundled component licenses) | Upstream tarball retains its `LICENSE` at the install prefix; noticed here. |
+| Node.js (22.23.4) | Dev CVM image | MIT (plus bundled component licenses) | Upstream tarball retains its `LICENSE` at the install prefix; noticed here. |
 | uv | All Python images (build stage) and Dev CVM image | Apache-2.0 OR MIT | Permissive dual license; binary copied from the digest-pinned upstream image; noticed here. |
 | nginx (1.27-alpine) | Reverse-proxy image | BSD-2-Clause | Permissive; unmodified official image; noticed here. |
 | mitmproxy (11.x) | Security CVM image | MIT (dependency graph inventoried above) | Installed from the locked `mitmproxy` extra; per-package obligations covered by the generated inventory. |
