@@ -3,7 +3,7 @@
 # reviewed value. Release builds override it with the source commit timestamp.
 ARG SOURCE_DATE_EPOCH=0
 
-FROM golang:1.27.2-bookworm@sha256:5cf287a799e6b94384bad13d16b14904c531f51ba65792237e122ce42b392f61 AS go-base
+FROM golang:1.27.3-bookworm@sha256:972b4110ba0f47539a975c31e52c64765e1ff19f2d74469ae4a595c6676e80a5 AS go-base
 ENV CGO_ENABLED=0 GOTOOLCHAIN=local
 
 FROM go-base AS compose-builder
@@ -112,7 +112,7 @@ COPY --from=rust-base /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certi
 # after rebuilding and exercising the sandbox image; it deliberately freezes
 # all packages from the Ubuntu archive. Docker's exact amd64 package filenames
 # and content digests are pinned separately in tool-versions.env below.
-ARG UBUNTU_SNAPSHOT=20261008T120000Z
+ARG UBUNTU_SNAPSHOT=20261023T000000Z
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1
