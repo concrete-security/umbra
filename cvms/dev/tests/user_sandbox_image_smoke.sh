@@ -2,15 +2,25 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-IMAGE_TAG="umbra-dev-sandbox-smoke:check"
+if [ "${DEV_CVM_IMAGE_SMOKE_IMAGE+x}" = x ]; then
+  IMAGE_TAG="$DEV_CVM_IMAGE_SMOKE_IMAGE"
+  # A release-image test must exercise the selected bytes and never replace
+  # a missing artifact with a fresh source build.
+  if [ -z "$IMAGE_TAG" ]; then
+    echo "release-image smoke requires a non-empty selected image" >&2
+    exit 1
+  fi
+  docker image inspect "$IMAGE_TAG" >/dev/null
+else
+  IMAGE_TAG="umbra-dev-sandbox-smoke:check"
+  docker build \
+    --platform linux/amd64 \
+    --file "${ROOT}/cvms/dev/user-sandbox/Dockerfile" \
+    --tag "${IMAGE_TAG}" \
+    "${ROOT}"
+fi
 
-docker build \
-  --platform linux/amd64 \
-  --file "${ROOT}/cvms/dev/user-sandbox/Dockerfile" \
-  --tag "${IMAGE_TAG}" \
-  "${ROOT}"
-
-docker run --rm --platform linux/amd64 --entrypoint bash "${IMAGE_TAG}" -lc '
+docker run --rm --network none --platform linux/amd64 --entrypoint bash "${IMAGE_TAG}" -lc '
   set -euo pipefail
   for cmd in claude codex node npm gh uv docker dockerd containerd; do
     command -v "${cmd}" >/dev/null
@@ -61,6 +71,10 @@ docker run --rm --platform linux/amd64 --entrypoint bash "${IMAGE_TAG}" -lc '
 echo "user_sandbox_image_smoke: ok"
 
 if [ "${UMBRA_VERIFY_IMAGE_REPRODUCIBILITY:-0}" = 1 ]; then
+  if [ -n "${DEV_CVM_IMAGE_SMOKE_IMAGE:-}" ]; then
+    echo "release-image smoke cannot rebuild the selected artifact" >&2
+    exit 1
+  fi
   bash "${ROOT}/ops/verify/verify-image-reproducibility.sh" \
     dev-cvm cvms/dev/user-sandbox/Dockerfile .
 fi

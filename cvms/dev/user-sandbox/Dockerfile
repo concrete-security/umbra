@@ -3,7 +3,7 @@
 # reviewed value. Release builds override it with the source commit timestamp.
 ARG SOURCE_DATE_EPOCH=0
 
-FROM golang:1.27.2-bookworm@sha256:5cf287a799e6b94384bad13d16b14904c531f51ba65792237e122ce42b392f61 AS go-base
+FROM golang:1.27.3-bookworm@sha256:972b4110ba0f47539a975c31e52c64765e1ff19f2d74469ae4a595c6676e80a5 AS go-base
 ENV CGO_ENABLED=0 GOTOOLCHAIN=local
 
 FROM go-base AS compose-builder
@@ -99,7 +99,7 @@ COPY cvms/dev/user-sandbox/atls-connect/Cargo.toml cvms/dev/user-sandbox/atls-co
 COPY cvms/dev/user-sandbox/atls-connect/src cvms/dev/user-sandbox/atls-connect/src
 RUN cargo build --locked --release -p umbra-atls-connect --target-dir /tmp/atls-connect-target
 
-FROM ghcr.io/astral-sh/uv:0.12.1@sha256:cf4eedcaa81655197f625739489effcbe71b61ceb1506f332c3facae5deceded AS uv
+FROM ghcr.io/astral-sh/uv:0.13.5@sha256:32a7bb39b496babbd997b0a39a4d66c126bdaf5661b302bf6f06abda8deca6ff AS uv
 
 FROM ubuntu:24.04@sha256:561618e2c15bf2397621dd04f96926663a3b5616c189cf7e38db7e82f5c538ea
 
@@ -112,7 +112,7 @@ COPY --from=rust-base /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certi
 # after rebuilding and exercising the sandbox image; it deliberately freezes
 # all packages from the Ubuntu archive. Docker's exact amd64 package filenames
 # and content digests are pinned separately in tool-versions.env below.
-ARG UBUNTU_SNAPSHOT=20261008T120000Z
+ARG UBUNTU_SNAPSHOT=20261023T000000Z
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1

@@ -4,7 +4,7 @@
 # untouched. The runtime's newer Debian glibc remains compatible with this
 # bookworm-built binary. Rust must be recent enough for the dependency tree's
 # edition2024 crates (e.g. indexmap >=2.14).
-FROM ghcr.io/astral-sh/uv:0.12.1@sha256:cf4eedcaa81655197f625739489effcbe71b61ceb1506f332c3facae5deceded AS uv
+FROM ghcr.io/astral-sh/uv:0.13.5@sha256:32a7bb39b496babbd997b0a39a4d66c126bdaf5661b302bf6f06abda8deca6ff AS uv
 
 FROM rust:1.96-slim-bookworm@sha256:e18a79fc84dfcfc3ab5ba72290398a644c135c97eaa881447fddc354ee4701a3 AS atlas-verify-builder
 RUN sed -i \
