@@ -436,10 +436,12 @@ impl ResolvedConfig {
     }
 
     pub fn require_console_url(&self) -> Result<&str, String> {
-        self.console_url.as_deref().ok_or_else(|| {
+        let value = self.console_url.as_deref().ok_or_else(|| {
             "[usage] missing console_url; set --console-url, UMBRA_CONSOLE_URL, or config.toml"
                 .to_string()
-        })
+        })?;
+        crate::console::validate_console_url(value)?;
+        Ok(value)
     }
 
     pub fn require_profile(&self) -> Result<&str, String> {

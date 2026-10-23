@@ -15,6 +15,8 @@ feature branch --PR--> dev --reviewed promotion--> main --tag/release--> immutab
 | CVM image candidate | push to `dev`; manual after promotion | `.github/workflows/publish-cvm-images.yml` | Reproduce and publish digest-only Dev/Security images with SBOM and provenance, then emit a lock-shaped candidate. |
 | CLI release | manual | `.github/workflows/publish-cli.yml` | Package and publish one reviewed version and its installer tree. |
 
+Security analysis runs on pushes to `dev`, `main`, and `codex/security-*`, on pull requests to `dev` or `main`, and by manual dispatch. Use a security patch branch to rerun source and image scans without the `dev` push publisher. These branch scans do not refresh default-branch Dependabot alerts; those reflect the dependency manifests on `main`.
+
 The public repository contains no staging or production deployment workflow. The maintainers' private deployment repository records the exact public commit, release tag, image digest, SBOM, and provenance selected for each environment, and owns all live deployment orchestration.
 
 All third-party Actions references use full commit SHAs except the SLSA generator, whose reviewed exception is exactly `slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0`. The generator requires a semver tag for builder-identity reconstruction. The repository checker recognizes quoted and unquoted YAML keys and cross-checks this exception against the CLI updater and bootstrap installer's exact builder IDs; update those trust pins and their tests together.

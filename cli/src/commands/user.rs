@@ -1,9 +1,6 @@
 use std::collections::BTreeMap;
 
-use reqwest::{
-    blocking::{Client, Response},
-    header::IF_MATCH,
-};
+use reqwest::{blocking::Response, header::IF_MATCH};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -414,7 +411,7 @@ fn fetch_user_with_etag(
     entity_id: &str,
     user_id: &str,
 ) -> Result<UserWithEtag, (ExitStatus, String)> {
-    let response = Client::new()
+    let response = crate::console::client(console_url)?
         .get(format!(
             "{console_url}/api/v1/entities/{entity_id}/users/{user_id}"
         ))
@@ -438,7 +435,7 @@ fn create_user(
     permissions: &[String],
 ) -> Result<UserWithEtag, (ExitStatus, String)> {
     let response = send(
-        Client::new()
+        crate::console::client(console_url)?
             .post(format!("{console_url}/api/v1/entities/{entity_id}/users"))
             .bearer_auth(access_token)
             .header("Idempotency-Key", Uuid::new_v4().to_string())
@@ -456,7 +453,7 @@ fn post_user_action(
 ) -> Result<User, (ExitStatus, String)> {
     let label = format!("{action} user");
     let response = send(
-        Client::new()
+        crate::console::client(console_url)?
             .post(format!(
                 "{console_url}/api/v1/entities/{}/users/{user_id}/actions/{action}",
                 session.entity.id
@@ -473,7 +470,7 @@ fn delete_user(
     user_id: &str,
 ) -> Result<(), (ExitStatus, String)> {
     let response = send(
-        Client::new()
+        crate::console::client(console_url)?
             .delete(format!(
                 "{console_url}/api/v1/entities/{}/users/{user_id}",
                 session.entity.id
@@ -490,7 +487,7 @@ fn fetch_profile_etag(
     session: &Session,
     profile_id: &str,
 ) -> Result<String, (ExitStatus, String)> {
-    let response = Client::new()
+    let response = crate::console::client(console_url)?
         .get(format!("{console_url}/api/v1/profiles/{profile_id}"))
         .bearer_auth(&session.access_token)
         .send()
@@ -511,7 +508,7 @@ fn assign_profile_member(
     user_id: &str,
 ) -> Result<(), (ExitStatus, String)> {
     let response = send(
-        Client::new()
+        crate::console::client(console_url)?
             .post(format!("{console_url}/api/v1/profiles/{profile_id}/users"))
             .bearer_auth(access_token)
             .header(IF_MATCH, etag)
@@ -530,7 +527,7 @@ fn grant_permissions(
     permissions: &[String],
 ) -> Result<PermissionSet, (ExitStatus, String)> {
     let response = send(
-        Client::new()
+        crate::console::client(console_url)?
             .post(format!("{console_url}/api/v1/users/{user_id}/permissions"))
             .bearer_auth(access_token)
             .header(IF_MATCH, etag)
@@ -549,7 +546,7 @@ fn revoke_permission(
     permission: &str,
 ) -> Result<(), (ExitStatus, String)> {
     let response = send(
-        Client::new()
+        crate::console::client(console_url)?
             .delete(format!(
                 "{console_url}/api/v1/users/{user_id}/permissions/{permission}"
             ))

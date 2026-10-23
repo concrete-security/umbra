@@ -317,7 +317,7 @@
       }
       const pending = A.Ops.pendingForCvm(cvm.id);
       if (pending.length) {
-        html += '<div class="card"><h3>In progress</h3><p class="state-warn">' + pending.map((o) => o.kind).join(", ") + "</p></div>";
+        html += '<div class="card"><h3>In progress</h3><p class="state-warn">' + pending.map((o) => UI.escapeHtml(o.kind)).join(", ") + "</p></div>";
       }
       return html;
     },
@@ -433,14 +433,14 @@
                 '<span class="chip">' +
                 UI.escapeHtml(p.name) +
                 ' <button type="button" class="chip-x" data-detach="' +
-                p.id +
+                UI.escapeHtml(p.id) +
                 '">×</button></span>'
             )
             .join("") +
           '</div><div class="field"><label>Attach profile</label><select id="attach-profile"><option value="">—</option>' +
           profiles
             .filter((p) => !attached.has(p.id))
-            .map((p) => '<option value="' + p.id + '">' + UI.escapeHtml(p.name) + "</option>")
+            .map((p) => '<option value="' + UI.escapeHtml(p.id) + '">' + UI.escapeHtml(p.name) + "</option>")
             .join("") +
           '</select></div><button type="button" class="btn" id="cvm-attach">Attach</button></div>';
       }

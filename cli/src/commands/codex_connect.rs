@@ -13,7 +13,6 @@ use std::{env, fs, path::Path, process::Command};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{SecondsFormat, Utc};
-use reqwest::blocking::Client;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -349,7 +348,7 @@ fn configure_managed_secret(
     if let Some(account_id) = &grant.account_id {
         body["account_id"] = Value::String(account_id.clone());
     }
-    let response = Client::new()
+    let response = crate::console::client(console_url)?
         .put(format!(
             "{console_url}/api/v1/profiles/{profile_id}/managed-secrets/{injection_id}"
         ))

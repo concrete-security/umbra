@@ -117,7 +117,8 @@ The credential and trust-anchor values are bound into RTMR3 by their SHA-256 dig
 
 Base: `ubuntu:24.04` (or pinned digest). Tooling:
 
-- `openssh-server`, `dtach`, `git`, `curl`, `xz-utils`, `build-essential`, `python3`, `python3-pip`, `rsync`, `jq`, `vim`, `less`, `ca-certificates`, `psmisc` (provides `fuser` for `umbra ps` / `umbra kill` socket probing per `docs/specs/cli.md` §6.4), `lsof` (fallback for the same probe).
+- `openssh-server`, `dtach`, `git`, `curl`, `xz-utils`, `build-essential`, `python3`, `rsync`, `jq`, `vim`, `less`, `ca-certificates`, `psmisc` (provides `fuser` for `umbra ps` / `umbra kill` socket probing per `docs/specs/cli.md` §6.4), `lsof` (fallback for the same probe).
+- pip MUST be installed from a hash-pinned upstream wheel with current CA distrust updates; the older distro pip and its independent bundled CA store MUST NOT be installed.
 - `sudo` MUST be installed with a `dev ALL=(ALL) NOPASSWD:ALL` sudoers drop-in, and that drop-in MUST preserve the proxy and CA-bundle environment variables (`HTTP_PROXY`, `HTTPS_PROXY`, `http_proxy`, `https_proxy`, `NO_PROXY`, `no_proxy`, `REQUESTS_CA_BUNDLE`, `SSL_CERT_FILE`, `CURL_CA_BUNDLE`, `GIT_SSL_CAINFO`, `NODE_EXTRA_CA_CERTS`) for the `dev` user. This is root-equivalent inside the Sysbox user namespace, but does not change the host boundary; see §3.2.
 - APT MUST be preconfigured through `/etc/apt/apt.conf.d/95umbra-proxy` to use `http://dev-egress-forwarder:3128` for both HTTP and HTTPS acquisitions, and HTTPS acquisitions MUST use `/run/umbra/ca-bundle.pem` as their CA bundle. This keeps `sudo apt update` / `sudo apt install` on the controlled egress path even though `sudo` and APT do not reliably consume the login shell's proxy environment by default.
 - **`docker-ce` engine + CLI + `docker-compose-plugin`** — verified install. The daemon runs natively inside `user-sandbox` (DinD via Sysbox; §3.2, §4.1). The image MUST drop `/etc/docker/daemon.json` configuring the SC proxy as `dockerd`'s default `http-proxy`/`https-proxy` so nested containers without baked-in env still pick up the forwarder (§7.2). No `DOCKER_HOST` env override is set — clients hit the local socket `/var/run/docker.sock` by default.
@@ -199,7 +200,7 @@ Host keys are generated at every container start (§10). Trust comes from aTLS a
 
 ### 3.6 Pre-installed agents and update path
 
-The image bakes Claude Code, Codex, and `gh` at known versions. The entrypoint MUST seed `/home/dev/.local/bin/claude` from the verified baked Claude binary when the persistent `.local` volume does not already contain an executable Claude command. The seeded path MUST use the native-install layout under `/home/dev/.local/share/claude/versions/` so Claude's persisted `installMethod` metadata and the command path agree even though `.claude` and `.local` are separate volumes. A `/etc/profile.d` hook MAY upgrade agents in the background on first SSH login per CVM, with a 4-hour cooldown via `/tmp/.umbra-agents-updated`. Auto-update MUST NOT block sshd startup or the entrypoint healthcheck window.
+The image bakes Claude Code, Codex, and `gh` at known versions. The entrypoint MUST seed `/home/dev/.local/bin/claude` from the verified baked Claude binary when the persistent `.local` volume does not already contain an executable Claude command. It MUST also advance a managed native-install symlink whose numeric version is older than the baked version, while preserving equal or newer managed versions and custom commands outside that layout. Version checks MUST NOT execute user-owned binaries as root. The seeded path MUST use the native-install layout under `/home/dev/.local/share/claude/versions/` so Claude's persisted `installMethod` metadata and the command path agree even though `.claude` and `.local` are separate volumes. A `/etc/profile.d` hook MAY upgrade agents in the background on first SSH login per CVM, with a 4-hour cooldown via `/tmp/.umbra-agents-updated`. Auto-update MUST NOT block sshd startup or the entrypoint healthcheck window.
 
 ### 3.7 `dev-tunnel` image
 
@@ -699,7 +700,7 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       openssh-server dtach git curl xz-utils build-essential \
-      python3 python3-pip rsync jq vim less ca-certificates \
+      python3 rsync jq vim less ca-certificates \
       psmisc lsof sudo \
     && rm -rf /var/lib/apt/lists/* \
     && ln -sf /usr/bin/python3 /usr/bin/python \
@@ -719,7 +720,7 @@ COPY docker-daemon.json /etc/docker/daemon.json
 # /etc/apt/apt.conf.d/95umbra-proxy: keep sudo apt traffic on the forwarder.
 COPY apt-umbra-proxy.conf /etc/apt/apt.conf.d/95umbra-proxy
 
-# uv, Node 22, Claude Code, Codex (--ignore-scripts), gh — verified binary installs.
+# uv, hash-pinned pip, Node 22, Claude Code, Codex (--ignore-scripts), gh — verified installs.
 # (See cvms/dev/user-sandbox/Dockerfile for current pins and checksums.)
 
 # Login user `dev` with UID/GID 1001 (§3.2). Sysbox (the runtime selected in

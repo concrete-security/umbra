@@ -2486,6 +2486,8 @@ A hidden command `umbra debug schema <entity>` MAY be introduced to surface, for
 
 When the Console returns a field that the CLI struct does not declare (e.g., a new field added server-side before the CLI is updated), the field MUST be captured and surfaced in the **human-readable** output only. Forward compatibility never extends to `--json`.
 
+**Write-only secrets are an exception.** Secret responses MUST discard unknown fields in both output modes. Only the reviewed name, host bindings, and timestamps may be rendered; a new server field must never cause secret material to appear on stdout.
+
 Two output paths, two contracts:
 
 - **Human path (Layer 2 renderers).** Forward-compatible. The unknown field is captured into the wire struct's `extra` bag, rendered alphabetically at the bottom of the card. Operators see new Console fields as soon as the Console emits them, with no CLI release required.

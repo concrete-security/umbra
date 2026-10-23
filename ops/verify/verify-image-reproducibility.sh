@@ -103,7 +103,7 @@ for pass in first second; do
     --no-cache \
     --platform linux/amd64 \
     --file "$build_dockerfile" \
-    --output "type=oci,dest=${archive},rewrite-timestamp=true,compatibility-version=${UMBRA_BUILDKIT_COMPATIBILITY_VERSION},oci-mediatypes=true" \
+    --output "type=oci,name=umbra-local-repro/${label}:local,dest=${archive},rewrite-timestamp=true,compatibility-version=${UMBRA_BUILDKIT_COMPATIBILITY_VERSION},oci-mediatypes=true" \
     "$build_context" >"${repro_dir}/${pass}.build.log" 2>&1 \
     || fail "${label} ${pass} cache-disabled build failed; detailed build output was suppressed"
   runtime_digest="$(umbra_oci_layout_runtime_digest "$archive" "$git_sha" "$source_date_epoch")" \

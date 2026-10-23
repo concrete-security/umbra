@@ -842,7 +842,6 @@ pub struct SecretView<'a> {
     pub allowed_hosts: &'a [String],
     pub created_at: &'a str,
     pub updated_at: &'a str,
-    pub extra: &'a BTreeMap<String, Value>,
 }
 
 pub fn secret_list_cards(secrets: &[SecretView<'_>]) -> String {
@@ -857,12 +856,12 @@ pub fn secret_list_cards(secrets: &[SecretView<'_>]) -> String {
         out.push_str(&card_title_id(secret.name));
         out.push('\n');
 
-        let mut rows: Vec<CardRow> = vec![
+        let rows: Vec<CardRow> = vec![
             CardRow::new("hosts", secret.allowed_hosts.join(", ")),
             CardRow::new("created", format_timestamp(secret.created_at)),
             CardRow::new("updated", format_timestamp(secret.updated_at)),
         ];
-        append_extra_rows(&mut rows, secret.extra);
+        // Secret responses are write-only: render only reviewed metadata fields.
 
         out.push_str(&render_card_body(&rows));
     }

@@ -4,15 +4,19 @@ FROM nginx:1.30.6-alpine3.24@sha256:47928bf67eb62a1863cb08d9ecb52d3e704304ba614e
 # Pin the complete added package closure. Alpine stable repositories replace
 # revisions in place; an unavailable reviewed version must fail closed.
 RUN apk add --no-cache \
+      ca-certificates=20261020-r0 \
+      ca-certificates-bundle=20261020-r0 \
       gettext=1.0-r0 \
       gettext-libs=1.0-r0 \
       libcrypto3=3.5.9-r0 \
       libexpat=2.9.0-r0 \
       libgomp=15.2.0-r5 \
-      libuuid=2.42.3-r1 \
       libssl3=3.5.9-r0 \
-      pcre2=10.49-r0 \
-      tiff=4.7.2-r0
+    # The server only serves install.sh; its curl calls run on the client.
+    && apk del --no-cache curl libcurl \
+    && ! apk info -e curl \
+    && ! apk info -e libcurl \
+    && rm -f /var/log/apk.log
 
 COPY install.sh /opt/umbra/installer/install.sh.template
 COPY nginx.conf.template /etc/nginx/templates/nginx.conf.template

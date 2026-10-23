@@ -1,6 +1,6 @@
 //! Shared plumbing for the `claude connect` / `codex connect` verbs.
 
-use reqwest::{blocking::Client, header::IF_MATCH, StatusCode};
+use reqwest::{header::IF_MATCH, StatusCode};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -20,7 +20,7 @@ pub(crate) fn attach_profile(
     cvm_id: &str,
     profile_id: &str,
 ) -> Result<AttachOutcome, (ExitStatus, String)> {
-    let etag_response = Client::new()
+    let etag_response = crate::console::client(console_url)?
         .get(format!("{console_url}/api/v1/cvms/{cvm_id}"))
         .bearer_auth(access_token)
         .send()
@@ -31,7 +31,7 @@ pub(crate) fn attach_profile(
             )
         })?;
     let etag = read_etag_only(etag_response, "fetch CVM")?;
-    let response = Client::new()
+    let response = crate::console::client(console_url)?
         .post(format!("{console_url}/api/v1/cvms/{cvm_id}/profiles"))
         .bearer_auth(access_token)
         .header(IF_MATCH, etag)
