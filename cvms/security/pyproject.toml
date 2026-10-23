@@ -37,6 +37,9 @@ dev = ["pytest>=8,<9"]
 mitmproxy = ["mitmproxy>=12.2.3,<13"]
 
 [tool.uv]
+# Exclude the compromised emSign trust root (GHSA-6q48-6c7w-9gw2).
+constraint-dependencies = ["certifi>=2026.10.19"]
+
 # mitmproxy 12.2.3 caps these packages below their security-fixed releases.
 # Remove the overrides when an upstream release widens all three constraints.
 override-dependencies = [
