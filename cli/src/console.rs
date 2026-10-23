@@ -18,6 +18,7 @@ use reqwest::{
 };
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use url::{Host, Url};
 
 use crate::{
     commands::{auth, operation_debug},
@@ -25,6 +26,55 @@ use crate::{
     exit::ExitStatus,
     session::Session,
 };
+
+/// Console credentials require HTTPS; local development may use loopback HTTP.
+pub(crate) fn validate_console_url(value: &str) -> Result<Url, String> {
+    let parsed = Url::parse(value).map_err(|_| "[usage] invalid Console URL".to_string())?;
+    if parsed.host().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(
+            "[usage] Console URL must have a host and no credentials, query, or fragment"
+                .to_string(),
+        );
+    }
+    if parsed.scheme() != "https" && !(parsed.scheme() == "http" && is_loopback(&parsed)) {
+        return Err(
+            "[usage] Console URL must use HTTPS; HTTP is allowed only for loopback hosts"
+                .to_string(),
+        );
+    }
+    Ok(parsed)
+}
+
+pub(crate) fn is_loopback(url: &Url) -> bool {
+    match url.host() {
+        Some(Host::Ipv4(addr)) => addr.is_loopback(),
+        Some(Host::Ipv6(addr)) => addr.is_loopback(),
+        Some(Host::Domain(name)) => name.eq_ignore_ascii_case("localhost"),
+        None => false,
+    }
+}
+
+/// Bind transport rules before any bearer, refresh token, or secret is attached.
+/// API redirects are rejected so credential-bearing bodies cannot change origin.
+pub(crate) fn client(console_url: &str) -> Result<Client, (ExitStatus, String)> {
+    let parsed =
+        validate_console_url(console_url).map_err(|message| (ExitStatus::Usage, message))?;
+    Client::builder()
+        .https_only(parsed.scheme() == "https")
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| {
+            (
+                ExitStatus::Error,
+                "[error] failed to build Console HTTP client".to_string(),
+            )
+        })
+}
 
 /// Resolve `(console_url, Session)` for a Console-backed command, mapping
 /// "no console url" to `ExitStatus::Usage`. The session carries
@@ -166,7 +216,8 @@ pub(crate) fn resolve_entity_name(
     struct EntityResp {
         name: String,
     }
-    let response = reqwest::blocking::Client::new()
+    let response = client(console_url)
+        .ok()?
         .get(format!("{console_url}/api/v1/entities/{entity_id}"))
         .bearer_auth(access_token)
         .send()
@@ -192,7 +243,8 @@ pub(crate) fn resolve_user_email(
     struct UserResp {
         email: String,
     }
-    let response = reqwest::blocking::Client::new()
+    let response = client(console_url)
+        .ok()?
         .get(format!(
             "{console_url}/api/v1/entities/{}/users/{user_id}",
             session.entity.id
@@ -276,7 +328,7 @@ pub(crate) fn fetch_json<T: DeserializeOwned>(
     action: &str,
 ) -> Result<T, (ExitStatus, String)> {
     let response = send(
-        Client::new()
+        client(console_url)?
             .get(format!("{console_url}{path}"))
             .bearer_auth(&session.access_token)
             .query(query),
@@ -317,7 +369,7 @@ pub(crate) fn post_json<T: DeserializeOwned>(
     action: &str,
 ) -> Result<T, (ExitStatus, String)> {
     let response = send(
-        Client::new()
+        client(console_url)?
             .post(format!("{console_url}{path}"))
             .bearer_auth(access_token)
             .header("Idempotency-Key", uuid::Uuid::new_v4().to_string())
@@ -503,6 +555,91 @@ pub(crate) fn console_error_envelope(body: &str) -> Option<(String, Option<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
+
+    /// HTTPS and parsed loopback hosts preserve production and local workflows.
+    #[rstest]
+    #[case::https("https://console.example.com/prefix")]
+    #[case::localhost("http://localhost:8000")]
+    #[case::ipv4("http://127.3.2.1:8000")]
+    #[case::ipv6("http://[::1]:8000")]
+    fn console_transport_url_success(#[case] value: &str) {
+        assert!(validate_console_url(value).is_ok());
+    }
+
+    /// Remote plaintext and URL components that can conceal credentials fail closed.
+    #[rstest]
+    #[case::remote_http("http://console.example.com")]
+    #[case::lookalike("http://127.0.0.1.example.com")]
+    #[case::network("http://0.0.0.0:8000")]
+    #[case::scheme("ftp://localhost")]
+    #[case::credentials("https://user:password@console.example.com")]
+    #[case::query("https://console.example.com?token=fixture")]
+    #[case::fragment("https://console.example.com#fragment")]
+    #[case::missing_host("not a URL")]
+    fn console_transport_url_failure(#[case] value: &str) {
+        assert!(client(value).is_err());
+    }
+
+    /// Redirects must never replay bearer tokens or JSON secrets to another endpoint.
+    #[rstest]
+    #[case::temporary(307)]
+    #[case::permanent(308)]
+    fn console_credential_redirect_failure(#[case] status: u16) {
+        use std::io::{BufRead, Read, Write};
+        use std::net::TcpListener;
+        let destination = TcpListener::bind("127.0.0.1:0").expect("destination bound");
+        destination
+            .set_nonblocking(true)
+            .expect("nonblocking destination");
+        let source = TcpListener::bind("127.0.0.1:0").expect("source bound");
+        let origin = format!("http://{}", source.local_addr().unwrap());
+        let target = format!("http://{}", destination.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = source.accept().expect("initial request accepted");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut reader = std::io::BufReader::new(&mut stream);
+            let mut headers = String::new();
+            loop {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).unwrap() > 0);
+                if line == "\r\n" {
+                    break;
+                }
+                headers.push_str(&line);
+            }
+            let length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().unwrap())
+                })
+                .expect("JSON request length");
+            let mut body = vec![0_u8; length];
+            reader.read_exact(&mut body).expect("complete JSON request");
+            assert!(headers.contains("fixture-bearer"));
+            assert!(String::from_utf8(body).unwrap().contains("fixture-secret"));
+            drop(reader);
+            write!(stream, "HTTP/1.1 {status} Redirect\r\nLocation: {target}/sink\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+        });
+        let response = client(&origin)
+            .expect("local client")
+            .post(format!("{origin}/api/v1/auth/refresh"))
+            .bearer_auth("fixture-bearer")
+            .json(&serde_json::json!({"refresh_token":"fixture-secret"}))
+            .timeout(Duration::from_secs(3))
+            .send()
+            .expect("redirect response received");
+        server.join().unwrap();
+        assert_eq!(response.status().as_u16(), status);
+        assert_eq!(
+            destination.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
 
     #[test]
     fn console_error_envelope_returns_message_and_typed_code() {

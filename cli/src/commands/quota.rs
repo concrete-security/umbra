@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 
-use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -254,7 +253,7 @@ fn set_quota(
         }
     };
     let response = send(
-        Client::new()
+        crate::console::client(console_url)?
             .patch(url)
             .bearer_auth(access_token)
             .header("Idempotency-Key", Uuid::new_v4().to_string())
@@ -279,7 +278,9 @@ fn clear_quota(
         }
     };
     let response = send(
-        Client::new().delete(url).bearer_auth(access_token),
+        crate::console::client(console_url)?
+            .delete(url)
+            .bearer_auth(access_token),
         "clear quota",
     )?;
     read_empty_response(response, "clear quota")
