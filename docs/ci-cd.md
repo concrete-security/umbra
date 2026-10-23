@@ -15,6 +15,8 @@ feature branch --PR--> dev --reviewed promotion--> main --tag/release--> immutab
 | CVM image candidate | push to `dev`; manual after promotion | `.github/workflows/publish-cvm-images.yml` | Reproduce and publish digest-only Dev/Security images with SBOM and provenance, then emit a lock-shaped candidate. |
 | CLI release | manual | `.github/workflows/publish-cli.yml` | Package and publish one reviewed version and its installer tree. |
 
+Security analysis runs on pushes to `dev`, `main`, and `codex/security-*`, on pull requests to `dev` or `main`, and by manual dispatch. Use a security patch branch to rerun source and image scans without the `dev` push publisher. These branch scans do not refresh default-branch Dependabot alerts; those reflect the dependency manifests on `main`.
+
 The public repository contains no staging or production deployment workflow. The maintainers' private deployment repository records the exact public commit, release tag, image digest, SBOM, and provenance selected for each environment, and owns all live deployment orchestration.
 
 All third-party Actions references use full commit SHAs except the SLSA generator, whose reviewed exception is exactly `slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0`. The generator requires a semver tag for builder-identity reconstruction. The repository checker recognizes quoted and unquoted YAML keys and cross-checks this exception against the CLI updater and bootstrap installer's exact builder IDs; update those trust pins and their tests together.
@@ -69,6 +71,8 @@ The scoped Hickory DNSSEC advisory exception requires both locked Linux Cargo
 feature graphs to exclude DNSSEC. `make check` enforces that condition and
 requires reassessment when the resolver version changes. The exception expires
 on 2026-11-08; remove it when the upstream dependency permits a patched resolver.
+
+The two pip-vendor exceptions also expire on 2026-11-08. They match Trivy's Python target and exact affected package PURLs when present; Trivy also matches a missing PURL. Before applying them, the image gate runs `tools/check-pip-vendor.py` in a read-only container without network access. The guard checks the reviewed pip/vendor pins and rejects native msgpack, PackageIndex implementations, or actual installed distributions at the excepted vulnerable versions, including alternate Python environments. A guard failure stops the image gate and requires reassessment.
 
 An `environment: release` declaration does not protect a publication by itself: GitHub will create an unprotected environment when the named environment is missing. Capture the `release` environment's deployment-branch policy and reviewer settings through the GitHub API before the first non-dry-run release.
 

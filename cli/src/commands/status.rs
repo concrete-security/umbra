@@ -1,4 +1,3 @@
-use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -269,7 +268,7 @@ fn fetch_security_cvm_optional(
     console_url: &str,
     session: &Session,
 ) -> Result<SecurityCvmFetch, (ExitStatus, String)> {
-    let response = Client::new()
+    let response = crate::console::client(console_url)?
         .get(format!(
             "{console_url}/api/v1/entities/{}/security-cvm",
             session.entity.id

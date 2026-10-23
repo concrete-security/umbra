@@ -1,4 +1,28 @@
 vulnerabilities:
+  # Trivy 0.70's pip SBOM rows have Target=Python and no PkgPath.
+  # Trivy intersects this target with the exact PURL when one is present; a
+  # missing PURL also matches. The image guard covers that scanner ambiguity
+  # and the SBOM's missing vendor file path by checking the actual image.
+  - id: GHSA-6v7p-g79w-8964
+    paths: [Python]
+    purls: ["pkg:pypi/msgpack@1.1.2"]
+    statement: >-
+      pip 26.2.2 vendors only pure-Python msgpack, without the affected native
+      streaming Unpacker. The CI runtime guard checks this subset, pip/vendor
+      pins and every image Python package inventory; a real installed msgpack
+      1.1.2 fails the guard. The independent Security CVM app uses msgpack 1.2.1.
+      Reassess after pip/vendor/scanner drift; retain the SBOM component.
+    expired_at: 2026-11-08
+  - id: CVE-2025-47273
+    paths: [Python]
+    purls: ["pkg:pypi/setuptools@70.3.0"]
+    statement: >-
+      pip 26.2.2 vendors pkg_resources only, without setuptools.package_index
+      or PackageIndex. The CI runtime guard checks this absent implementation,
+      pip/vendor pins and every image Python package inventory; a real installed
+      setuptools 70.3.0 fails the guard. Reassess after pip/vendor/scanner drift;
+      retain the SBOM component.
+    expired_at: 2026-11-08
   - id: GHSA-5j98-2g5x-46v6
     paths:
       - Cargo.lock

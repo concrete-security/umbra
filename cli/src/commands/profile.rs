@@ -5,7 +5,7 @@ use std::{
     path::Path,
 };
 
-use reqwest::{blocking::Client, header::IF_MATCH};
+use reqwest::header::IF_MATCH;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use uuid::Uuid;
@@ -86,7 +86,14 @@ fn grants(config: &ResolvedConfig, json_output: bool) -> ExitStatus {
             return status;
         }
     };
-    let response = Client::new()
+    let client = match crate::console::client(console_url) {
+        Ok(client) => client,
+        Err((status, message)) => {
+            crate::style::eprintln_error(&message);
+            return status;
+        }
+    };
+    let response = client
         .get(format!(
             "{console_url}/api/v1/profiles/{profile_id}/secrets-status"
         ))
@@ -198,7 +205,14 @@ fn connections_create(
     if !args.injection_ids.is_empty() {
         body["injection_ids"] = serde_json::json!(args.injection_ids);
     }
-    let response = Client::new()
+    let client = match crate::console::client(console_url) {
+        Ok(client) => client,
+        Err((status, message)) => {
+            crate::style::eprintln_error(&message);
+            return status;
+        }
+    };
+    let response = client
         .post(format!(
             "{console_url}/api/v1/profiles/{profile_id}/connections"
         ))
@@ -536,7 +550,7 @@ fn create_profile(
     description: &str,
 ) -> Result<ProfileWithEtag, (ExitStatus, String)> {
     let response = console::send(
-        Client::new()
+        crate::console::client(console_url)?
             .post(format!(
                 "{console_url}/api/v1/entities/{}/profiles",
                 session.entity.id
@@ -586,7 +600,7 @@ fn fetch_profile(
     session: &Session,
     profile_id: &str,
 ) -> Result<ProfileWithEtag, (ExitStatus, String)> {
-    let response = Client::new()
+    let response = crate::console::client(console_url)?
         .get(format!("{console_url}{}", profile_path(profile_id)))
         .bearer_auth(&session.access_token)
         .send()
@@ -616,7 +630,7 @@ fn patch_profile(
     body: &Value,
 ) -> Result<ProfileWithEtag, (ExitStatus, String)> {
     let response = console::send(
-        Client::new()
+        crate::console::client(console_url)?
             .patch(format!("{console_url}/api/v1/profiles/{profile_id}"))
             .bearer_auth(access_token)
             .header(IF_MATCH, etag)
@@ -635,7 +649,7 @@ fn assign_member(
     user_id: &str,
 ) -> Result<(), (ExitStatus, String)> {
     let response = console::send(
-        Client::new()
+        crate::console::client(console_url)?
             .post(format!("{console_url}/api/v1/profiles/{profile_id}/users"))
             .bearer_auth(access_token)
             .header(IF_MATCH, etag)
@@ -654,7 +668,7 @@ fn remove_member(
     user_id: &str,
 ) -> Result<(), (ExitStatus, String)> {
     let response = console::send(
-        Client::new()
+        crate::console::client(console_url)?
             .delete(format!(
                 "{console_url}/api/v1/profiles/{profile_id}/users/{user_id}"
             ))

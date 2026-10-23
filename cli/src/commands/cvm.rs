@@ -10,7 +10,7 @@ use std::{
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
-use reqwest::{blocking::Client, header::IF_MATCH};
+use reqwest::header::IF_MATCH;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use uuid::Uuid;
@@ -318,7 +318,7 @@ fn list(config: &ResolvedConfig, args: CvmListArgs, json_output: bool) -> ExitSt
 impl CvmListArgs {
     fn query_params(&self) -> Vec<(&'static str, String)> {
         let mut query: Vec<(&'static str, String)> = Vec::new();
-        // No --state -> send no `state` param (the Console defaults to alive).
+        // No --state -> send no `state` param (the Console hides terminal states).
         // Otherwise send its lowercase value (incl. an explicit `--state alive`).
         if let Some(state) = self.state {
             query.push(("state", wire(state)));
@@ -1152,7 +1152,7 @@ fn fetch_cvm_with_etag(
     session: &Session,
     cvm_id: &str,
 ) -> Result<(Cvm, String), (ExitStatus, String)> {
-    let response = Client::new()
+    let response = crate::console::client(console_url)?
         .get(format!("{console_url}{}", cvm_path(cvm_id)))
         .bearer_auth(&session.access_token)
         .send()
@@ -1217,7 +1217,7 @@ fn mutate_profile(
     profile_id: &str,
     mutation: Mutation,
 ) -> Result<(Cvm, String), (ExitStatus, String)> {
-    let client = Client::new();
+    let client = crate::console::client(console_url)?;
     let request = match mutation {
         Mutation::Attach => client
             .post(format!("{console_url}/api/v1/cvms/{cvm_id}/profiles"))
@@ -1246,7 +1246,7 @@ fn submit_lifecycle_action(
 ) -> Result<(Cvm, String), (ExitStatus, String)> {
     let label = format!("{} CVM", action.as_str());
     let response = send(
-        Client::new()
+        crate::console::client(console_url)?
             .post(format!(
                 "{console_url}{}",
                 cvm_action_path(cvm_id, action.as_str())
@@ -1266,7 +1266,7 @@ fn submit_update(
     etag: &str,
 ) -> Result<Operation, (ExitStatus, String)> {
     let response = send(
-        Client::new()
+        crate::console::client(console_url)?
             .post(format!(
                 "{console_url}{}",
                 cvm_action_path(cvm_id, "update")
@@ -1286,7 +1286,7 @@ fn submit_terminate(
     etag: &str,
 ) -> Result<Operation, (ExitStatus, String)> {
     let response = send(
-        Client::new()
+        crate::console::client(console_url)?
             .post(format!(
                 "{console_url}{}",
                 cvm_action_path(cvm_id, "terminate")

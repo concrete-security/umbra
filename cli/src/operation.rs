@@ -16,7 +16,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -76,7 +75,7 @@ pub(crate) fn fetch_operation(
     access_token: &str,
     operation_id: &str,
 ) -> Result<OperationPoll, (ExitStatus, String)> {
-    let response = Client::new()
+    let response = crate::console::client(console_url)?
         .get(format!("{console_url}/api/v1/operations/{operation_id}"))
         .bearer_auth(access_token)
         .send()

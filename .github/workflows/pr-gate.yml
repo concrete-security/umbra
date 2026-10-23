@@ -40,7 +40,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
-          version: 0.12.1
+          version: 0.13.5
           enable-cache: 'false'
 
       - name: Install pinned Python
@@ -78,7 +78,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
-          version: 0.12.1
+          version: 0.13.5
           enable-cache: 'false'
 
       - name: Install pinned Python
@@ -110,7 +110,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
-          version: 0.12.1
+          version: 0.13.5
           enable-cache: 'false'
       - name: Install pinned Python
         run: uv python install

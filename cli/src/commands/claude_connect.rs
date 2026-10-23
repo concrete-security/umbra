@@ -9,7 +9,6 @@
 
 use std::io::{self, IsTerminal, Read};
 
-use reqwest::blocking::Client;
 use serde_json::{json, Value};
 
 use crate::{
@@ -148,7 +147,7 @@ fn mint_profile_secret(
     injection_id: &str,
     token: &str,
 ) -> Result<Value, (ExitStatus, String)> {
-    let response = Client::new()
+    let response = crate::console::client(console_url)?
         .post(format!(
             "{console_url}/api/v1/profiles/{profile_id}/secrets/{injection_id}"
         ))
