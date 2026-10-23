@@ -77,4 +77,4 @@ Updates use `umbra cvm update <cvm-id>` and preserve provider-managed named volu
 
 Live key rotation, host-level nested-virtualization alternatives, and guaranteed hitless migration are outside v0.
 
-The pinned sandbox tools include Docker Engine/CLI 29.9.0, Buildx 0.38.0+umbra.2, Compose 5.6.0, and GitHub CLI 2.102.0. Their Go dependencies include the upstream security fixes; source archives and binary packages remain checksum-verified. The image smoke test exercises each Docker command and Compose configuration parsing.
+The pinned sandbox tools include Docker Engine/CLI 29.9.2, Buildx 0.38.0+umbra.2, Compose 5.6.0, and GitHub CLI 2.102.0. Their Go dependencies include the upstream security fixes; source archives and binary packages remain checksum-verified. The image smoke test exercises each Docker command and Compose configuration parsing.
