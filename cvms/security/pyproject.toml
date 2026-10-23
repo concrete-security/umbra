@@ -44,6 +44,7 @@ constraint-dependencies = [
 # mitmproxy 12.2.3 caps these packages below their security-fixed releases.
 # Remove the overrides when an upstream release widens these constraints.
 override-dependencies = [
+    "brotli>=1.2.1,<2",
     "cryptography>=50,<51",
     "h2>=4.4.1,<5",
     "msgpack>=1.2.1,<2",

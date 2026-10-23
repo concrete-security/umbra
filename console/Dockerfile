@@ -228,6 +228,8 @@ COPY src ./src
 COPY static ./static
 COPY --from=webapp-builder /build/static/admin/tailwind.css ./static/admin/tailwind.css
 COPY tests ./tests
+# Exercise the provider boundary with this image's exact Node and locked packages.
+RUN node --test tests/test_phala_zod.mjs
 COPY entrypoint.sh /entrypoint.sh
 
 RUN uv sync --frozen --no-dev --no-editable \

@@ -44,6 +44,7 @@ check:
 	uv run --locked --project console python -m pytest -q tools/test_check_cargo_keywords.py tools/test_check_github_actions.py tools/test_check_pip_vendor.py tools/test_check_cargo_dnssec.py
 	uv run --locked --project console python tools/check-github-actions.py
 	cd console && npm ci --ignore-scripts --no-audit --no-fund
+	cd console && npm run test:phala
 	@css_tmp="$$(mktemp)"; \
 	trap 'rm -f "$${css_tmp}"' EXIT; \
 	cd console; \

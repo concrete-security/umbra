@@ -11,6 +11,7 @@ from umbra_console.tee_provider import (
     CvmProviderError,
 )
 from umbra_console.tee_provider.phala import (
+    PHALA_API_VERSION,
     PHALA_COMPOSE_FILE_HASH_HELPER,
     PhalaClient,
     PhalaError,
@@ -326,7 +327,7 @@ def test_deploy_parses_progress_prefixed_json_and_fetches_gateway(tmp_path) -> N
 
     result = run(client.deploy(name="umbra-v0-cvm-smoke", compose_yaml="services: {}\n", env={}))
 
-    assert json.loads(marker.read_text()) == ["cvms", "get", "app-123", "--json"]
+    assert json.loads(marker.read_text()) == ["cvms", "get", "app-123", "--json", "--api-version", PHALA_API_VERSION]
     assert result.app_id == "app-123"
     assert result.gateway_host == "dstack.example.com"
     assert result.status == "RUNNING"
@@ -573,3 +574,27 @@ def test_run_json_translates_hostile_output_to_invalid_json(make_output, kwargs,
         run(client._run_json(["instance-types", "--json"], **kwargs))
 
     assert exc.value.code == "invalid_json"
+
+
+@pytest.mark.parametrize("args", [
+    pytest.param(["deploy", "--name", "umbra-v0-cvm-fixture"], id="deploy"),
+    pytest.param(["deploy", "--cvm-id", "app-123"], id="update"),
+    pytest.param(["cvms", "get", "app-123", "--json"], id="info"),
+    pytest.param(["cvms", "list", "--json"], id="list"),
+    pytest.param(["cvms", "logs", "app-123"], id="logs"),
+    pytest.param(["cvms", "start", "app-123"], id="start"),
+    pytest.param(["cvms", "stop", "app-123"], id="stop"),
+    pytest.param(["cvms", "delete", "app-123", "--force"], id="delete"),
+    pytest.param(["instance-types", "--json"], id="instance-types"),
+])
+def test_run_text_pins_provider_api_version_success(tmp_path, args) -> None:
+    """Keep every provider CLI path on the reviewed API response contract."""
+    expected = [*args, "--api-version", PHALA_API_VERSION]
+    cli = write_fake_cli(tmp_path, f"""
+        import sys
+        assert sys.argv[1:] == {expected!r}
+        print("pinned")
+    """)
+    client = PhalaClient(cli_path=str(cli), api_token="phala-token", timeout_seconds=TEST_CLI_TIMEOUT_SECONDS)
+
+    assert run(client._run_text(args)) == "pinned\n"

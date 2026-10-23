@@ -68,3 +68,5 @@ Security CVM reuses the Dev canary's private dstack guest MRTD measurement.
 ## Scope
 
 V0 does not provide multiple active Security CVMs per entity, outbound WebSocket frame filtering, response-body filtering, arbitrary request signing, dynamic SSH-key revocation, or multi-entity Security CVMs. Unknown identity or invalid policy fails closed.
+
+The locked mitmproxy extra overrides Brotli to `>=1.2.1,<2`, because mitmproxy 12.2.3 caps the decoder below the CVE-2026-111497 fix. Keep the patched decoder when updating the proxy dependency.
