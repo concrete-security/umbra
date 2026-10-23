@@ -2833,7 +2833,7 @@ Phala Cloud is the CVM provider. The Console drives it through a pinned Node/npm
 
 #### Distribution integrity (T-13, T-19)
 
-The Phala CLI is distributed as an npm package (`phala` on the public npm registry, e.g. `phala@1.1.19`). The on-disk shape is a launcher at `PHALA_CLI_PATH` (default `/usr/local/bin/phala`) symlinked to the package's JS entrypoint under `node_modules/phala/dist/index.js`, plus its transitive `node_modules` tree. There is no single-file binary to hash; the integrity anchor is the **npm tarball** the package was installed from. The Console MUST verify that integrity at startup and refuse to start otherwise:
+The Phala CLI is distributed as an npm package (`phala` on the public npm registry, e.g. `phala@1.1.22`). The on-disk shape is a launcher at `PHALA_CLI_PATH` (default `/usr/local/bin/phala`) symlinked to the package's JS entrypoint under `node_modules/phala/dist/index.js`, plus its transitive `node_modules` tree. There is no single-file binary to hash; the integrity anchor is the **npm tarball** the package was installed from. The Console MUST verify that integrity at startup and refuse to start otherwise:
 
 - `PHALA_CLI_PATH` is fixed in the deployment image (e.g. `/usr/local/bin/phala`); it is permitted only as a deploy-time configuration, NOT a runtime env override that production can mutate.
 - The CLI tree (e.g. `/usr/lib/node_modules/phala/`) and its launcher live on a read-only mount in production.

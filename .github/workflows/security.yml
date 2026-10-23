@@ -36,6 +36,10 @@ jobs:
           uv python install
           uv run --locked --project console python -m pytest -q tools/test_check_cargo_dnssec.py
           uv run --python "$(cat .python-version)" --no-project python tools/check-cargo-dnssec.py
+      - name: Verify Phala and fixed Zod compatibility
+        run: |
+          npm ci --prefix console --ignore-scripts --no-audit --no-fund
+          npm run --prefix console test:phala
       # Use the MIT-licensed CLI directly: gitleaks-action requires a separate
       # organization license. The release archive is exact-versioned and its
       # digest comes from the upstream release checksum manifest.
