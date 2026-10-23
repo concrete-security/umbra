@@ -32,6 +32,7 @@ APP_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 MANAGED_CVM_NAME_RE = re.compile(r"^umbra-v0-(?:cvm|sc)-[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$")
 DNS_HOST_RE = re.compile(r"^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$")
 ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+PRODUCTION_OS_IMAGE_RE = re.compile(r"^dstack-(?:nvidia-)?[0-9]+\.[0-9]+\.[0-9]+(?:\.[0-9]+)?$")
 INSTANCE_TYPE_CURRENCY = "USD"
 # Authoring-time snapshot of `phala instance-types` in the adapter's normalized
 # shape. Seeds the Console catalog on a virgin database until the first live
@@ -163,6 +164,7 @@ class PhalaClient:
     node_path: str = "node"
     redaction_patterns: tuple[re.Pattern[str], ...] = ()
     timeout_seconds: float = 300.0
+    os_image: str | None = None
 
     @classmethod
     def from_settings(cls, *, timeout_seconds: float | None = None) -> PhalaClient:
@@ -177,6 +179,7 @@ class PhalaClient:
             node_path=raw.get("PHALA_NODE_PATH", "node").strip() or "node",
             redaction_patterns=patterns,
             timeout_seconds=300.0 if timeout_seconds is None else timeout_seconds,
+            os_image=raw.get("PHALA_OS_IMAGE", "").strip() or None,
         )
 
     async def deploy(
@@ -190,6 +193,8 @@ class PhalaClient:
         disk_size_gb: int | None = None,
     ) -> PhalaDeployResult:
         validate_managed_cvm_name(name)
+        if self.os_image is not None and not PRODUCTION_OS_IMAGE_RE.fullmatch(self.os_image):
+            raise PhalaError("invalid_os_image", field="PHALA_OS_IMAGE")
         async with staged_compose_and_env(compose_yaml=compose_yaml, env=env) as staged:
             args = [
                 "deploy",
@@ -203,6 +208,7 @@ class PhalaClient:
             ]
             append_optional_arg(args, "--instance-type", instance_type)
             append_optional_arg(args, "--region", region)
+            append_optional_arg(args, "--image", self.os_image)
             # `phala deploy --disk-size` expects a size *with unit* (e.g. "50G");
             # a bare integer is not accepted. Omitting it uses Phala's own 40GB
             # default (matching DEV_CVM_DEFAULT_DISK_GB).
