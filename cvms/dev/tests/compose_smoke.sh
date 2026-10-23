@@ -308,6 +308,21 @@ with socket.create_connection(("dev-egress-forwarder", 3128), timeout=5) as conn
         raise SystemExit("compose smoke: missing attestation policy did not deny CONNECT with 502")
 PY
 
+# Correlate the denial with the bootstrap check: an unreachable SC can also
+# return 502, without proving that policy bootstrap stopped this CONNECT.
+compose logs --no-log-prefix --no-color dev-egress-forwarder | python3 -c '
+import sys
+
+target = f"{sys.argv[1]}:18080"
+expected = (
+    f" destination={target!r}"
+    " reason=Security CVM aTLS policy fetch requires CONSOLE_URL"
+)
+lines = sys.stdin.read().splitlines()
+if not any(" connection_error " in line and line.rstrip().endswith(expected) for line in lines):
+    raise SystemExit("compose smoke: CONNECT denial did not come from the missing-policy bootstrap check")
+' "$origin_ip"
+
 origin_control after
 
 # The canonical path and a configured alias must both relay.
