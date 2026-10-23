@@ -23,6 +23,19 @@ vulnerabilities:
       setuptools 70.3.0 fails the guard. Reassess after pip/vendor/scanner drift;
       retain the SBOM component.
     expired_at: 2026-11-08
+  - id: GHSA-6f2x-v7q7-m7m5
+    paths:
+      - Cargo.lock
+      - console/atlas-verify/Cargo.lock
+    statement: >-
+      The advisory fixes resolve_cnames in the full recursive resolver.
+      In 0.25.2 this belongs to the separate hickory-recursor package,
+      absent from every Umbra release graph. reqwest 0.12.28 instead calls
+      the stub TokioResolver::lookup_ip. Controlled CNAME-only DNS fixtures
+      cover authority, additional and unrelated answers, with legitimate-chain
+      controls. CI rejects package, source, caller and feature drift.
+      Reassess or remove after an upgrade; this is not a general DNS safety claim.
+    expired_at: 2026-11-08
   - id: GHSA-5j98-2g5x-46v6
     paths:
       - Cargo.lock
