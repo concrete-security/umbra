@@ -159,7 +159,13 @@ fn login(
     let console_url = console_url_value.as_str();
     let persist_console_url =
         console_url_arg.is_some() || config.console_url_source == ConfigSource::Flag;
-    let client = Client::new();
+    let client = match crate::console::client(console_url) {
+        Ok(client) => client,
+        Err((status, message)) => {
+            crate::style::eprintln_error(&message);
+            return status;
+        }
+    };
     if !device {
         return match loopback_login(
             &client,
@@ -252,13 +258,7 @@ fn selected_console_url(config: &ResolvedConfig, arg: Option<&str>) -> Result<St
     if value.is_empty() {
         return Err("[usage] CONSOLE_URL must not be empty".to_string());
     }
-    let parsed = Url::parse(value).map_err(|err| format!("[usage] invalid CONSOLE_URL: {err}"))?;
-    if parsed.scheme() != "https" && parsed.scheme() != "http" {
-        return Err("[usage] CONSOLE_URL must start with https:// or http://".to_string());
-    }
-    if parsed.host_str().is_none() {
-        return Err("[usage] CONSOLE_URL must include a host".to_string());
-    }
+    crate::console::validate_console_url(value)?;
     Ok(value.to_string())
 }
 
@@ -756,7 +756,7 @@ fn refresh_existing_session(config: &ResolvedConfig) -> Result<Session, (ExitSta
     let console_url = config
         .require_console_url()
         .map_err(|message| (ExitStatus::Usage, message))?;
-    let client = Client::new();
+    let client = crate::console::client(console_url)?;
     let token_pair = refresh_token_pair(&client, console_url, refresh_token.as_str())?;
     let now = Utc::now();
     session.access_token = token_pair.access_token;
@@ -820,12 +820,14 @@ fn logout(config: &ResolvedConfig, json_output: bool) -> ExitStatus {
             return ExitStatus::Error;
         }
     };
-    if let (Some(session), Some(console_url)) = (session.as_ref(), config.console_url.as_deref()) {
-        let _ = Client::new()
-            .post(format!("{console_url}/api/v1/auth/logout"))
-            .bearer_auth(&session.access_token)
-            .json(&json!({ "refresh_token": session.refresh_token }))
-            .send();
+    if let (Some(session), Ok(console_url)) = (session.as_ref(), config.require_console_url()) {
+        if let Ok(client) = crate::console::client(console_url) {
+            let _ = client
+                .post(format!("{console_url}/api/v1/auth/logout"))
+                .bearer_auth(&session.access_token)
+                .json(&json!({ "refresh_token": session.refresh_token }))
+                .send();
+        }
     }
     if json_output {
         println!("{}", serde_json::json!({ "cleared": cleared }));

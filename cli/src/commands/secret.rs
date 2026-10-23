@@ -1,13 +1,11 @@
 use std::{
-    collections::BTreeMap,
     fs,
     io::{self, IsTerminal, Read},
     path::Path,
 };
 
-use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::json;
 use zeroize::Zeroizing;
 
 use crate::{
@@ -29,9 +27,6 @@ struct ConsoleUserSecret {
     allowed_hosts: Vec<String>,
     created_at: String,
     updated_at: String,
-
-    #[serde(flatten, default, skip_serializing)]
-    extra: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -132,7 +127,6 @@ fn list(config: &ResolvedConfig, json_output: bool) -> ExitStatus {
                 allowed_hosts: &secret.allowed_hosts,
                 created_at: &secret.created_at,
                 updated_at: &secret.updated_at,
-                extra: &secret.extra,
             })
             .collect();
         println!("{}", style::secret_list_cards(&views));
@@ -238,7 +232,7 @@ fn fetch_secrets(
     console_url: &str,
     access_token: &str,
 ) -> Result<SecretListPage, (ExitStatus, String)> {
-    let response = Client::new()
+    let response = crate::console::client(console_url)?
         .get(format!("{console_url}/api/v1/me/secrets"))
         .bearer_auth(access_token)
         .send()
@@ -258,7 +252,7 @@ fn put_secret(
     value: &str,
     hosts: &[String],
 ) -> Result<ConsoleUserSecret, (ExitStatus, String)> {
-    let response = Client::new()
+    let response = crate::console::client(console_url)?
         .put(format!("{console_url}/api/v1/me/secrets/{name}"))
         .bearer_auth(access_token)
         .json(&json!({ "value": value, "allowed_hosts": hosts }))
@@ -277,7 +271,7 @@ fn delete_secret(
     access_token: &str,
     name: &str,
 ) -> Result<(), (ExitStatus, String)> {
-    let response = Client::new()
+    let response = crate::console::client(console_url)?
         .delete(format!("{console_url}/api/v1/me/secrets/{name}"))
         .bearer_auth(access_token)
         .send()
@@ -293,6 +287,31 @@ fn delete_secret(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Unreviewed scalar or nested response fields never become secret output.
+    #[test]
+    fn secret_response_metadata_only_success() {
+        let secret: ConsoleUserSecret = serde_json::from_value(json!({
+            "name": "fixture-name",
+            "allowed_hosts": ["example.com"],
+            "created_at": "2026-10-23T00:00:00Z",
+            "updated_at": "2026-10-23T00:00:00Z",
+            "value": "fixture-private-scalar",
+            "future": {"token": "fixture-private-nested"}
+        }))
+        .unwrap();
+        let human = style::secret_list_cards(&[style::SecretView {
+            name: &secret.name,
+            allowed_hosts: &secret.allowed_hosts,
+            created_at: &secret.created_at,
+            updated_at: &secret.updated_at,
+        }]);
+        let json = serde_json::to_string(&secret).unwrap();
+        for output in [human, json] {
+            assert!(output.contains("fixture-name") && output.contains("example.com"));
+            assert!(!output.contains("fixture-private-"));
+        }
+    }
 
     #[test]
     fn secret_name_charset_and_length() {

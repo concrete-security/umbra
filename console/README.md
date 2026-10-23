@@ -46,7 +46,7 @@ make check
 make test
 ```
 
-The repository pins Python 3.12 in `.python-version`, matching the Console container. `uv` provisions it when necessary; newer Python minors are not part of the supported or release-tested runtime. The Console image restores the dated Debian snapshots recorded by its digest-pinned Rust and Python bases before installing system packages, so a later repository update cannot silently change the same source build.
+The repository pins Python 3.12 in `.python-version`, matching the Console container. `uv` provisions it when necessary; newer Python minors are not part of the supported or release-tested runtime. The Console image uses reviewed Debian snapshots for its Rust build and Python runtime packages, including CA distrust updates. Node.js comes from a digest-pinned upstream image; npm is retained only in the web asset build stage. Both the system CA store and pip's bundled CA store are patched. pip stays at 26.2.2 with a local, hash-verified urllib3 2.8.0 vendor update; global pip and ensurepip use the same rebuilt wheel, with its license, SBOM and RECORD updated. Later repository updates cannot silently change the same source build.
 
 The final image normalizes application-tree permissions before switching to unprivileged UID/GID 10001. A restrictive source-checkout umask therefore cannot make Alembic metadata or installed application files unreadable at startup, while the runtime user remains unable to modify the image contents.
 
@@ -76,8 +76,10 @@ The ordinary Console suite uses fake asyncpg connections and needs no database. 
 - Public routes live under `/api/v1`; authenticated CVM control routes live under `/internal`.
 - Middleware owns request IDs, body/JSON guards, canonical UUID paths, security headers, rate limits, metrics, and normalized error envelopes.
 - Provider subprocess adapters allowlist environment, stage private material at restrictive modes, avoid shell invocation, and redact errors.
+- Phala 1.1.22 uses the reviewed Zod 4.6.7 override. CLI and compose SDK requests keep provider API version `2026-05-22`. `npm run test:phala` checks its actual CLI and compose-hash SDK boundary without cloud calls. The matching public tarball SHA-256 lives in `.env.common`; regenerate deployment artifacts for this pin when deploying a rebuilt image.
 - CVM update APIs are provider-neutral. Provider-specific IDs and commands stay inside adapters.
 - CVM start and stop return the current resource ETag even when the requested state is already active, so an idempotent retry remains a successful CLI operation.
+- Set `PHALA_OS_IMAGE` to a reviewed production guest version for new CVMs, and validate both shared MRTD pins with that version. In-place application updates retain the existing guest OS; see the [operator setup guide](../docs/operator-setup.md#4-tdx-cvm-provider).
 - After approved runtime images are published for anonymous reads, leaving every `DSTACK_DOCKER_*` value unset makes the Console forward no registry credential to the provider or CVM. Before that publication, and for any private registry, self-hosters must explicitly set the complete `DSTACK_DOCKER_REGISTRY`, `DSTACK_DOCKER_USERNAME`, and `DSTACK_DOCKER_PASSWORD` trio; partial configuration is rejected.
 - `GHCR_USER`, `GHCR_TOKEN`, and `GH_TOKEN` are one-shot host process inputs. `build-env` rejects them from merged runtime layers, and Compose keeps legacy values out of the Console and installer containers.
 - Attestation uses the bundled `umbra-atlas-verify` helper and complete shade runtime policy. Missing authoritative runtime fields fail closed.

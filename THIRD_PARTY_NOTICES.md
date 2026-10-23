@@ -14,9 +14,9 @@ Every entry in the review queue below is **pending maintainer approval**; the in
 
 | Inventory | Packages | Permissive | Needs review |
 | --- | --- | --- | --- |
-| Rust — `umbra` CLI | 282 | 280 | 2 |
-| Rust — `umbra-atls-connect` | 267 | 265 | 2 |
-| Rust — `atlas-verify-cli` | 271 | 269 | 2 |
+| Rust — `umbra` CLI | 283 | 281 | 2 |
+| Rust — `umbra-atls-connect` | 268 | 266 | 2 |
+| Rust — `atlas-verify-cli` | 272 | 270 | 2 |
 | Python — Console | 35 | 34 | 1 |
 | Python — Security CVM | 52 | 44 | 8 |
 | npm — Console runtime (`phala` CLI) | 158 | 158 | 0 |
@@ -28,11 +28,11 @@ Every row below is unapproved until a maintainer records a decision in this file
 | Inventory | Package | Version | Declared license | Category | Note |
 | --- | --- | --- | --- | --- | --- |
 | Rust — `umbra` CLI | `webpki-roots` | 0.26.11 | CDLA-Permissive-2.0 | non-OSI permissive | — |
-| Rust — `umbra` CLI | `webpki-roots` | 1.0.7 | CDLA-Permissive-2.0 | non-OSI permissive | — |
+| Rust — `umbra` CLI | `webpki-roots` | 1.0.10 | CDLA-Permissive-2.0 | non-OSI permissive | — |
 | Rust — `umbra-atls-connect` | `webpki-roots` | 0.26.11 | CDLA-Permissive-2.0 | non-OSI permissive | — |
-| Rust — `umbra-atls-connect` | `webpki-roots` | 1.0.7 | CDLA-Permissive-2.0 | non-OSI permissive | — |
+| Rust — `umbra-atls-connect` | `webpki-roots` | 1.0.10 | CDLA-Permissive-2.0 | non-OSI permissive | — |
 | Rust — `atlas-verify-cli` | `webpki-roots` | 0.26.11 | CDLA-Permissive-2.0 | non-OSI permissive | — |
-| Rust — `atlas-verify-cli` | `webpki-roots` | 1.0.8 | CDLA-Permissive-2.0 | non-OSI permissive | — |
+| Rust — `atlas-verify-cli` | `webpki-roots` | 1.0.10 | CDLA-Permissive-2.0 | non-OSI permissive | — |
 | Python — Security CVM | `mitmproxy-linux` | 0.12.11 | _none declared_ | unknown | installed only when: sys_platform == 'linux' |
 | Python — Security CVM | `mitmproxy-rs` | 0.12.11 | _none declared_ | unknown | — |
 | Python — Console | `certifi` | 2026.10.19 | MPL-2.0 | weak copyleft | from trove classifiers |
@@ -61,8 +61,8 @@ Locked non-dev closure of `umbra-cli`, unioned across the published targets (`x8
 | `atlas-rs` | 0.2.0 | MIT | permissive | — |
 | `atomic-waker` | 1.1.2 | Apache-2.0 OR MIT | permissive | — |
 | `autocfg` | 1.5.0 | Apache-2.0 OR MIT | permissive | — |
-| `aws-lc-rs` | 1.17.0 | ISC AND (Apache-2.0 OR ISC) | permissive | — |
-| `aws-lc-sys` | 0.41.0 | ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0) | permissive | — |
+| `aws-lc-rs` | 1.18.2 | ISC AND (Apache-2.0 OR ISC) | permissive | — |
+| `aws-lc-sys` | 0.46.0 | ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0) | permissive | — |
 | `base16ct` | 0.2.0 | Apache-2.0 OR MIT | permissive | — |
 | `base64` | 0.13.1 | MIT/Apache-2.0 | permissive | — |
 | `base64` | 0.22.1 | MIT OR Apache-2.0 | permissive | — |
@@ -210,6 +210,7 @@ Locked non-dev closure of `umbra-cli`, unioned across the published targets (`x8
 | `pin-project-lite` | 0.2.17 | Apache-2.0 OR MIT | permissive | — |
 | `pkcs1` | 0.7.5 | Apache-2.0 OR MIT | permissive | — |
 | `pkcs8` | 0.10.2 | Apache-2.0 OR MIT | permissive | — |
+| `pkg-config` | 0.3.34 | MIT OR Apache-2.0 | permissive | — |
 | `portable-atomic` | 1.13.1 | Apache-2.0 OR MIT | permissive | — |
 | `potential_utf` | 0.1.5 | Unicode-3.0 | permissive | — |
 | `ppv-lite86` | 0.2.21 | MIT OR Apache-2.0 | permissive | — |
@@ -238,9 +239,9 @@ Locked non-dev closure of `umbra-cli`, unioned across the published targets (`x8
 | `rsa` | 0.9.10 | MIT OR Apache-2.0 | permissive | — |
 | `rustc-hash` | 2.1.2 | Apache-2.0 OR MIT | permissive | — |
 | `rustc_version` | 0.4.1 | MIT OR Apache-2.0 | permissive | — |
-| `rustls` | 0.23.40 | Apache-2.0 OR ISC OR MIT | permissive | — |
+| `rustls` | 0.23.46 | Apache-2.0 OR ISC OR MIT | permissive | — |
 | `rustls-pki-types` | 1.14.1 | MIT OR Apache-2.0 | permissive | — |
-| `rustls-webpki` | 0.103.13 | ISC | permissive | — |
+| `rustls-webpki` | 0.103.16 | ISC | permissive | — |
 | `rustversion` | 1.0.22 | MIT OR Apache-2.0 | permissive | — |
 | `ryu` | 1.0.23 | Apache-2.0 OR BSL-1.0 | permissive | — |
 | `scale-info` | 2.11.6 | Apache-2.0 | permissive | — |
@@ -314,7 +315,7 @@ Locked non-dev closure of `umbra-cli`, unioned across the published targets (`x8
 | `wasm-bindgen-shared` | 0.2.118 | MIT OR Apache-2.0 | permissive | — |
 | `webbrowser` | 1.2.1 | MIT OR Apache-2.0 | permissive | — |
 | `webpki-roots` | 0.26.11 | CDLA-Permissive-2.0 | non-OSI permissive | — |
-| `webpki-roots` | 1.0.7 | CDLA-Permissive-2.0 | non-OSI permissive | — |
+| `webpki-roots` | 1.0.10 | CDLA-Permissive-2.0 | non-OSI permissive | — |
 | `winnow` | 0.7.15 | MIT | permissive | — |
 | `winnow` | 1.0.3 | MIT | permissive | — |
 | `writeable` | 0.6.3 | Unicode-3.0 | permissive | — |
@@ -350,8 +351,8 @@ Locked non-dev closure for `x86_64-unknown-linux-gnu`. Distributed inside the De
 | `atlas-rs` | 0.2.0 | MIT | permissive | — |
 | `atomic-waker` | 1.1.2 | Apache-2.0 OR MIT | permissive | — |
 | `autocfg` | 1.5.0 | Apache-2.0 OR MIT | permissive | — |
-| `aws-lc-rs` | 1.17.0 | ISC AND (Apache-2.0 OR ISC) | permissive | — |
-| `aws-lc-sys` | 0.41.0 | ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0) | permissive | — |
+| `aws-lc-rs` | 1.18.2 | ISC AND (Apache-2.0 OR ISC) | permissive | — |
+| `aws-lc-sys` | 0.46.0 | ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0) | permissive | — |
 | `base16ct` | 0.2.0 | Apache-2.0 OR MIT | permissive | — |
 | `base64` | 0.13.1 | MIT/Apache-2.0 | permissive | — |
 | `base64` | 0.22.1 | MIT OR Apache-2.0 | permissive | — |
@@ -491,6 +492,7 @@ Locked non-dev closure for `x86_64-unknown-linux-gnu`. Distributed inside the De
 | `pin-project-lite` | 0.2.17 | Apache-2.0 OR MIT | permissive | — |
 | `pkcs1` | 0.7.5 | Apache-2.0 OR MIT | permissive | — |
 | `pkcs8` | 0.10.2 | Apache-2.0 OR MIT | permissive | — |
+| `pkg-config` | 0.3.34 | MIT OR Apache-2.0 | permissive | — |
 | `portable-atomic` | 1.13.1 | Apache-2.0 OR MIT | permissive | — |
 | `potential_utf` | 0.1.5 | Unicode-3.0 | permissive | — |
 | `ppv-lite86` | 0.2.21 | MIT OR Apache-2.0 | permissive | — |
@@ -519,9 +521,9 @@ Locked non-dev closure for `x86_64-unknown-linux-gnu`. Distributed inside the De
 | `rsa` | 0.9.10 | MIT OR Apache-2.0 | permissive | — |
 | `rustc-hash` | 2.1.2 | Apache-2.0 OR MIT | permissive | — |
 | `rustc_version` | 0.4.1 | MIT OR Apache-2.0 | permissive | — |
-| `rustls` | 0.23.40 | Apache-2.0 OR ISC OR MIT | permissive | — |
+| `rustls` | 0.23.46 | Apache-2.0 OR ISC OR MIT | permissive | — |
 | `rustls-pki-types` | 1.14.1 | MIT OR Apache-2.0 | permissive | — |
-| `rustls-webpki` | 0.103.13 | ISC | permissive | — |
+| `rustls-webpki` | 0.103.16 | ISC | permissive | — |
 | `rustversion` | 1.0.22 | MIT OR Apache-2.0 | permissive | — |
 | `ryu` | 1.0.23 | Apache-2.0 OR BSL-1.0 | permissive | — |
 | `scale-info` | 2.11.6 | Apache-2.0 | permissive | — |
@@ -589,7 +591,7 @@ Locked non-dev closure for `x86_64-unknown-linux-gnu`. Distributed inside the De
 | `wasm-bindgen-macro-support` | 0.2.118 | MIT OR Apache-2.0 | permissive | — |
 | `wasm-bindgen-shared` | 0.2.118 | MIT OR Apache-2.0 | permissive | — |
 | `webpki-roots` | 0.26.11 | CDLA-Permissive-2.0 | non-OSI permissive | — |
-| `webpki-roots` | 1.0.7 | CDLA-Permissive-2.0 | non-OSI permissive | — |
+| `webpki-roots` | 1.0.10 | CDLA-Permissive-2.0 | non-OSI permissive | — |
 | `winnow` | 1.0.3 | MIT | permissive | — |
 | `writeable` | 0.6.3 | Unicode-3.0 | permissive | — |
 | `wyz` | 0.5.1 | MIT | permissive | — |
@@ -624,8 +626,8 @@ Locked non-dev closure for `x86_64-unknown-linux-gnu` from `console/atlas-verify
 | `atlas-rs` | 0.2.0 | MIT | permissive | — |
 | `atomic-waker` | 1.1.2 | Apache-2.0 OR MIT | permissive | — |
 | `autocfg` | 1.5.1 | Apache-2.0 OR MIT | permissive | — |
-| `aws-lc-rs` | 1.17.0 | ISC AND (Apache-2.0 OR ISC) | permissive | — |
-| `aws-lc-sys` | 0.41.0 | ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0) | permissive | — |
+| `aws-lc-rs` | 1.18.2 | ISC AND (Apache-2.0 OR ISC) | permissive | — |
+| `aws-lc-sys` | 0.46.0 | ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0) | permissive | — |
 | `base16ct` | 0.2.0 | Apache-2.0 OR MIT | permissive | — |
 | `base64` | 0.13.1 | MIT/Apache-2.0 | permissive | — |
 | `base64` | 0.22.1 | MIT OR Apache-2.0 | permissive | — |
@@ -768,6 +770,7 @@ Locked non-dev closure for `x86_64-unknown-linux-gnu` from `console/atlas-verify
 | `pin-project-lite` | 0.2.17 | Apache-2.0 OR MIT | permissive | — |
 | `pkcs1` | 0.7.5 | Apache-2.0 OR MIT | permissive | — |
 | `pkcs8` | 0.10.2 | Apache-2.0 OR MIT | permissive | — |
+| `pkg-config` | 0.3.34 | MIT OR Apache-2.0 | permissive | — |
 | `portable-atomic` | 1.13.1 | Apache-2.0 OR MIT | permissive | — |
 | `potential_utf` | 0.1.5 | Unicode-3.0 | permissive | — |
 | `ppv-lite86` | 0.2.21 | MIT OR Apache-2.0 | permissive | — |
@@ -798,9 +801,9 @@ Locked non-dev closure for `x86_64-unknown-linux-gnu` from `console/atlas-verify
 | `rsa` | 0.9.10 | MIT OR Apache-2.0 | permissive | — |
 | `rustc-hash` | 2.1.2 | Apache-2.0 OR MIT | permissive | — |
 | `rustc_version` | 0.4.1 | MIT OR Apache-2.0 | permissive | — |
-| `rustls` | 0.23.41 | Apache-2.0 OR ISC OR MIT | permissive | — |
+| `rustls` | 0.23.46 | Apache-2.0 OR ISC OR MIT | permissive | — |
 | `rustls-pki-types` | 1.14.1 | MIT OR Apache-2.0 | permissive | — |
-| `rustls-webpki` | 0.103.13 | ISC | permissive | — |
+| `rustls-webpki` | 0.103.16 | ISC | permissive | — |
 | `rustversion` | 1.0.22 | MIT OR Apache-2.0 | permissive | — |
 | `ryu` | 1.0.23 | Apache-2.0 OR BSL-1.0 | permissive | — |
 | `scale-info` | 2.11.6 | Apache-2.0 | permissive | — |
@@ -868,7 +871,7 @@ Locked non-dev closure for `x86_64-unknown-linux-gnu` from `console/atlas-verify
 | `wasm-bindgen-macro-support` | 0.2.125 | MIT OR Apache-2.0 | permissive | — |
 | `wasm-bindgen-shared` | 0.2.125 | MIT OR Apache-2.0 | permissive | — |
 | `webpki-roots` | 0.26.11 | CDLA-Permissive-2.0 | non-OSI permissive | — |
-| `webpki-roots` | 1.0.8 | CDLA-Permissive-2.0 | non-OSI permissive | — |
+| `webpki-roots` | 1.0.10 | CDLA-Permissive-2.0 | non-OSI permissive | — |
 | `winnow` | 1.0.3 | MIT | permissive | — |
 | `writeable` | 0.6.3 | Unicode-3.0 | permissive | — |
 | `wyz` | 0.5.1 | MIT | permissive | — |
@@ -908,7 +911,7 @@ Locked runtime closure of `umbra-console` from `console/uv.lock` (`uv sync --fro
 | `httptools` | 0.8.0 | MIT | permissive | — |
 | `httpx` | 0.28.1 | BSD-3-Clause | permissive | from trove classifiers |
 | `idna` | 3.18 | BSD-3-Clause | permissive | — |
-| `mako` | 1.4.1 | MIT | permissive | — |
+| `mako` | 1.4.2 | MIT | permissive | — |
 | `markupsafe` | 3.0.3 | BSD-3-Clause | permissive | — |
 | `pycparser` | 3.0 | BSD-3-Clause | permissive | installed only when: implementation_name != 'PyPy' |
 | `pydantic` | 2.13.4 | MIT | permissive | — |
@@ -949,7 +952,7 @@ Locked runtime closure of `umbra-security-cvm` from `cvms/security/uv.lock` incl
 | `flask` | 3.1.3 | BSD-3-Clause | permissive | — |
 | `google-re2` | 1.1.20251105 | BSD-3-Clause | permissive | from trove classifiers |
 | `h11` | 0.16.0 | MIT | permissive | from trove classifiers |
-| `h2` | 4.3.0 | MIT | permissive | from trove classifiers |
+| `h2` | 4.4.1 | MIT | permissive | — |
 | `hpack` | 4.2.0 | MIT | permissive | — |
 | `httpcore` | 1.0.9 | BSD-3-Clause | permissive | — |
 | `httpx` | 0.28.1 | BSD-3-Clause | permissive | from trove classifiers |
@@ -977,11 +980,11 @@ Locked runtime closure of `umbra-security-cvm` from `cvms/security/uv.lock` incl
 | `ruamel-yaml` | 0.19.1 | MIT | permissive | from trove classifiers |
 | `service-identity` | 26.1.0 | MIT | permissive | — |
 | `sortedcontainers` | 2.4.0 | Apache-2.0 | permissive | from trove classifiers |
-| `tornado` | 6.5.10 | Apache-2.0 | permissive | from trove classifiers |
+| `tornado` | 6.6 | Apache-2.0 | permissive | from trove classifiers |
 | `typing-extensions` | 4.14.0 | PSF-2.0 | permissive | — |
 | `urwid` | 3.0.5 | LGPL-2.1-only | weak copyleft | — |
 | `wcwidth` | 0.8.2 | MIT | permissive | — |
-| `werkzeug` | 3.1.8 | BSD-3-Clause | permissive | — |
+| `werkzeug` | 3.1.9 | BSD-3-Clause | permissive | — |
 | `wsproto` | 1.3.2 | MIT | permissive | — |
 | `zstandard` | 0.25.0 | BSD-3-Clause | permissive | — |
 
@@ -1179,7 +1182,7 @@ Non-dev entries of `console/package-lock.json`. The Console image retains this g
 | `lilconfig` | 2.1.0 | MIT | permissive | — |
 | `lines-and-columns` | 1.2.4 | MIT | permissive | — |
 | `mz` | 2.7.0 | MIT | permissive | — |
-| `nanoid` | 3.3.17 | MIT | permissive | — |
+| `nanoid` | 3.3.18 | MIT | permissive | — |
 | `normalize-path` | 3.0.0 | MIT | permissive | — |
 | `object-assign` | 4.1.1 | MIT | permissive | — |
 | `object-hash` | 3.0.0 | MIT | permissive | — |
@@ -1193,12 +1196,12 @@ Non-dev entries of `console/package-lock.json`. The Console image retains this g
 | `postcss-load-config` | 4.0.2 | MIT | permissive | — |
 | `postcss-load-config/node_modules/lilconfig` | 3.1.3 | MIT | permissive | — |
 | `postcss-nested` | 6.2.0 | MIT | permissive | — |
-| `postcss-selector-parser` | 6.1.4 | MIT | permissive | — |
+| `postcss-selector-parser` | 7.1.6 | MIT | permissive | — |
 | `postcss-value-parser` | 4.2.0 | MIT | permissive | — |
 | `read-cache` | 1.0.0 | MIT | permissive | — |
 | `readdirp` | 3.6.0 | MIT | permissive | — |
 | `resolve` | 1.22.12 | MIT | permissive | — |
-| `source-map-js` | 1.2.1 | BSD-3-Clause | permissive | — |
+| `source-map-js` | 1.2.2 | BSD-3-Clause | permissive | — |
 | `sucrase` | 3.35.1 | MIT | permissive | — |
 | `sucrase/node_modules/commander` | 4.1.1 | MIT | permissive | — |
 | `supports-preserve-symlinks-flag` | 1.0.0 | MIT | permissive | — |
@@ -1230,8 +1233,8 @@ Non-dev entries of `console/package-lock.json`. The Console image retains this g
 
 ## Baked developer agents in the Dev CVM image
 
-- **Codex** (`@openai/codex` 0.131.0, Apache-2.0). Installed into the image from the reviewed, locked package under `cvms/dev/user-sandbox/codex-package/` with `npm ci --omit=dev`; the package's `LICENSE` ships inside the installed `node_modules` tree, which satisfies the Apache-2.0 redistribution condition, and this file provides the corresponding notice entry. The version above is the baked build-time pin; `umbra-update-agents.sh` may update the installed copy in a running sandbox, so the shipped image states the baked version, not a runtime guarantee.
-- **Claude Code** (2.1.144, proprietary — Anthropic). Baked from the upstream release tarball with a SHA-256 pin. The project does not redistribute this binary: the Dev CVM image is not published for anonymous pull (ADR 0005 amendment, 2026-08-05), and a self-hoster's own image build downloads it directly from Anthropic's release URL. The same runtime-update caveat applies.
+- **Codex** (`@openai/codex` 0.147.0, Apache-2.0). Installed into the image from the reviewed, locked package under `cvms/dev/user-sandbox/codex-package/` with `npm ci --omit=dev`; the package's `LICENSE` ships inside the installed `node_modules` tree, which satisfies the Apache-2.0 redistribution condition, and this file provides the corresponding notice entry. The version above is the baked build-time pin; `umbra-update-agents.sh` may update the installed copy in a running sandbox, so the shipped image states the baked version, not a runtime guarantee.
+- **Claude Code** (2.1.303, proprietary — Anthropic). Baked from the upstream release tarball with a SHA-256 pin. The project does not redistribute this binary: the Dev CVM image is not published for anonymous pull (ADR 0005 amendment, 2026-08-05), and a self-hoster's own image build downloads it directly from Anthropic's release URL. The same runtime-update caveat applies.
 
 ## Image system components and base images
 
@@ -1243,11 +1246,14 @@ Components installed into the container images (all version- and digest-/SHA-256
 | Debian (python:3.12-slim base) | Console, Security CVM images | Various (Debian per-package copyright files) | Same as above; copyright files retained in-image. |
 | Alpine base | Installer, reverse-proxy images | Various (mostly MIT/BSD; apk metadata) | Pinned complete package closure; license metadata retained by apk. |
 | Python 3.12 | Console, Security CVM images | PSF-2.0 | Permissive; retained upstream image layers unmodified. |
-| Docker Engine, CLI, containerd, Buildx, Compose plugin | Dev CVM image | Apache-2.0 | Unmodified official `.deb`s (SHA-256-pinned); Apache-2.0 license/notice files ship in the packages; noticed here. |
-| GitHub CLI (`gh` 2.92.0) | Dev CVM image | MIT | License text ships in the upstream release tarball layout and package docs; noticed here. |
-| Node.js (22.23.4) | Dev CVM image | MIT (plus bundled component licenses) | Upstream tarball retains its `LICENSE` at the install prefix; noticed here. |
+| pip (26.2.2) | Dev CVM, Console and Security CVM images | MIT | The hash-pinned upstream wheel receives a local urllib3 2.8.0 vendor update; pip's compatibility patches remain, and the vendor manifest, SBOM and wheel RECORD reflect the rebuilt contents. Licenses ship in the distribution metadata. |
+| urllib3 (2.8.0, vendored in pip) | Dev CVM, Console and Security CVM images | MIT | Taken from the hash-pinned upstream wheel; its license is retained in both pip vendor and distribution license directories. |
+| Docker Engine, CLI, containerd, Buildx, Compose plugin | Dev CVM image | Apache-2.0 | Engine 29.9.2, CLI 29.9.2 and containerd 2.4.2 come from SHA-256-pinned official `.deb`s. Compose 5.6.1 and Buildx 0.38.1+umbra.2 are built from checksum-pinned source with Go 1.27.3. Compose applies the reviewed x/net 0.60.0, x/crypto 0.57.0, x/text 0.42.0 and x/term 0.46.0 checksums, then preserves its locked module graph during the build. Buildx retains its vendor graph with separately hash-pinned x/net 0.60.0 and go-archive 0.3.3 replacements. Official Docker package license/notice files remain in the image; Compose's `LICENSE` and `NOTICE` and Buildx's `LICENSE` are retained under `/usr/local/share/licenses/`. |
+| GitHub CLI (`gh` 2.103.0) | Dev CVM image | MIT | Built from checksum-pinned source with Go 1.27.3 and upstream's locked modules; the build rejects changes to `go.sum`. Its `LICENSE` ships at `/usr/local/share/licenses/gh/LICENSE`. |
+| npm (12.2.1) | Dev CVM image | Artistic-2.0 (plus bundled component licenses) | Installed offline from the SHA-256-pinned upstream tarball; upstream and bundled dependency license files remain in the image. |
+| Node.js (22.23.4) | Dev CVM and Console images | MIT (plus bundled component licenses) | The Dev tarball retains its `LICENSE`; Console copies the upstream image's runtime and license. |
 | uv | All Python images (build stage) and Dev CVM image | Apache-2.0 OR MIT | Permissive dual license; binary copied from the digest-pinned upstream image; noticed here. |
-| nginx (1.27-alpine) | Reverse-proxy image | BSD-2-Clause | Permissive; unmodified official image; noticed here. |
+| nginx (1.30.6-alpine3.24) | Installer and reverse-proxy images | BSD-2-Clause | Permissive; unmodified official image; noticed here. |
 | mitmproxy (11.x) | Security CVM image | MIT (dependency graph inventoried above) | Installed from the locked `mitmproxy` extra; per-package obligations covered by the generated inventory. |
 | PostgreSQL (postgres:16) | Compose deployment (pulled by the operator, not redistributed by Umbra) | PostgreSQL License | Referenced by digest in `docker-compose.yml`; the operator pulls the official image directly, so Umbra redistributes nothing. |
 
