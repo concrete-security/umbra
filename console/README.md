@@ -77,7 +77,7 @@ The ordinary Console suite uses fake asyncpg connections and needs no database. 
 - Middleware owns request IDs, body/JSON guards, canonical UUID paths, security headers, rate limits, metrics, and normalized error envelopes.
 - Provider subprocess adapters allowlist environment, stage private material at restrictive modes, avoid shell invocation, and redact errors.
 - CVM update APIs are provider-neutral. Provider-specific IDs and commands stay inside adapters.
-- Set `PHALA_OS_IMAGE` to a reviewed production guest version for new CVMs, and validate both shared MRTD pins with that version. In-place application updates retain the existing guest OS; see the [operator setup guide](../docs/operator-setup.md#4-tee-provider).
+- Set `PHALA_OS_IMAGE` to a reviewed production guest version for new CVMs, and validate both shared MRTD pins with that version. In-place application updates retain the existing guest OS; see the [operator setup guide](../docs/operator-setup.md#4-tdx-cvm-provider).
 - After approved runtime images are published for anonymous reads, leaving every `DSTACK_DOCKER_*` value unset makes the Console forward no registry credential to the provider or CVM. Before that publication, and for any private registry, self-hosters must explicitly set the complete `DSTACK_DOCKER_REGISTRY`, `DSTACK_DOCKER_USERNAME`, and `DSTACK_DOCKER_PASSWORD` trio; partial configuration is rejected.
 - `GHCR_USER`, `GHCR_TOKEN`, and `GH_TOKEN` are one-shot host process inputs. `build-env` rejects them from merged runtime layers, and Compose keeps legacy values out of the Console and installer containers.
 - Attestation uses the bundled `umbra-atlas-verify` helper and complete shade runtime policy. Missing authoritative runtime fields fail closed.
