@@ -38,6 +38,10 @@ dependencies = [
 [dependency-groups]
 dev = ["pytest>=8,<9", "pyyaml>=6,<7"]
 
+[tool.uv]
+# Exclude the compromised emSign trust root (GHSA-6q48-6c7w-9gw2).
+constraint-dependencies = ["certifi>=2026.10.19"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
