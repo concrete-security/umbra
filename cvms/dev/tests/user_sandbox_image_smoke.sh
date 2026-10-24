@@ -87,6 +87,9 @@ docker run --rm --network none --platform linux/amd64 --entrypoint bash "${IMAGE
   test "$(readlink -f /home/dev/.local/bin/claude)" = "$versions/999.0.0"
 '
 
+docker run --rm -i --network none --platform linux/amd64 \
+  --entrypoint node "${IMAGE_TAG}" - <"${ROOT}/cvms/dev/tests/npm_undici_smoke.cjs"
+
 echo "user_sandbox_image_smoke: ok"
 
 if [ "${UMBRA_VERIFY_IMAGE_REPRODUCIBILITY:-0}" = 1 ]; then
