@@ -104,7 +104,7 @@ Some Console resource-management routes (§3.4) are asynchronous: they return a 
 
 Affected commands today: `umbra cvm launch`, `umbra cvm update`, `umbra cvm terminate`, `umbra security-cvm launch`, `umbra security-cvm update`, and `umbra audit export`. Future async commands inherit this contract automatically.
 
-**Default (wait).** The CLI polls the operation handle until it reaches a terminal state (`succeeded` / `failed` / `cancelled`) or `--wait-timeout-seconds` elapses.
+**Default (wait).** The CLI polls the operation handle until it reaches a terminal state (`succeeded` / `failed` / `cancelled`) or `--wait-timeout-seconds` elapses. Before each poll, it MUST reload the local session and apply the normal expiry/refresh contract (§5.3) only while its credential pair still matches the operation's retained session. An external credential change, including another login with the same user/entity IDs, MUST stop polling before using that session. A refresh MUST use the validated snapshot and persist its rotation only if that exact snapshot remains current under the shared session-store lock; it MUST preserve a concurrent login or logout. A refresh or poll authorization failure MUST stop the waiter without resubmitting the accepted mutation. The server-side operation remains unaffected.
 
 - On `succeeded`, the CLI prints the resource record carried in the operation's `result` (per the affected command's Output section).
 - On `failed`, the CLI prints `[<error_code>] <message>` on stderr — where `error_code` is the Console's typed `Operation.error.code` (e.g. `PHALA_DEPLOY_FAILED`, `CA_EXPORT_TTL_EXPIRED`, see Console contract for the closed set per kind) — and exits `1`.

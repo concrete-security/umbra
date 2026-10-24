@@ -100,8 +100,8 @@ fn launch(config: &ResolvedConfig, args: SecurityCvmLaunchArgs, json_output: boo
     let (console_url, session) = try_or_eprintln!(console_session(config));
     let op = try_or_eprintln!(submit_launch(console_url, &session, &args));
     let result: SecurityCvmProvisionResult = match try_or_eprintln!(operation::await_result(
-        console_url,
-        &session.access_token,
+        config,
+        &session,
         op,
         &args.wait,
         json_output,
@@ -119,8 +119,8 @@ fn update(config: &ResolvedConfig, args: SecurityCvmUpdateArgs, json_output: boo
     let (console_url, session) = try_or_eprintln!(console_session(config));
     let op = try_or_eprintln!(submit_update(console_url, &session));
     let result: SecurityCvmUpdateResult = match try_or_eprintln!(operation::await_result(
-        console_url,
-        &session.access_token,
+        config,
+        &session,
         op,
         &args.wait,
         json_output,

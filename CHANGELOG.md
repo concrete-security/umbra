@@ -6,6 +6,8 @@ Umbra follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and will 
 
 ### Fixed
 
+- Async operation waiters reload and refresh the session before each poll, so a long CVM update can complete after its original access token expires. Authorization failures stop polling without resubmitting the operation.
+
 - CLI 0.1.1 can refresh a cached per-CVM aTLS policy after a recognized bootchain or OS-image mismatch. It requires explicit consent, checks the CVM and Console context, and retries full Atlas verification once. Quote, certificate, TCB, session-binding, and replay failures remain closed.
 
 ### Compatibility
