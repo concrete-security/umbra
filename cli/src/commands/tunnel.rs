@@ -22,15 +22,22 @@ const MAX_HANDSHAKE_BYTES: usize = 16 * 1024;
 const RELAY_CHUNK_BYTES: usize = 16 * 1024;
 
 enum TunnelError {
-    Atls { host: String, detail: String },
-    Unreachable { host: String, detail: String },
+    Atls {
+        host: String,
+        detail: String,
+        policy_mismatch: bool,
+    },
+    Unreachable {
+        host: String,
+        detail: String,
+    },
     Other(String),
 }
 
 impl TunnelError {
     fn message(&self) -> String {
         match self {
-            Self::Atls { host, detail } => {
+            Self::Atls { host, detail, .. } => {
                 format!("[error] aTLS verification failed for {host}: {detail}")
             }
             Self::Unreachable { host, detail } => format!(
@@ -79,6 +86,18 @@ pub fn run(target: &str, config: &ResolvedConfig) -> ExitStatus {
         }
     };
 
+    run_with_policy_refresh(
+        policy_path,
+        |policy| runtime.block_on(run_tunnel(host.clone(), policy)),
+        |host, detail| refresh_policy_after_mismatch(config, policy_path, host, detail),
+    )
+}
+
+fn run_with_policy_refresh(
+    policy_path: &Path,
+    mut connect: impl FnMut(Policy) -> Result<(), TunnelError>,
+    mut refresh: impl FnMut(&str, &str) -> Result<RefreshDecision, (ExitStatus, String)>,
+) -> ExitStatus {
     let mut refreshed = false;
     loop {
         let policy = match load_policy(policy_path) {
@@ -88,34 +107,33 @@ pub fn run(target: &str, config: &ResolvedConfig) -> ExitStatus {
                 return ExitStatus::Usage;
             }
         };
-        match runtime.block_on(run_tunnel(host.clone(), policy)) {
+        match connect(policy) {
             Ok(()) => return ExitStatus::Ok,
             Err(TunnelError::Atls {
                 host: failed_host,
                 detail,
-            }) if !refreshed && is_app_compose_hash_mismatch(&detail) => {
-                match refresh_policy_after_mismatch(config, policy_path, &failed_host, &detail) {
-                    Ok(RefreshDecision::Refreshed(path)) => {
-                        refreshed = true;
-                        eprintln!(
-                            "{}",
-                            style::info_line(&format!(
-                                "refreshed local aTLS policy: {}",
-                                path.display()
-                            ))
-                        );
-                        eprintln!("{}", style::info_line("retrying aTLS verification"));
-                    }
-                    Ok(RefreshDecision::Declined(message)) => {
-                        crate::style::eprintln_error(&message);
-                        return ExitStatus::Error;
-                    }
-                    Err((status, message)) => {
-                        crate::style::eprintln_error(&message);
-                        return status;
-                    }
+                policy_mismatch: true,
+            }) if !refreshed => match refresh(&failed_host, &detail) {
+                Ok(RefreshDecision::Refreshed(path)) => {
+                    refreshed = true;
+                    eprintln!(
+                        "{}",
+                        style::info_line(&format!(
+                            "refreshed local aTLS policy: {}",
+                            path.display()
+                        ))
+                    );
+                    eprintln!("{}", style::info_line("retrying aTLS verification"));
                 }
-            }
+                Ok(RefreshDecision::Declined(message)) => {
+                    crate::style::eprintln_error(&message);
+                    return ExitStatus::Error;
+                }
+                Err((status, message)) => {
+                    crate::style::eprintln_error(&message);
+                    return status;
+                }
+            },
             Err(err) => {
                 crate::style::eprintln_error(&err.message());
                 return ExitStatus::Error;
@@ -183,6 +201,16 @@ fn refresh_policy_after_mismatch(
     host: &str,
     detail: &str,
 ) -> Result<RefreshDecision, (ExitStatus, String)> {
+    refresh_policy_with_confirmation(config, policy_path, host, detail, prompt::confirm)
+}
+
+fn refresh_policy_with_confirmation(
+    config: &ResolvedConfig,
+    policy_path: &Path,
+    host: &str,
+    detail: &str,
+    confirm: impl FnOnce(&str) -> Option<bool>,
+) -> Result<RefreshDecision, (ExitStatus, String)> {
     let Some(cvm_id) = atls_policy_store::cvm_id_from_store_path(&config.config_dir, policy_path)
     else {
         return Ok(RefreshDecision::Declined(friendly_mismatch_message(
@@ -193,6 +221,23 @@ fn refresh_policy_after_mismatch(
             "This policy path does not look like a per-CVM policy file, so Umbra cannot refresh it automatically.",
         )));
     };
+    let console_url = config
+        .require_console_url()
+        .map_err(|message| (ExitStatus::Usage, message))?;
+    let previous: Value = serde_json::from_slice(&fs::read(policy_path).map_err(|_| {
+        (
+            ExitStatus::Error,
+            "[error] could not read the existing local aTLS policy".to_string(),
+        )
+    })?)
+    .map_err(|_| {
+        (
+            ExitStatus::Error,
+            "[error] invalid existing local aTLS policy".to_string(),
+        )
+    })?;
+    validate_policy_context(&previous["rtmr3_binding"], &cvm_id, console_url)
+        .map_err(|message| (ExitStatus::Error, message))?;
     let question = friendly_mismatch_message(
         host,
         policy_path,
@@ -200,7 +245,7 @@ fn refresh_policy_after_mismatch(
         detail,
         "Refresh this local policy file from Console and retry verification now?",
     );
-    match prompt::confirm(&question) {
+    match confirm(&question) {
         Some(true) => {}
         Some(false) => {
             return Ok(RefreshDecision::Declined(
@@ -223,6 +268,23 @@ fn refresh_policy_after_mismatch(
             refresh_failed_message(host, policy_path, detail, &message),
         )
     })?;
+    let cvm: Value = crate::console::fetch_json(
+        console_url,
+        &session,
+        &format!("/api/v1/cvms/{cvm_id}"),
+        &[],
+        "check Dev CVM policy target",
+    )?;
+    if cvm["id"].as_str() != Some(cvm_id.as_str())
+        || cvm["state"].as_str() != Some("RUNNING")
+        || cvm["error_reason"].as_str() == Some("SECURITY_CVM_REBIND_REQUIRED")
+        || !cvm["fqdn"]
+            .as_str()
+            .and_then(|value| validate_target(value).ok())
+            .is_some_and(|value| value.eq_ignore_ascii_case(host))
+    {
+        return Err((ExitStatus::Error, "[error] Console CVM does not match the failed tunnel target; local policy was not changed".to_string()));
+    }
     let bundle = atls_policy_store::fetch_bundle(console_url, &session, &cvm_id).map_err(
         |(status, message)| {
             (
@@ -231,6 +293,8 @@ fn refresh_policy_after_mismatch(
             )
         },
     )?;
+    validate_policy_context(&bundle.rtmr3_binding, &cvm_id, console_url)
+        .map_err(|message| (ExitStatus::Error, message))?;
     let path =
         atls_policy_store::write(&config.config_dir, &bundle, &cvm_id).map_err(|message| {
             (
@@ -239,6 +303,17 @@ fn refresh_policy_after_mismatch(
             )
         })?;
     Ok(RefreshDecision::Refreshed(path))
+}
+
+fn validate_policy_context(binding: &Value, cvm_id: &str, console_url: &str) -> Result<(), String> {
+    let expected = crate::console::validate_console_url(console_url)?;
+    let actual = binding["console_url"]
+        .as_str()
+        .and_then(|value| crate::console::validate_console_url(value).ok());
+    if binding["cvm_id"].as_str() != Some(cvm_id) || actual.as_ref() != Some(&expected) {
+        return Err("[error] aTLS policy does not match this CVM and Console context; local policy was not changed".to_string());
+    }
+    Ok(())
 }
 
 fn friendly_mismatch_message(
@@ -251,7 +326,7 @@ fn friendly_mismatch_message(
     let cvm = cvm_id.unwrap_or("unknown");
     format!(
         "[error] Umbra could not verify this Dev CVM.\n\
-         [info] The CVM's measured app material does not match the local aTLS policy file.\n\
+         [info] The CVM's measured bootchain, OS image, or app material does not match the local aTLS policy file.\n\
          [info] Console can provide the current policy for this CVM, but Umbra needs confirmation before replacing local trust material.\n\
          [info] CVM: {cvm}\n\
          [info] host: {host}\n\
@@ -285,7 +360,12 @@ fn classify_atls_error(host: String, err: AtlsVerificationError) -> TunnelError 
     {
         TunnelError::Unreachable { host, detail }
     } else {
-        TunnelError::Atls { host, detail }
+        let policy_mismatch = is_refreshable_policy_mismatch(&err);
+        TunnelError::Atls {
+            host,
+            detail,
+            policy_mismatch,
+        }
     }
 }
 
@@ -306,8 +386,19 @@ fn is_transport_handshake_failure(detail: &str) -> bool {
         || detail.contains("timeout")
 }
 
-fn is_app_compose_hash_mismatch(detail: &str) -> bool {
-    detail.contains("app compose hash mismatch") || detail.contains("app_compose_hash_mismatch")
+fn is_refreshable_policy_mismatch(error: &AtlsVerificationError) -> bool {
+    // Atlas 0.2.0 emits these only after quote, TLS binding, and RTMR replay pass.
+    // Never infer trust-refresh eligibility from an error's diagnostic text.
+    match error {
+        AtlsVerificationError::AppComposeHashMismatch { .. }
+        | AtlsVerificationError::OsImageHashMismatch {
+            actual: Some(_), ..
+        } => true,
+        AtlsVerificationError::BootchainMismatch { field, .. } => {
+            matches!(field.as_str(), "mrtd" | "rtmr0" | "rtmr1" | "rtmr2")
+        }
+        _ => false,
+    }
 }
 
 async fn websocket_handshake<S>(stream: &mut S, host: &str) -> Result<(), String>
@@ -578,17 +669,325 @@ mod tests {
         std::fs::remove_file(path).unwrap();
     }
 
+    use crate::test_support::{authenticated_config, MockConsole};
+    use rstest::rstest;
+    use serde_json::json;
+
+    const CVM_ID: &str = "00000000-0000-4000-8000-000000000001";
+    const CVM_HOST: &str = "dev.example.com";
+
+    fn bundle(console_url: &str, measurement: &str) -> Value {
+        json!({
+            "cvm_id": CVM_ID,
+            "compose_template": "services: {}",
+            "expected_bootchain": {"mrtd":measurement.repeat(96),"rtmr0":"1".repeat(96),
+                "rtmr1":"2".repeat(96),"rtmr2":"3".repeat(96)},
+            "os_image_hash": measurement.repeat(64),
+            "rtmr3_binding": {"cvm_id":CVM_ID,"console_url":console_url},
+            "app_compose": {"docker_compose_file":"services: {}"}
+        })
+    }
+
+    struct PolicyFixture {
+        console: MockConsole,
+        config: ResolvedConfig,
+        path: PathBuf,
+    }
+
+    impl Drop for PolicyFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.config.config_dir);
+        }
+    }
+
+    fn policy_fixture() -> PolicyFixture {
+        let console = MockConsole::start();
+        let config = authenticated_config(&console);
+        let old = serde_json::from_value(bundle(console.base_url(), "a")).unwrap();
+        let path = atls_policy_store::write(&config.config_dir, &old, CVM_ID).unwrap();
+        console.reply_raw(
+            &format!("/api/v1/cvms/{CVM_ID}"),
+            200,
+            &json!({"id":CVM_ID,"fqdn":CVM_HOST,"state":"RUNNING"}).to_string(),
+        );
+        console.reply_raw(
+            &format!("/api/v1/cvms/{CVM_ID}/policy-bundle"),
+            200,
+            &bundle(console.base_url(), "b").to_string(),
+        );
+        PolicyFixture {
+            console,
+            config,
+            path,
+        }
+    }
+
+    fn bootchain_error(field: &str) -> AtlsVerificationError {
+        AtlsVerificationError::BootchainMismatch {
+            field: field.into(),
+            expected: "a".repeat(96),
+            actual: "b".repeat(96),
+        }
+    }
+
+    /// Only policy comparisons emitted after integrity verification can refresh trust.
+    #[rstest]
+    #[case::compose(AtlsVerificationError::AppComposeHashMismatch{expected:"a".into(),actual:"b".into()})]
+    #[case::mrtd(bootchain_error("mrtd"))]
+    #[case::rtmr0(bootchain_error("rtmr0"))]
+    #[case::rtmr1(bootchain_error("rtmr1"))]
+    #[case::rtmr2(bootchain_error("rtmr2"))]
+    #[case::os_image(AtlsVerificationError::OsImageHashMismatch{expected:"a".into(),actual:Some("b".into())})]
+    fn recognized_policy_measurement_error_success(#[case] error: AtlsVerificationError) {
+        assert!(matches!(
+            classify_atls_error(CVM_HOST.into(), error),
+            TunnelError::Atls {
+                policy_mismatch: true,
+                ..
+            }
+        ));
+    }
+
+    /// Integrity failures and misleading diagnostic text cannot trigger a trust prompt.
+    #[rstest]
+    #[case::quote(AtlsVerificationError::Quote("bootchain mismatch: mrtd".into()))]
+    #[case::certificate(AtlsVerificationError::CertificateNotInEventLog)]
+    #[case::missing_certificate(AtlsVerificationError::MissingCertificate)]
+    #[case::event_log(AtlsVerificationError::EventLogParse("app compose hash mismatch".into()))]
+    #[case::tee(AtlsVerificationError::TeeTypeMismatch("bootchain mismatch".into()))]
+    #[case::tcb(AtlsVerificationError::TcbStatusNotAllowed{status:"Revoked".into(),allowed:vec!["UpToDate".into()]})]
+    #[case::session_binding(AtlsVerificationError::ReportDataMismatch{expected:"a".into(),actual:"b".into()})]
+    #[case::rtmr0_replay(AtlsVerificationError::RtmrMismatch{index:0,expected:"a".into(),actual:"b".into()})]
+    #[case::rtmr3_replay(AtlsVerificationError::RtmrMismatch{index:3,expected:"a".into(),actual:"b".into()})]
+    #[case::missing_os_measurement(AtlsVerificationError::OsImageHashMismatch{expected:"a".into(),actual:None})]
+    #[case::unknown_bootchain(bootchain_error("rtmr3"))]
+    #[case::tls(AtlsVerificationError::TlsHandshake("app compose hash mismatch".into()))]
+    #[case::ekm_config(AtlsVerificationError::Configuration("session_ekm must be exactly 32 bytes".into()))]
+    #[case::io(AtlsVerificationError::Io("OS image hash mismatch".into()))]
+    #[case::other(AtlsVerificationError::Other(std::io::Error::other("app_compose_hash_mismatch").into()))]
+    fn unsafe_attestation_error_never_refreshes_failure(#[case] error: AtlsVerificationError) {
+        let fixture = policy_fixture();
+        let previous = fs::read(&fixture.path).unwrap();
+        let mut error = Some(error);
+        let mut attempts = 0;
+        let status = run_with_policy_refresh(
+            &fixture.path,
+            |_| {
+                attempts += 1;
+                Err(classify_atls_error(CVM_HOST.into(), error.take().unwrap()))
+            },
+            |_, _| panic!("unsafe errors must not offer policy refresh"),
+        );
+        assert_eq!(status as u8, ExitStatus::Error as u8);
+        assert_eq!(attempts, 1);
+        assert_eq!(fs::read(&fixture.path).unwrap(), previous);
+    }
+
+    /// An old cached OS policy gets one consented Console refresh and one complete verifier retry.
     #[test]
-    fn app_compose_hash_mismatch_is_detected() {
-        assert!(is_app_compose_hash_mismatch(
-            "app compose hash mismatch: expected abc, got def"
+    fn cached_os_policy_refreshes_then_verifies_once_success() {
+        let fixture = policy_fixture();
+        let mut attempts = 0;
+        let mut prompts = 0;
+        let status = run_with_policy_refresh(
+            &fixture.path,
+            |policy| {
+                attempts += 1;
+                let value = serde_json::to_value(policy).unwrap();
+                assert_eq!(value["allowed_tcb_status"], json!(["UpToDate"]));
+                assert_eq!(value["disable_runtime_verification"], false);
+                if attempts == 1 {
+                    assert_eq!(value["expected_bootchain"]["mrtd"], "a".repeat(96));
+                    Err(classify_atls_error(
+                        CVM_HOST.into(),
+                        bootchain_error("mrtd"),
+                    ))
+                } else {
+                    assert_eq!(value["expected_bootchain"]["mrtd"], "b".repeat(96));
+                    assert_eq!(value["os_image_hash"], "b".repeat(64));
+                    assert!(value["app_compose"].is_object());
+                    let installed: Value =
+                        serde_json::from_slice(&fs::read(&fixture.path).unwrap()).unwrap();
+                    assert_eq!(installed["rtmr3_binding"]["cvm_id"], CVM_ID);
+                    Ok(())
+                }
+            },
+            |host, detail| {
+                refresh_policy_with_confirmation(
+                    &fixture.config,
+                    &fixture.path,
+                    host,
+                    detail,
+                    |question| {
+                        prompts += 1;
+                        assert!(question.contains("before replacing local trust material"));
+                        Some(true)
+                    },
+                )
+            },
+        );
+        assert_eq!(status as u8, ExitStatus::Ok as u8);
+        assert_eq!(attempts, 2);
+        assert_eq!(prompts, 1);
+    }
+
+    /// A failed verified retry never prompts or fetches a second replacement policy.
+    #[test]
+    fn repeated_policy_mismatch_cannot_refresh_twice_failure() {
+        let fixture = policy_fixture();
+        let mut attempts = 0;
+        let mut prompts = 0;
+        let status = run_with_policy_refresh(
+            &fixture.path,
+            |_| {
+                attempts += 1;
+                Err(classify_atls_error(
+                    CVM_HOST.into(),
+                    bootchain_error("mrtd"),
+                ))
+            },
+            |host, detail| {
+                refresh_policy_with_confirmation(
+                    &fixture.config,
+                    &fixture.path,
+                    host,
+                    detail,
+                    |_| {
+                        prompts += 1;
+                        Some(true)
+                    },
+                )
+            },
+        );
+        assert_eq!(status as u8, ExitStatus::Error as u8);
+        assert_eq!(attempts, 2);
+        assert_eq!(prompts, 1);
+    }
+
+    /// Declining or lacking a terminal leaves the original file and tunnel unchanged.
+    #[rstest]
+    #[case::declined(Some(false))]
+    #[case::no_terminal(None)]
+    fn unconfirmed_policy_refresh_keeps_original_failure(#[case] answer: Option<bool>) {
+        let fixture = policy_fixture();
+        let previous = fs::read(&fixture.path).unwrap();
+        let mut attempts = 0;
+        let status = run_with_policy_refresh(
+            &fixture.path,
+            |_| {
+                attempts += 1;
+                Err(classify_atls_error(
+                    CVM_HOST.into(),
+                    bootchain_error("mrtd"),
+                ))
+            },
+            |host, detail| {
+                refresh_policy_with_confirmation(
+                    &fixture.config,
+                    &fixture.path,
+                    host,
+                    detail,
+                    |_| answer,
+                )
+            },
+        );
+        assert_eq!(status as u8, ExitStatus::Error as u8);
+        assert_eq!(attempts, 1);
+        assert_eq!(fs::read(&fixture.path).unwrap(), previous);
+    }
+
+    /// Console must identify the same running CVM and FQDN before any local replacement.
+    #[rstest]
+    #[case::wrong_id("id",json!("another-cvm"))]
+    #[case::wrong_host("fqdn",json!("other.example.com"))]
+    #[case::missing_host("fqdn", Value::Null)]
+    #[case::stopped("state",json!("STOPPED"))]
+    #[case::legacy_rebind("error_reason",json!("SECURITY_CVM_REBIND_REQUIRED"))]
+    fn refreshed_target_context_mismatch_failure(#[case] key: &str, #[case] value: Value) {
+        let fixture = policy_fixture();
+        let previous = fs::read(&fixture.path).unwrap();
+        let mut cvm = json!({"id":CVM_ID,"fqdn":CVM_HOST,"state":"RUNNING"});
+        cvm[key] = value;
+        fixture
+            .console
+            .reply_raw(&format!("/api/v1/cvms/{CVM_ID}"), 200, &cvm.to_string());
+        assert!(refresh_policy_with_confirmation(
+            &fixture.config,
+            &fixture.path,
+            CVM_HOST,
+            "mismatch",
+            |_| Some(true)
+        )
+        .is_err());
+        assert_eq!(fs::read(&fixture.path).unwrap(), previous);
+    }
+
+    /// A substituted returned bundle cannot change the selected CVM or Console context.
+    #[rstest]
+    #[case::bundle_id("cvm_id",json!("another-cvm"))]
+    #[case::binding_id("binding-cvm",json!("another-cvm"))]
+    #[case::binding_console("binding-console",json!("https://other.example.com"))]
+    fn refreshed_bundle_context_mismatch_failure(#[case] field: &str, #[case] value: Value) {
+        let fixture = policy_fixture();
+        let previous = fs::read(&fixture.path).unwrap();
+        let mut current = bundle(fixture.console.base_url(), "b");
+        match field {
+            "binding-cvm" => current["rtmr3_binding"]["cvm_id"] = value,
+            "binding-console" => current["rtmr3_binding"]["console_url"] = value,
+            _ => current[field] = value,
+        }
+        fixture.console.reply_raw(
+            &format!("/api/v1/cvms/{CVM_ID}/policy-bundle"),
+            200,
+            &current.to_string(),
+        );
+        assert!(refresh_policy_with_confirmation(
+            &fixture.config,
+            &fixture.path,
+            CVM_HOST,
+            "mismatch",
+            |_| Some(true)
+        )
+        .is_err());
+        assert_eq!(fs::read(&fixture.path).unwrap(), previous);
+    }
+
+    /// Stored policies from another Console cannot prompt or refresh under the current session.
+    #[test]
+    fn stored_policy_context_mismatch_cannot_prompt_failure() {
+        let fixture = policy_fixture();
+        let old = serde_json::from_value(bundle("https://other.example.com", "a")).unwrap();
+        atls_policy_store::write(&fixture.config.config_dir, &old, CVM_ID).unwrap();
+        let previous = fs::read(&fixture.path).unwrap();
+        assert!(refresh_policy_with_confirmation(
+            &fixture.config,
+            &fixture.path,
+            CVM_HOST,
+            "mismatch",
+            |_| panic!("context must be checked before consent")
+        )
+        .is_err());
+        assert_eq!(fs::read(&fixture.path).unwrap(), previous);
+    }
+
+    /// A custom policy path is never rewritten or offered an automatic refresh.
+    #[test]
+    fn custom_policy_path_cannot_refresh_failure() {
+        let fixture = policy_fixture();
+        let custom = fixture.config.config_dir.join("custom.json");
+        fs::copy(&fixture.path, &custom).unwrap();
+        let previous = fs::read(&custom).unwrap();
+        assert!(matches!(
+            refresh_policy_with_confirmation(
+                &fixture.config,
+                &custom,
+                CVM_HOST,
+                "mismatch",
+                |_| panic!("custom path must not prompt")
+            ),
+            Ok(RefreshDecision::Declined(_))
         ));
-        assert!(is_app_compose_hash_mismatch(
-            "reason=app_compose_hash_mismatch"
-        ));
-        assert!(!is_app_compose_hash_mismatch(
-            "rtmr3 mismatch: expected abc, got def"
-        ));
+        assert_eq!(fs::read(&custom).unwrap(), previous);
     }
 
     #[test]
