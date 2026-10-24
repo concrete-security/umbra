@@ -57,6 +57,8 @@ make check
 make test
 ```
 
+`make test-release-images` runs real wire journeys through the installed production entrypoints in the exact published Security image. It checks bearer identity, origin non-delivery for blocked traffic, DLP, injection, credential stripping, policy revocation, and upstream certificate verification. Fixture containers receive only test material; production proxy containers receive no source mounts. The [runner release-image gate](../../docs/ci-cd.md#runner-release-image-gate) provisions no cloud resources and reports TDX, Sysbox, provider, and OIDC coverage as unverified.
+
 Use digest-pinned images. Runtime updates go through `umbra security-cvm update`; provider-specific commands and IDs remain behind Console adapters. Dev forwarders can accept a locally verified candidate aTLS policy after an SC policy-only change and can refresh a rotated CA through the authenticated runtime path. Processes that cache trust may need restart after CA rotation.
 
 `make verify-security-image-repro` performs two independent cache-disabled builds, requires identical runnable runtime-manifest digests, and independently validates each result index's attestations; `make verify-cvm-images-repro` runs that gate for both CVM images. Publication exports the matching result from the fresh isolated cache populated by those builds, then revalidates the tagless push-by-digest registry result before selecting the runtime digest.

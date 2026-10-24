@@ -10,9 +10,10 @@ feature branch --PR--> dev --reviewed promotion--> main --tag/release--> immutab
 
 | Stage | Trigger | Workflow | Purpose |
 | --- | --- | --- | --- |
-| PR gate | PR to `dev` | `.github/workflows/pr-gate.yml` | Run `make check` and `make test` without live credentials. |
+| PR gate | PR to `dev` or `main` | `.github/workflows/pr-gate.yml` | Run `make check` and `make test` without live credentials. |
 | Security checks | repository security triggers | `.github/workflows/security.yml` | Run public dependency, source, and artifact security gates. |
-| CVM image candidate | push to `dev`; manual after promotion | `.github/workflows/publish-cvm-images.yml` | Reproduce and publish digest-only Dev/Security images with SBOM and provenance, then emit a lock-shaped candidate. |
+| CVM image candidate | push to `dev`; manual after promotion | `.github/workflows/publish-cvm-images.yml` | Reproduce and publish digest-only Dev/Security images with SBOM and provenance, then test those exact runtime images. |
+| Selected CVM image verification | manual | `.github/workflows/verify-release-images.yml` | Repeat runner tests for immutable images selected from a successful publication candidate. |
 | CLI release | manual | `.github/workflows/publish-cli.yml` | Package and publish one reviewed version and its installer tree. |
 
 Security analysis runs on pushes to `dev`, `main`, and `codex/security-*`, on pull requests to `dev` or `main`, and by manual dispatch. Use a security patch branch to rerun source and image scans without the `dev` push publisher. These branch scans do not refresh default-branch Dependabot alerts; those reflect the dependency manifests on `main`.
@@ -33,6 +34,69 @@ make test
 ```
 
 Live verification uses the private deployment repository and maintainer infrastructure; it is not required from an external contributor's cloud account.
+
+### Runner release-image gate
+
+After both CVM images publish, `publish-cvm-images.yml` assembles
+`deployment-lock.candidate.json` and validates it with
+`ops/verify/select-release-test-images.py`. The selector rejects duplicate JSON
+keys, noncanonical repositories, mutable refs, mismatched source commits, and
+inconsistent guest measurements. Its source must equal the workflow's full
+commit SHA. Null measurements remain valid because this job has no TDX hardware.
+
+The downstream `release-images` job calls `verify-release-images.yml` with those
+exact runtime digest refs. It checks out the image source commit and runs
+`make test-release-images` on a Linux amd64 GitHub-hosted runner. The target
+pulls the images, checks their source labels, and runs the release-image tests
+without rebuilding either image. A test failure makes the publication workflow
+fail, even though the immutable images and candidate already exist. Consumers
+must require the complete publication workflow to succeed before selecting its
+candidate.
+
+After all tests pass, the job uploads only
+`artifacts/release-image-tests.json`. This receipt binds the exact image refs,
+inspected image config IDs, source commit, and SHA-256 of the raw candidate.
+It also lists untested hardware, provider, OIDC, Sysbox, aTLS, and production
+TLS boundaries. Failed tests produce no success receipt. Logs, credentials,
+and private configuration are not uploaded.
+
+This job has repository and package read permissions. Registry pulls use the
+workflow token and a temporary Docker credential directory, removed after the
+tests. It uses no deployment environment, cloud identity, provider credentials,
+private state, or pull-request cache.
+
+To repeat the gate manually, run **Verify release images** on `dev` or `main`.
+Supply a successful **Publish CVM images** run ID and the two exact digest refs
+from its candidate. The workflow authenticates the publication's repository,
+workflow path, event, branch, conclusion, and full source SHA. It downloads that
+run's candidate and rejects selected refs that differ from its contents.
+Expired or missing candidate artifacts fail the manual selection.
+
+If publication succeeded but its downstream release-image tests failed, rerun
+the failed jobs in that publication workflow. Manual selection requires an
+overall successful publication and cannot select a failed run's candidate.
+
+For local verification of already approved runtime refs:
+
+```bash
+UMBRA_TEST_DEV_IMAGE=ghcr.io/concrete-security/umbra-dev-cvm@sha256:<runtime-digest> \
+UMBRA_TEST_SECURITY_IMAGE=ghcr.io/concrete-security/umbra-security-cvm@sha256:<runtime-digest> \
+UMBRA_TEST_SOURCE_SHA=<full-source-commit> \
+  make test-release-images
+```
+
+Authenticate Docker separately if the images require pull access. This target
+needs a local Linux amd64 Docker daemon; remote Docker contexts are refused.
+CI supplies the validated candidate hash. Direct local runs record a null
+`lock_sha256` unless the caller supplies `UMBRA_TEST_LOCK_SHA256`.
+Image labels and a candidate's provenance
+references do not independently authenticate registry provenance. The automatic
+gate relies on the existing publisher's source and build-evidence checks; the
+manual gate also authenticates the successful publication run.
+
+Runner image tests do not establish genuine TDX attestation, provider lifecycle,
+real OIDC login, or Sysbox behavior. Live staging must verify those properties
+against the selected immutable artifacts before production promotion.
 
 ## Build-cache boundary
 

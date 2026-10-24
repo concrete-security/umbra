@@ -5273,6 +5273,7 @@ async def apply_cvm_state_action(
             if if_match is not None:
                 require_matching_etag(cvm_etag(cvm), if_match)
             if cvm["state"] == target_state:
+                response.headers["ETag"] = cvm_etag(cvm)
                 return await fetch_cvm_resource_for_operation(conn, cvm_id)
             if cvm["state"] != source_state:
                 raise api_error(

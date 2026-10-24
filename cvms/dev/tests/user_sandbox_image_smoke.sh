@@ -2,13 +2,23 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-IMAGE_TAG="umbra-dev-sandbox-smoke:check"
-
-docker build \
-  --platform linux/amd64 \
-  --file "${ROOT}/cvms/dev/user-sandbox/Dockerfile" \
-  --tag "${IMAGE_TAG}" \
-  "${ROOT}"
+if [ "${DEV_CVM_IMAGE_SMOKE_IMAGE+x}" = x ]; then
+  IMAGE_TAG="$DEV_CVM_IMAGE_SMOKE_IMAGE"
+  # A release-image test must exercise the selected bytes and never replace
+  # a missing artifact with a fresh source build.
+  if [ -z "$IMAGE_TAG" ]; then
+    echo "release-image smoke requires a non-empty selected image" >&2
+    exit 1
+  fi
+  docker image inspect "$IMAGE_TAG" >/dev/null
+else
+  IMAGE_TAG="umbra-dev-sandbox-smoke:check"
+  docker build \
+    --platform linux/amd64 \
+    --file "${ROOT}/cvms/dev/user-sandbox/Dockerfile" \
+    --tag "${IMAGE_TAG}" \
+    "${ROOT}"
+fi
 
 docker run --rm --network none --platform linux/amd64 --entrypoint bash "${IMAGE_TAG}" -lc '
   set -euo pipefail
@@ -56,6 +66,9 @@ docker run --rm --network none --platform linux/amd64 --entrypoint bash "${IMAGE
   claude --version >/dev/null
   codex --version >/dev/null
   node --version | grep -q "^v22\\."
+  test "$(node -p "process.versions.undici")" = 6.29.1
+  test "$(node -p "require(\"/usr/local/lib/node_modules/npm/node_modules/undici/package.json\").version")" = 6.29.1
+  npm --version | grep -qx 12.2.1
   # Image updates must advance an older managed copy on the persistent volume.
   eval "$(sed -n "/^ensure_claude_native_install() {/,/^}/p" /entrypoint.sh)"
   baked_version="$(cat /usr/local/lib/umbra/claude.version)"
@@ -74,9 +87,16 @@ docker run --rm --network none --platform linux/amd64 --entrypoint bash "${IMAGE
   test "$(readlink -f /home/dev/.local/bin/claude)" = "$versions/999.0.0"
 '
 
+docker run --rm -i --network none --platform linux/amd64 \
+  --entrypoint node "${IMAGE_TAG}" - <"${ROOT}/cvms/dev/tests/npm_undici_smoke.cjs"
+
 echo "user_sandbox_image_smoke: ok"
 
 if [ "${UMBRA_VERIFY_IMAGE_REPRODUCIBILITY:-0}" = 1 ]; then
+  if [ -n "${DEV_CVM_IMAGE_SMOKE_IMAGE:-}" ]; then
+    echo "release-image smoke cannot rebuild the selected artifact" >&2
+    exit 1
+  fi
   bash "${ROOT}/ops/verify/verify-image-reproducibility.sh" \
     dev-cvm cvms/dev/user-sandbox/Dockerfile .
 fi

@@ -54,6 +54,8 @@ make check
 make test
 ```
 
+Published CVM candidates also run `make test-release-images` against their exact pulled runtime digests. This [runner-only gate](docs/ci-cd.md#runner-release-image-gate) creates no cloud resources and reports hardware attestation as unverified.
+
 Read the module README before changing a component:
 
 - [CLI](cli/README.md)
