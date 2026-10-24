@@ -5,6 +5,7 @@ FROM nginx:1.30.6-alpine3.24@sha256:47928bf67eb62a1863cb08d9ecb52d3e704304ba614e
 # resolve from the tagged edge repository. Keep the complete closure pinned.
 RUN printf '%s\n' '@urllib3-security https://dl-cdn.alpinelinux.org/alpine/edge/main' >> /etc/apk/repositories \
     && apk add --no-cache \
+      brotli-libs=1.2.1-r0 \
       ca-certificates=20261020-r0 \
       ca-certificates-bundle=20261020-r0 \
       certbot=5.6.0-r0 \

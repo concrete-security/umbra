@@ -1,0 +1,166 @@
+name: Verify release images
+run-name: Verify exact CVM runtime images
+
+on:
+  workflow_call:
+    inputs:
+      source_sha:
+        required: true
+        type: string
+      dev_image:
+        required: true
+        type: string
+      security_image:
+        required: true
+        type: string
+      lock_sha256:
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      publication_run_id:
+        description: Successful Publish CVM images workflow run containing the selected candidate
+        required: true
+        type: string
+      dev_image:
+        description: Exact Dev runtime digest ref from that candidate
+        required: true
+        type: string
+      security_image:
+        description: Exact Security runtime digest ref from that candidate
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  select:
+    name: authenticate image selection
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      source_sha: ${{ steps.images.outputs.source_sha }}
+      dev_image: ${{ steps.images.outputs.dev_image }}
+      security_image: ${{ steps.images.outputs.security_image }}
+      lock_sha256: ${{ steps.images.outputs.lock_sha256 }}
+    steps:
+      - name: Checkout verification tooling
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: 'false'
+
+      - name: Require immutable images from the selected publication
+        id: images
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_SOURCE_SHA: ${{ inputs.source_sha }}
+          INPUT_LOCK_SHA256: ${{ inputs.lock_sha256 }}
+          PUBLICATION_RUN_ID: ${{ inputs.publication_run_id }}
+          SELECTED_DEV_IMAGE: ${{ inputs.dev_image }}
+          SELECTED_SECURITY_IMAGE: ${{ inputs.security_image }}
+        run: |
+          set -euo pipefail
+          [[ "$SELECTED_DEV_IMAGE" =~ ^ghcr\.io/concrete-security/umbra-dev-cvm@sha256:[0-9a-f]{64}$ ]] \
+            || { echo "Dev image must be the canonical immutable runtime ref" >&2; exit 2; }
+          [[ "$SELECTED_SECURITY_IMAGE" =~ ^ghcr\.io/concrete-security/umbra-security-cvm@sha256:[0-9a-f]{64}$ ]] \
+            || { echo "Security image must be the canonical immutable runtime ref" >&2; exit 2; }
+          if [[ -n "$INPUT_SOURCE_SHA" ]]; then
+            # The publisher supplies outputs derived by the strict candidate selector.
+            [[ -z "$PUBLICATION_RUN_ID" && "$INPUT_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] \
+              || { echo "invalid publisher source selection" >&2; exit 2; }
+            source_sha="$INPUT_SOURCE_SHA"
+            lock_sha256="$INPUT_LOCK_SHA256"
+          else
+            [[ "$GITHUB_REF" == refs/heads/dev || "$GITHUB_REF" == refs/heads/main ]] \
+              || { echo "manual image verification requires dev or main" >&2; exit 2; }
+            [[ "$PUBLICATION_RUN_ID" =~ ^[1-9][0-9]*$ ]] \
+              || { echo "publication run id must be a positive integer" >&2; exit 2; }
+            run_json="$RUNNER_TEMP/publication-run.json"
+            gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${PUBLICATION_RUN_ID}" > "$run_json"
+            jq -e --arg repository "$GITHUB_REPOSITORY" '
+              .repository.full_name == $repository
+              and .head_repository.full_name == $repository
+              and .path == ".github/workflows/publish-cvm-images.yml"
+              and (.event == "push" or .event == "workflow_dispatch")
+              and (.head_branch == "dev" or .head_branch == "main")
+              and .status == "completed"
+              and .conclusion == "success"
+              and (.head_sha | type == "string" and test("^[0-9a-f]{40}$"))
+            ' "$run_json" >/dev/null \
+              || { echo "selected run is not a successful trusted image publication" >&2; exit 2; }
+            source_sha="$(jq -er .head_sha "$run_json")"
+            candidate_dir="$RUNNER_TEMP/release-image-candidate"
+            gh run download "$PUBLICATION_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+              --name "cvm-images-${source_sha}" --dir "$candidate_dir"
+            selection="$RUNNER_TEMP/release-test-images.json"
+            python3 ops/verify/select-release-test-images.py \
+              --lock "$candidate_dir/deployment-lock.candidate.json" \
+              --expected-commit "$source_sha" > "$selection"
+            [[ "$(jq -er .UMBRA_TEST_DEV_IMAGE "$selection")" == "$SELECTED_DEV_IMAGE" \
+              && "$(jq -er .UMBRA_TEST_SECURITY_IMAGE "$selection")" == "$SELECTED_SECURITY_IMAGE" ]] \
+              || { echo "selected runtime images differ from the publication candidate" >&2; exit 2; }
+            lock_sha256="$(jq -er .lock_sha256 "$selection")"
+          fi
+          [[ "$lock_sha256" =~ ^[0-9a-f]{64}$ ]] \
+            || { echo "candidate SHA-256 must be 64 lowercase hexadecimal characters" >&2; exit 2; }
+          {
+            echo "source_sha=${source_sha}"
+            echo "dev_image=${SELECTED_DEV_IMAGE}"
+            echo "security_image=${SELECTED_SECURITY_IMAGE}"
+            echo "lock_sha256=${lock_sha256}"
+          } >> "$GITHUB_OUTPUT"
+
+  test:
+    name: test pulled runtime images
+    needs: select
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Checkout exact image source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.select.outputs.source_sha }}
+          persist-credentials: 'false'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: 0.13.5
+          enable-cache: 'false'
+
+      - name: Install pinned Python
+        run: uv python install
+
+      - name: Test selected images without rebuilding
+        env:
+          UMBRA_TEST_DEV_IMAGE: ${{ needs.select.outputs.dev_image }}
+          UMBRA_TEST_SECURITY_IMAGE: ${{ needs.select.outputs.security_image }}
+          UMBRA_TEST_SOURCE_SHA: ${{ needs.select.outputs.source_sha }}
+          UMBRA_TEST_LOCK_SHA256: ${{ needs.select.outputs.lock_sha256 }}
+          IMAGE_PULL_USER: ${{ github.actor }}
+          IMAGE_PULL_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          umask 077
+          export DOCKER_CONFIG="$RUNNER_TEMP/release-image-pull"
+          mkdir -p "$DOCKER_CONFIG"
+          trap 'rm -rf -- "$DOCKER_CONFIG"' EXIT
+          printf '%s' "$IMAGE_PULL_TOKEN" \
+            | docker login ghcr.io --username "$IMAGE_PULL_USER" --password-stdin >/dev/null
+          unset IMAGE_PULL_TOKEN
+          make test-release-images
+
+      - name: Upload successful release-image test receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-image-tests-${{ needs.select.outputs.source_sha }}
+          path: artifacts/release-image-tests.json
+          if-no-files-found: error
+          retention-days: 30

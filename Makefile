@@ -1,4 +1,4 @@
-.PHONY: up down clean-phala backup-console-db reset restore-console-db verify verify-dev-image-repro verify-security-image-repro verify-cvm-images-repro bootstrap deploy redeploy-sc redeploy-dev redeploy-console redeploy-installer measure-dev build release package-cli test test-console-db check fmt clean install-cli skill build-env setup-jwt-keys up-env bootstrap-env
+.PHONY: up down clean-phala backup-console-db reset restore-console-db verify verify-dev-image-repro verify-security-image-repro verify-cvm-images-repro bootstrap deploy redeploy-sc redeploy-dev redeploy-console redeploy-installer measure-dev build release package-cli test test-release-images test-console-db check fmt clean install-cli skill build-env setup-jwt-keys up-env bootstrap-env
 
 UMBRA_PYTHON_VERSION := $(strip $(shell cat .python-version))
 UMBRA_PINNED_RUN := uv run --python $(UMBRA_PYTHON_VERSION) --no-project
@@ -25,6 +25,11 @@ test:
 	uv run --locked --project console python -m pytest console/tests
 	uv run --locked --project cvms/security python -m pytest cvms/security/tests
 
+# Linux runner only: pull and exercise exact published CVM runtime digests.
+# Requires UMBRA_TEST_{DEV_IMAGE,SECURITY_IMAGE,SOURCE_SHA}; never rebuilds.
+test-release-images:
+	$(UMBRA_PINNED_PYTHON) ops/verify/test-release-images.py
+
 # Opt-in: boots an ephemeral Postgres and runs the real-DB integration tests
 # (migration + list_sc_control_cvms query). The plain `test` target stays DB-less;
 # these tests skip there unless UMBRA_TEST_DATABASE_URL is set.
@@ -42,6 +47,8 @@ check:
 	uv lock --check --project cvms/security
 	$(UMBRA_PINNED_PYTHON) -m py_compile tools/check-cargo-keywords.py tools/check-dco.py tools/check-github-actions.py tools/check-pip-vendor.py tools/check-cargo-dnssec.py tools/test_check_cargo_dnssec.py tools/test_check_pip_vendor.py tools/generate-cargo-sbom.py tools/test_check_cargo_keywords.py tools/test_check_github_actions.py
 	uv run --locked --project console python -m pytest -q tools/test_check_cargo_keywords.py tools/test_check_github_actions.py tools/test_check_pip_vendor.py tools/test_check_cargo_dnssec.py
+	$(UMBRA_PINNED_PYTHON) -m py_compile ops/verify/select-release-test-images.py ops/verify/test-release-images.py ops/verify/run-required-pytest.py tools/test_release_test_images.py tools/test_release_image_runner.py tools/test_release_image_workflow.py tools/test_required_pytest.py
+	uv run --locked --project console python -m pytest -q tools/test_release_test_images.py tools/test_release_image_runner.py tools/test_release_image_workflow.py tools/test_required_pytest.py
 	uv run --locked --project console python tools/check-github-actions.py
 	cd console && npm ci --ignore-scripts --no-audit --no-fund
 	cd console && npm run test:phala

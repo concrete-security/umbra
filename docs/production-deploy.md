@@ -38,7 +38,7 @@ set +a
 command -v make git jq curl uv rustc cargo docker psql
 docker info >/dev/null
 docker buildx version  # must report exactly v0.34.0
-docker buildx inspect umbra-release --bootstrap  # exact digest-pinned BuildKit 0.32.2
+docker buildx inspect umbra-release --bootstrap  # exact digest-pinned BuildKit 0.34.1
 test -d "$SHADE_DIR"
 uv run --project "$SHADE_DIR" shade --help >/dev/null
 test -n "$CONSOLE_HOST"
@@ -57,7 +57,7 @@ Start from a clean, reviewed commit. The repository fixes the release inputs to:
 
 ```text
 Buildx:              0.34.0 exactly
-BuildKit:            moby/buildkit:v0.32.2@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8
+BuildKit:            moby/buildkit:v0.34.1@sha256:99368f3e46177c6405b9740e4461d91cee004128daeecca78d4ceac50ec1da5c
 Dockerfile frontend: docker/dockerfile:1.26.0@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
 SBOM generator:      docker.io/docker/buildkit-syft-scanner:stable-1@sha256:79e7b013cbec16bbb436f312819a49a4a57752b2270c1a9332ae1a10fcc82a68
 Dev bases:           golang:1.27.3-bookworm@sha256:972b4110ba0f47539a975c31e52c64765e1ff19f2d74469ae4a595c6676e80a5
@@ -71,11 +71,13 @@ Security bases:      ghcr.io/astral-sh/uv:0.13.5@sha256:32a7bb39b496babbd997b0a3
 
 `ops/buildkit-version.sh` and the Dockerfiles are authoritative for these values. The Dev and Security images resolve system packages, including userspace headers, from their reviewed `20261023T000000Z` Ubuntu and Debian snapshots. Debian runtime and Rust build stages install upgrades from the same snapshot, including the eMudhra CA distrust updates; the Rust compiler remains pinned. The Dev build retries failed archive requests three times and fails if any package index remains unavailable. Exact Docker `.deb` digests are pinned separately, including containerd 2.4.2.
 
-The sandbox tools pin Docker Engine/CLI 29.9.2, Buildx 0.38.1+umbra.2, Compose 5.6.1, and GitHub CLI 2.103.0; this in-sandbox Buildx is separate from the release-host Buildx above. Buildx, Compose, and GitHub CLI compile from checksum-pinned upstream source with Go 1.27.3 and `GOTOOLCHAIN=local`. All three tools pin `golang.org/x/net` v0.60.0. Buildx replaces its vendored network and archive modules with checksum-pinned releases, including go-archive 0.3.3. Compose applies the reviewed x/net 0.60.0, x/crypto 0.57.0, x/text 0.42.0 and x/term 0.46.0 checksums from `go-net.sum`; GitHub CLI retains its newer upstream module locks. Both build without changing those locks. npm 12.2.1 is installed offline from its hash-verified upstream tarball. Console uses the digest-pinned Node.js 22.23.4 image as a source for its runtime binary and build-only npm.
+The sandbox tools pin Docker Engine/CLI 29.9.2, Buildx 0.38.1+umbra.2, Compose 5.6.1, and GitHub CLI 2.103.0; this in-sandbox Buildx is separate from the release-host Buildx above. Buildx, Compose, and GitHub CLI compile from checksum-pinned upstream source with Go 1.27.3 and `GOTOOLCHAIN=local`. All three tools pin `golang.org/x/net` v0.60.0. Buildx replaces its vendored network and archive modules with checksum-pinned releases, including go-archive 0.3.3. Compose applies the reviewed x/net 0.60.0, x/crypto 0.57.0, x/text 0.42.0 and x/term 0.46.0 checksums from `go-net.sum`; GitHub CLI retains its newer upstream module locks. Both build without changing those locks. npm 12.2.1 is installed offline from its hash-verified upstream tarball, then its bundled Undici 6.29.0 is replaced with hash-verified 6.29.1. Console uses the digest-pinned Node.js 22.23.4 image as a source for its runtime binary and build-only npm.
 
 All three images hash-pin pip 26.2.2 because its bundled CA store is independent of the system store. That upstream wheel still vendors urllib3 2.7.0, so the build replaces only that vendor with hash-verified urllib3 2.8.0, preserves pip's three compatibility patches and import rewrites, and updates its license, vendor manifest, SBOM and wheel RECORD. pip keeps its upstream version; this local vendor update is not an upstream pip release. Console and Security images use the same rebuilt wheel for global pip and ensurepip, so new virtual environments inherit both fixes. Other vendor SBOM entries remain intact.
 
-The installer and reverse proxy pin nginx 1.30.6, OpenSSL 3.5.9, Alpine CA certificates 20261020-r0 and libexpat 2.9.0-r0; Alpine certifi uses that system store. The reverse proxy pins only urllib3 2.8.0 and its bytecode package from a tagged Alpine edge/main repository until those fixes reach stable; their Python 3.14 dependency matches the pinned stable interpreter. A pin change must be reviewed together with this guide. The host Docker Engine itself is not pinned by the repository: treat its daemon and root-equivalent socket as a trusted release-host boundary and record `docker version` with the build evidence.
+The installer and reverse proxy pin nginx 1.30.6, OpenSSL 3.5.9, Alpine CA certificates 20261020-r0, libexpat 2.9.0-r0, and Brotli 1.2.1-r0; Alpine certifi uses that system store. The reverse proxy pins only urllib3 2.8.0 and its bytecode package from a tagged Alpine edge/main repository until those fixes reach stable; their Python 3.14 dependency matches the pinned stable interpreter. A pin change must be reviewed together with this guide. The host Docker Engine itself is not pinned by the repository: treat its daemon and root-equivalent socket as a trusted release-host boundary and record `docker version` with the build evidence.
+
+BuildKit 0.34.1 includes the special-file snapshot fix for [GHSA-9728-qjrv-2xh2](https://github.com/moby/buildkit/security/advisories/GHSA-9728-qjrv-2xh2) and the updated Go CA trust store. Existing builders with an older image fail the exact-pin check; replace only the stopped build worker, retaining its state volume, before release builds.
 
 Run both independent-worktree reproducibility gates before publication:
 

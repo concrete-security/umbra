@@ -1,4 +1,4 @@
-# Hermetic PR gate for the `dev` trunk.
+# Hermetic PR gate for source changes and release promotion.
 #
 # Every change reaches `dev` through a PR, and a PR cannot merge until both jobs
 # below are green (enforced by branch protection on `dev` — see docs/ci-cd.md).
@@ -10,7 +10,7 @@ name: PR gate
 
 on:
   pull_request:
-    branches: [dev]
+    branches: [dev, main]
 
 # Newer pushes to the same PR supersede in-flight runs; safe here because these
 # jobs are hermetic and stateless (unlike the staging verify journey).
