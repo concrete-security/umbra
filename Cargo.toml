@@ -3,7 +3,7 @@ resolver = "2"
 members = ["cli", "cvms/dev/user-sandbox/atls-connect"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["Umbra maintainers"]
 homepage = "https://github.com/concrete-security/umbra"

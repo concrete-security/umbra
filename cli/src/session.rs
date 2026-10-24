@@ -10,13 +10,13 @@ use zeroize::{Zeroize, Zeroizing};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Entity {
     pub id: String,
     pub name: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Session {
     pub access_token: String,
     #[serde(default)]
@@ -55,6 +55,7 @@ pub fn load(config_dir: &Path) -> Result<Option<Session>, String> {
 }
 
 pub fn remove(config_dir: &Path) -> Result<bool, String> {
+    let _lock = session_lock(config_dir)?;
     let path = session_path(config_dir);
     match fs::remove_file(path) {
         Ok(()) => Ok(true),
@@ -64,6 +65,31 @@ pub fn remove(config_dir: &Path) -> Result<bool, String> {
 }
 
 pub fn write_atomic(config_dir: &Path, session: &Session) -> Result<(), String> {
+    let _lock = session_lock(config_dir)?;
+    write_unlocked(config_dir, session)
+}
+
+/// Replace only the exact snapshot refreshed by this process; preserve another login.
+pub(crate) fn replace_if_current(
+    config_dir: &Path,
+    expected: &Session,
+    next: &Session,
+) -> Result<bool, String> {
+    let _lock = session_lock(config_dir)?;
+    if load(config_dir)?.as_ref() != Some(expected) {
+        return Ok(false);
+    }
+    write_unlocked(config_dir, next)?;
+    Ok(true)
+}
+
+fn session_lock(config_dir: &Path) -> Result<crate::fsutil::StoreLock, String> {
+    ensure_config_dir(config_dir)?;
+    crate::fsutil::StoreLock::acquire(&config_dir.join("session.json.lock"))
+        .map_err(|_| "[error] could not lock local session".to_string())
+}
+
+fn write_unlocked(config_dir: &Path, session: &Session) -> Result<(), String> {
     ensure_config_dir(config_dir)?;
     let target = session_path(config_dir);
     let data = Zeroizing::new(
@@ -166,5 +192,79 @@ mod tests {
 
         remove(&config_dir).expect("session remove succeeds");
         fs::remove_dir_all(config_dir).expect("test config dir removed");
+    }
+
+    /// A refresh may replace only the exact stored snapshot, under the shared lock.
+    #[test]
+    fn replace_current_snapshot_success() {
+        let dir = temp_config_dir();
+        let old = sample_session();
+        write_atomic(&dir, &old).unwrap();
+        let mut next = old.clone();
+        next.access_token = "rotated-fixture".into();
+        assert!(replace_if_current(&dir, &old, &next).unwrap());
+        assert!(load(&dir).unwrap().as_ref() == Some(&next));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A stale refresh must preserve another login or leave a removed session absent.
+    #[rstest::rstest]
+    #[case::login(false)]
+    #[case::logout(true)]
+    fn replace_changed_snapshot_preserves_current_failure(#[case] logout: bool) {
+        let dir = temp_config_dir();
+        let old = sample_session();
+        write_atomic(&dir, &old).unwrap();
+        let mut other = old.clone();
+        other.access_token = "other-login-fixture".into();
+        if logout {
+            remove(&dir).unwrap();
+        } else {
+            write_atomic(&dir, &other).unwrap();
+        }
+        let mut next = old.clone();
+        next.access_token = "stale-refresh-fixture".into();
+        assert!(!replace_if_current(&dir, &old, &next).unwrap());
+        assert!(if logout {
+            load(&dir).unwrap().is_none()
+        } else {
+            load(&dir).unwrap().as_ref() == Some(&other)
+        });
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Every session writer/remover must respect the lock used by conditional replacement.
+    #[cfg(unix)]
+    #[rstest::rstest]
+    #[case::writer(false)]
+    #[case::remover(true)]
+    fn session_mutators_share_store_lock_success(#[case] removing: bool) {
+        use std::{sync::mpsc, thread, time::Duration};
+        let dir = temp_config_dir();
+        let old = sample_session();
+        write_atomic(&dir, &old).unwrap();
+        let held = session_lock(&dir).unwrap();
+        let target = dir.clone();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let child = thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            if removing {
+                remove(&target).unwrap();
+            } else {
+                write_atomic(&target, &old).unwrap();
+            }
+            done_tx.send(()).unwrap();
+        });
+        ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(matches!(
+            done_rx.recv_timeout(Duration::from_millis(50)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        drop(held);
+        done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        child.join().unwrap();
+        assert_eq!(load(&dir).unwrap().is_none(), removing);
+        fs::remove_dir_all(dir).unwrap();
     }
 }
