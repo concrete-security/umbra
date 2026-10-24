@@ -66,6 +66,9 @@ docker run --rm --network none --platform linux/amd64 --entrypoint bash "${IMAGE
   claude --version >/dev/null
   codex --version >/dev/null
   node --version | grep -q "^v22\\."
+  test "$(node -p "process.versions.undici")" = 6.29.1
+  test "$(node -p "require(\"/usr/local/lib/node_modules/npm/node_modules/undici/package.json\").version")" = 6.29.1
+  npm --version | grep -qx 12.2.1
   # Image updates must advance an older managed copy on the persistent volume.
   eval "$(sed -n "/^ensure_claude_native_install() {/,/^}/p" /entrypoint.sh)"
   baked_version="$(cat /usr/local/lib/umbra/claude.version)"

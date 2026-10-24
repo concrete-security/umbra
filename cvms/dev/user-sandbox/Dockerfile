@@ -334,6 +334,7 @@ RUN uv pip install --python "$(command -v python3)" --system --no-deps --no-cach
     && rm -f /tmp/pip-26.2.2-py3-none-any.whl /tmp/umbra-pip-requirements.txt \
     && rm -rf /tmp/uv-*.lock
 
+# npm 12.2.1 bundles Undici 6.29.0; replace it with the fixed 6.29.1 release.
 RUN set -a \
     && . /tmp/tool-versions.env \
     && set +a \
@@ -345,9 +346,15 @@ RUN set -a \
     && echo "${NPM_SHA256}  /tmp/npm.tgz" | sha256sum -c - \
     && npm install --global /tmp/npm.tgz --offline --ignore-scripts --no-audit --no-fund \
     && rm /tmp/npm.tgz \
+    && curl -fsSL "https://registry.npmjs.org/undici/-/undici-${NPM_UNDICI_VERSION}.tgz" -o /tmp/npm-undici.tgz \
+    && echo "${NPM_UNDICI_SHA256}  /tmp/npm-undici.tgz" | sha256sum -c - \
+    && rm -rf /usr/local/lib/node_modules/npm/node_modules/undici \
+    && install -d /usr/local/lib/node_modules/npm/node_modules/undici \
+    && tar -xzf /tmp/npm-undici.tgz -C /usr/local/lib/node_modules/npm/node_modules/undici --strip-components=1 \
+    && rm /tmp/npm-undici.tgz \
     && test "$(npm --version)" = "${NPM_VERSION}" \
     && test "$(node -p "require('/usr/local/lib/node_modules/npm/node_modules/brace-expansion/package.json').version")" = 5.0.12 \
-    && test "$(node -p "require('/usr/local/lib/node_modules/npm/node_modules/undici/package.json').version")" = 6.29.0 \
+    && test "$(node -p "require('/usr/local/lib/node_modules/npm/node_modules/undici/package.json').version")" = "${NPM_UNDICI_VERSION}" \
     && test "$(node -p "require('/usr/local/lib/node_modules/npm/node_modules/ip-address/package.json').version")" = 10.7.2 \
     && test "$(node -p "require('/usr/local/lib/node_modules/npm/node_modules/tar/package.json').version")" = 7.5.22 \
     && curl -fsSL "https://github.com/anthropics/claude-code/releases/download/v${CLAUDE_VERSION}/claude-linux-x64.tar.gz" -o /tmp/claude.tar.gz \

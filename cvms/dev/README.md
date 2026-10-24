@@ -55,7 +55,7 @@ The forwarder MAY bind `:3128` without a policy so the Dev CVM remains reachable
 
 The sandbox image is amd64-only. Its Ubuntu packages, including userspace headers, resolve from the dated Canonical snapshot in the Dockerfile. Container headers do not change the provider-managed guest kernel. Exact Docker Engine, CLI, and containerd `.deb` filenames and SHA-256 digests are reviewed in `user-sandbox/tool-versions.env`. Buildx, Compose, and GitHub CLI compile from checksum-pinned upstream source with Go 1.27.3 and `GOTOOLCHAIN=local`. All three tools pin `golang.org/x/net` v0.60.0. Buildx replaces its vendored network and archive modules with separately checksum-pinned releases and reports `+umbra.2` for the local edits. Compose applies the reviewed module checksums from `user-sandbox/go-net.sum`; GitHub CLI retains its newer upstream module locks. Both build without changing their checksum locks. Architecture or digest drift fails closed.
 
-pip is installed separately with a hash pin so its bundled CA store includes current distrust updates. pip stays at 26.2.2 with a local, hash-verified urllib3 2.8.0 vendor update; its license, SBOM and wheel RECORD reflect the rebuilt contents. npm uses a checksum-pinned upstream tarball with its fixed bundled dependencies.
+pip is installed separately with a hash pin so its bundled CA store includes current distrust updates. pip stays at 26.2.2 with a local, hash-verified urllib3 2.8.0 vendor update; its license, SBOM and wheel RECORD reflect the rebuilt contents. npm 12.2.1 uses a checksum-pinned upstream tarball; the build replaces its bundled Undici 6.29.0 with hash-verified 6.29.1 until npm includes that fix. The image smoke checks both npm's copy and Node's built-in Undici.
 
 ```bash
 make check
