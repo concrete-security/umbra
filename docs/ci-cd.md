@@ -10,7 +10,7 @@ feature branch --PR--> dev --reviewed promotion--> main --tag/release--> immutab
 
 | Stage | Trigger | Workflow | Purpose |
 | --- | --- | --- | --- |
-| PR gate | PR to `dev` | `.github/workflows/pr-gate.yml` | Run `make check` and `make test` without live credentials. |
+| PR gate | PR to `dev` or `main` | `.github/workflows/pr-gate.yml` | Run `make check` and `make test` without live credentials. |
 | Security checks | repository security triggers | `.github/workflows/security.yml` | Run public dependency, source, and artifact security gates. |
 | CVM image candidate | push to `dev`; manual after promotion | `.github/workflows/publish-cvm-images.yml` | Reproduce and publish digest-only Dev/Security images with SBOM and provenance, then test those exact runtime images. |
 | Selected CVM image verification | manual | `.github/workflows/verify-release-images.yml` | Repeat runner tests for immutable images selected from a successful publication candidate. |
