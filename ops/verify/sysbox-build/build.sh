@@ -30,6 +30,7 @@ for component in sysbox-runc sysbox-fs sysbox-mgr; do
   # accepting it as a release build. No local fork replacements are removed.
   GOFLAGS='' go get github.com/opencontainers/selinux@v1.13.0 \
     golang.org/x/net@v0.60.0 google.golang.org/grpc@v1.83.2
+  GOFLAGS='' go mod tidy
   mkdir "/out/evidence/$component"
   cp go.mod go.sum "/out/evidence/$component/"
   case "$component" in
