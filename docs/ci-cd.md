@@ -126,12 +126,16 @@ analyzer. Missing inventories, scanner errors and known HIGH/CRITICAL dependency
 advisories fail the job; repository ignore exceptions do not apply. Manual runs
 can set `run_compatibility=false` to repeat only this scan.
 
-The manual `rebuild_candidate=true` diagnostic compiles the coherent 0.7.1 source
-set with pinned Go 1.27.3, snapshot native build packages and updated Go modules.
-It retains the resolved module locks and ELF/build metadata, then scans the three
-outputs. This resolution build does not install, publish or qualify its output
-for deployment. The resolved locks need review, followed by exact-binary runtime
-and boot qualification, before a source candidate can replace the host runtime.
+The default candidate compiles the coherent 0.7.1 source set with pinned Go
+1.27.3, snapshot native build packages and committed dependency locks. It must
+reproduce the reviewed binary checksums before scanning. Only after the scan and
+inventory gates pass does the disposable runner install those exact bytes and
+compare them against 0.6.7. The smoke also checks sandbox restart, exec and a
+saved home-directory file. No build output is published or installed on a CVM.
+
+Manual `rebuild_candidate=false` selects the checksum-pinned upstream package
+for a separate diagnostic. It must pass the same unsuppressed binary scan;
+compatibility success does not override known dependency advisories.
 
 This is a diagnostic experiment, not a release or deployment approval. Upstream
 packages share the 0.6.7 component source revisions with dstack, but the runner's

@@ -26,11 +26,10 @@ find sysbox-ipc -name '*.pb.go' -type f -print0 | sort -z | xargs -0 sha256sum \
 
 for component in sysbox-runc sysbox-fs sysbox-mgr; do
   cd "/src/$component"
-  # Resolve this diagnostic graph once; retain complete locks for review before
-  # accepting it as a release build. No local fork replacements are removed.
-  GOFLAGS='' go get github.com/opencontainers/selinux@v1.13.0 \
-    golang.org/x/net@v0.60.0 google.golang.org/grpc@v1.83.2
-  GOFLAGS='' go mod tidy
+  # These locks came from the reviewed resolution build. Never resolve new
+  # versions here; all local fork replacements remain bound to sources.txt.
+  cp "/recipe/locks/$component/go.mod" "/recipe/locks/$component/go.sum" .
+  go mod verify
   mkdir "/out/evidence/$component"
   cp go.mod go.sum "/out/evidence/$component/"
   case "$component" in
@@ -58,5 +57,8 @@ for component in sysbox-runc sysbox-fs sysbox-mgr; do
     echo "$component is not a static ELF" >&2
     exit 1
   fi
-  sha256sum "/out/bin/$component" >> /out/evidence/binaries.sha256
+  (cd /out/bin && sha256sum "$component") >> /out/evidence/binaries.sha256
 done
+
+# A clean, independent build must reproduce the already scanned binary bytes.
+(cd /out/bin && sha256sum --check --strict /recipe/binaries.expected.sha256)

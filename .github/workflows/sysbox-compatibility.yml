@@ -9,9 +9,9 @@ on:
         type: boolean
         default: true
       rebuild_candidate:
-        description: Build the pinned Sysbox source with patched dependencies (diagnostic)
+        description: Build the pinned Sysbox source with patched dependencies
         type: boolean
-        default: false
+        default: true
   pull_request:
     branches: [dev, main]
     paths:
@@ -29,20 +29,21 @@ concurrency:
   group: sysbox-compatibility-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+env:
+  # Approved published runtime from f6aed98e6ad67faa0337f5186a1086002d757e91.
+  # A pin change is a new experiment, not an automatic release promotion.
+  DEV_CVM_COMPOSE_SMOKE_IMAGE: ghcr.io/concrete-security/umbra-dev-cvm@sha256:8ceb3590898d28f7ee54bc06b46ad4487473988c24719bee6ab69bd80c2fb0f9
+  UMBRA_NESTED_TEST_IMAGE: ubuntu@sha256:561618e2c15bf2397621dd04f96926663a3b5616c189cf7e38db7e82f5c538ea
+
 jobs:
   compare:
-    if: github.event_name != 'workflow_dispatch' || inputs.run_compatibility
+    if: github.event_name == 'workflow_dispatch' && !inputs.rebuild_candidate && inputs.run_compatibility
     name: compare nested Docker with Sysbox
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     permissions:
       contents: read
       packages: read
-    env:
-      # Approved published runtime from f6aed98e6ad67faa0337f5186a1086002d757e91.
-      # A pin change is a new experiment, not an automatic release promotion.
-      DEV_CVM_COMPOSE_SMOKE_IMAGE: ghcr.io/concrete-security/umbra-dev-cvm@sha256:8ceb3590898d28f7ee54bc06b46ad4487473988c24719bee6ab69bd80c2fb0f9
-      UMBRA_NESTED_TEST_IMAGE: ubuntu@sha256:561618e2c15bf2397621dd04f96926663a3b5616c189cf7e38db7e82f5c538ea
     steps:
       - name: Checkout test tooling
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -91,18 +92,19 @@ jobs:
           retention-days: 14
 
   candidate-security:
-    name: inspect candidate Sysbox binaries
+    name: qualify candidate Sysbox binaries
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 35
     permissions:
       contents: read
+      packages: read
     steps:
       - name: Checkout scanner policy
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: 'false'
       - name: Extract the exact candidate without executing or installing it
-        if: ${{ !inputs.rebuild_candidate }}
+        if: github.event_name == 'workflow_dispatch' && !inputs.rebuild_candidate
         run: |
           set -euo pipefail
           umask 077
@@ -126,7 +128,7 @@ jobs:
               >> "$RUNNER_TEMP/sysbox-security/binaries.sha256"
           done
       - name: Build the source candidate in the disposable runner
-        if: inputs.rebuild_candidate
+        if: github.event_name == 'pull_request' || inputs.rebuild_candidate
         run: |
           set -euo pipefail
           docker build --platform linux/amd64 --no-cache --progress=plain \
@@ -167,6 +169,54 @@ jobs:
           assert all(row.get('Packages') for row in results)
           print('All three candidate Go binaries were analyzed')
           PY
+      - name: Install uv
+        if: (github.event_name == 'pull_request' || inputs.rebuild_candidate) && (github.event_name == 'pull_request' || inputs.run_compatibility)
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: 0.13.5
+          enable-cache: 'false'
+      - name: Install pinned Python
+        if: (github.event_name == 'pull_request' || inputs.rebuild_candidate) && (github.event_name == 'pull_request' || inputs.run_compatibility)
+        run: uv python install
+      - name: Check failure classification and real TCP controls
+        if: (github.event_name == 'pull_request' || inputs.rebuild_candidate) && (github.event_name == 'pull_request' || inputs.run_compatibility)
+        run: |
+          command -v timeout
+          uv run --locked --project console python -m pytest -q tools/test_nested_docker_smoke.py
+      - name: Pull exact images without deployment credentials
+        if: (github.event_name == 'pull_request' || inputs.rebuild_candidate) && (github.event_name == 'pull_request' || inputs.run_compatibility)
+        env:
+          IMAGE_PULL_USER: ${{ github.actor }}
+          IMAGE_PULL_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          umask 077
+          export DOCKER_CONFIG="$RUNNER_TEMP/sysbox-image-pull"
+          mkdir "$DOCKER_CONFIG"
+          trap 'rm -rf -- "$DOCKER_CONFIG"' EXIT
+          printf '%s' "$IMAGE_PULL_TOKEN" \
+            | docker login ghcr.io --username "$IMAGE_PULL_USER" --password-stdin >/dev/null
+          unset IMAGE_PULL_TOKEN
+          docker pull --platform linux/amd64 "$DEV_CVM_COMPOSE_SMOKE_IMAGE"
+          docker pull --platform linux/amd64 "$UMBRA_NESTED_TEST_IMAGE"
+          docker image inspect "$DEV_CVM_COMPOSE_SMOKE_IMAGE" | jq -e '
+            .[0] | .Os == "linux" and .Architecture == "amd64"
+            and .Config.Labels["org.opencontainers.image.source"] == "https://github.com/concrete-security/umbra"
+            and .Config.Labels["org.opencontainers.image.revision"] == "f6aed98e6ad67faa0337f5186a1086002d757e91"
+          ' >/dev/null
+      - name: Compare the exact scanned rebuild against the old runtime
+        if: (github.event_name == 'pull_request' || inputs.rebuild_candidate) && (github.event_name == 'pull_request' || inputs.run_compatibility)
+        env:
+          UMBRA_SYSBOX_CANDIDATE_DIR: ${{ runner.temp }}/sysbox-candidate
+        run: uv run --python "$(cat .python-version)" --no-project bash ops/verify/sysbox-compatibility.sh
+      - name: Retain rebuilt runtime evidence
+        if: always() && (github.event_name == 'pull_request' || inputs.rebuild_candidate) && (github.event_name == 'pull_request' || inputs.run_compatibility)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sysbox-rebuilt-compatibility-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/sysbox-compatibility/
+          if-no-files-found: error
+          retention-days: 14
       - name: Retain candidate binary security evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

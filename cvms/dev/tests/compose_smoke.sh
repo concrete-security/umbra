@@ -205,6 +205,17 @@ fi
 compose_started=1
 compose up -d --pull never --wait --wait-timeout "$smoke_wait"
 
+if [[ "$SMOKE_RUNTIME" = sysbox-runc ]]; then
+  # Exercise Sysbox's stop/start and exec paths with an owned persistent volume.
+  compose exec -T --user dev user-sandbox sh -c \
+    'umask 077; printf umbra-sysbox-restart > /home/dev/.umbra-sysbox-restart'
+  compose restart --timeout 20 user-sandbox
+  compose up -d --no-recreate --pull never --wait --wait-timeout "$smoke_wait"
+  # shellcheck disable=SC2016 # Expand inside the restarted sandbox.
+  compose exec -T --user dev user-sandbox sh -c \
+    'test "$(cat /home/dev/.umbra-sysbox-restart)" = umbra-sysbox-restart && rm /home/dev/.umbra-sysbox-restart'
+fi
+
 # The inner SSH command expands inside the sandbox, not in this script.
 # shellcheck disable=SC2016
 compose exec -T dev-tunnel bash -lc '
