@@ -114,7 +114,10 @@ sources and bindings, CPU affinity, drop-in order, guest watchdog and prepare
 failure action. A late vendor drop-in restoring a native command fails this gate.
 Systemd 255 omits empty command/environment-file arrays from its human display;
 read-only typed D-Bus queries must prove each omitted array exists and is empty.
-Missing properties or failed queries remain errors. Disabled watchdog values are
+Queries address the encoded isolated unit path directly: systemd loads that unit
+for the property read, while `GetUnit` can fail after an inactive unit is unloaded.
+Missing properties or failed queries remain errors. Failed subprocesses retain
+bounded stderr in their traceback. Disabled watchdog values are
 accepted as either `0` or systemd's `infinity` display.
 The hook likewise distinguishes the present empty `Job=` property (no job)
 from absent or malformed query output before cancelling or checking queued jobs.

@@ -92,23 +92,40 @@ class BootstrapTests(unittest.TestCase):
             "WatchdogUSec": "infinity", "FailureAction": "none",
         }
         missing = sorted(set(systemd_harness.EMPTY_SERVICE_PROPERTIES) - shown.keys())
-        object_path = "/org/freedesktop/systemd1/unit/isolated"
-        responses = [
-            subprocess.CompletedProcess([], 0, json.dumps({"type": "o", "data": [object_path]}), ""),
-            subprocess.CompletedProcess([], 0, "\n".join(json.dumps({
+        unit = case.layout.unit("dstack-guest-agent.service")
+        object_path = "/org/freedesktop/systemd1/unit/" + unit.replace("-", "_2d").replace(".", "_2e")
+        def query(*args):
+            # Inactive, unreferenced units may disappear between systemctl and
+            # GetUnit. Direct object properties load the unit on that same call.
+            if "GetUnit" in args:
+                raise subprocess.CalledProcessError(1, args, stderr=f"Unit {unit} not loaded.")
+            self.assertEqual(args, (
+                "busctl", "--system", "--json=short", "get-property",
+                "org.freedesktop.systemd1", object_path,
+                "org.freedesktop.systemd1.Service", *missing,
+            ))
+            return subprocess.CompletedProcess([], 0, "\n".join(json.dumps({
                 "type": "a(sb)" if name == "EnvironmentFiles" else "a(sasbttttuii)",
                 "data": [],
-            }) for name in missing), ""),
-        ]
+            }) for name in missing), "")
         output = subprocess.CompletedProcess([], 0, "\n".join(
             key + "=" + value for key, value in shown.items()
         ), "")
         with patch.object(case, "ctl", return_value=output), patch.object(
-            systemd_harness, "run", side_effect=responses,
+            systemd_harness, "run", side_effect=query,
         ) as dbus:
             case.assert_effective_services()
-        self.assertEqual(dbus.call_args_list[0].args[-1], case.layout.unit("dstack-guest-agent.service"))
-        self.assertEqual(dbus.call_args_list[1].args[-len(missing):], tuple(missing))
+        dbus.assert_called_once()
+
+    def test_subprocess_failure_retains_bounded_stderr_failure(self):
+        """An actual failing child leaves a bounded diagnostic in the traceback."""
+        with self.assertRaises(subprocess.CalledProcessError) as raised:
+            systemd_harness.run(sys.executable, "-c",
+                                "import sys; sys.stderr.write('x' * 10000 + 'unit-not-loaded'); sys.exit(1)")
+        notes = raised.exception.__notes__
+        self.assertEqual(len(notes), 1)
+        self.assertTrue(notes[0].endswith("unit-not-loaded"))
+        self.assertLessEqual(len(notes[0]), 2100)
 
     def test_omitted_array_needs_typed_empty_proof_failure(self):
         """Missing, malformed or nonempty D-Bus values never permit a start."""
@@ -126,9 +143,6 @@ class BootstrapTests(unittest.TestCase):
         output = subprocess.CompletedProcess([], 0, "\n".join(
             key + "=" + value for key, value in shown.items()
         ), "")
-        object_reply = subprocess.CompletedProcess([], 0, json.dumps({
-            "type": "o", "data": ["/org/freedesktop/systemd1/unit/isolated"],
-        }), "")
         values = (
             "", "not json", json.dumps({"type": "s", "data": ""}),
             json.dumps({"type": "a(sasbttttuii)", "data": [["/bin/native"]]}),
@@ -137,7 +151,7 @@ class BootstrapTests(unittest.TestCase):
         for value in values:
             reply = value if isinstance(value, Exception) else subprocess.CompletedProcess([], 0, value, "")
             with self.subTest(value=str(value)), patch.object(case, "ctl", return_value=output) as ctl, patch.object(
-                systemd_harness, "run", side_effect=[object_reply, reply],
+                systemd_harness, "run", side_effect=[reply],
             ), self.assertRaises((AssertionError, ValueError, subprocess.CalledProcessError)):
                 try:
                     case.exercise()

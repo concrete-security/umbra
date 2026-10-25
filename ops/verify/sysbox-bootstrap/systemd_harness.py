@@ -87,7 +87,12 @@ def validate_effective_service(
 
 
 def run(*args: str, check: bool = True, timeout: float = 30) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(args, check=check, text=True, capture_output=True, timeout=timeout)
+    try:
+        return subprocess.run(args, check=check, text=True, capture_output=True, timeout=timeout)
+    except subprocess.CalledProcessError as error:
+        if error.stderr:
+            error.add_note("stderr (last 2048 characters): " + error.stderr[-2048:])
+        raise
 
 
 def transform(content: bytes, prefix: str) -> bytes:
@@ -154,20 +159,18 @@ class Case:
                 # systemctl 255 prints no line for empty structured arrays even
                 # with --all. Prove their type and emptiness through D-Bus; never
                 # treat an unknown or unavailable property as an empty command.
-                reply = json.loads(run(
-                    "busctl", "--system", "--json=short", "call", SYSTEMD_BUS,
-                    "/org/freedesktop/systemd1", SYSTEMD_BUS + ".Manager", "GetUnit",
-                    "s", self.layout.unit(unit),
-                ).stdout)
-                paths = reply.get("data")
-                if (reply.get("type") != "o" or not isinstance(paths, list) or len(paths) != 1
-                    or not isinstance(paths[0], str)
-                    or not re.fullmatch(r"/org/freedesktop/systemd1/unit/[A-Za-z0-9_]+", paths[0])):
-                    raise AssertionError("systemd did not identify the isolated fixture object")
+                # GetUnit only finds already-loaded units: inactive fixtures may
+                # be garbage-collected after systemctl exits. Direct property
+                # access loads the unit by its encoded path on each query.
+                name = self.layout.unit(unit)
+                if not re.fullmatch(r"umbra-sbq-[a-f0-9]{12}-[a-z0-9-]+\.service", name):
+                    raise AssertionError("D-Bus query escaped the isolated service namespace")
+                label = re.sub(r"[^A-Za-z0-9]", lambda match: f"_{ord(match[0]):02x}", name)
+                object_path = "/org/freedesktop/systemd1/unit/" + label
                 names = sorted(missing)
                 values = run(
                     "busctl", "--system", "--json=short", "get-property", SYSTEMD_BUS,
-                    paths[0], SYSTEMD_BUS + ".Service", *names,
+                    object_path, SYSTEMD_BUS + ".Service", *names,
                 ).stdout.splitlines()
                 if len(values) != len(names):
                     raise AssertionError("systemd did not return every typed fixture property")
