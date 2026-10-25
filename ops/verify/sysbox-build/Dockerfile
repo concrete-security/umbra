@@ -7,7 +7,9 @@ RUN sed -i \
       /etc/apt/sources.list.d/debian.sources \
     && printf '%s\n' 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99snapshot \
     && apt-get update \
-    && apt-get install -y --no-install-recommends build-essential pkg-config libseccomp-dev protobuf-compiler \
+    && apt-get install -y --no-install-recommends build-essential pkg-config libseccomp-dev protobuf-compiler libprotobuf-dev \
+    && test -f /usr/include/google/protobuf/timestamp.proto \
+    && ln -s /usr/include/google /usr/local/include/google \
     && rm -rf /var/lib/apt/lists/*
 COPY . /recipe/
 RUN bash /recipe/build.sh
