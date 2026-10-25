@@ -101,8 +101,8 @@ against the selected immutable artifacts before production promotion.
 ## Sysbox compatibility experiment
 
 `Sysbox compatibility` runs on a disposable GitHub-hosted Ubuntu 24.04 runner.
-It compares checksum-pinned upstream Sysbox 0.6.7 and 0.7.1 against the same
-fixed Dev release digest. Both arms run on the same host; installation must not
+It compares checksum-pinned upstream Sysbox 0.6.7 with a locked 0.7.1 source
+candidate against the same fixed Dev release digest. Both arms run on the same host; installation must not
 change the outer Docker components. The workflow installs host runtime packages
 and therefore must never run on a developer machine, self-hosted runner or CVM.
 
