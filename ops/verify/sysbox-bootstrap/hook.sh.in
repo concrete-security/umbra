@@ -44,6 +44,21 @@ runtime_units=(@@RUNTIME_UNITS@@)
 require() { if ! "$@"; then hold "precondition failed"; fi; }
 ctl() { timeout 20 systemctl "$@"; }
 property() { ctl show --property="$2" --value "$1"; }
+job_id() {
+    local observed value
+    # PID 1's Job tuple is printed as an empty named property when its ID is 0.
+    # Require that property to exist; empty/malformed command output is not idle.
+    observed=$(ctl show --all --property=Job "$1")
+    require test "${observed%%=*}" = Job
+    value=${observed#Job=}
+    if [[ -z "$value" ]]; then
+        printf '0\n'
+    elif [[ "$value" =~ ^[0-9]+$ ]]; then
+        printf '%s\n' "$value"
+    else
+        hold "invalid systemd job property"
+    fi
+}
 hash_file() { sha256sum -- "$1" | awk '{print $1}'; }
 
 safe_dir() {
@@ -127,14 +142,14 @@ done
 # after proving Docker is inactive; cancel only the named queued startup jobs.
 ctl stop "$docker_socket"
 for unit in "${runtime_units[@]}" "$docker_socket"; do
-    job=$(property "$unit" Job)
+    job=$(job_id "$unit")
     if [[ "$job" != 0 ]]; then
         require test "$job" -gt 0
         ctl cancel "$job"
     fi
 done
 for unit in "${runtime_units[@]}" "$docker_socket"; do
-    require test "$(property "$unit" Job)" = 0
+    require test "$(job_id "$unit")" = 0
     require test "$(property "$unit" ActiveState)" = inactive
 done
 
@@ -196,7 +211,7 @@ done
 # Reload alone does not reconstruct the cancelled transactions.
 ctl --no-block start "$ready" "${runtime_units[@]}" "$docker_socket"
 for unit in "$ready" "${runtime_units[@]}"; do
-    require test "$(property "$unit" Job)" -gt 0
+    require test "$(job_id "$unit")" -gt 0
     require test "$(property "$unit" ActiveState)" = inactive
 done
 printf 'Sysbox bootstrap installed verified bytes and requeued gated starts\n' >&2

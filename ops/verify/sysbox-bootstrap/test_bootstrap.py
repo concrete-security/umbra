@@ -78,6 +78,96 @@ class BootstrapTests(unittest.TestCase):
             with self.subTest(property=key), self.assertRaises(AssertionError):
                 systemd_harness.validate_effective_service(props, command, role, root)
 
+    def test_systemd_255_empty_property_display_success(self):
+        """CI's omitted empty arrays and disabled watchdog still prove isolation."""
+        case = systemd_harness.Case("0.5.9", "success", Path("/unused"), Path("/unused"))
+        command = case.layout.root + "/mock-runtime"
+        case.expected_services = {"dstack-guest-agent.service": ("guest", command)}
+        # systemd 255's human printer omits empty structured arrays even with
+        # --all; the 40220656650 artifact reports disabled watchdog as infinity.
+        shown = {
+            "ExecStart": f"{{ path={command} ; argv[]={command} ; ignore_errors=no ; }}",
+            "CPUAffinity": "", "Environment": f"SBQ_ROOT={case.layout.root} SBQ_ROLE=guest",
+            "DropInPaths": "/run/systemd/system/unit.d/zz-qualification.conf",
+            "WatchdogUSec": "infinity", "FailureAction": "none",
+        }
+        missing = sorted(set(systemd_harness.EMPTY_SERVICE_PROPERTIES) - shown.keys())
+        object_path = "/org/freedesktop/systemd1/unit/isolated"
+        responses = [
+            subprocess.CompletedProcess([], 0, json.dumps({"type": "o", "data": [object_path]}), ""),
+            subprocess.CompletedProcess([], 0, "\n".join(json.dumps({
+                "type": "a(sb)" if name == "EnvironmentFiles" else "a(sasbttttuii)",
+                "data": [],
+            }) for name in missing), ""),
+        ]
+        output = subprocess.CompletedProcess([], 0, "\n".join(
+            key + "=" + value for key, value in shown.items()
+        ), "")
+        with patch.object(case, "ctl", return_value=output), patch.object(
+            systemd_harness, "run", side_effect=responses,
+        ) as dbus:
+            case.assert_effective_services()
+        self.assertEqual(dbus.call_args_list[0].args[-1], case.layout.unit("dstack-guest-agent.service"))
+        self.assertEqual(dbus.call_args_list[1].args[-len(missing):], tuple(missing))
+
+    def test_omitted_array_needs_typed_empty_proof_failure(self):
+        """Missing, malformed or nonempty D-Bus values never permit a start."""
+        case = systemd_harness.Case("0.5.9", "success", Path("/unused"), Path("/unused"))
+        command = case.layout.root + "/mock-runtime"
+        case.expected_services = {"docker.service": ("docker", command)}
+        shown = {key: "" for key in systemd_harness.EMPTY_SERVICE_PROPERTIES}
+        shown.update({
+            "ExecStart": f"{{ path={command} ; argv[]={command} ; }}",
+            "Environment": f"SBQ_ROOT={case.layout.root} SBQ_ROLE=docker",
+            "DropInPaths": "/run/systemd/system/unit.d/zz-qualification.conf",
+            "WatchdogUSec": "infinity", "FailureAction": "none",
+        })
+        del shown["ExecStartPre"]
+        output = subprocess.CompletedProcess([], 0, "\n".join(
+            key + "=" + value for key, value in shown.items()
+        ), "")
+        object_reply = subprocess.CompletedProcess([], 0, json.dumps({
+            "type": "o", "data": ["/org/freedesktop/systemd1/unit/isolated"],
+        }), "")
+        values = (
+            "", "not json", json.dumps({"type": "s", "data": ""}),
+            json.dumps({"type": "a(sasbttttuii)", "data": [["/bin/native"]]}),
+            subprocess.CalledProcessError(1, ["busctl", "get-property"]),
+        )
+        for value in values:
+            reply = value if isinstance(value, Exception) else subprocess.CompletedProcess([], 0, value, "")
+            with self.subTest(value=str(value)), patch.object(case, "ctl", return_value=output) as ctl, patch.object(
+                systemd_harness, "run", side_effect=[object_reply, reply],
+            ), self.assertRaises((AssertionError, ValueError, subprocess.CalledProcessError)):
+                try:
+                    case.exercise()
+                finally:
+                    self.assertTrue(all(call.args[0] == "show" for call in ctl.call_args_list))
+
+    def test_omitted_scalar_is_not_empty_array_failure(self):
+        """A missing command identity, CPU mask or environment remains an error."""
+        case = systemd_harness.Case("0.5.9", "success", Path("/unused"), Path("/unused"))
+        case.expected_services = {"docker.service": ("docker", "/unused")}
+        for key in ("ExecStart", "Environment", "CPUAffinity"):
+            fields = {*systemd_harness.EMPTY_SERVICE_PROPERTIES, "ExecStart", "Environment",
+                      "DropInPaths", "WatchdogUSec", "FailureAction"} - {key}
+            output = subprocess.CompletedProcess([], 0, "\n".join(name + "=" for name in fields), "")
+            with self.subTest(property=key), patch.object(case, "ctl", return_value=output), patch.object(
+                systemd_harness, "run",
+            ) as dbus, self.assertRaisesRegex(AssertionError, "omitted required"):
+                try:
+                    case.assert_effective_services()
+                finally:
+                    dbus.assert_not_called()
+
+    def test_repeated_command_property_failure(self):
+        """A later expected command cannot conceal an earlier native command."""
+        case = systemd_harness.Case("0.5.9", "success", Path("/unused"), Path("/unused"))
+        case.expected_services = {"docker.service": ("docker", "/unused")}
+        output = subprocess.CompletedProcess([], 0, "ExecStart=native\nExecStart=/unused\n", "")
+        with patch.object(case, "ctl", return_value=output), self.assertRaisesRegex(AssertionError, "repeated"):
+            case.assert_effective_services()
+
     def test_effective_service_gate_runs_before_any_start_failure(self):
         """A bad effective fixture prevents every scenario from starting a unit."""
         for scenario in ("success", "source", "wrong-executable", *systemd_harness.FAULTS,
@@ -90,6 +180,48 @@ class BootstrapTests(unittest.TestCase):
                     case.exercise()
                 finally:
                     ctl.assert_not_called()
+
+    def test_idle_systemd_job_display_success(self):
+        """The actual cancel/check block accepts present empty Job= as idle."""
+        hook = render.render("0.5.9", URLS)
+        helpers = hook[hook.index("require() {"):hook.index("safe_dir() {")]
+        checks = hook[hook.index("# A native socket may"):hook.index("# Qualification fault injection")]
+        for mode in ("idle", "queued"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
+                script = "set -euo pipefail\nhold() { exit 97; }\n" + helpers + r'''
+mode=$1
+state=$2
+runtime_units=(mock.service)
+docker_socket=mock.socket
+ctl() {
+    case "$1" in
+        stop) return 0 ;;
+        cancel) [[ "$2" = 42 ]]; touch "$state"; printf 'cancel 42\n'; return 0 ;;
+    esac
+    if [[ "$*" == *--property=ActiveState* ]]; then printf 'inactive\n'; return; fi
+    [[ "$*" == *--property=Job* ]] || exit 96
+    value=''
+    if [[ "$mode" = queued && "${!#}" = mock.service && ! -e "$state" ]]; then value=42; fi
+    if [[ "$*" == *--value* ]]; then printf '%s\n' "$value"; else printf 'Job=%s\n' "$value"; fi
+}
+''' + checks
+                result = subprocess.run(["bash", "-c", script, "bash", mode, tmp + "/cancelled"],
+                                        capture_output=True, text=True, timeout=3)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, "cancel 42\n" if mode == "queued" else "")
+
+    def test_malformed_systemd_job_display_failure(self):
+        """Absent, differently named and malformed job properties never mean idle."""
+        hook = render.render("0.5.9", URLS)
+        helpers = hook[hook.index("require() {"):hook.index("safe_dir() {")]
+        # Use an argument instead of interpolating returned property bytes into code.
+        script = ("set -euo pipefail\nhold() { exit 97; }\n" + helpers
+                  + '\nfake_job_output=$1\nctl() { printf "%s\\n" "$fake_job_output"; }\njob_id mock.service\n')
+        for value in ("", "LoadState=loaded", "Job=unknown", "Job=42\nJob=", "Job=-1"):
+            with self.subTest(value=value):
+                result = subprocess.run(["bash", "-c", script, "bash", value],
+                                        capture_output=True, text=True, timeout=3)
+                self.assertEqual(result.returncode, 97)
 
     def test_pinned_source_fixtures_success(self):
         """All retained bytes match Git and SHA-256; only the app dependency differs."""

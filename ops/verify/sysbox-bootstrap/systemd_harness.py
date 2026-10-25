@@ -34,6 +34,11 @@ EMPTY_SERVICE_PROPERTIES = (
     "ExecCondition", "ExecStartPre", "ExecStartPost", "ExecStop", "ExecStopPost",
     "ExecReload", "EnvironmentFiles", "CPUAffinity",
 )
+EMPTY_STRUCTURED_PROPERTIES = {
+    name: "a(sasbttttuii)" for name in EMPTY_SERVICE_PROPERTIES if name.startswith("Exec")
+}
+EMPTY_STRUCTURED_PROPERTIES["EnvironmentFiles"] = "a(sb)"
+SYSTEMD_BUS = "org.freedesktop.systemd1"
 
 
 def service_override(layout: render.Layout, role: str, command: str, scenario: str) -> bytes:
@@ -75,7 +80,7 @@ def validate_effective_service(
     drops = shlex.split(properties["DropInPaths"])
     if not drops or Path(drops[-1]).name != QUALIFICATION_OVERRIDE:
         raise AssertionError("qualification override is not the final effective drop-in")
-    if role == "guest" and properties["WatchdogUSec"] != "0":
+    if role == "guest" and properties["WatchdogUSec"] not in {"0", "infinity"}:
         raise AssertionError("mock guest watchdog is not disabled")
     if role == "prepare" and properties["FailureAction"] != "none":
         raise AssertionError("mock prepare retained a native failure action")
@@ -138,9 +143,38 @@ class Case:
             output = self.ctl(
                 "show", "--all", "--property=" + ",".join(fields), self.layout.unit(unit),
             ).stdout
-            properties = dict(line.split("=", 1) for line in output.splitlines())
-            if set(properties) != set(fields):
-                raise AssertionError("systemd did not return all effective fixture properties")
+            rows = [line.split("=", 1) for line in output.splitlines()]
+            properties = dict(rows)
+            if len(properties) != len(rows):
+                raise AssertionError("systemd repeated an effective fixture property")
+            missing = set(fields) - properties.keys()
+            if properties.keys() - set(fields) or missing - EMPTY_STRUCTURED_PROPERTIES.keys():
+                raise AssertionError(f"systemd omitted required fixture properties: {sorted(missing)}")
+            if missing:
+                # systemctl 255 prints no line for empty structured arrays even
+                # with --all. Prove their type and emptiness through D-Bus; never
+                # treat an unknown or unavailable property as an empty command.
+                reply = json.loads(run(
+                    "busctl", "--system", "--json=short", "call", SYSTEMD_BUS,
+                    "/org/freedesktop/systemd1", SYSTEMD_BUS + ".Manager", "GetUnit",
+                    "s", self.layout.unit(unit),
+                ).stdout)
+                paths = reply.get("data")
+                if (reply.get("type") != "o" or not isinstance(paths, list) or len(paths) != 1
+                    or not isinstance(paths[0], str)
+                    or not re.fullmatch(r"/org/freedesktop/systemd1/unit/[A-Za-z0-9_]+", paths[0])):
+                    raise AssertionError("systemd did not identify the isolated fixture object")
+                names = sorted(missing)
+                values = run(
+                    "busctl", "--system", "--json=short", "get-property", SYSTEMD_BUS,
+                    paths[0], SYSTEMD_BUS + ".Service", *names,
+                ).stdout.splitlines()
+                if len(values) != len(names):
+                    raise AssertionError("systemd did not return every typed fixture property")
+                for name, value in zip(names, values):
+                    if json.loads(value) != {"type": EMPTY_STRUCTURED_PROPERTIES[name], "data": []}:
+                        raise AssertionError(f"effective {name} is not a typed empty array")
+                    properties[name] = ""
             validate_effective_service(properties, command, role, self.layout.root)
 
     def setup(self) -> None:
@@ -347,7 +381,7 @@ class Case:
             state[unit.removeprefix(self.layout.prefix)] = self.ctl(
                 "show", "--property=ActiveState,SubState,Result,Job,Requires,After,Type,MainPID,"
                 "ExecStart,ExecCondition,ExecStartPre,ExecStartPost,ExecStop,ExecStopPost,ExecReload,"
-                "EnvironmentFiles,DropInPaths,FragmentPath,CPUAffinity,WatchdogUSec,FailureAction,"
+                "Environment,EnvironmentFiles,DropInPaths,FragmentPath,CPUAffinity,WatchdogUSec,FailureAction,"
                 "NotifyAccess,TimeoutStartUSec,KillMode,Restart,BindsTo,PartOf,DefaultDependencies",
                 unit, check=False,
             ).stdout

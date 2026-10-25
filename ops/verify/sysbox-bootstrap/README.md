@@ -112,6 +112,12 @@ Test overrides sort last as `zz-qualification.conf`. After reload and before
 each scenario starts, the harness checks PID 1's effective commands, environment
 sources and bindings, CPU affinity, drop-in order, guest watchdog and prepare
 failure action. A late vendor drop-in restoring a native command fails this gate.
+Systemd 255 omits empty command/environment-file arrays from its human display;
+read-only typed D-Bus queries must prove each omitted array exists and is empty.
+Missing properties or failed queries remain errors. Disabled watchdog values are
+accepted as either `0` or systemd's `infinity` display.
+The hook likewise distinguishes the present empty `Job=` property (no job)
+from absent or malformed query output before cancelling or checking queued jobs.
 
 The suite tests both OS fixture graphs: successful handover, delayed listeners,
 command/pipeline/nounset/timeout holds, TERM to the worker, MainPID and whole
