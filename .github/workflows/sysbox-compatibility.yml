@@ -4,6 +4,13 @@ run-name: Compare Sysbox against the selected Dev release
 on:
   workflow_dispatch:
     inputs:
+      dev_image:
+        description: Exact reviewed runtime image to qualify
+        type: choice
+        options:
+          - current-release
+          - migration-baseline
+        default: current-release
       run_compatibility:
         description: Repeat the runtime comparison as well as the binary security scan
         type: boolean
@@ -35,9 +42,11 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Approved published runtime from f6aed98e6ad67faa0337f5186a1086002d757e91.
-  # A pin change is a new experiment, not an automatic release promotion.
-  DEV_CVM_COMPOSE_SMOKE_IMAGE: ghcr.io/concrete-security/umbra-dev-cvm@sha256:8ceb3590898d28f7ee54bc06b46ad4487473988c24719bee6ab69bd80c2fb0f9
+  # Default: approved published runtime from f6aed98e6ad67faa0337f5186a1086002d757e91.
+  # Manual migration-baseline: the unchanged runtime on the approved old-OS canary.
+  # Both are fixed digest references; selection never promotes a release.
+  DEV_CVM_COMPOSE_SMOKE_IMAGE: ${{ inputs.dev_image == 'migration-baseline' && 'ghcr.io/concrete-security/umbra-dev-cvm@sha256:c2f103331848d534783625888fa3920453d2848deeeef92dfcb1903a7589a0ba' || 'ghcr.io/concrete-security/umbra-dev-cvm@sha256:8ceb3590898d28f7ee54bc06b46ad4487473988c24719bee6ab69bd80c2fb0f9' }}
+  DEV_CVM_COMPOSE_SMOKE_SOURCE: ${{ inputs.dev_image == 'migration-baseline' && '5545a59930f79b9a055dc0813ec9f551d3f66287' || 'f6aed98e6ad67faa0337f5186a1086002d757e91' }}
   UMBRA_NESTED_TEST_IMAGE: ubuntu@sha256:561618e2c15bf2397621dd04f96926663a3b5616c189cf7e38db7e82f5c538ea
 
 jobs:
@@ -104,10 +113,10 @@ jobs:
           unset IMAGE_PULL_TOKEN
           docker pull --platform linux/amd64 "$DEV_CVM_COMPOSE_SMOKE_IMAGE"
           docker pull --platform linux/amd64 "$UMBRA_NESTED_TEST_IMAGE"
-          docker image inspect "$DEV_CVM_COMPOSE_SMOKE_IMAGE" | jq -e '
+          docker image inspect "$DEV_CVM_COMPOSE_SMOKE_IMAGE" | jq -e --arg source "$DEV_CVM_COMPOSE_SMOKE_SOURCE" '
             .[0] | .Os == "linux" and .Architecture == "amd64"
             and .Config.Labels["org.opencontainers.image.source"] == "https://github.com/concrete-security/umbra"
-            and .Config.Labels["org.opencontainers.image.revision"] == "f6aed98e6ad67faa0337f5186a1086002d757e91"
+            and .Config.Labels["org.opencontainers.image.revision"] == $source
           ' >/dev/null
       - name: Reproduce then test the fixed runtime on the same host
         run: uv run --python "$(cat .python-version)" --no-project bash ops/verify/sysbox-compatibility.sh
@@ -236,10 +245,10 @@ jobs:
           unset IMAGE_PULL_TOKEN
           docker pull --platform linux/amd64 "$DEV_CVM_COMPOSE_SMOKE_IMAGE"
           docker pull --platform linux/amd64 "$UMBRA_NESTED_TEST_IMAGE"
-          docker image inspect "$DEV_CVM_COMPOSE_SMOKE_IMAGE" | jq -e '
+          docker image inspect "$DEV_CVM_COMPOSE_SMOKE_IMAGE" | jq -e --arg source "$DEV_CVM_COMPOSE_SMOKE_SOURCE" '
             .[0] | .Os == "linux" and .Architecture == "amd64"
             and .Config.Labels["org.opencontainers.image.source"] == "https://github.com/concrete-security/umbra"
-            and .Config.Labels["org.opencontainers.image.revision"] == "f6aed98e6ad67faa0337f5186a1086002d757e91"
+            and .Config.Labels["org.opencontainers.image.revision"] == $source
           ' >/dev/null
       - name: Compare the exact scanned rebuild against the old runtime
         if: (github.event_name == 'pull_request' || inputs.rebuild_candidate) && (github.event_name == 'pull_request' || inputs.run_compatibility)

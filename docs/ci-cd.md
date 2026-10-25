@@ -139,6 +139,11 @@ inventory gates pass does the disposable runner install those exact bytes and
 compare them against 0.6.7. The smoke also checks sandbox restart, exec and a
 saved home-directory file.
 
+Manual runs can select `dev_image=migration-baseline` to repeat qualification
+against the unchanged older Dev image used by the migration canary. Both choices
+map to reviewed immutable digests and their exact source-revision labels in the
+workflow; pull requests keep the current release default. A passing result for one image does not qualify the other.
+
 The populated-state qualification has two distinct arms. Both retain
 `--data-root /var/lib/sysbox --disable-ovfs-on-idmapped-mount`; neither relaxes
 procfs checks, device filters, user namespaces or sandbox networking.
