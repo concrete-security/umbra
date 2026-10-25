@@ -78,3 +78,78 @@ jobs:
           path: ${{ runner.temp }}/sysbox-compatibility/
           if-no-files-found: warn
           retention-days: 14
+
+  candidate-security:
+    name: inspect candidate Sysbox binaries
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout scanner policy
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: 'false'
+      - name: Extract the exact candidate without executing or installing it
+        run: |
+          set -euo pipefail
+          umask 077
+          package="$RUNNER_TEMP/sysbox-candidate.deb"
+          curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
+            --retry 3 --connect-timeout 10 --max-time 120 --max-filesize 20000000 \
+            https://github.com/nestybox/sysbox/releases/download/v0.7.1/sysbox-ce_0.7.1.linux_amd64.deb \
+            --output "$package"
+          printf '%s  %s\n' 9d6d5484f980d0a17f86c492c1262015c2afb66280bdb97215b79fde6a0261c5 "$package" \
+            | sha256sum --check --strict
+          mkdir "$RUNNER_TEMP/sysbox-candidate" "$RUNNER_TEMP/sysbox-security"
+          : > "$RUNNER_TEMP/sysbox-security/empty-ignore"
+          for component in sysbox-runc sysbox-fs sysbox-mgr; do
+            dpkg-deb --fsys-tarfile "$package" \
+              | tar -xOf - "./usr/bin/$component" > "$RUNNER_TEMP/sysbox-candidate/$component"
+            chmod 0500 "$RUNNER_TEMP/sysbox-candidate/$component"
+            # go version -m parses ELF build metadata; it does not execute the binary.
+            go version -m "$RUNNER_TEMP/sysbox-candidate/$component" \
+              > "$RUNNER_TEMP/sysbox-security/$component.buildinfo.txt"
+            sha256sum "$RUNNER_TEMP/sysbox-candidate/$component" \
+              >> "$RUNNER_TEMP/sysbox-security/binaries.sha256"
+          done
+      - name: Check candidate binary vulnerabilities without exceptions
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_IGNORE_UNFIXED: 'false'
+          TRIVY_IGNOREFILE: ${{ runner.temp }}/sysbox-security/empty-ignore
+        with:
+          version: v0.70.0
+          cache: 'false'
+          list-all-pkgs: 'true'
+          scan-type: fs
+          scan-ref: ${{ runner.temp }}/sysbox-candidate
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: '1'
+          format: json
+          output: ${{ runner.temp }}/sysbox-security/vulnerabilities.json
+          timeout: 15m
+      - name: Require all three Go binaries to have been analyzed
+        if: always()
+        run: |
+          python3 - "$RUNNER_TEMP/sysbox-security/vulnerabilities.json" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+          data = json.loads(Path(sys.argv[1]).read_text())
+          results = [row for row in data.get('Results', []) if row.get('Type') == 'gobinary']
+          assert {Path(row['Target']).name for row in results} == {'sysbox-runc', 'sysbox-fs', 'sysbox-mgr'}
+          assert len(results) == 3
+          assert all(row.get('Packages') for row in results)
+          print('All three candidate Go binaries were analyzed')
+          PY
+      - name: Retain candidate binary security evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sysbox-security-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/sysbox-security/
+          if-no-files-found: error
+          retention-days: 14
