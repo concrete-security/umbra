@@ -13,6 +13,8 @@ cd "$ROOT"
 : "${UMBRA_NESTED_TEST_IMAGE:?}"
 receipt_dir="$RUNNER_TEMP/sysbox-compatibility"
 candidate_dir="${UMBRA_SYSBOX_CANDIDATE_DIR:-}"
+qualification_arm="${UMBRA_SYSBOX_QUALIFICATION_ARM:-default-clone}"
+case "$qualification_arm" in default-clone|no-rootfs-cloning) ;; *) exit 2 ;; esac
 
 check_candidate() {
   [[ "$candidate_dir" = "$RUNNER_TEMP/sysbox-candidate" \
@@ -41,7 +43,7 @@ record_runtime() {
 install_candidate() (
   local project="${1:-}"
   local containers
-  local phase=fresh-candidate
+  local phase="$qualification_arm-fresh-candidate"
   local status=0
   local ids=()
   check_candidate
@@ -51,7 +53,7 @@ install_candidate() (
     mapfile -t ids <<< "$containers"
   fi
   if [[ -n "$project" ]]; then
-    phase=handover-candidate
+    phase="$qualification_arm-handover-candidate"
     # Only the four cold-stopped fixtures from the current smoke may survive.
     [[ "$project" =~ ^umbra-dev-compose-smoke-[a-z0-9]+$ && "${#ids[@]}" -eq 4 ]]
     docker inspect "${ids[@]}" | python3 -c '
@@ -122,9 +124,9 @@ if any(row["State"]["Status"] != "exited" or row["State"]["Pid"] != 0 for row in
 
 case "${1:-compare}" in
   switch-runtime)
-    [[ "$#" -eq 2 && -d "$receipt_dir/handover" ]]
+    [[ "$#" -eq 2 && -d "$receipt_dir/$qualification_arm/handover" ]]
     install_candidate "$2"
-    record_runtime handover-candidate
+    record_runtime "$qualification_arm-handover-candidate"
     exit 0 ;;
   compare) [[ "$#" -eq 0 ]] ;;
   *) echo 'unsupported Sysbox qualification phase' >&2; exit 2 ;;
@@ -176,40 +178,63 @@ sudo apt-get update -qq
 sudo apt-get install -y --no-install-recommends "$RUNNER_TEMP/sysbox-ce_0.6.7.linux_amd64.deb"
 [[ "$(dpkg-query -W -f='${Version}' sysbox-ce)" = 0.6.7.linux ]] \
   || { echo 'unexpected installed Sysbox version' >&2; exit 1; }
-# Match the 0.5.12 guest's manager setting before creating the test project.
-sudo mkdir -p /etc/systemd/system/sysbox-mgr.service.d
-printf '[Service]\nExecStart=\nExecStart=%s --data-root /var/lib/sysbox --disable-ovfs-on-idmapped-mount\n' \
-  "$(command -v sysbox-mgr)" | sudo tee /etc/systemd/system/sysbox-mgr.service.d/umbra-ci.conf >/dev/null
-sudo systemctl daemon-reload
-sudo systemctl restart sysbox.service
-for service in sysbox-fs.service sysbox-mgr.service; do
-  systemctl is-active --quiet "$service"
-done
+configure_manager() {
+  # A configuration arm starts from an empty runner, never an existing clone.
+  [[ -z "$(docker ps -aq)" ]] || { echo 'refuse manager configuration with existing containers' >&2; exit 1; }
+  local extra=''
+  case "$1" in
+    default-clone) ;;
+    no-rootfs-cloning) extra=' --disable-rootfs-cloning' ;;
+    *) exit 2 ;;
+  esac
+  sudo mkdir -p /etc/systemd/system/sysbox-mgr.service.d
+  printf '[Service]\nExecStart=\nExecStart=%s --data-root /var/lib/sysbox --disable-ovfs-on-idmapped-mount%s\n' \
+    "$(command -v sysbox-mgr)" "$extra" | sudo tee /etc/systemd/system/sysbox-mgr.service.d/umbra-ci.conf >/dev/null
+  sudo systemctl daemon-reload
+  sudo systemctl restart sysbox.service
+  for service in sysbox-fs.service sysbox-mgr.service; do
+    systemctl is-active --quiet "$service"
+  done
+}
+
+# Preserve the accepted guest flag in both arms. The default arm deliberately
+# demonstrates that cloned writable-rootfs data cannot survive daemon shutdown.
+configure_manager default-clone
 record_runtime 0.6.7
 
+mkdir "$receipt_dir/default-clone" "$receipt_dir/no-rootfs-cloning"
 export DEV_CVM_COMPOSE_SMOKE_RUNTIME=sysbox-runc
 export UMBRA_NESTED_RECEIPT="$receipt_dir/nested-0.6.7.json"
 export UMBRA_NESTED_EXPECT=unsafe-procfs
-export UMBRA_SYSBOX_HANDOVER_DIR="$receipt_dir/handover"
+qualification_arm=default-clone
+export UMBRA_SYSBOX_QUALIFICATION_ARM=default-clone
+export UMBRA_SYSBOX_HANDOVER_DIR="$receipt_dir/default-clone/handover"
+export UMBRA_SYSBOX_HANDOVER_EXPECT=rootfs-loss
 if timeout --kill-after=30 1200 bash cvms/dev/tests/compose_smoke.sh; then
-  printf 'passed\n' > "$receipt_dir/compose-handover.txt"
+  printf 'passed\n' > "$receipt_dir/compose-default-clone.txt"
 else
-  printf 'failed\n' > "$receipt_dir/compose-handover.txt"
+  printf 'failed\n' > "$receipt_dir/compose-default-clone.txt"
 fi
-if [[ -f "$receipt_dir/handover/baseline-passed" ]]; then
+if [[ -f "$receipt_dir/default-clone/handover/baseline-passed" ]]; then
   printf 'passed\n' > "$receipt_dir/compose-0.6.7.txt"
 else
   printf 'failed\n' > "$receipt_dir/compose-0.6.7.txt"
 fi
-unset UMBRA_SYSBOX_HANDOVER_DIR
+unset UMBRA_SYSBOX_HANDOVER_DIR UMBRA_SYSBOX_HANDOVER_EXPECT
 
-# Always attempt the fresh candidate arm, even if the old arm or cold handover
-# failed. Cleanup may remove only the just-finished disposable smoke project.
+# Always attempt the independent candidate arm after scoped fixture cleanup.
+# The same reviewed bytes are installed; only the supported clone optimization
+# is disabled BEFORE creating a fresh, fully working candidate baseline.
 install_candidate
-record_runtime 0.7.1
+configure_manager no-rootfs-cloning
+qualification_arm=no-rootfs-cloning
+export UMBRA_SYSBOX_QUALIFICATION_ARM=no-rootfs-cloning
+record_runtime 0.7.1-no-rootfs-cloning
 export UMBRA_NESTED_RECEIPT="$receipt_dir/nested-0.7.1.json"
 export UMBRA_NESTED_EXPECT=success
-if timeout --kill-after=30 600 bash cvms/dev/tests/compose_smoke.sh; then
+export UMBRA_SYSBOX_HANDOVER_DIR="$receipt_dir/no-rootfs-cloning/handover"
+export UMBRA_SYSBOX_HANDOVER_EXPECT=preserved
+if timeout --kill-after=30 1800 bash cvms/dev/tests/compose_smoke.sh; then
   printf 'passed\n' > "$receipt_dir/compose-0.7.1.txt"
 else
   printf 'failed\n' > "$receipt_dir/compose-0.7.1.txt"
@@ -223,31 +248,39 @@ import sys
 
 root = Path(sys.argv[1])
 outcomes = {version: (root / f'compose-{version}.txt').read_text().strip()
-            for version in ('0.6.7', '0.7.1', 'handover')}
+            for version in ('0.6.7', '0.7.1', 'default-clone')}
 if any(value != 'passed' for value in outcomes.values()):
     result = {'status': 'failed',
               'baseline': 'reproduced' if outcomes['0.6.7'] == 'passed' else 'inconclusive',
               'candidate': 'passed' if outcomes['0.7.1'] == 'passed' else 'failed',
-              'cold_handover': 'passed' if outcomes['handover'] == 'passed' else 'failed'}
+              'default_clone_loss_control': outcomes['default-clone'],
+              'cold_handover': outcomes['0.7.1']}
     (root / 'comparison.json').write_text(json.dumps(result, indent=2) + '\n')
     raise SystemExit(f"Sysbox comparison failed: {result}")
 baseline = json.loads((root / 'nested-0.6.7.json').read_text())
 candidate = json.loads((root / 'nested-0.7.1.json').read_text())
-handover = json.loads((root / 'handover/handover.json').read_text())
-resumed = json.loads((root / 'handover/nested-candidate.json').read_text())
+loss = json.loads((root / 'default-clone/handover/handover.json').read_text())
+handover = json.loads((root / 'no-rootfs-cloning/handover/handover.json').read_text())
+resumed = json.loads((root / 'no-rootfs-cloning/handover/nested-candidate.json').read_text())
+loss_resumed = json.loads((root / 'default-clone/handover/nested-candidate.json').read_text())
 for field in ('dev_image_id', 'nested_image', 'nested_image_id', 'inner_versions'):
-    if baseline[field] != candidate[field] or baseline[field] != resumed[field]:
+    if len({json.dumps(receipt[field], sort_keys=True) for receipt in (baseline, candidate, resumed, loss_resumed)}) != 1:
         raise SystemExit(f'A/B input changed: {field}')
-if baseline['expectation'] != 'unsafe-procfs' or candidate['expectation'] != 'success' or resumed['expectation'] != 'success':
+if baseline['expectation'] != 'unsafe-procfs' or any(receipt['expectation'] != 'success' for receipt in (candidate, resumed, loss_resumed)):
     raise SystemExit('invalid A/B expectations')
-if handover['status'] != 'passed' or not resumed['nested_bridge_direct_egress_denied']:
+if handover['status'] != 'passed' or not all(receipt['nested_bridge_direct_egress_denied'] for receipt in (candidate, resumed, loss_resumed)):
     raise SystemExit('cold handover did not preserve state and egress enforcement')
+if handover['rootfs_outcome'] != 'preserved' or loss['status'] != 'passed' or loss['rootfs_outcome'] != 'rootfs-loss':
+    raise SystemExit('cloning arms did not prove their distinct rootfs outcomes')
 (root / 'comparison.json').write_text(json.dumps({
     'status': 'passed', 'baseline_sysbox': '0.6.7', 'candidate_sysbox': os.environ['UMBRA_SYSBOX_CANDIDATE_VERSION'],
     'dev_image_id': candidate['dev_image_id'], 'nested_image_id': candidate['nested_image_id'],
     'inner_versions': candidate['inner_versions'],
+    'manager_flags': ['--data-root', '/var/lib/sysbox', '--disable-ovfs-on-idmapped-mount', '--disable-rootfs-cloning'],
+    'default_clone_loss_control': loss,
     'cold_handover': handover,
+    'migrates_already_cloned_rootfs': False,
     'not_exercised': candidate['not_exercised'],
 }, indent=2) + '\n')
-print('Sysbox comparison: old procfs failure reproduced; populated cold handover and fresh candidate passed')
+print('Sysbox comparison: default clone loss reproduced; fresh no-clone candidate preserved populated state across cold restart')
 PY

@@ -25,6 +25,7 @@ on:
       - cvms/dev/tests/compose_smoke.sh
       - cvms/dev/tests/nested_docker_smoke.py
       - tools/test_nested_docker_smoke.py
+      - tools/test_sysbox_handover.py
 
 permissions:
   contents: read
@@ -68,7 +69,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && !inputs.rebuild_candidate && inputs.run_compatibility
     name: compare nested Docker with Sysbox
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     permissions:
       contents: read
       packages: read
@@ -87,7 +88,7 @@ jobs:
       - name: Check failure classification and real TCP controls
         run: |
           command -v timeout
-          uv run --locked --project console python -m pytest -q tools/test_nested_docker_smoke.py
+          uv run --locked --project console python -m pytest -q tools/test_nested_docker_smoke.py tools/test_sysbox_handover.py
       - name: Pull exact images without deployment credentials
         env:
           IMAGE_PULL_USER: ${{ github.actor }}
@@ -122,7 +123,7 @@ jobs:
   candidate-security:
     name: qualify candidate Sysbox binaries
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 75
     permissions:
       contents: read
       packages: read
@@ -218,7 +219,7 @@ jobs:
         if: (github.event_name == 'pull_request' || inputs.rebuild_candidate) && (github.event_name == 'pull_request' || inputs.run_compatibility)
         run: |
           command -v timeout
-          uv run --locked --project console python -m pytest -q tools/test_nested_docker_smoke.py
+          uv run --locked --project console python -m pytest -q tools/test_nested_docker_smoke.py tools/test_sysbox_handover.py
       - name: Pull exact images without deployment credentials
         if: (github.event_name == 'pull_request' || inputs.rebuild_candidate) && (github.event_name == 'pull_request' || inputs.run_compatibility)
         env:
@@ -284,9 +285,17 @@ jobs:
           comparison = json.loads((runtime / 'comparison.json').read_text())
           if comparison['status'] != 'passed' or comparison['cold_handover']['status'] != 'passed':
               raise SystemExit('candidate has no successful populated cold-handover receipt')
+          if (comparison['cold_handover']['rootfs_outcome'] != 'preserved'
+              or comparison['default_clone_loss_control']['rootfs_outcome'] != 'rootfs-loss'
+              or comparison['default_clone_loss_control']['status'] != 'passed'
+              or comparison['migrates_already_cloned_rootfs'] is not False
+              or comparison['manager_flags'] != ['--data-root', '/var/lib/sysbox',
+                  '--disable-ovfs-on-idmapped-mount', '--disable-rootfs-cloning']):
+              raise SystemExit('candidate did not qualify the declared fresh no-clone configuration')
           inputs = subprocess.check_output(['git', 'ls-files', 'ops/verify/sysbox-build'], text=True).splitlines()
           inputs += ['.github/workflows/sysbox-compatibility.yml', 'ops/verify/sysbox-compatibility.sh',
-                     'cvms/dev/tests/compose_smoke.sh', 'cvms/dev/tests/nested_docker_smoke.py']
+                     'cvms/dev/tests/compose_smoke.sh', 'cvms/dev/tests/nested_docker_smoke.py',
+                     'tools/test_nested_docker_smoke.py', 'tools/test_sysbox_handover.py']
           if len(inputs) > 64:
               raise SystemExit('unexpected build input count')
           input_hashes = {name: digest(Path(name), 2 * 1024 * 1024) for name in sorted(inputs)}
@@ -297,8 +306,12 @@ jobs:
           evidence.update({
               'runtime/' + name: digest(runtime / name, 128 * 1024)
               for name in ['comparison.json', 'nested-0.6.7.json', 'nested-0.7.1.json',
-                           'handover/before.json', 'handover/after.json', 'handover/handover.json',
-                           'handover/nested-candidate.json']
+                           'manager-0.6.7.txt', 'manager-0.7.1-no-rootfs-cloning.txt',
+                           'default-clone/handover/before.json', 'default-clone/handover/after.json',
+                           'default-clone/handover/handover.json', 'default-clone/handover/nested-candidate.json',
+                           'default-clone/handover/expected-rootfs-loss.txt',
+                           'no-rootfs-cloning/handover/before.json', 'no-rootfs-cloning/handover/after.json',
+                           'no-rootfs-cloning/handover/handover.json', 'no-rootfs-cloning/handover/nested-candidate.json']
           })
           output.mkdir()
           archive = output / 'sysbox-candidate.tar.gz'
@@ -333,6 +346,8 @@ jobs:
               'binaries': actual, 'archive_sha256': archive_hash, 'source_and_test_sha256': input_hashes,
               'evidence_sha256': evidence, 'dev_image': os.environ['DEV_CVM_COMPOSE_SMOKE_IMAGE'],
               'nested_image': os.environ['UMBRA_NESTED_TEST_IMAGE'],
+              'manager_flags': comparison['manager_flags'],
+              'migrates_already_cloned_rootfs': False,
               'not_exercised': comparison['cold_handover']['not_exercised'],
           }
           encoded = json.dumps(provenance, indent=2, sort_keys=True) + '\n'

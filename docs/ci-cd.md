@@ -116,7 +116,8 @@ networks; the candidate also checks blocked direct bridge egress.
 The baseline must reproduce the exact `unsafe procfs` / `openat2` / cross-device
 failure after the inner daemon is ready. An installation, startup or different
 runtime error makes the comparison inconclusive. The candidate must run the
-commands successfully in both the retained sandbox and a fresh project. The receipt records image IDs, runtime versions, host
+commands successfully in the retained control sandbox and a fresh no-clone
+project, before and after its cold restart. The receipt records image IDs, runtime versions, host
 kernel, user namespace mappings and package/binary hashes. The package source
 pins come from the upstream [0.6.7](https://github.com/nestybox/sysbox/releases/tag/v0.6.7)
 and [0.7.1](https://github.com/nestybox/sysbox/releases/tag/v0.7.1) releases.
@@ -138,29 +139,42 @@ inventory gates pass does the disposable runner install those exact bytes and
 compare them against 0.6.7. The smoke also checks sandbox restart, exec and a
 saved home-directory file.
 
-After the baseline checks, the smoke writes separate fixtures to the sandbox's
-writable root filesystem and its home, workspace and Docker-data named volumes.
-It stops all four existing Compose containers, outer Docker, containerd and both
-Sysbox daemons. It checks completed daemon shutdown before replacing the three
-runtime binaries, restarting the daemons and starting those same containers.
-It retains Docker metadata, the installed package and the Sysbox data root;
-there is no package uninstall, container recreation, data restore or reseeding.
-The containers must remain stopped after the outer daemons restart, before the
-explicit Compose start. Failed handover restores daemon availability for scoped
-fixture cleanup; it cannot turn a failed preservation check into a pass.
-The candidate must preserve all four container IDs, image/runtime/volume
-bindings, fixture contents, ownership and modes, and the previously imported
-inner image. These checks run before the nested smoke can reload its image.
-SSH, tunnel, missing-policy denial and direct-egress checks then run again;
-fresh nested containers must succeed on `none` and `bridge` networks.
+The populated-state qualification has two distinct arms. Both retain
+`--data-root /var/lib/sysbox --disable-ovfs-on-idmapped-mount`; neither relaxes
+procfs checks, device filters, user namespaces or sandbox networking.
 
-The handover receipt includes the actual init root mount before and after the
-switch, so the tested overlay/clone backing is visible. Sysbox manager shutdown
-can remove cloned root filesystems; missing writable-layer data fails this gate.
-An empty replacement sandbox or preserved volume alone cannot pass. The old
-runtime cannot start the selected nested containers, so this proves preservation
-of the populated outer sandbox and inner image, not migration of running nested
-containers. A separate fresh-candidate test still runs if handover fails.
+- **Default clone loss control:** the original 0.6.7 manager configuration first
+  reproduces the procfs failure. The smoke writes synthetic fixtures to the
+  writable rootfs and the home, workspace and Docker-data named volumes, then
+  cold-stops the containers, Docker, containerd and Sysbox before installing the
+  candidate. The same containers must restart with only the rootfs marker
+  missing. The gate accepts exactly `FileNotFoundError` for that path, while
+  requiring every volume fixture, ownership/mode, container/image/runtime/volume
+  binding, and the previously loaded inner image. Other failures remain failures.
+  The receipt retains the raw missing-file diagnostic and actual clone mount.
+- **Fresh no-clone candidate:** with no containers present, the manager adds
+  `--disable-rootfs-cloning` before creating a fresh candidate baseline. This
+  supported option uses ordinary rootfs chown instead of the disposable clone
+  optimization. It can cost more startup I/O; readiness is bounded at 600 seconds.
+  Nested Docker, SSH, tunnels and egress controls must work before data is seeded.
+  All daemons then cold-stop; the same reviewed binaries and same container IDs
+  restart. Every rootfs and volume fixture, ownership/mode and inner image must
+  survive, and all workload/security checks must pass again.
+
+Each arm checks completed daemon shutdown, retains Docker metadata and the
+installed package, and uses `compose start`, never recreation, to resume its
+containers. Inner `docker image save` reads every retained layer before the
+nested smoke can import anything again. Actual init root mounts prove that the
+control uses a clone and the preservation arm does not. Cleanup removes only
+the owned synthetic project; an unrelated error cannot pass as expected loss.
+
+This configuration **does not migrate an already-cloned rootfs**. Both upstream
+versions [delete clone data during manager shutdown](https://github.com/nestybox/sysbox-mgr/blob/2d45af01bcfd8641e6641f76104c6003bf501cd7/mgr.go#L489)
+and [clean the data root on startup](https://github.com/nestybox/sysbox-mgr/blob/2d45af01bcfd8641e6641f76104c6003bf501cd7/utils.go#L503).
+Existing clone-backed data needs an explicit verified filesystem
+checkpoint before the first runtime correction. A healthy fresh no-clone
+baseline must precede any separate OS-upgrade qualification. CI does not restore
+fixtures or silently change the source-pinned bootstrap manager flags.
 
 Only a successful source build, security scan, device-filter test and complete
 runtime comparison produce `sysbox-qualified-candidate-<run>-<attempt>`.
@@ -169,7 +183,9 @@ binary/archive SHA-256 manifests and bounded `qualification.json` metadata.
 The metadata identifies the checkout and workflow run, hashes source/build/test
 inputs and the separate security/runtime receipts, and records the tested image
 digests. These are diagnostic provenance records, not signed release attestations.
-Scan-only runs, upstream-package diagnostics and failed handovers produce no
+The metadata binds the required no-clone manager flags and explicitly excludes
+migration of already-cloned data. Both arms must pass their exact outcomes.
+Scan-only runs, upstream-package diagnostics and failed preservation checks produce no
 qualified binary artifact. No build output is published as a release or installed on a CVM.
 
 Manual `resolve_locks=true` adds a separate maintenance job that exports proposed
