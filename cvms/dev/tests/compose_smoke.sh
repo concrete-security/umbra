@@ -5,6 +5,12 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 smoke_tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/umbra-dev-compose-smoke.XXXXXX")"
 PROJECT="umbra-dev-compose-smoke-$(printf '%s' "${smoke_tmpdir##*.}" | tr '[:upper:]' '[:lower:]')"
 compose_started=0
+SMOKE_RUNTIME="${DEV_CVM_COMPOSE_SMOKE_RUNTIME:-runc}"
+case "$SMOKE_RUNTIME" in
+  runc) smoke_wait=60 ;;
+  sysbox-runc) smoke_wait=180 ;;
+  *) echo "compose smoke: unsupported runtime" >&2; exit 2 ;;
+esac
 explicit_image=0
 if [ "${DEV_CVM_COMPOSE_SMOKE_IMAGE+x}" = x ]; then
   IMAGE_TAG="$DEV_CVM_COMPOSE_SMOKE_IMAGE"
@@ -82,8 +88,9 @@ printf 'VERIFY_PLACEHOLDER=compose-smoke\n' >"$smoke_tmpdir/placeholders"
 
 # Most developer hosts do not have sysbox-runc registered. This local smoke keeps
 # production networking and service entrypoints, but swaps only the sandbox OCI
-# runtime so SSH/tunnel boot can be checked outside a dstack guest. Sysbox's
-# user-namespace isolation and TDX attestation are not verified by this test.
+# runtime so SSH/tunnel boot can be checked outside a dstack guest. The opt-in
+# Sysbox CI experiment keeps sysbox-runc and tests nested Docker below. Neither
+# mode verifies TDX attestation.
 # The production compose file must stay byte-identical (its shade app_compose
 # hash feeds CVM measurements), so the test-only listener healthchecks live
 # here: compose >= 2.40 fails `up --wait` for containers without a healthcheck,
@@ -91,7 +98,7 @@ printf 'VERIFY_PLACEHOLDER=compose-smoke\n' >"$smoke_tmpdir/placeholders"
 cat >"$smoke_tmpdir/compose.override.yml" <<YAML
 services:
   user-sandbox:
-    runtime: runc
+    runtime: $SMOKE_RUNTIME
   dev-egress-forwarder:
     healthcheck:
       disable: false
@@ -196,7 +203,7 @@ if [[ "$rendered_compose" == *SECURITY_CVM_ATLS_POLICY_B64* \
 fi
 
 compose_started=1
-compose up -d --pull never --wait --wait-timeout 60
+compose up -d --pull never --wait --wait-timeout "$smoke_wait"
 
 # The inner SSH command expands inside the sandbox, not in this script.
 # shellcheck disable=SC2016
@@ -325,6 +332,16 @@ lines = sys.stdin.read().splitlines()
 if not any(" connection_error " in line and line.rstrip().endswith(expected) for line in lines):
     raise SystemExit("compose smoke: CONNECT denial did not come from the missing-policy bootstrap check")
 ' "$origin_ip"
+
+if [ "$SMOKE_RUNTIME" = sysbox-runc ]; then
+  python3 "$ROOT/cvms/dev/tests/nested_docker_smoke.py" \
+    --sandbox "$(compose ps -q user-sandbox)" \
+    --image "${UMBRA_NESTED_TEST_IMAGE:?set a pre-pulled nested image digest}" \
+    --expect "${UMBRA_NESTED_EXPECT:?set success or unsafe-procfs}" \
+    --origin "$origin_ip" \
+    --control "$(compose exec -T user-sandbox getent ahostsv4 dev-egress-forwarder | awk 'NR == 1 { print $1 }')" \
+    --receipt "${UMBRA_NESTED_RECEIPT:?set a fresh receipt path}"
+fi
 
 origin_control after
 

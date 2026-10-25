@@ -47,8 +47,8 @@ check:
 	uv lock --check --project cvms/security
 	$(UMBRA_PINNED_PYTHON) -m py_compile tools/check-cargo-keywords.py tools/check-dco.py tools/check-github-actions.py tools/check-pip-vendor.py tools/check-cargo-dnssec.py tools/test_check_cargo_dnssec.py tools/test_check_pip_vendor.py tools/generate-cargo-sbom.py tools/test_check_cargo_keywords.py tools/test_check_github_actions.py
 	uv run --locked --project console python -m pytest -q tools/test_check_cargo_keywords.py tools/test_check_github_actions.py tools/test_check_pip_vendor.py tools/test_check_cargo_dnssec.py
-	$(UMBRA_PINNED_PYTHON) -m py_compile ops/verify/select-release-test-images.py ops/verify/test-release-images.py ops/verify/run-required-pytest.py tools/test_release_test_images.py tools/test_release_image_runner.py tools/test_release_image_workflow.py tools/test_required_pytest.py
-	uv run --locked --project console python -m pytest -q tools/test_release_test_images.py tools/test_release_image_runner.py tools/test_release_image_workflow.py tools/test_required_pytest.py
+	$(UMBRA_PINNED_PYTHON) -m py_compile ops/verify/select-release-test-images.py ops/verify/test-release-images.py ops/verify/run-required-pytest.py tools/test_release_test_images.py tools/test_release_image_runner.py tools/test_release_image_workflow.py tools/test_required_pytest.py tools/test_nested_docker_smoke.py
+	uv run --locked --project console python -m pytest -q tools/test_release_test_images.py tools/test_release_image_runner.py tools/test_release_image_workflow.py tools/test_required_pytest.py tools/test_nested_docker_smoke.py
 	uv run --locked --project console python tools/check-github-actions.py
 	cd console && npm ci --ignore-scripts --no-audit --no-fund
 	cd console && npm run test:phala
@@ -79,7 +79,8 @@ check:
 	bash -n cvms/dev/user-sandbox/umbra-agent-claude.sh
 	bash -n cvms/dev/user-sandbox/umbra-agent-codex.sh
 	bash -n cvms/dev/tests/user_sandbox_image_smoke.sh
-	bash -n cvms/dev/tests/compose_smoke.sh
+	bash -n cvms/dev/tests/compose_smoke.sh ops/verify/sysbox-compatibility.sh
+	$(UMBRA_PINNED_PYTHON) -m py_compile cvms/dev/tests/nested_docker_smoke.py
 	bash -n ops/verify/verify-image-reproducibility.sh
 	bash cvms/dev/tests/user_sandbox_image_smoke.sh
 	$(UMBRA_PINNED_RUN) bash cvms/dev/tests/compose_smoke.sh
