@@ -1,28 +1,8 @@
 #!/usr/bin/env bash
 # Qualification build only: no installation, publication, or live guest changes.
 set -euo pipefail
-[[ "$(go env GOVERSION)" = go1.27.3 && "$(go env GOARCH)" = amd64 ]]
-mkdir -p /src /out/bin /out/evidence
-cd /src
-while read -r repository commit checksum destination; do
-  [[ -n "$repository" && "$repository" != \#* ]] || continue
-  curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
-    --connect-timeout 10 --max-time 120 --max-filesize 25000000 --retry 3 \
-    "https://codeload.github.com/nestybox/$repository/tar.gz/$commit" -o /tmp/source.tar.gz
-  printf '%s  %s\n' "$checksum" /tmp/source.tar.gz | sha256sum --check --strict
-  mkdir -p "$destination"
-  tar -xzf /tmp/source.tar.gz -C "$destination" --strip-components=1 --no-same-owner
-  rm /tmp/source.tar.gz
-done < /recipe/sources.txt
-cp /recipe/sources.txt /out/evidence/sources.txt
-dpkg-query -W -f='${Package} ${Version}\n' > /out/evidence/build-packages.txt
-# The pinned legacy generator supports the source's plugins=grpc API.
-go install github.com/golang/protobuf/protoc-gen-go@v1.5.4
-go version -m /go/bin/protoc-gen-go > /out/evidence/protoc-gen-go.buildinfo.txt
-protoc --version > /out/evidence/protoc.txt
-make -C sysbox-ipc sysbox-ipc
-find sysbox-ipc -name '*.pb.go' -type f -print0 | sort -z | xargs -0 sha256sum \
-  > /out/evidence/generated-protobuf.sha256
+bash /recipe/prepare.sh
+mkdir -p /out/bin /out/tests
 
 for component in sysbox-runc sysbox-fs sysbox-mgr; do
   cd "/src/$component"
@@ -58,7 +38,13 @@ for component in sysbox-runc sysbox-fs sysbox-mgr; do
     exit 1
   fi
   (cd /out/bin && sha256sum "$component") >> /out/evidence/binaries.sha256
+  if [[ "$component" = sysbox-runc ]]; then
+    go test -mod=readonly -tags "$tags" ./libcontainer/cgroups/ebpf/devicefilter
+    go test -mod=readonly -buildvcs=false -trimpath -tags "$tags" \
+      -ldflags '-extldflags -static' -c -o /out/tests/device-filter.test ./libcontainer/cgroups/ebpf
+  fi
 done
 
 # A clean, independent build must reproduce the already scanned binary bytes.
+cat /out/evidence/binaries.sha256
 (cd /out/bin && sha256sum --check --strict /recipe/binaries.expected.sha256)

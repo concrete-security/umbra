@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.26.0@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
-FROM golang:1.27.3-bookworm@sha256:972b4110ba0f47539a975c31e52c64765e1ff19f2d74469ae4a595c6676e80a5 AS build
+FROM golang:1.27.3-bookworm@sha256:972b4110ba0f47539a975c31e52c64765e1ff19f2d74469ae4a595c6676e80a5 AS toolchain
 ENV CGO_ENABLED=1 GOTOOLCHAIN=local GOFLAGS=-mod=readonly
 RUN sed -i \
       -e 's|URIs: http://deb.debian.org/debian$|URIs: https://snapshot.debian.org/archive/debian/20261023T000000Z|' \
@@ -7,11 +7,18 @@ RUN sed -i \
       /etc/apt/sources.list.d/debian.sources \
     && printf '%s\n' 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99snapshot \
     && apt-get update \
-    && apt-get install -y --no-install-recommends build-essential pkg-config libseccomp-dev protobuf-compiler libprotobuf-dev \
+    && apt-get install -y --no-install-recommends build-essential patch pkg-config libseccomp-dev protobuf-compiler libprotobuf-dev \
     && test -f /usr/include/google/protobuf/timestamp.proto \
     && ln -s /usr/include/google /usr/local/include/google \
     && rm -rf /var/lib/apt/lists/*
 COPY . /recipe/
+FROM toolchain AS lock-resolution
+RUN bash /recipe/resolve-locks.sh
+FROM scratch AS resolved-locks
+USER 65532:65532
+COPY --from=lock-resolution /out/ /
+FROM toolchain AS build
 RUN bash /recipe/build.sh
 FROM scratch
+USER 65532:65532
 COPY --from=build /out/ /

@@ -12,6 +12,10 @@ on:
         description: Build the pinned Sysbox source with patched dependencies
         type: boolean
         default: true
+      resolve_locks:
+        description: Also generate proposed module locks for review (does not qualify a runtime)
+        type: boolean
+        default: false
   pull_request:
     branches: [dev, main]
     paths:
@@ -36,6 +40,30 @@ env:
   UMBRA_NESTED_TEST_IMAGE: ubuntu@sha256:561618e2c15bf2397621dd04f96926663a3b5616c189cf7e38db7e82f5c538ea
 
 jobs:
+  dependency-locks:
+    if: github.event_name == 'workflow_dispatch' && inputs.resolve_locks
+    name: resolve dependency locks (maintenance only)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout lock maintenance tooling
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: 'false'
+      - name: Resolve proposed locks without building a runtime
+        run: |
+          set -euo pipefail
+          docker build --platform linux/amd64 --no-cache --progress=plain \
+            --target resolved-locks --output "type=local,dest=$RUNNER_TEMP/sysbox-lock-resolution" \
+            ops/verify/sysbox-build
+      - name: Retain proposed locks for review
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sysbox-proposed-locks-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/sysbox-lock-resolution/
+          if-no-files-found: error
+          retention-days: 14
+
   compare:
     if: github.event_name == 'workflow_dispatch' && !inputs.rebuild_candidate && inputs.run_compatibility
     name: compare nested Docker with Sysbox
@@ -135,6 +163,7 @@ jobs:
             --output "type=local,dest=$RUNNER_TEMP/sysbox-build" ops/verify/sysbox-build
           mv "$RUNNER_TEMP/sysbox-build/bin" "$RUNNER_TEMP/sysbox-candidate"
           mv "$RUNNER_TEMP/sysbox-build/evidence" "$RUNNER_TEMP/sysbox-security"
+          mv "$RUNNER_TEMP/sysbox-build/tests" "$RUNNER_TEMP/sysbox-tests"
           : > "$RUNNER_TEMP/sysbox-security/empty-ignore"
       - name: Check candidate binary vulnerabilities without exceptions
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
@@ -169,6 +198,13 @@ jobs:
           assert all(row.get('Packages') for row in results)
           print('All three candidate Go binaries were analyzed')
           PY
+      - name: Require kernel device-filter enforcement and lifetime
+        if: github.event_name == 'pull_request' || inputs.rebuild_candidate
+        run: |
+          set -euo pipefail
+          sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            "$RUNNER_TEMP/sysbox-tests/device-filter.test" -test.v -test.timeout=120s \
+            | tee "$RUNNER_TEMP/sysbox-security/device-filter-tests.txt"
       - name: Install uv
         if: (github.event_name == 'pull_request' || inputs.rebuild_candidate) && (github.event_name == 'pull_request' || inputs.run_compatibility)
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0

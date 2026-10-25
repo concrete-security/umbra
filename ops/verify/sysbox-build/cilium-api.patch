@@ -1,0 +1,55 @@
+--- a/libcontainer/cgroups/ebpf/ebpf.go
++++ b/libcontainer/cgroups/ebpf/ebpf.go
+@@ -3,6 +3,7 @@
+ import (
+ 	"github.com/cilium/ebpf"
+ 	"github.com/cilium/ebpf/asm"
++	"github.com/cilium/ebpf/link"
+ 	"github.com/pkg/errors"
+ 	"golang.org/x/sys/unix"
+ )
+@@ -32,14 +33,20 @@
+ 	if err != nil {
+ 		return nilCloser, err
+ 	}
+-	if err := prog.Attach(dirFD, ebpf.AttachCGroupDevice, unix.BPF_F_ALLOW_MULTI); err != nil {
++	if err := link.RawAttachProgram(link.RawAttachProgramOptions{
++		Target: dirFD, Program: prog, Attach: ebpf.AttachCGroupDevice,
++		Flags: unix.BPF_F_ALLOW_MULTI,
++	}); err != nil {
++		prog.Close()
+ 		return nilCloser, errors.Wrap(err, "failed to call BPF_PROG_ATTACH (BPF_CGROUP_DEVICE, BPF_F_ALLOW_MULTI)")
+ 	}
+ 	closer := func() error {
+-		if err := prog.Detach(dirFD, ebpf.AttachCGroupDevice, unix.BPF_F_ALLOW_MULTI); err != nil {
+-			return errors.Wrap(err, "failed to call BPF_PROG_DETACH (BPF_CGROUP_DEVICE, BPF_F_ALLOW_MULTI)")
++		if err := link.RawDetachProgram(link.RawDetachProgramOptions{
++			Target: dirFD, Program: prog, Attach: ebpf.AttachCGroupDevice,
++		}); err != nil {
++			return errors.Wrap(err, "failed to call BPF_PROG_DETACH (BPF_CGROUP_DEVICE)")
+ 		}
+-		return nil
++		return prog.Close()
+ 	}
+ 	return closer, nil
+ }
+--- a/libcontainer/cgroups/ebpf/devicefilter/devicefilter.go
++++ b/libcontainer/cgroups/ebpf/devicefilter/devicefilter.go
+@@ -150,7 +150,7 @@
+ 	}
+ 	p.insts = append(p.insts, acceptBlock(dev.Allow)...)
+ 	// set blockSym to the first instruction we added in this iteration
+-	p.insts[prevBlockLastIdx+1] = p.insts[prevBlockLastIdx+1].Sym(blockSym)
++	p.insts[prevBlockLastIdx+1] = p.insts[prevBlockLastIdx+1].WithSymbol(blockSym)
+ 	p.blockID++
+ 	return nil
+ }
+@@ -163,7 +163,7 @@
+ 	blockSym := "block-" + strconv.Itoa(p.blockID)
+ 	p.insts = append(p.insts,
+ 		// R0 <- 0
+-		asm.Mov.Imm32(asm.R0, 0).Sym(blockSym),
++		asm.Mov.Imm32(asm.R0, 0).WithSymbol(blockSym),
+ 		asm.Return(),
+ 	)
+ 	p.blockID = -1
