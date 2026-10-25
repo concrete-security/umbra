@@ -87,5 +87,5 @@ The runner-only [Sysbox compatibility experiment](../../docs/ci-cd.md#sysbox-com
 uses the exact selected Dev release and real nested Docker. It compares upstream
 Sysbox 0.6.7 with a locked 0.7.1 source rebuild on one disposable host. The rebuild
 must reproduce reviewed binary hashes and pass an unsuppressed dependency scan
-before runtime, restart and persistent-file checks. It does not qualify a dstack
+before kernel device-filter, runtime, restart and persistent-file checks. It does not qualify a dstack
 OS migration.
