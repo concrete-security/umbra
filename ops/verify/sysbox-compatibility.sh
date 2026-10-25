@@ -14,6 +14,17 @@ cd "$ROOT"
 receipt_dir="$RUNNER_TEMP/sysbox-compatibility"
 mkdir "$receipt_dir"
 [[ -z "$(docker ps -aq)" ]] || { echo 'refuse a runner with existing containers' >&2; exit 2; }
+candidate_dir="${UMBRA_SYSBOX_CANDIDATE_DIR:-}"
+if [[ -n "$candidate_dir" ]]; then
+  [[ "$candidate_dir" = "$RUNNER_TEMP/sysbox-candidate" && ! -L "$candidate_dir" ]] \
+    || { echo 'refuse candidate outside the disposable runner output' >&2; exit 2; }
+  for component in sysbox-runc sysbox-fs sysbox-mgr; do
+    [[ -f "$candidate_dir/$component" && -x "$candidate_dir/$component" && ! -L "$candidate_dir/$component" ]] \
+      || { echo 'candidate must contain three regular executable files' >&2; exit 2; }
+  done
+  (cd "$candidate_dir" && sha256sum --check --strict "$RUNNER_TEMP/sysbox-security/binaries.sha256")
+  cp "$RUNNER_TEMP/sysbox-security/binaries.sha256" "$receipt_dir/scanned-candidate.sha256"
+fi
 docker version --format '{{json .Server}}' > "$receipt_dir/outer-before.json"
 uname -r > "$receipt_dir/kernel.txt"
 printf '%s\n' "${ImageOS:-unknown}" "${ImageVersion:-unknown}" > "$receipt_dir/runner-image.txt"
@@ -46,6 +57,17 @@ for version in 0.6.7 0.7.1; do
   installed="$(dpkg-query -W -f='${Version}' sysbox-ce)"
   [[ "$installed" = "$version.linux" ]] \
     || { echo 'unexpected installed Sysbox version' >&2; exit 1; }
+  if [[ "$version" = 0.7.1 && -n "$candidate_dir" ]]; then
+    # Only this disposable runner accepts the source candidate, after its scan.
+    # Never replace a runtime while it owns containers or has active daemons.
+    [[ -z "$(docker ps -aq)" ]]
+    sudo systemctl stop sysbox.service sysbox-fs.service sysbox-mgr.service
+    for component in sysbox-runc sysbox-fs sysbox-mgr; do
+      sudo install -m 0755 "$candidate_dir/$component" "$(command -v "$component")"
+      cmp "$candidate_dir/$component" "$(command -v "$component")"
+      "$component" --version | grep -F '0.7.1+umbra.1' >/dev/null
+    done
+  fi
   # Match the 0.5.12 guest's manager setting in both arms. This is safe only
   # before creating the isolated test project; never restart a live CVM here.
   sudo mkdir -p /etc/systemd/system/sysbox-mgr.service.d
@@ -79,6 +101,7 @@ done
 
 python3 - "$receipt_dir" <<'PY'
 import json
+import os
 from pathlib import Path
 import sys
 
@@ -99,10 +122,10 @@ for field in ('dev_image_id', 'nested_image', 'nested_image_id', 'inner_versions
 if baseline['expectation'] != 'unsafe-procfs' or candidate['expectation'] != 'success':
     raise SystemExit('invalid A/B expectations')
 (root / 'comparison.json').write_text(json.dumps({
-    'status': 'passed', 'baseline_sysbox': '0.6.7', 'candidate_sysbox': '0.7.1',
+    'status': 'passed', 'baseline_sysbox': '0.6.7', 'candidate_sysbox': '0.7.1+umbra.1' if os.environ.get('UMBRA_SYSBOX_CANDIDATE_DIR') else '0.7.1',
     'dev_image_id': candidate['dev_image_id'], 'nested_image_id': candidate['nested_image_id'],
     'inner_versions': candidate['inner_versions'],
     'not_exercised': candidate['not_exercised'],
 }, indent=2) + '\n')
-print('Sysbox comparison: exact procfs failure reproduced with 0.6.7; 0.7.1 passed')
+print('Sysbox comparison: exact procfs failure reproduced with 0.6.7; selected candidate passed')
 PY

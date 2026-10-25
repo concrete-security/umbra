@@ -101,8 +101,8 @@ against the selected immutable artifacts before production promotion.
 ## Sysbox compatibility experiment
 
 `Sysbox compatibility` runs on a disposable GitHub-hosted Ubuntu 24.04 runner.
-It compares checksum-pinned upstream Sysbox 0.6.7 and 0.7.1 against the same
-fixed Dev release digest. Both arms run on the same host; installation must not
+It compares checksum-pinned upstream Sysbox 0.6.7 with a locked 0.7.1 source
+candidate against the same fixed Dev release digest. Both arms run on the same host; installation must not
 change the outer Docker components. The workflow installs host runtime packages
 and therefore must never run on a developer machine, self-hosted runner or CVM.
 
@@ -120,6 +120,32 @@ commands successfully. The receipt records image IDs, runtime versions, host
 kernel, user namespace mappings and package/binary hashes. The package source
 pins come from the upstream [0.6.7](https://github.com/nestybox/sysbox/releases/tag/v0.6.7)
 and [0.7.1](https://github.com/nestybox/sysbox/releases/tag/v0.7.1) releases.
+
+A separate job scans all three exact candidate Go binaries with Trivy's `rootfs`
+analyzer. Missing inventories, scanner errors and known HIGH/CRITICAL dependency
+advisories fail the job; repository ignore exceptions do not apply. Manual runs
+can set `run_compatibility=false` to repeat only this scan.
+
+The default candidate compiles the coherent 0.7.1 source set with pinned Go
+1.27.3, snapshot native build packages and committed dependency locks. A small
+source patch adapts its cgroup device filter to the fixed eBPF library while
+preserving raw kernel attachment semantics. Existing filter-generation tests
+run during the build. A private runner cgroup checks allowed and denied device
+opens, enforcement after the loader exits, explicit detach and invalid targets.
+The candidate must
+reproduce the reviewed binary checksums before scanning. Only after the scan and
+inventory gates pass does the disposable runner install those exact bytes and
+compare them against 0.6.7. The smoke also checks sandbox restart, exec and a
+saved home-directory file. No build output is published or installed on a CVM.
+
+Manual `resolve_locks=true` adds a separate maintenance job that exports proposed
+Go module locks. It builds no runtime and cannot feed the qualification job.
+Review and commit those locks before rebuilding; a changed binary hash still
+fails the mandatory checksum gate until its new pin is reviewed and committed.
+
+Manual `rebuild_candidate=false` selects the checksum-pinned upstream package
+for a separate diagnostic. It must pass the same unsuppressed binary scan;
+compatibility success does not override known dependency advisories.
 
 This is a diagnostic experiment, not a release or deployment approval. Upstream
 packages share the 0.6.7 component source revisions with dstack, but the runner's

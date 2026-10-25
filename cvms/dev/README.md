@@ -85,4 +85,7 @@ The pinned sandbox tools include Docker Engine/CLI 29.9.2, Buildx 0.38.1+umbra.2
 
 The runner-only [Sysbox compatibility experiment](../../docs/ci-cd.md#sysbox-compatibility-experiment)
 uses the exact selected Dev release and real nested Docker. It compares upstream
-Sysbox packages on one disposable host; it does not qualify a dstack OS migration.
+Sysbox 0.6.7 with a locked 0.7.1 source rebuild on one disposable host. The rebuild
+must reproduce reviewed binary hashes and pass an unsuppressed dependency scan
+before kernel device-filter, runtime, restart and persistent-file checks. It does not qualify a dstack
+OS migration.
