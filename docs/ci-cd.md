@@ -127,11 +127,21 @@ advisories fail the job; repository ignore exceptions do not apply. Manual runs
 can set `run_compatibility=false` to repeat only this scan.
 
 The default candidate compiles the coherent 0.7.1 source set with pinned Go
-1.27.3, snapshot native build packages and committed dependency locks. It must
+1.27.3, snapshot native build packages and committed dependency locks. A small
+source patch adapts its cgroup device filter to the fixed eBPF library while
+preserving raw kernel attachment semantics. Existing filter-generation tests
+run during the build. A private runner cgroup checks allowed and denied device
+opens, enforcement after the loader exits, explicit detach and invalid targets.
+The candidate must
 reproduce the reviewed binary checksums before scanning. Only after the scan and
 inventory gates pass does the disposable runner install those exact bytes and
 compare them against 0.6.7. The smoke also checks sandbox restart, exec and a
 saved home-directory file. No build output is published or installed on a CVM.
+
+Manual `resolve_locks=true` adds a separate maintenance job that exports proposed
+Go module locks. It builds no runtime and cannot feed the qualification job.
+Review and commit those locks before rebuilding; a changed binary hash still
+fails the mandatory checksum gate until its new pin is reviewed and committed.
 
 Manual `rebuild_candidate=false` selects the checksum-pinned upstream package
 for a separate diagnostic. It must pass the same unsuppressed binary scan;

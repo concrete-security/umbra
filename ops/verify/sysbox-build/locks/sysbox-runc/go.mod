@@ -5,7 +5,7 @@ go 1.26.0
 require (
 	github.com/Masterminds/semver v1.5.0
 	github.com/checkpoint-restore/go-criu/v4 v4.1.0
-	github.com/cilium/ebpf v0.3.0
+	github.com/cilium/ebpf v0.22.0
 	github.com/containerd/console v1.0.5
 	github.com/coreos/go-systemd/v22 v22.1.0
 	github.com/cyphar/filepath-securejoin v0.6.0

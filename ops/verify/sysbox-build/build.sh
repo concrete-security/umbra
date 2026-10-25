@@ -45,6 +45,6 @@ for component in sysbox-runc sysbox-fs sysbox-mgr; do
   fi
 done
 
-# A clean, independent build must reproduce the already scanned binary bytes.
+# A clean, independent build must reproduce the reviewed binary bytes.
 cat /out/evidence/binaries.sha256
 (cd /out/bin && sha256sum --check --strict /recipe/binaries.expected.sha256)
