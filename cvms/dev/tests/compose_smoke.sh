@@ -433,7 +433,16 @@ if phase not in ("before", "after"):
     raise SystemExit("invalid handover phase")
 
 def run(args, **kwargs):
-    return subprocess.run(args, check=True, capture_output=True, text=True, timeout=30, **kwargs).stdout
+    try:
+        return subprocess.run(args, check=True, capture_output=True, text=True, timeout=30, **kwargs).stdout
+    except subprocess.CalledProcessError as error:
+        # This project contains only synthetic runner fixtures. Retain a bounded
+        # diagnostic before cleanup removes the failed container and its data.
+        diagnostic = (error.stderr or "")[-4096:]
+        with Path(output, "failed-command-" + phase + ".txt").open("x") as handle:
+            handle.write(diagnostic)
+        print(diagnostic, file=sys.stderr)
+        raise
 
 ids = run(["docker", "ps", "-aq", "--no-trunc", "--filter", f"label=com.docker.compose.project={project}"]).split()
 if len(ids) != 4:
