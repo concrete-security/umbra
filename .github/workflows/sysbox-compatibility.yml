@@ -8,11 +8,16 @@ on:
         description: Repeat the runtime comparison as well as the binary security scan
         type: boolean
         default: true
+      rebuild_candidate:
+        description: Build the pinned Sysbox source with patched dependencies (diagnostic)
+        type: boolean
+        default: false
   pull_request:
     branches: [dev, main]
     paths:
       - .github/workflows/sysbox-compatibility.yml
       - ops/verify/sysbox-compatibility.sh
+      - ops/verify/sysbox-build/**
       - cvms/dev/tests/compose_smoke.sh
       - cvms/dev/tests/nested_docker_smoke.py
       - tools/test_nested_docker_smoke.py
@@ -97,6 +102,7 @@ jobs:
         with:
           persist-credentials: 'false'
       - name: Extract the exact candidate without executing or installing it
+        if: ${{ !inputs.rebuild_candidate }}
         run: |
           set -euo pipefail
           umask 077
@@ -119,6 +125,15 @@ jobs:
             sha256sum "$RUNNER_TEMP/sysbox-candidate/$component" \
               >> "$RUNNER_TEMP/sysbox-security/binaries.sha256"
           done
+      - name: Build the source candidate in the disposable runner
+        if: inputs.rebuild_candidate
+        run: |
+          set -euo pipefail
+          docker build --platform linux/amd64 --no-cache --progress=plain \
+            --output "type=local,dest=$RUNNER_TEMP/sysbox-build" ops/verify/sysbox-build
+          mv "$RUNNER_TEMP/sysbox-build/bin" "$RUNNER_TEMP/sysbox-candidate"
+          mv "$RUNNER_TEMP/sysbox-build/evidence" "$RUNNER_TEMP/sysbox-security"
+          : > "$RUNNER_TEMP/sysbox-security/empty-ignore"
       - name: Check candidate binary vulnerabilities without exceptions
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         env:

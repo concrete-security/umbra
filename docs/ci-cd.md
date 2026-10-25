@@ -121,6 +121,18 @@ kernel, user namespace mappings and package/binary hashes. The package source
 pins come from the upstream [0.6.7](https://github.com/nestybox/sysbox/releases/tag/v0.6.7)
 and [0.7.1](https://github.com/nestybox/sysbox/releases/tag/v0.7.1) releases.
 
+A separate job scans all three exact candidate Go binaries with Trivy's `rootfs`
+analyzer. Missing inventories, scanner errors and known HIGH/CRITICAL dependency
+advisories fail the job; repository ignore exceptions do not apply. Manual runs
+can set `run_compatibility=false` to repeat only this scan.
+
+The manual `rebuild_candidate=true` diagnostic compiles the coherent 0.7.1 source
+set with pinned Go 1.27.3, snapshot native build packages and updated Go modules.
+It retains the resolved module locks and ELF/build metadata, then scans the three
+outputs. This resolution build does not install, publish or qualify its output
+for deployment. The resolved locks need review, followed by exact-binary runtime
+and boot qualification, before a source candidate can replace the host runtime.
+
 This is a diagnostic experiment, not a release or deployment approval. Upstream
 packages share the 0.6.7 component source revisions with dstack, but the runner's
 kernel, packaging and outer Docker differ. No result establishes dstack boot,
