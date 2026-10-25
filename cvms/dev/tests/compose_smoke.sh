@@ -438,7 +438,18 @@ def run(args, **kwargs):
 ids = run(["docker", "ps", "-aq", "--no-trunc", "--filter", f"label=com.docker.compose.project={project}"]).split()
 if len(ids) != 4:
     raise SystemExit("handover requires all four existing containers")
-rows = json.loads(run(["docker", "inspect", *ids]))
+deadline = time.monotonic() + 180
+while True:
+    rows = json.loads(run(["docker", "inspect", *ids]))
+    if all(row["State"]["Status"] == "running" and
+           row["State"].get("Health", {}).get("Status") == "healthy" for row in rows):
+        break
+    if any(row["State"]["Status"] in ("dead", "exited") or
+           row["State"].get("Health", {}).get("Status") == "unhealthy" for row in rows):
+        raise SystemExit("handover service failed to become healthy")
+    if time.monotonic() >= deadline:
+        raise SystemExit("handover services did not become healthy within 180 seconds")
+    time.sleep(1)
 services = {}
 sandbox = None
 for row in rows:
@@ -520,7 +531,12 @@ expected_image = json.loads(Path(baseline).read_text())["nested_image_id"]
 loaded = json.loads(run([*inner, "image", "inspect", expected_image]))
 if len(loaded) != 1 or loaded[0]["Id"] != expected_image:
     raise SystemExit("cold handover lost the previously imported inner image")
+# Read every retained layer before run_checks can import the image again.
+# Metadata alone would miss lost content that the later load could repair.
+subprocess.run([*inner, "image", "save", expected_image], stdout=subprocess.DEVNULL,
+               stderr=subprocess.PIPE, timeout=120, check=True)
 state = {"services": services, "fixtures": fixtures, "inner_image_id": loaded[0]["Id"],
+         "inner_image_content_readable": True,
          "init_root_mount": root_mounts[0], "init_pid": pid}
 if phase == "after" and (fixtures != previous["fixtures"] or loaded[0]["Id"] != previous["inner_image_id"]):
     raise SystemExit("cold handover changed populated state")
@@ -532,7 +548,7 @@ PY
   compose stop --timeout 20
   bash "$ROOT/ops/verify/sysbox-compatibility.sh" switch-runtime "$PROJECT"
   # start cannot recreate a container. Do not use up, restore, or reseed here.
-  compose start --wait --wait-timeout "$smoke_wait"
+  compose start
   python3 "$smoke_tmpdir/handover-state.py" after "$PROJECT" "$UMBRA_SYSBOX_HANDOVER_DIR" "$UMBRA_NESTED_RECEIPT"
   export UMBRA_NESTED_EXPECT=success
   export UMBRA_NESTED_RECEIPT="$UMBRA_SYSBOX_HANDOVER_DIR/nested-candidate.json"
@@ -549,6 +565,7 @@ receipt = {
     "status": "passed", "same_container_ids": {key: value["id"] for key, value in before["services"].items()},
     "same_image_runtime_and_named_volume_bindings": before["services"] == after["services"],
     "preserved_files": after["fixtures"], "preserved_inner_image_id": after["inner_image_id"],
+    "inner_image_content_readable_before_reload": before["inner_image_content_readable"] and after["inner_image_content_readable"],
     "old_init_root_mount": before["init_root_mount"], "candidate_init_root_mount": after["init_root_mount"],
     "old_nested_container_start": "expected unsafe-procfs failure",
     "candidate_fresh_nested_containers": "none and bridge passed; direct bridge egress denied",
