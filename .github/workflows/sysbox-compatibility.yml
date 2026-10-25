@@ -1,0 +1,80 @@
+name: Sysbox compatibility
+run-name: Compare Sysbox against the selected Dev release
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [dev, main]
+    paths:
+      - .github/workflows/sysbox-compatibility.yml
+      - ops/verify/sysbox-compatibility.sh
+      - cvms/dev/tests/compose_smoke.sh
+      - cvms/dev/tests/nested_docker_smoke.py
+      - tools/test_nested_docker_smoke.py
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sysbox-compatibility-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compare:
+    name: compare nested Docker with Sysbox
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    permissions:
+      contents: read
+      packages: read
+    env:
+      # Approved published runtime from f6aed98e6ad67faa0337f5186a1086002d757e91.
+      # A pin change is a new experiment, not an automatic release promotion.
+      DEV_CVM_COMPOSE_SMOKE_IMAGE: ghcr.io/concrete-security/umbra-dev-cvm@sha256:8ceb3590898d28f7ee54bc06b46ad4487473988c24719bee6ab69bd80c2fb0f9
+      UMBRA_NESTED_TEST_IMAGE: ubuntu@sha256:561618e2c15bf2397621dd04f96926663a3b5616c189cf7e38db7e82f5c538ea
+    steps:
+      - name: Checkout test tooling
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: 'false'
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: 0.13.5
+          enable-cache: 'false'
+      - name: Install pinned Python
+        run: uv python install
+      - name: Check failure classification and real TCP controls
+        run: |
+          command -v timeout
+          uv run --locked --project console python -m pytest -q tools/test_nested_docker_smoke.py
+      - name: Pull exact images without deployment credentials
+        env:
+          IMAGE_PULL_USER: ${{ github.actor }}
+          IMAGE_PULL_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          umask 077
+          export DOCKER_CONFIG="$RUNNER_TEMP/sysbox-image-pull"
+          mkdir "$DOCKER_CONFIG"
+          trap 'rm -rf -- "$DOCKER_CONFIG"' EXIT
+          printf '%s' "$IMAGE_PULL_TOKEN" \
+            | docker login ghcr.io --username "$IMAGE_PULL_USER" --password-stdin >/dev/null
+          unset IMAGE_PULL_TOKEN
+          docker pull --platform linux/amd64 "$DEV_CVM_COMPOSE_SMOKE_IMAGE"
+          docker pull --platform linux/amd64 "$UMBRA_NESTED_TEST_IMAGE"
+          docker image inspect "$DEV_CVM_COMPOSE_SMOKE_IMAGE" | jq -e '
+            .[0] | .Os == "linux" and .Architecture == "amd64"
+            and .Config.Labels["org.opencontainers.image.source"] == "https://github.com/concrete-security/umbra"
+            and .Config.Labels["org.opencontainers.image.revision"] == "f6aed98e6ad67faa0337f5186a1086002d757e91"
+          ' >/dev/null
+      - name: Reproduce then test the fixed runtime on the same host
+        run: uv run --python "$(cat .python-version)" --no-project bash ops/verify/sysbox-compatibility.sh
+      - name: Retain bounded runtime evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sysbox-compatibility-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/sysbox-compatibility/
+          if-no-files-found: warn
+          retention-days: 14

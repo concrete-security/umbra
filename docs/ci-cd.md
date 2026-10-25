@@ -98,6 +98,35 @@ Runner image tests do not establish genuine TDX attestation, provider lifecycle,
 real OIDC login, or Sysbox behavior. Live staging must verify those properties
 against the selected immutable artifacts before production promotion.
 
+## Sysbox compatibility experiment
+
+`Sysbox compatibility` runs on a disposable GitHub-hosted Ubuntu 24.04 runner.
+It compares checksum-pinned upstream Sysbox 0.6.7 and 0.7.1 against the same
+fixed Dev release digest. Both arms run on the same host; installation must not
+change the outer Docker components. The workflow installs host runtime packages
+and therefore must never run on a developer machine, self-hosted runner or CVM.
+
+The existing Compose smoke keeps `runc` by default. This experiment opts into
+`sysbox-runc`, retains the production Compose file, uses synthetic keys and CA
+material, and checks SSH, tunnels, internal networking and missing-policy denial.
+A pinned Ubuntu image is streamed into the inner Docker daemon without a pull or
+host socket mount. Fresh nested containers exercise both `none` and `bridge`
+networks; the candidate also checks blocked direct bridge egress.
+
+The baseline must reproduce the exact `unsafe procfs` / `openat2` / cross-device
+failure after the inner daemon is ready. An installation, startup or different
+runtime error makes the comparison inconclusive. The candidate must run the
+commands successfully. The receipt records image IDs, runtime versions, host
+kernel, user namespace mappings and package/binary hashes. The package source
+pins come from the upstream [0.6.7](https://github.com/nestybox/sysbox/releases/tag/v0.6.7)
+and [0.7.1](https://github.com/nestybox/sysbox/releases/tag/v0.7.1) releases.
+
+This is a diagnostic experiment, not a release or deployment approval. Upstream
+packages share the 0.6.7 component source revisions with dstack, but the runner's
+kernel, packaging and outer Docker differ. No result establishes dstack boot,
+TDX attestation, KMS key continuity, existing-data recovery or a safe host runtime
+upgrade. Production migration needs separate verification of those properties.
+
 ## Build-cache boundary
 
 The pull-request gate caches only public Cargo inputs, Cargo build output, and uv downloads. Its exact cache keys include the Python pin, Rust toolchain, and all Rust and Python locks; there are no prefix fallback keys. A clean cache miss must pass the same locked gates.

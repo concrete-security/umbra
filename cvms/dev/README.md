@@ -82,3 +82,7 @@ At startup, an older managed Claude install advances to the baked version withou
 Live key rotation, host-level nested-virtualization alternatives, and guaranteed hitless migration are outside v0.
 
 The pinned sandbox tools include Docker Engine/CLI 29.9.2, Buildx 0.38.1+umbra.2, Compose 5.6.1, and GitHub CLI 2.103.0. Their Go dependencies include the upstream security fixes; source archives and binary packages remain checksum-verified. The image smoke test exercises each Docker command and Compose configuration parsing.
+
+The runner-only [Sysbox compatibility experiment](../../docs/ci-cd.md#sysbox-compatibility-experiment)
+uses the exact selected Dev release and real nested Docker. It compares upstream
+Sysbox packages on one disposable host; it does not qualify a dstack OS migration.
