@@ -142,7 +142,10 @@ saved home-directory file.
 Manual runs can select `dev_image=migration-baseline` to repeat qualification
 against the unchanged older Dev image used by the migration canary. Both choices
 map to reviewed immutable digests and their exact source-revision labels in the
-workflow; pull requests keep the current release default. A passing result for one image does not qualify the other.
+workflow; pull requests keep the current release default. The nested smoke binds
+the complete Engine, containerd, runc and docker-init version tuple to that digest
+and rejects unreviewed images or component drift. A passing result for one image
+does not qualify the other.
 
 The populated-state qualification has two distinct arms. Both retain
 `--data-root /var/lib/sysbox --disable-ovfs-on-idmapped-mount`; neither relaxes
