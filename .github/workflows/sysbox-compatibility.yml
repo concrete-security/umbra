@@ -68,7 +68,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && !inputs.rebuild_candidate && inputs.run_compatibility
     name: compare nested Docker with Sysbox
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 45
     permissions:
       contents: read
       packages: read
@@ -122,7 +122,7 @@ jobs:
   candidate-security:
     name: qualify candidate Sysbox binaries
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 45
     permissions:
       contents: read
       packages: read
@@ -245,6 +245,109 @@ jobs:
         env:
           UMBRA_SYSBOX_CANDIDATE_DIR: ${{ runner.temp }}/sysbox-candidate
         run: uv run --python "$(cat .python-version)" --no-project bash ops/verify/sysbox-compatibility.sh
+      - name: Package the successfully qualified candidate and provenance
+        if: success() && (github.event_name == 'pull_request' || inputs.rebuild_candidate) && (github.event_name == 'pull_request' || inputs.run_compatibility)
+        run: |
+          python3 - <<'PY'
+          import gzip
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import stat
+          import subprocess
+          import tarfile
+
+          root = Path(os.environ['RUNNER_TEMP'])
+          candidate = root / 'sysbox-candidate'
+          security = root / 'sysbox-security'
+          runtime = root / 'sysbox-compatibility'
+          output = root / 'sysbox-qualified-candidate'
+          names = {'sysbox-runc', 'sysbox-fs', 'sysbox-mgr'}
+
+          def digest(path, limit):
+              info = path.lstat()
+              if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= limit:
+                  raise SystemExit(f'invalid or oversized artifact input: {path.name}')
+              return hashlib.sha256(path.read_bytes()).hexdigest()
+
+          def manifest(path):
+              rows = [line.split() for line in path.read_text().splitlines()]
+              if len(rows) != 3 or any(len(row) != 2 for row in rows) or {row[1] for row in rows} != names:
+                  raise SystemExit('invalid candidate checksum manifest')
+              return {name: checksum for checksum, name in rows}
+
+          expected = manifest(Path('ops/verify/sysbox-build/binaries.expected.sha256'))
+          actual = {name: digest(candidate / name, 64 * 1024 * 1024) for name in sorted(names)}
+          if actual != expected or actual != manifest(security / 'binaries.sha256'):
+              raise SystemExit('candidate changed after build or scan')
+          comparison = json.loads((runtime / 'comparison.json').read_text())
+          if comparison['status'] != 'passed' or comparison['cold_handover']['status'] != 'passed':
+              raise SystemExit('candidate has no successful populated cold-handover receipt')
+          inputs = subprocess.check_output(['git', 'ls-files', 'ops/verify/sysbox-build'], text=True).splitlines()
+          inputs += ['.github/workflows/sysbox-compatibility.yml', 'ops/verify/sysbox-compatibility.sh',
+                     'cvms/dev/tests/compose_smoke.sh', 'cvms/dev/tests/nested_docker_smoke.py']
+          if len(inputs) > 64:
+              raise SystemExit('unexpected build input count')
+          input_hashes = {name: digest(Path(name), 2 * 1024 * 1024) for name in sorted(inputs)}
+          evidence = {
+              'security/' + name: digest(security / name, 32 * 1024 * 1024)
+              for name in ['vulnerabilities.json', 'device-filter-tests.txt', 'binaries.sha256']
+          }
+          evidence.update({
+              'runtime/' + name: digest(runtime / name, 128 * 1024)
+              for name in ['comparison.json', 'nested-0.6.7.json', 'nested-0.7.1.json',
+                           'handover/before.json', 'handover/after.json', 'handover/handover.json',
+                           'handover/nested-candidate.json']
+          })
+          output.mkdir()
+          archive = output / 'sysbox-candidate.tar.gz'
+          # The tar preserves executable modes; upload-artifact alone does not.
+          with archive.open('xb') as raw, gzip.GzipFile(fileobj=raw, mode='wb', filename='', mtime=0) as compressed:
+              with tarfile.open(fileobj=compressed, mode='w') as bundle:
+                  for name in sorted(names):
+                      member = tarfile.TarInfo(name)
+                      member.size = (candidate / name).stat().st_size
+                      member.mode = 0o755
+                      with (candidate / name).open('rb') as source:
+                          bundle.addfile(member, source)
+          with tarfile.open(archive) as bundle:
+              if {member.name for member in bundle.getmembers()} != names:
+                  raise SystemExit('unexpected candidate archive contents')
+              for member in bundle.getmembers():
+                  if not member.isfile() or hashlib.sha256(bundle.extractfile(member).read()).hexdigest() != actual[member.name]:
+                      raise SystemExit('candidate archive differs from qualified bytes')
+          archive_hash = digest(archive, 200 * 1024 * 1024)
+          (output / 'binaries.sha256').write_text(''.join(f'{actual[name]}  {name}\n' for name in sorted(names)))
+          (output / 'archive.sha256').write_text(f'{archive_hash}  {archive.name}\n')
+          context = {name: os.environ[name] for name in (
+              'GITHUB_REPOSITORY', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT', 'GITHUB_EVENT_NAME',
+              'GITHUB_WORKFLOW_REF', 'GITHUB_WORKFLOW_SHA',
+          )}
+          if any(len(value) > 1024 for value in context.values()):
+              raise SystemExit('oversized workflow context')
+          provenance = {
+              'schema_version': 1, 'purpose': 'diagnostic candidate; no release or deployment approval',
+              'version': '0.7.1+umbra.1', 'platform': 'linux/amd64', 'workflow': context,
+              'checkout_commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
+              'binaries': actual, 'archive_sha256': archive_hash, 'source_and_test_sha256': input_hashes,
+              'evidence_sha256': evidence, 'dev_image': os.environ['DEV_CVM_COMPOSE_SMOKE_IMAGE'],
+              'nested_image': os.environ['UMBRA_NESTED_TEST_IMAGE'],
+              'not_exercised': comparison['cold_handover']['not_exercised'],
+          }
+          encoded = json.dumps(provenance, indent=2, sort_keys=True) + '\n'
+          if len(encoded.encode()) > 32768:
+              raise SystemExit('oversized candidate provenance')
+          (output / 'qualification.json').write_text(encoded)
+          PY
+      - name: Retain the successfully qualified candidate
+        if: success() && (github.event_name == 'pull_request' || inputs.rebuild_candidate) && (github.event_name == 'pull_request' || inputs.run_compatibility)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sysbox-qualified-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/sysbox-qualified-candidate/
+          if-no-files-found: error
+          retention-days: 14
       - name: Retain rebuilt runtime evidence
         if: always() && (github.event_name == 'pull_request' || inputs.rebuild_candidate) && (github.event_name == 'pull_request' || inputs.run_compatibility)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

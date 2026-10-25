@@ -102,8 +102,8 @@ against the selected immutable artifacts before production promotion.
 
 `Sysbox compatibility` runs on a disposable GitHub-hosted Ubuntu 24.04 runner.
 It compares checksum-pinned upstream Sysbox 0.6.7 with a locked 0.7.1 source
-candidate against the same fixed Dev release digest. Both arms run on the same host; installation must not
-change the outer Docker components. The workflow installs host runtime packages
+candidate against the same fixed Dev release digest. All tests run on the same
+host; installation must not change the outer Docker components. The workflow installs host runtime packages
 and therefore must never run on a developer machine, self-hosted runner or CVM.
 
 The existing Compose smoke keeps `runc` by default. This experiment opts into
@@ -116,7 +116,7 @@ networks; the candidate also checks blocked direct bridge egress.
 The baseline must reproduce the exact `unsafe procfs` / `openat2` / cross-device
 failure after the inner daemon is ready. An installation, startup or different
 runtime error makes the comparison inconclusive. The candidate must run the
-commands successfully. The receipt records image IDs, runtime versions, host
+commands successfully in both the retained sandbox and a fresh project. The receipt records image IDs, runtime versions, host
 kernel, user namespace mappings and package/binary hashes. The package source
 pins come from the upstream [0.6.7](https://github.com/nestybox/sysbox/releases/tag/v0.6.7)
 and [0.7.1](https://github.com/nestybox/sysbox/releases/tag/v0.7.1) releases.
@@ -136,7 +136,41 @@ The candidate must
 reproduce the reviewed binary checksums before scanning. Only after the scan and
 inventory gates pass does the disposable runner install those exact bytes and
 compare them against 0.6.7. The smoke also checks sandbox restart, exec and a
-saved home-directory file. No build output is published or installed on a CVM.
+saved home-directory file.
+
+After the baseline checks, the smoke writes separate fixtures to the sandbox's
+writable root filesystem and its home, workspace and Docker-data named volumes.
+It stops all four existing Compose containers, outer Docker, containerd and both
+Sysbox daemons. It checks completed daemon shutdown before replacing the three
+runtime binaries, restarting the daemons and starting those same containers.
+It retains Docker metadata, the installed package and the Sysbox data root;
+there is no package uninstall, container recreation, data restore or reseeding.
+The containers must remain stopped after the outer daemons restart, before the
+explicit Compose start. Failed handover restores daemon availability for scoped
+fixture cleanup; it cannot turn a failed preservation check into a pass.
+The candidate must preserve all four container IDs, image/runtime/volume
+bindings, fixture contents, ownership and modes, and the previously imported
+inner image. These checks run before the nested smoke can reload its image.
+SSH, tunnel, missing-policy denial and direct-egress checks then run again;
+fresh nested containers must succeed on `none` and `bridge` networks.
+
+The handover receipt includes the actual init root mount before and after the
+switch, so the tested overlay/clone backing is visible. Sysbox manager shutdown
+can remove cloned root filesystems; missing writable-layer data fails this gate.
+An empty replacement sandbox or preserved volume alone cannot pass. The old
+runtime cannot start the selected nested containers, so this proves preservation
+of the populated outer sandbox and inner image, not migration of running nested
+containers. A separate fresh-candidate test still runs if handover fails.
+
+Only a successful source build, security scan, device-filter test and complete
+runtime comparison produce `sysbox-qualified-candidate-<run>-<attempt>`.
+This 14-day CI artifact contains a tar archive of the three executable binaries,
+binary/archive SHA-256 manifests and bounded `qualification.json` metadata.
+The metadata identifies the checkout and workflow run, hashes source/build/test
+inputs and the separate security/runtime receipts, and records the tested image
+digests. These are diagnostic provenance records, not signed release attestations.
+Scan-only runs, upstream-package diagnostics and failed handovers produce no
+qualified binary artifact. No build output is published as a release or installed on a CVM.
 
 Manual `resolve_locks=true` adds a separate maintenance job that exports proposed
 Go module locks. It builds no runtime and cannot feed the qualification job.
@@ -151,7 +185,9 @@ This is a diagnostic experiment, not a release or deployment approval. Upstream
 packages share the 0.6.7 component source revisions with dstack, but the runner's
 kernel, packaging and outer Docker differ. No result establishes dstack boot,
 TDX attestation, KMS key continuity, existing-data recovery or a safe host runtime
-upgrade. Production migration needs separate verification of those properties.
+upgrade. The handover covers only the synthetic files, named-volume bindings
+and inner image on the recorded runner storage mode. Production migration needs
+separate verification of these properties on the selected guest image and data.
 
 ## Build-cache boundary
 
