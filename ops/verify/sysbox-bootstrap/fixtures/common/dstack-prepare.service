@@ -1,0 +1,17 @@
+[Unit]
+Description=dstack Guest Preparation Service
+After=network.target network-online.target chronyd.service
+Wants=network-online.target
+Before=app-compose.service dstack-guest-agent.service docker.service
+OnFailure=reboot.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/dstack-prepare.sh
+RemainAfterExit=yes
+StandardOutput=journal+console
+StandardError=journal+console
+FailureAction=reboot
+
+[Install]
+WantedBy=multi-user.target

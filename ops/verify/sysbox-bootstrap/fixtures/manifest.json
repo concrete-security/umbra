@@ -1,0 +1,135 @@
+{
+  "schema": 1,
+  "scope": "Qualification fixtures; upstream source is not a deployed-image inventory.",
+  "versions": {
+    "0.5.9": {
+      "dstack": "282eeb27d22d8f091ad0fa5a90e638f85cf68751",
+      "meta-dstack": "e3655d1390feee3736476f4bda35c4354b4a12fc",
+      "meta-virtualization": "52cd8a290cf3989bc99bd9eb475b5db88000245a"
+    },
+    "0.5.12": {
+      "dstack": "43f69f41cc546423f9f73fc48b16f8cf19053cbc",
+      "meta-dstack": "7f7b2762d4353943eb2c004d89025977794d7d24",
+      "meta-virtualization": "52cd8a290cf3989bc99bd9eb475b5db88000245a"
+    }
+  },
+  "old_new_blob_identity": [
+    "dstack-prepare.service",
+    "dstack-prepare.sh",
+    "app-compose.sh",
+    "sysbox.service",
+    "sysbox-mgr.service",
+    "sysbox-fs.service",
+    "docker.service.d/dstack-prepare.conf",
+    "containerd.service.d/dstack-prepare.conf",
+    "docker.service.d/override.conf",
+    "dstack-guest-agent.service",
+    "docker.service.d/dstack-guest-agent.conf"
+  ],
+  "install_transform": {
+    "containerd.service": {
+      "from": "ExecStart=/usr/local/bin/containerd",
+      "to": "ExecStart=/usr/bin/containerd",
+      "evidence": "https://github.com/Dstack-TEE/meta-virtualization/blob/52cd8a290cf3989bc99bd9eb475b5db88000245a/recipes-containers/containerd/containerd-opencontainers_git.bb"
+    }
+  },
+  "sources": [
+    {
+      "file": "fixtures/common/dstack-prepare.service",
+      "sha256": "50d727f02033e2d05638f93771e016e88e1c445abaaf29eca6cc160087bd44f2",
+      "git_blob": "833ad4090abbcb118734b7460a978432b7e74dda",
+      "url": "https://github.com/Dstack-TEE/dstack/blob/43f69f41cc546423f9f73fc48b16f8cf19053cbc/basefiles/dstack-prepare.service"
+    },
+    {
+      "file": "fixtures/common/dstack-prepare.sh",
+      "sha256": "1636030add2dfd5a85272a246939d7d1b472aa2a400e76b158dc39577a9c442a",
+      "git_blob": "7b6ac2c38393cbcaca94a74f7da7ff55d947979e",
+      "url": "https://github.com/Dstack-TEE/dstack/blob/43f69f41cc546423f9f73fc48b16f8cf19053cbc/basefiles/dstack-prepare.sh"
+    },
+    {
+      "file": "fixtures/common/app-compose.sh",
+      "sha256": "c84903b500b03c10fa4793e5d2c092defc10181789951aa351fda7c0c6bc8324",
+      "git_blob": "0387ed3483c388dc1f668edfa0b1de4bb9d5c381",
+      "url": "https://github.com/Dstack-TEE/dstack/blob/43f69f41cc546423f9f73fc48b16f8cf19053cbc/basefiles/app-compose.sh"
+    },
+    {
+      "file": "fixtures/common/sysbox.service",
+      "sha256": "dc77d49b191921175a610d9bebae642d0f41fd60016901d46d1d335511a15652",
+      "git_blob": "d6605f3a910f4449498e0b5979829a2393195f3c",
+      "url": "https://github.com/Dstack-TEE/meta-dstack/blob/7f7b2762d4353943eb2c004d89025977794d7d24/meta-dstack/recipes-core/dstack-sysbox/files/sysbox.service"
+    },
+    {
+      "file": "fixtures/common/sysbox-mgr.service",
+      "sha256": "6cace5cf44709bd9f78f88eb467f0d92a98675a3dc30191ea1dbdbba54dfe157",
+      "git_blob": "8bcfcd026000156fb304128d140b16849ddfb8dc",
+      "url": "https://github.com/Dstack-TEE/meta-dstack/blob/7f7b2762d4353943eb2c004d89025977794d7d24/meta-dstack/recipes-core/dstack-sysbox/files/sysbox-mgr.service"
+    },
+    {
+      "file": "fixtures/common/sysbox-fs.service",
+      "sha256": "145099f20f972acbc0114e9e1aaa4a3363b68cddaddf9a1de6852172bf8a6ca7",
+      "git_blob": "606f90408830cd4cd0cc08b7257ca7a0fcc828fc",
+      "url": "https://github.com/Dstack-TEE/meta-dstack/blob/7f7b2762d4353943eb2c004d89025977794d7d24/meta-dstack/recipes-core/dstack-sysbox/files/sysbox-fs.service"
+    },
+    {
+      "file": "fixtures/common/docker.service",
+      "sha256": "f3ebfa72f344ad5de8b15874f0a7a607a1d60603bb0d0240dd6ade80b1f1d8fe",
+      "git_blob": "d8c7867057344f7ca4bd4381ca5dfec310141d9a",
+      "url": "https://github.com/moby/moby/blob/f417435e5f6216828dec57958c490c4f8bae4f98/contrib/init/systemd/docker.service"
+    },
+    {
+      "file": "fixtures/common/docker.socket",
+      "sha256": "96cd0d89474816ddfb03893b44c36e7d744254aed1bf6d30eca65ff396114656",
+      "git_blob": "c76a23296ec0e0be41e4d5b8d240a80b1b8b14c1",
+      "url": "https://github.com/moby/moby/blob/f417435e5f6216828dec57958c490c4f8bae4f98/contrib/init/systemd/docker.socket"
+    },
+    {
+      "file": "fixtures/common/containerd.service",
+      "sha256": "46601c33ada1e4d8834dc3cf3fef1195b6ffcfb0e549d10d1e99449666902623",
+      "git_blob": "7edd64645b1440b3992af432ce08fbc322b57d36",
+      "url": "https://github.com/containerd/containerd/blob/b1624c3628954e769dd50783b63823040b2db38c/containerd.service"
+    },
+    {
+      "file": "fixtures/common/dstack-guest-agent.service",
+      "sha256": "240b699c476b6adb3a3388801a6b340e1ed505505d528dfb4e6b711b52146b25",
+      "git_blob": "a88d395d9d1c927479b53e871894a86c5414d748",
+      "url": "https://github.com/Dstack-TEE/dstack/blob/43f69f41cc546423f9f73fc48b16f8cf19053cbc/basefiles/dstack-guest-agent.service"
+    },
+    {
+      "file": "fixtures/common/docker.service.d/dstack-prepare.conf",
+      "sha256": "4ccb304b76e83528bd28449012627feef81ff4f69364574ad09f6265bab07523",
+      "git_blob": "6bbda8246fbd7764ac02df174919ad679fbf9516",
+      "url": "https://github.com/Dstack-TEE/dstack/blob/43f69f41cc546423f9f73fc48b16f8cf19053cbc/basefiles/docker.service.d/dstack-prepare.conf"
+    },
+    {
+      "file": "fixtures/common/docker.service.d/dstack-guest-agent.conf",
+      "sha256": "4050b0368758c4f0cf2ee40548d164037af829a8f72e27aed726c405c571e00b",
+      "git_blob": "2ca01dce3744c8148873716ae3d823dfcf2221ec",
+      "url": "https://github.com/Dstack-TEE/dstack/blob/43f69f41cc546423f9f73fc48b16f8cf19053cbc/basefiles/docker.service.d/dstack-guest-agent.conf"
+    },
+    {
+      "file": "fixtures/common/docker.service.d/override.conf",
+      "sha256": "bf67a223fd7e7b87dcdaf6fce463917f9c82dab77d4b4314b749417326aaa207",
+      "git_blob": "fecb5127da8fbc051dbceda78f8f2ee00d015293",
+      "url": "https://github.com/Dstack-TEE/meta-dstack/blob/7f7b2762d4353943eb2c004d89025977794d7d24/meta-dstack/recipes-core/docker/files/docker.service.d_override.conf"
+    },
+    {
+      "file": "fixtures/common/containerd.service.d/dstack-prepare.conf",
+      "sha256": "4ccb304b76e83528bd28449012627feef81ff4f69364574ad09f6265bab07523",
+      "git_blob": "6bbda8246fbd7764ac02df174919ad679fbf9516",
+      "url": "https://github.com/Dstack-TEE/dstack/blob/43f69f41cc546423f9f73fc48b16f8cf19053cbc/basefiles/containerd.service.d/dstack-prepare.conf"
+    },
+    {
+      "file": "fixtures/0.5.9/app-compose.service",
+      "sha256": "68898fd5221ef132db072f2943163d0dbb00dc5cbd12b3aeb06a43e227138cad",
+      "git_blob": "b92ef21e1547d88ed34845f387607800ffa0ca79",
+      "url": "https://github.com/Dstack-TEE/dstack/blob/282eeb27d22d8f091ad0fa5a90e638f85cf68751/basefiles/app-compose.service"
+    },
+    {
+      "file": "fixtures/0.5.12/app-compose.service",
+      "sha256": "4034af2d139b52c854e600089b5a40cbd506b3af3b80767fa9f0e566334af1d4",
+      "git_blob": "802167935f6db7167d5499fcafa949e50b01b4b3",
+      "url": "https://github.com/Dstack-TEE/dstack/blob/43f69f41cc546423f9f73fc48b16f8cf19053cbc/basefiles/app-compose.service"
+    }
+  ],
+  "meta_virtualization_binding": "Both pinned meta-dstack root trees bind meta-virtualization to the same commit."
+}

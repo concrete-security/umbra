@@ -1,0 +1,209 @@
+#!/bin/bash
+# Qualification candidate. The native rendering holds until technical gates close.
+# Source this in dstack-prepare; do not execute it as a later app pre-launch hook.
+# Keep the source caller (the systemd MainPID) alive as well as the worker.
+# A trap inside the subshell alone cannot intercept TERM sent to MainPID.
+umbra_sysbox_saved_traps=$(trap -p HUP INT TERM ERR EXIT)
+umbra_sysbox_parent_hold() {
+    trap - ERR EXIT
+    trap '' HUP INT TERM
+    set +e +u
+    printf 'Sysbox bootstrap held: source caller interrupted before completion\n' >&2
+    while :; do sleep 60; done
+}
+trap umbra_sysbox_parent_hold HUP INT TERM ERR EXIT
+(
+set -Eeuo pipefail
+umask 077
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+hold() {
+    trap - ERR EXIT
+    trap '' HUP INT TERM
+    set +e +u
+    printf 'Sysbox bootstrap held: %s\n' "$1" >&2
+    # No failed prepare completion, automatic old-runtime fallback, or reboot loop.
+    while :; do sleep 60; done
+}
+trap 'hold "command, pipeline or shell failure"' ERR EXIT
+trap 'hold "interrupted before completion"' HUP INT TERM
+
+@@QUALIFICATION_HOLD@@
+
+prefix=@@PREFIX@@
+root=@@ROOT@@
+bin_dir=@@BIN_DIR@@
+cache_dir=@@CACHE_DIR@@
+runtime_dir=@@RUNTIME_DIR@@
+unit_dir=@@UNIT_DIR@@
+prepare=@@PREPARE@@
+ready=@@READY@@
+docker_socket=@@DOCKER_SOCKET@@
+runtime_units=(@@RUNTIME_UNITS@@)
+
+require() { if ! "$@"; then hold "precondition failed"; fi; }
+ctl() { timeout 20 systemctl "$@"; }
+property() { ctl show --property="$2" --value "$1"; }
+hash_file() { sha256sum -- "$1" | awk '{print $1}'; }
+
+safe_dir() {
+    local path=$1 parent=$1 mode
+    while [[ ! -e "$parent" ]]; do parent=$(dirname -- "$parent"); done
+    require test ! -L "$parent"
+    require test "$(readlink -f -- "$parent")" = "$parent"
+    require test "$(stat -c %u -- "$parent")" = 0
+    mode=$(stat -c %a -- "$parent")
+    require test "$((8#$mode & 0022))" = 0
+    mkdir -p -- "$path"
+    require test ! -L "$path"
+    require test "$(readlink -f -- "$path")" = "$path"
+    require test "$(stat -c %u -- "$path")" = 0
+    mode=$(stat -c %a -- "$path")
+    require test "$((8#$mode & 0022))" = 0
+}
+
+write_file() {
+    local path=$1 mode=$2 tmp
+    safe_dir "$(dirname -- "$path")"
+    require test ! -e "$path"
+    require test ! -L "$path"
+    tmp=$(mktemp "$(dirname -- "$path")/.umbra.XXXXXXXX")
+    cat >"$tmp"
+    chmod "$mode" "$tmp"
+    mv -T -- "$tmp" "$path"
+}
+
+require test "$EUID" = 0
+for tool in bash systemctl timeout sha256sum awk stat readlink dirname mkdir mktemp \
+            install mv chmod curl sleep cat; do
+    require command -v "$tool" >/dev/null
+done
+require test "$(property "$prepare" ActiveState)" = activating
+require test "$(property "$prepare" SubState)" = start
+require test "$(property "$prepare" MainPID)" = "$$"
+require test "$(property "$prepare" Type)" = oneshot
+require test "$(property "$prepare" TimeoutStartUSec)" = infinity
+
+# Both real native units and the test copies must match their entire loaded source.
+# Unexpected or stale drop-ins fail closed; no merging with unknown runtime policy.
+while read -r unit expected; do
+    require test "$(property "$unit" Id)" = "$unit"
+    require test "$(property "$unit" NeedDaemonReload)" = no
+    fragment=$(property "$unit" FragmentPath)
+    require test -f "$fragment"
+    require test ! -L "$fragment"
+    require test "$(hash_file "$fragment")" = "$expected"
+done <<'UMBRA_FRAGMENTS'
+@@FRAGMENTS@@
+UMBRA_FRAGMENTS
+
+while read -r name expected; do
+    if [[ "$name" == *.service || "$name" == *.socket ]]; then
+        unit=$name
+        read -r -a drop_paths <<<"$(property "$unit" DropInPaths)"
+        require test "${#drop_paths[@]}" = "$expected"
+    else
+        matched=0
+        for path in "${drop_paths[@]}"; do
+            if [[ "$path" == */"$name" ]]; then
+                require test -f "$path"
+                require test ! -L "$path"
+                require test "$(hash_file "$path")" = "$expected"
+                matched=$((matched + 1))
+            fi
+        done
+        require test "$matched" = 1
+    fi
+done <<'UMBRA_DROPS'
+@@DROPS@@
+UMBRA_DROPS
+
+# Never stop a running app: its native ExecStop would stop populated containers.
+for unit in "${runtime_units[@]}"; do
+    require test "$(property "$unit" ActiveState)" = inactive
+done
+
+# A native socket may already be active under sockets.target. Stop only the socket
+# after proving Docker is inactive; cancel only the named queued startup jobs.
+ctl stop "$docker_socket"
+for unit in "${runtime_units[@]}" "$docker_socket"; do
+    job=$(property "$unit" Job)
+    if [[ "$job" != 0 ]]; then
+        require test "$job" -gt 0
+        ctl cancel "$job"
+    fi
+done
+for unit in "${runtime_units[@]}" "$docker_socket"; do
+    require test "$(property "$unit" Job)" = 0
+    require test "$(property "$unit" ActiveState)" = inactive
+done
+
+# Qualification fault injection point. The renderer exposes no fault/bypass flag.
+
+safe_dir "$runtime_dir"
+safe_dir "$cache_dir"
+safe_dir "$bin_dir"
+
+# Cache is on the unlocked persistent filesystem, outside /var/lib/sysbox.
+# Every byte is checked on every boot, including a cache hit. All three binaries
+# are verified before replacing any executable in the volatile /usr overlay.
+while read -r name expected url; do
+    artifact="$cache_dir/$name"
+    if [[ -e "$artifact" || -L "$artifact" ]]; then
+        require test -f "$artifact"
+        require test ! -L "$artifact"
+        require test "$(stat -c %u -- "$artifact")" = 0
+        require test "$(hash_file "$artifact")" = "$expected"
+    else
+        tmp=$(mktemp "$cache_dir/.download.XXXXXXXX")
+        curl --disable --fail --silent --show-error --location --max-redirs 3 \
+            --proto '=https' --proto-redir '=https' --tlsv1.2 \
+            --connect-timeout 10 --max-time 180 --max-filesize 100000000 \
+            --output "$tmp" "$url"
+        require test "$(hash_file "$tmp")" = "$expected"
+        chmod 0700 "$tmp"
+        mv -T -- "$tmp" "$artifact"
+    fi
+done <<'UMBRA_ARTIFACTS'
+@@ARTIFACTS@@
+UMBRA_ARTIFACTS
+
+while read -r name expected _; do
+    require test -f "$bin_dir/$name"
+    require test ! -L "$bin_dir/$name"
+    tmp=$(mktemp "$bin_dir/.umbra.XXXXXXXX")
+    install -m 0755 -- "$cache_dir/$name" "$tmp"
+    require test "$(hash_file "$tmp")" = "$expected"
+    mv -T -- "$tmp" "$bin_dir/$name"
+done <<'UMBRA_INSTALL'
+@@ARTIFACTS@@
+UMBRA_INSTALL
+
+@@WRITES@@
+ctl daemon-reload
+for unit in @@RUNTIME_UNITS@@; do
+    require test "$(property "$unit" ActiveState)" = inactive
+done
+for unit in @@PREFIX@@app-compose.service @@PREFIX@@docker.service @@PREFIX@@containerd.service; do
+    for key in Requires After; do
+        value=" $(property "$unit" "$key") "
+        require test "${value#*" $ready "}" != "$value"
+        require test "${value#*" $prepare "}" != "$value"
+    done
+done
+
+# A synchronous start here deadlocks on this still-activating prepare unit.
+# Reload alone does not reconstruct the cancelled transactions.
+ctl --no-block start "$ready" "${runtime_units[@]}" "$docker_socket"
+for unit in "$ready" "${runtime_units[@]}"; do
+    require test "$(property "$unit" Job)" -gt 0
+    require test "$(property "$unit" ActiveState)" = inactive
+done
+printf 'Sysbox bootstrap installed verified bytes and requeued gated starts\n' >&2
+trap - ERR EXIT HUP INT TERM
+)
+# Restore the source caller's traps after successful worker completion.
+trap - HUP INT TERM ERR EXIT
+eval "$umbra_sysbox_saved_traps"
+unset umbra_sysbox_saved_traps
+unset -f umbra_sysbox_parent_hold
