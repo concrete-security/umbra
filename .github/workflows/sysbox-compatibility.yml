@@ -3,6 +3,11 @@ run-name: Compare Sysbox against the selected Dev release
 
 on:
   workflow_dispatch:
+    inputs:
+      run_compatibility:
+        description: Repeat the runtime comparison as well as the binary security scan
+        type: boolean
+        default: true
   pull_request:
     branches: [dev, main]
     paths:
@@ -21,6 +26,7 @@ concurrency:
 
 jobs:
   compare:
+    if: github.event_name != 'workflow_dispatch' || inputs.run_compatibility
     name: compare nested Docker with Sysbox
     runs-on: ubuntu-24.04
     timeout-minutes: 35
@@ -122,7 +128,8 @@ jobs:
           version: v0.70.0
           cache: 'false'
           list-all-pkgs: 'true'
-          scan-type: fs
+          # fs scans source manifests; rootfs also recognizes compiled Go binaries.
+          scan-type: rootfs
           scan-ref: ${{ runner.temp }}/sysbox-candidate
           scanners: vuln
           severity: HIGH,CRITICAL
