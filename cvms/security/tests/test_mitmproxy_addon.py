@@ -66,6 +66,10 @@ class FakeFlow:
         self.metadata: dict[str, object] = {}
         self.client_conn = FakeConnection(("10.0.0.5", 52344))
         self.server_conn = FakeConnection(("198.51.100.7", 443), ("198.51.100.7", 443))
+        self.killed = False
+
+    def kill(self) -> None:
+        self.killed = True
 
 
 def response_factory(status_code: int, content: bytes, headers: Mapping[str, str]) -> FakeResponse:
@@ -421,6 +425,95 @@ def test_malformed_flow_returns_400_without_traffic_log() -> None:
     assert flow.response is not None
     assert flow.response.status_code == 400
     assert len(queue) == 0
+
+
+@pytest.mark.parametrize(
+    "stage",
+    [
+        "translation", "snapshot", "authentication", "enforce_request", "enforce_connect_request",
+        "enforce_authenticated_request",
+        "headers", "traffic_log", "connect_identity",
+    ],
+)
+def test_unexpected_proxy_failure_blocks_without_logging_input_failure(
+    stage: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Translation, enforcement, and verdict application errors never resume forwarding."""
+    from umbra_security_cvm import mitmproxy_addon
+
+    policy_body = policy()
+    policy_body["blocked_destinations"] = []
+    proxy_addon, queue = addon(policy_body)
+    flow = FakeFlow()
+    hook = proxy_addon.request
+    if stage in {"enforce_connect_request", "connect_identity"}:
+        flow.request.method = "CONNECT"
+        hook = proxy_addon.http_connect
+    if stage == "enforce_authenticated_request":
+        connect_flow = FakeFlow(FakeRequest(method="CONNECT"))
+        proxy_addon.http_connect(connect_flow)
+        queue.drain_batch()
+        flow.client_conn = connect_flow.client_conn
+    if stage == "traffic_log":
+        flow.request.path = "/forbidden"
+
+    sensitive_input = "private-exception-value"
+
+    def fail(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError(sensitive_input)
+
+    if stage == "translation":
+        monkeypatch.setattr(mitmproxy_addon, "proxy_request_from_flow", fail)
+    elif stage == "snapshot":
+        monkeypatch.setattr(proxy_addon.control_state, "snapshot", fail)
+    elif stage == "authentication":
+        monkeypatch.setattr(ControlMap, "lookup_proxy_token", fail)
+    elif stage == "headers":
+        monkeypatch.setattr(mitmproxy_addon, "_replace_headers", fail)
+    elif stage == "traffic_log":
+        monkeypatch.setattr(proxy_addon.traffic_emitter, "enqueue", fail)
+    elif stage == "connect_identity":
+        remember = proxy_addon._remember_connect_identity
+
+        def remember_then_fail(key: str, cvm_id: UUID) -> None:
+            remember(key, cvm_id)
+            fail()
+
+        monkeypatch.setattr(proxy_addon, "_remember_connect_identity", remember_then_fail)
+    else:
+        monkeypatch.setattr(mitmproxy_addon, stage, fail)
+
+    with caplog.at_level(logging.ERROR, logger="umbra_security_cvm.mitmproxy_addon"):
+        hook(flow)
+
+    assert flow.response is not None
+    assert flow.response.status_code == 500
+    assert flow.response.raw_content == b"Umbra Proxy: Request enforcement failed\n"
+    assert "X-Umbra-Blocked" not in flow.response.headers
+    assert "umbra_connect_allowed" not in flow.metadata
+    assert "umbra_cvm_id" not in flow.metadata
+    assert "umbra_traffic_log" not in flow.metadata
+    assert proxy_addon._connect_identities == {}
+    assert sensitive_input not in caplog.text
+    assert "proxy_enforcement_failed" in caplog.text
+
+
+@pytest.mark.parametrize("hook_name", ["request", "http_connect"])
+def test_rejection_response_failure_terminates_flow_failure(
+    hook_name: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed rejection factory cannot leave a live request or CONNECT unblocked."""
+    proxy_addon, _queue = addon()
+    flow = FakeFlow(FakeRequest(headers={"Proxy-Authorization": "Bearer wrong-token"}))
+
+    def fail(*_args: object) -> None:
+        raise RuntimeError("response factory failed")
+
+    monkeypatch.setattr(proxy_addon, "response_factory", fail)
+
+    getattr(proxy_addon, hook_name)(flow)
+
+    assert flow.killed is True
 
 
 def test_error_hook_emits_502_for_allowed_request_without_response() -> None:

@@ -761,14 +761,23 @@ def test_blocked_connect_origin_non_delivery_failure(egress: EgressHarness) -> N
     assert egress.origin.requests == []
 
 
-@pytest.mark.parametrize("token", [None, "unknown-e2e-bearer"], ids=["missing", "unknown"])
-def test_unauthenticated_connect_origin_non_delivery_failure(egress: EgressHarness, token: str | None) -> None:
-    """Unknown identities cannot open tunnels or create attributed traffic logs."""
+@pytest.mark.parametrize("scheme", ["http", "https"], ids=["absolute-http", "connect-tls"])
+@pytest.mark.parametrize(
+    "token", [None, b"unknown-e2e-bearer", b"\xff", b"caf\xc3\xa9", b"token,other"],
+    ids=["missing", "unknown", "surrogateescape", "non-ascii", "folded-headers"],
+)
+def test_unauthenticated_proxy_origin_non_delivery_failure(
+    egress: EgressHarness, scheme: str, token: bytes | None,
+) -> None:
+    """Missing, unknown, and malformed identities cannot reach either upstream path."""
     with egress.tunnel() as connection:
-        auth = "" if token is None else f"Proxy-Authorization: Bearer {token}\r\n"
+        port = egress.https_port if scheme == "https" else egress.http_port
+        target = f"{egress.destination_host}:{port}"
+        request_line = f"CONNECT {target}" if scheme == "https" else f"POST http://{target}/allowed"
+        auth = b"" if token is None else b"Proxy-Authorization: Bearer " + token + b"\r\n"
         connection.sendall(
-            (f"CONNECT {egress.destination_host}:{egress.https_port} HTTP/1.1\r\n"
-             f"Host: {egress.destination_host}:{egress.https_port}\r\n{auth}\r\n").encode()
+            (f"{request_line} HTTP/1.1\r\nHost: {target}\r\nContent-Length: 0\r\n").encode()
+            + auth + b"\r\n"
         )
         response = HTTPResponse(connection)
         response.begin()
@@ -777,6 +786,31 @@ def test_unauthenticated_connect_origin_non_delivery_failure(egress: EgressHarne
         response.close()
     assert egress.origin.requests == []
     assert egress.console.logs == []
+
+
+@pytest.mark.parametrize("scheme", ["http", "https"], ids=["absolute-http", "decrypted-https"])
+def test_unexpected_header_scan_failure_origin_non_delivery_failure(egress: EgressHarness, scheme: str) -> None:
+    """An authenticated request with undecodable header bytes cannot bypass DLP."""
+    tunnel = egress.https_connection() if scheme == "https" else egress.tunnel()
+    port = egress.https_port if scheme == "https" else egress.http_port
+    target = "/allowed" if scheme == "https" else f"http://{egress.destination_host}:{port}/allowed"
+    body = DLP_VALUE.encode()
+    with tunnel as connection:
+        connection.sendall(
+            (f"POST {target} HTTP/1.1\r\nHost: {egress.destination_host}:{port}\r\n"
+             f"Proxy-Authorization: Bearer {PROXY_TOKEN}\r\nContent-Length: {len(body)}\r\n").encode()
+            + b"X-Sandbox-Value: \xff\r\n\r\n" + body
+        )
+        response = HTTPResponse(connection)
+        response.begin()
+        assert response.status == 500
+        assert response.read() == b"Umbra Proxy: Request enforcement failed\n"
+        response.close()
+
+    assert egress.origin.requests == []
+    published = "\n".join(path.read_text() for path in egress.log_paths)
+    assert DLP_VALUE not in published
+    assert PROXY_TOKEN not in published
 
 
 @pytest.mark.parametrize("location", ["body", "header", "gzip"], ids=["plaintext-body", "header", "compressed-body"])

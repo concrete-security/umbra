@@ -32,6 +32,8 @@ Policy flow:
 
 Source IP is not the identity boundary; the per-CVM bearer is.
 
+Malformed bearers are rejected with `407` before hashing. Unexpected HTTP or CONNECT enforcement errors return a generic `500`; if rejection cannot be created, the flow is terminated. Unexpected failures clear the cached CONNECT identity; their logs contain only the exception type.
+
 ## Files
 
 | Path | Purpose |

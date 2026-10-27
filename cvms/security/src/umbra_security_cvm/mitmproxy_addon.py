@@ -60,6 +60,14 @@ class SecurityCVMProxyAddon:
         self._handle_proxy_flow(flow, connect_only=False)
 
     def _handle_proxy_flow(self, flow: Any, *, connect_only: bool) -> None:
+        # mitmproxy suppresses hook exceptions and resumes forwarding. Keep the
+        # entire admission path inside this boundary, including verdict application.
+        try:
+            self._enforce_proxy_flow(flow, connect_only=connect_only)
+        except Exception as exc:
+            self._reject_internal_error(flow, exc)
+
+    def _enforce_proxy_flow(self, flow: Any, *, connect_only: bool) -> None:
         if getattr(flow, "response", None) is not None:
             return
         request = getattr(flow, "request", None)
@@ -339,6 +347,25 @@ class SecurityCVMProxyAddon:
             _blocked_body(result),
             _blocked_headers(result),
         )
+
+    def _reject_internal_error(self, flow: Any, error: Exception) -> None:
+        try:
+            flow.response = self.response_factory(
+                500,
+                b"Umbra Proxy: Request enforcement failed\n",
+                {"Content-Type": "text/plain; charset=utf-8"},
+            )
+        except Exception:
+            flow.kill()
+        # Discard partial authorization and any deferred response log after an
+        # unexpected failure.
+        metadata = _metadata(flow)
+        for key in ("umbra_connect_allowed", "umbra_cvm_id", "umbra_websocket_governed", "umbra_traffic_log"):
+            metadata.pop(key, None)
+        if connection_key := _client_connection_key(flow):
+            self._connect_identities.pop(connection_key, None)
+        # Exception messages and tracebacks can contain headers or secret values.
+        logger.error("proxy_enforcement_failed", extra={"error_type": type(error).__name__})
 
 
 def proxy_request_from_flow(flow: Any) -> ProxyRequest:
