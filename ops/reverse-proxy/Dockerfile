@@ -65,10 +65,10 @@ RUN printf '%s\n' '@urllib3-security https://dl-cdn.alpinelinux.org/alpine/edge/
       py3-tz-pyc=2026.2-r0 \
       py3-urllib3@urllib3-security=2.8.0-r0 \
       py3-urllib3-pyc@urllib3-security=2.8.0-r0 \
-      pyc=3.14.8-r0 \
-      python3=3.14.8-r0 \
-      python3-pyc=3.14.8-r0 \
-      python3-pycache-pyc0=3.14.8-r0 \
+      pyc=3.14.10-r1 \
+      python3=3.14.10-r1 \
+      python3-pyc=3.14.10-r1 \
+      python3-pycache-pyc0=3.14.10-r1 \
       readline=8.3.3-r1 \
       sqlite-libs=3.53.4-r0 \
     # Neither nginx nor Certbot needs the base image's curl/libcurl client.
