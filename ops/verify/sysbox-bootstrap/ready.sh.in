@@ -1,0 +1,65 @@
+#!/bin/bash
+# Listener ownership and executable identity only. Real nested starts qualify RPCs.
+set -Eeuo pipefail
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+mgr_unit=@@MGR_UNIT@@
+fs_unit=@@FS_UNIT@@
+bin_dir=@@BIN_DIR@@
+socket_dir=@@SOCKET_DIR@@
+property() { timeout 3 systemctl show --property="$2" --value "$1"; }
+
+listener() {
+    local path=$1 pid=$2 inode fd link found=0
+    [[ -S "$path" && ! -L "$path" ]] || return 1
+    [[ "$(stat -c '%u:%a' -- "$path")" == 0:600 ]] || return 1
+    inode=$(awk -v path="$path" '
+        NR > 1 && $8 == path && $4 == "00010000" && $5 == "0001" && $6 == "01" {
+            inode=$7; count++
+        }
+        END { if (count == 1) print inode; else exit 1 }
+    ' /proc/net/unix) || return 1
+    [[ "$inode" =~ ^[1-9][0-9]*$ ]] || return 1
+    for fd in /proc/"$pid"/fd/*; do
+        link=$(readlink -- "$fd") || continue
+        if [[ "$link" == "socket:[$inode]" ]]; then found=1; break; fi
+    done
+    [[ "$found" == 1 ]]
+}
+
+pid_for() {
+    local unit=$1 pid
+    [[ "$(property "$unit" Type)" == notify ]] || return 1
+    [[ "$(property "$unit" ActiveState)" == active ]] || return 1
+    [[ "$(property "$unit" SubState)" == running ]] || return 1
+    pid=$(property "$unit" MainPID)
+    [[ "$pid" =~ ^[1-9][0-9]*$ && "$pid" -gt 1 ]] || return 1
+    kill -0 "$pid" || return 1
+    printf '%s\n' "$pid"
+}
+
+identity() {
+    local unit=$1 pid=$2 binary=$3 expected=$4
+    [[ "$(readlink -- "/proc/$pid/exe")" == "$bin_dir/$binary" ]] || return 1
+    [[ "$(sha256sum -- "/proc/$pid/exe" | awk '{print $1}')" == "$expected" ]] || return 1
+    [[ "$(pid_for "$unit")" == "$pid" ]]
+}
+
+deadline=$((SECONDS + 25))
+while ((SECONDS < deadline)); do
+    mgr_pid=$(pid_for "$mgr_unit") || exit 1
+    fs_pid=$(pid_for "$fs_unit") || exit 1
+    if listener "$socket_dir/sysmgr.sock" "$mgr_pid" \
+        && listener "$socket_dir/sysfs.sock" "$fs_pid" \
+        && listener "$socket_dir/sysfs-seccomp.sock" "$fs_pid"; then
+        identity "$mgr_unit" "$mgr_pid" sysbox-mgr @@MGR_HASH@@
+        identity "$fs_unit" "$fs_pid" sysbox-fs @@FS_HASH@@
+        [[ "$(sha256sum -- "$bin_dir/sysbox-runc" | awk '{print $1}')" == @@RUNC_HASH@@ ]]
+        [[ "$(pid_for "$mgr_unit")" == "$mgr_pid" ]]
+        [[ "$(pid_for "$fs_unit")" == "$fs_pid" ]]
+        printf 'Sysbox notify, live executable hashes and owned listeners verified\n'
+        exit 0
+    fi
+    sleep 0.1
+done
+printf 'Sysbox readiness timed out before owned listeners appeared\n' >&2
+exit 1

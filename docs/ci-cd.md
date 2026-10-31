@@ -102,8 +102,8 @@ against the selected immutable artifacts before production promotion.
 
 `Sysbox compatibility` runs on a disposable GitHub-hosted Ubuntu 24.04 runner.
 It compares checksum-pinned upstream Sysbox 0.6.7 with a locked 0.7.1 source
-candidate against the same fixed Dev release digest. Both arms run on the same host; installation must not
-change the outer Docker components. The workflow installs host runtime packages
+candidate against the same fixed Dev release digest. All tests run on the same
+host; installation must not change the outer Docker components. The workflow installs host runtime packages
 and therefore must never run on a developer machine, self-hosted runner or CVM.
 
 The existing Compose smoke keeps `runc` by default. This experiment opts into
@@ -116,7 +116,8 @@ networks; the candidate also checks blocked direct bridge egress.
 The baseline must reproduce the exact `unsafe procfs` / `openat2` / cross-device
 failure after the inner daemon is ready. An installation, startup or different
 runtime error makes the comparison inconclusive. The candidate must run the
-commands successfully. The receipt records image IDs, runtime versions, host
+commands successfully in the retained control sandbox and a fresh no-clone
+project, before and after its cold restart. The receipt records image IDs, runtime versions, host
 kernel, user namespace mappings and package/binary hashes. The package source
 pins come from the upstream [0.6.7](https://github.com/nestybox/sysbox/releases/tag/v0.6.7)
 and [0.7.1](https://github.com/nestybox/sysbox/releases/tag/v0.7.1) releases.
@@ -136,7 +137,64 @@ The candidate must
 reproduce the reviewed binary checksums before scanning. Only after the scan and
 inventory gates pass does the disposable runner install those exact bytes and
 compare them against 0.6.7. The smoke also checks sandbox restart, exec and a
-saved home-directory file. No build output is published or installed on a CVM.
+saved home-directory file.
+
+Manual runs can select `dev_image=migration-baseline` to repeat qualification
+against the unchanged older Dev image used by the migration canary. Both choices
+map to reviewed immutable digests and their exact source-revision labels in the
+workflow; pull requests keep the current release default. The nested smoke binds
+the complete Engine, containerd, runc and docker-init version tuple to that digest
+and rejects unreviewed images or component drift. A passing result for one image
+does not qualify the other.
+
+The populated-state qualification has two distinct arms. Both retain
+`--data-root /var/lib/sysbox --disable-ovfs-on-idmapped-mount`; neither relaxes
+procfs checks, device filters, user namespaces or sandbox networking.
+
+- **Default clone loss control:** the original 0.6.7 manager configuration first
+  reproduces the procfs failure. The smoke writes synthetic fixtures to the
+  writable rootfs and the home, workspace and Docker-data named volumes, then
+  cold-stops the containers, Docker, containerd and Sysbox before installing the
+  candidate. The same containers must restart with only the rootfs marker
+  missing. The gate accepts exactly `FileNotFoundError` for that path, while
+  requiring every volume fixture, ownership/mode, container/image/runtime/volume
+  binding, and the previously loaded inner image. Other failures remain failures.
+  The receipt retains the raw missing-file diagnostic and actual clone mount.
+- **Fresh no-clone candidate:** with no containers present, the manager adds
+  `--disable-rootfs-cloning` before creating a fresh candidate baseline. This
+  supported option uses ordinary rootfs chown instead of the disposable clone
+  optimization. It can cost more startup I/O; readiness is bounded at 600 seconds.
+  Nested Docker, SSH, tunnels and egress controls must work before data is seeded.
+  All daemons then cold-stop; the same reviewed binaries and same container IDs
+  restart. Every rootfs and volume fixture, ownership/mode and inner image must
+  survive, and all workload/security checks must pass again.
+
+Each arm checks completed daemon shutdown, retains Docker metadata and the
+installed package, and uses `compose start`, never recreation, to resume its
+containers. Inner `docker image save` reads every retained layer before the
+nested smoke can import anything again. Actual init root mounts prove that the
+control uses a clone and the preservation arm does not. Cleanup removes only
+the owned synthetic project; an unrelated error cannot pass as expected loss.
+
+This configuration **does not migrate an already-cloned rootfs**. Both upstream
+versions [delete clone data during manager shutdown](https://github.com/nestybox/sysbox-mgr/blob/2d45af01bcfd8641e6641f76104c6003bf501cd7/mgr.go#L489)
+and [clean the data root on startup](https://github.com/nestybox/sysbox-mgr/blob/2d45af01bcfd8641e6641f76104c6003bf501cd7/utils.go#L503).
+Existing clone-backed data needs an explicit verified filesystem
+checkpoint before the first runtime correction. A healthy fresh no-clone
+baseline must precede any separate OS-upgrade qualification. CI does not restore
+fixtures or silently change the source-pinned bootstrap manager flags.
+
+Only a successful source build, security scan, device-filter test and complete
+runtime comparison produce `sysbox-qualified-candidate-<run>-<attempt>`.
+This 14-day CI artifact contains a tar archive of the three executable binaries,
+binary/archive SHA-256 manifests and bounded `qualification.json` metadata.
+The metadata identifies the checkout and workflow run, hashes source/build/test
+inputs and the separate security/runtime receipts, and records the tested image
+digests. These are diagnostic provenance records, not signed release attestations.
+The metadata binds the required no-clone manager flags and explicitly excludes
+migration of already-cloned data. Both arms must pass their exact outcomes.
+Scan-only runs, upstream-package diagnostics and failed preservation checks produce no
+qualified binary artifact. No build output is published as a release or installed on a CVM.
 
 Manual `resolve_locks=true` adds a separate maintenance job that exports proposed
 Go module locks. It builds no runtime and cannot feed the qualification job.
@@ -151,7 +209,9 @@ This is a diagnostic experiment, not a release or deployment approval. Upstream
 packages share the 0.6.7 component source revisions with dstack, but the runner's
 kernel, packaging and outer Docker differ. No result establishes dstack boot,
 TDX attestation, KMS key continuity, existing-data recovery or a safe host runtime
-upgrade. Production migration needs separate verification of those properties.
+upgrade. The handover covers only the synthetic files, named-volume bindings
+and inner image on the recorded runner storage mode. Production migration needs
+separate verification of these properties on the selected guest image and data.
 
 ## Build-cache boundary
 

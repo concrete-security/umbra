@@ -1,7 +1,9 @@
 """Prevent unrelated failures from certifying the Sysbox compatibility fix."""
 from __future__ import annotations
 
+import argparse
 import importlib.util
+import json
 from pathlib import Path
 import subprocess
 import shutil
@@ -19,6 +21,138 @@ ERROR = (
     'net.ipv4.ip_unprivileged_port_start file: unsafe procfs detected: '
     'openat2 /proc/./sys/net/ipv4/ip_unprivileged_port_start: invalid cross-device link'
 )
+RELEASES = [
+    (
+        'ghcr.io/concrete-security/umbra-dev-cvm@sha256:8ceb3590898d28f7ee54bc06b46ad4487473988c24719bee6ab69bd80c2fb0f9',
+        {'Engine': '29.9.2', 'containerd': 'v2.4.2', 'runc': '1.5.2', 'docker-init': '0.19.0'},
+    ),
+    (
+        'ghcr.io/concrete-security/umbra-dev-cvm@sha256:c2f103331848d534783625888fa3920453d2848deeeef92dfcb1903a7589a0ba',
+        {'Engine': '29.7.1', 'containerd': 'v2.2.6', 'runc': '1.3.6', 'docker-init': '0.19.0'},
+    ),
+]
+
+
+def runtime_version(components):
+    return {
+        'Version': components['Engine'],
+        'Components': [{'Name': name, 'Version': value} for name, value in components.items()],
+    }
+
+
+@pytest.fixture
+def runtime_probe(monkeypatch):
+    """Run the actual verifier against deterministic Docker command responses."""
+    calls = []
+
+    def invoke(reference, version, expected='success'):
+        args = argparse.Namespace(sandbox='a' * 64, image='ubuntu@sha256:' + 'b' * 64,
+                                  expect=expected, origin='192.0.2.1', control='192.0.2.2')
+        dev_id, nested_id = 'sha256:' + 'c' * 64, 'sha256:' + 'd' * 64
+        inner = ['docker', 'exec', '--user', 'dev', args.sandbox, 'docker']
+
+        def respond(command, **_kwargs):
+            calls.append(command)
+            value = ''
+            if command[:3] == ['docker', 'context', 'inspect']:
+                value = 'unix:///var/run/docker.sock'
+            elif command == ['docker', 'inspect', args.sandbox]:
+                value = [{
+                    'Image': dev_id,
+                    'HostConfig': {'Runtime': 'sysbox-runc', 'Privileged': False, 'PidMode': '', 'IpcMode': ''},
+                    'NetworkSettings': {'Networks': {'internal': {}}},
+                    'Mounts': [{'Type': 'volume'}], 'State': {'Pid': 123},
+                }]
+            elif command == ['docker', 'image', 'inspect', reference]:
+                value = [{'Id': dev_id, 'RepoDigests': [reference]}]
+            elif command == ['docker', 'network', 'inspect', 'internal']:
+                value = [{'Internal': True}]
+            elif command in (['sudo', 'cat', '/proc/123/uid_map'], ['sudo', 'cat', '/proc/123/gid_map']):
+                value = '0 100000 65536'
+            elif command == ['docker', 'exec', '--user', 'dev', args.sandbox, 'id', '-u']:
+                value = '1001'
+            elif command == [*inner, 'info']:
+                pass
+            elif command == [*inner, 'version', '--format', '{{json .Server}}']:
+                value = version
+            elif command == ['docker', 'image', 'inspect', args.image]:
+                value = [{'Id': nested_id, 'RepoDigests': [args.image], 'Os': 'linux', 'Architecture': 'amd64'}]
+            elif command == [*inner, 'image', 'inspect', nested_id]:
+                value = [{'Id': nested_id}]
+            elif command[:len(inner) + 1] == [*inner, 'run']:
+                if expected == 'unsafe-procfs':
+                    return subprocess.CompletedProcess(command, 125, '', ERROR)
+                value = smoke.MARKER
+            elif command[:len(inner) + 1] == [*inner, 'rm']:
+                pass
+            else:
+                raise AssertionError(f'unexpected command: {command}')
+            return subprocess.CompletedProcess(command, 0, value if isinstance(value, str) else json.dumps(value), '')
+
+        monkeypatch.setenv('DEV_CVM_COMPOSE_SMOKE_IMAGE', reference)
+        monkeypatch.setenv('DOCKER_HOST', 'unix:///var/run/docker.sock')
+        monkeypatch.setattr(smoke, 'run', respond)
+        monkeypatch.setattr(smoke, 'stream_image', lambda *_args: calls.append(['stream-image']))
+        return smoke.verify(args)
+
+    return invoke, calls
+
+
+@pytest.mark.parametrize('reference,components', RELEASES, ids=['current-release', 'migration-baseline'])
+@pytest.mark.parametrize('expected', ['success', 'unsafe-procfs'])
+def test_digest_bound_runtime_reaches_probes_success(runtime_probe, reference, components, expected):
+    """Each approved image reaches the existing runtime probes with its own exact tuple."""
+    invoke, _calls = runtime_probe
+    receipt = invoke(reference, runtime_version(components), expected)
+    assert receipt['dev_image'] == reference
+    assert receipt['inner_versions'] == components
+    assert [(row['network'], row['expected']) for row in receipt['probes']] == [
+        ('none', expected), ('bridge', expected),
+    ]
+    assert receipt['nested_bridge_direct_egress_denied'] == (expected == 'success')
+
+
+@pytest.mark.parametrize('selected,reported', [(0, 1), (1, 0)])
+def test_other_release_runtime_tuple_failure(runtime_probe, selected, reported):
+    """An approved tuple cannot certify the other approved application digest."""
+    invoke, calls = runtime_probe
+    with pytest.raises(RuntimeError, match='unexpected release inner runtime versions'):
+        invoke(RELEASES[selected][0], runtime_version(RELEASES[reported][1]))
+    assert ['stream-image'] not in calls
+
+
+@pytest.mark.parametrize('reference', [
+    'ghcr.io/concrete-security/umbra-dev-cvm@sha256:' + 'e' * 64,
+    'ghcr.io/concrete-security/umbra-dev-cvm:latest',
+    RELEASES[0][0].replace('concrete-security', 'unreviewed-owner'),
+])
+def test_unreviewed_application_image_failure(runtime_probe, reference):
+    """A familiar runtime tuple never qualifies an unknown image or mutable tag."""
+    invoke, calls = runtime_probe
+    with pytest.raises(RuntimeError, match='unreviewed Dev release image'):
+        invoke(reference, runtime_version(RELEASES[0][1]))
+    assert ['stream-image'] not in calls
+
+
+@pytest.mark.parametrize('reference,components', RELEASES, ids=['current-release', 'migration-baseline'])
+@pytest.mark.parametrize('field', ['Version', 'Engine', 'containerd', 'runc', 'docker-init', 'missing', 'duplicate', 'extra'])
+def test_runtime_tuple_drift_failure(runtime_probe, reference, components, field):
+    """All components and the Engine summary must agree without missing or duplicate names."""
+    invoke, calls = runtime_probe
+    version = runtime_version(components)
+    if field == 'Version':
+        version['Version'] = '0.0.0'
+    elif field == 'missing':
+        version['Components'].pop()
+    elif field == 'duplicate':
+        version['Components'].append(version['Components'][0].copy())
+    elif field == 'extra':
+        version['Components'].append({'Name': 'unreviewed', 'Version': '0.0.0'})
+    else:
+        next(row for row in version['Components'] if row['Name'] == field)['Version'] = '0.0.0'
+    with pytest.raises(RuntimeError, match='unexpected release inner runtime versions'):
+        invoke(reference, version)
+    assert ['stream-image'] not in calls
 
 
 def test_exact_procfs_baseline_success():

@@ -13,6 +13,16 @@ import time
 
 
 MARKER = "umbra-nested-docker-sysbox-ok"
+# Reviewed published application digests, not caller-supplied version overrides.
+# containerd and runc may report their otherwise exact versions with a leading v.
+RELEASE_INNER_VERSIONS = {
+    "ghcr.io/concrete-security/umbra-dev-cvm@sha256:8ceb3590898d28f7ee54bc06b46ad4487473988c24719bee6ab69bd80c2fb0f9": {
+        "Engine": "29.9.2", "containerd": "2.4.2", "runc": "1.5.2", "docker-init": "0.19.0",
+    },
+    "ghcr.io/concrete-security/umbra-dev-cvm@sha256:c2f103331848d534783625888fa3920453d2848deeeef92dfcb1903a7589a0ba": {
+        "Engine": "29.7.1", "containerd": "2.2.6", "runc": "1.3.6", "docker-init": "0.19.0",
+    },
+}
 BRIDGE_PROBE = (
     'command -v timeout >/dev/null && command -v bash >/dev/null || exit 8; '
     'probe() { timeout 3 bash -c \'exec 3<>/dev/tcp/$1/$2\' bash "$1" "$2"; }; '
@@ -86,6 +96,9 @@ def verify(args: argparse.Namespace) -> dict:
         raise RuntimeError("refuse non-local Docker daemon")
     sandbox = json.loads(run(["docker", "inspect", args.sandbox]).stdout)[0]
     dev_reference = os.environ["DEV_CVM_COMPOSE_SMOKE_IMAGE"]
+    if dev_reference not in RELEASE_INNER_VERSIONS:
+        raise RuntimeError("unreviewed Dev release image")
+    expected_versions = RELEASE_INNER_VERSIONS[dev_reference]
     selected = json.loads(run(["docker", "image", "inspect", dev_reference]).stdout)[0]
     if sandbox["Image"] != selected["Id"] or dev_reference not in selected.get("RepoDigests", []):
         raise RuntimeError("sandbox is not running the selected Dev release image")
@@ -120,7 +133,13 @@ def verify(args: argparse.Namespace) -> dict:
         raise RuntimeError("nested Docker daemon never became ready; baseline is inconclusive")
     version = json.loads(run([*inner, "version", "--format", "{{json .Server}}"] ).stdout)
     components = {item["Name"]: item["Version"] for item in version["Components"]}
-    if version["Version"] != "29.9.2" or components.get("containerd", "").removeprefix("v") != "2.4.2" or components.get("runc", "").removeprefix("v") != "1.5.2":
+    normalized = {
+        name: value.removeprefix("v") if name in ("containerd", "runc") else value
+        for name, value in components.items()
+    }
+    if (len(components) != len(version["Components"])
+            or version["Version"] != expected_versions["Engine"]
+            or normalized != expected_versions):
         raise RuntimeError(f"unexpected release inner runtime versions: {components}")
     image = json.loads(run(["docker", "image", "inspect", args.image]).stdout)[0]
     if args.image not in image.get("RepoDigests", []) or image["Os"] != "linux" or image["Architecture"] != "amd64":

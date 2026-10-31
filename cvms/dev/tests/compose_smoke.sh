@@ -8,7 +8,9 @@ compose_started=0
 SMOKE_RUNTIME="${DEV_CVM_COMPOSE_SMOKE_RUNTIME:-runc}"
 case "$SMOKE_RUNTIME" in
   runc) smoke_wait=60 ;;
-  sysbox-runc) smoke_wait=180 ;;
+  sysbox-runc)
+    smoke_wait=180
+    if [[ "${UMBRA_SYSBOX_QUALIFICATION_ARM:-}" = no-rootfs-cloning ]]; then smoke_wait=600; fi ;;
   *) echo "compose smoke: unsupported runtime" >&2; exit 2 ;;
 esac
 explicit_image=0
@@ -216,6 +218,7 @@ if [[ "$SMOKE_RUNTIME" = sysbox-runc ]]; then
     'test "$(cat /home/dev/.umbra-sysbox-restart)" = umbra-sysbox-restart && rm /home/dev/.umbra-sysbox-restart'
 fi
 
+run_checks() {
 # The inner SSH command expands inside the sandbox, not in this script.
 # shellcheck disable=SC2016
 compose exec -T dev-tunnel bash -lc '
@@ -405,5 +408,211 @@ with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
         raise SystemExit(f"unexpected tunnel payload: {payload!r}")
 PY
 done
+
+}
+
+run_checks
+
+if [[ -n "${UMBRA_SYSBOX_HANDOVER_DIR:-}" ]]; then
+  # Only the disposable qualification runner may cold-stop the host runtime.
+  [[ "${GITHUB_ACTIONS:-}" = true && "${RUNNER_ENVIRONMENT:-}" = github-hosted \
+    && "$(uname -s)" = Linux && "$(uname -m)" = x86_64 && "$SMOKE_RUNTIME" = sysbox-runc \
+    && "$UMBRA_SYSBOX_HANDOVER_DIR" = "${RUNNER_TEMP:?}/sysbox-compatibility/${UMBRA_SYSBOX_QUALIFICATION_ARM:?}/handover" ]]
+  case "${UMBRA_SYSBOX_QUALIFICATION_ARM}:${UMBRA_SYSBOX_HANDOVER_EXPECT:-}" in
+    default-clone:rootfs-loss|no-rootfs-cloning:preserved) ;;
+    *) echo 'unsupported Sysbox handover expectation' >&2; exit 2 ;;
+  esac
+  mkdir "$UMBRA_SYSBOX_HANDOVER_DIR"
+  printf 'passed\n' > "$UMBRA_SYSBOX_HANDOVER_DIR/baseline-passed"
+
+  # One collector seeds only the old runtime. The candidate path only reads;
+  # state loss must fail before the ordinary nested smoke can reload its image.
+  cat > "$smoke_tmpdir/handover-state.py" <<'PY'
+import json
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+phase, project, output, baseline, expectation = sys.argv[1:]
+if phase not in ("before", "after"):
+    raise SystemExit("invalid handover phase")
+if expectation not in ("preserved", "rootfs-loss"):
+    raise SystemExit("invalid handover expectation")
+
+def run(args, **kwargs):
+    try:
+        return subprocess.run(args, check=True, capture_output=True, text=True, timeout=30, **kwargs).stdout
+    except subprocess.CalledProcessError as error:
+        # This project contains only synthetic runner fixtures. Retain a bounded
+        # diagnostic before cleanup removes the failed container and its data.
+        diagnostic = (error.stderr or "")[-4096:]
+        with Path(output, "failed-command-" + phase + ".txt").open("x") as handle:
+            handle.write(diagnostic)
+        print(diagnostic, file=sys.stderr)
+        raise
+
+ids = run(["docker", "ps", "-aq", "--no-trunc", "--filter", f"label=com.docker.compose.project={project}"]).split()
+if len(ids) != 4:
+    raise SystemExit("handover requires all four existing containers")
+deadline = time.monotonic() + 600
+while True:
+    rows = json.loads(run(["docker", "inspect", *ids]))
+    if all(row["State"]["Status"] == "running" and
+           row["State"].get("Health", {}).get("Status") == "healthy" for row in rows):
+        break
+    if any(row["State"]["Status"] in ("dead", "exited") or
+           row["State"].get("Health", {}).get("Status") == "unhealthy" for row in rows):
+        raise SystemExit("handover service failed to become healthy")
+    if time.monotonic() >= deadline:
+        raise SystemExit("handover services did not become healthy within 600 seconds")
+    time.sleep(1)
+services = {}
+sandbox = None
+for row in rows:
+    service = row["Config"]["Labels"]["com.docker.compose.service"]
+    if service in services or row["State"]["Status"] != "running":
+        raise SystemExit("handover requires distinct running services")
+    services[service] = {
+        "id": row["Id"], "image_id": row["Image"], "runtime": row["HostConfig"]["Runtime"],
+        "named_volumes": sorted([
+            {key: mount[key] for key in ("Name", "Destination", "RW")}
+            for mount in row["Mounts"] if mount["Type"] == "volume"
+        ], key=lambda item: item["Destination"]),
+    }
+    if service == "user-sandbox":
+        sandbox = row
+if set(services) != {"user-sandbox", "dev-egress-forwarder", "dev-tunnel", "smoke-origin"}:
+    raise SystemExit("unexpected handover service set")
+rootfs_marker = "/usr/local/share/umbra-sysbox-handover"
+if any(rootfs_marker == m["Destination"] or rootfs_marker.startswith(m["Destination"].rstrip("/") + "/")
+       for m in sandbox["Mounts"]):
+    raise SystemExit("rootfs fixture must be outside every mounted volume and tmpfs")
+volumes = {m["Destination"]: m for m in sandbox["Mounts"] if m["Type"] == "volume"}
+if any(path not in volumes or volumes[path]["RW"] is not True
+       for path in ("/home/dev", "/home/dev/workspaces", "/var/lib/docker")):
+    raise SystemExit("handover requires the production writable named volumes")
+if phase == "after":
+    previous = json.loads(Path(output, "before.json").read_text())
+    if services != previous["services"]:
+        raise SystemExit("cold handover recreated containers or changed image/runtime/volume bindings")
+pid = sandbox["State"]["Pid"]
+root_mounts = [line for line in run(["sudo", "cat", f"/proc/{pid}/mountinfo"]).splitlines()
+               if line.split()[4] == "/"]
+if len(root_mounts) != 1 or len(root_mounts[0]) > 16384:
+    raise SystemExit("missing or oversized init root mount evidence")
+# Retain the actual backing mount even if the fixture check below finds loss.
+with Path(output, "init-root-" + phase + ".txt").open("x") as handle:
+    handle.write(root_mounts[0] + "\n")
+clone_upper = f"upperdir=/var/lib/sysbox/rootfs/{sandbox['Id']}/"
+if ("upperdir=/var/lib/sysbox/rootfs/" in root_mounts[0]) != (expectation == "rootfs-loss"):
+    raise SystemExit("actual rootfs backing does not match the selected cloning arm")
+if expectation == "rootfs-loss" and clone_upper not in root_mounts[0]:
+    raise SystemExit("cloned rootfs does not belong to the retained sandbox")
+
+script = r'''
+import hashlib, json, os, stat, sys
+files = {
+    "/usr/local/share/umbra-sysbox-handover": ("rootfs", 0, 0, 0o600),
+    "/home/dev/.umbra-sysbox-handover": ("home", 1001, 1001, 0o600),
+    "/home/dev/workspaces/.umbra-sysbox-handover": ("workspaces", 1001, 1001, 0o640),
+    "/var/lib/docker/.umbra-sysbox-handover": ("docker-data", 0, 0, 0o600),
+}
+result = {}
+for path, (label, uid, gid, mode) in files.items():
+    content = ("umbra-cold-handover-" + label + "\n").encode()
+    if sys.argv[1] == "before":
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fchown(handle.fileno(), uid, gid)
+            os.fchmod(handle.fileno(), mode)
+            os.fsync(handle.fileno())
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError as error:
+        if sys.argv[1:] == ["after", "rootfs-loss"] and label == "rootfs":
+            result[path] = {"missing": True, "error": str(error), "errno": error.errno}
+            continue
+        raise
+    with os.fdopen(fd, "rb") as handle:
+        info = os.fstat(handle.fileno())
+        actual = handle.read(1024)
+    if not stat.S_ISREG(info.st_mode) or actual != content or (info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)) != (uid, gid, mode):
+        raise SystemExit("cold handover fixture changed: " + label)
+    result[path] = {"sha256": hashlib.sha256(actual).hexdigest(), "uid": info.st_uid,
+                    "gid": info.st_gid, "mode": stat.S_IMODE(info.st_mode), "size": info.st_size}
+print(json.dumps(result, sort_keys=True))
+'''
+fixtures = json.loads(run(["docker", "exec", "-i", "--user", "0", sandbox["Id"], "python3", "-", phase, expectation], input=script))
+if phase == "after":
+    missing = [path for path, record in fixtures.items() if record.get("missing")]
+    if missing != ([rootfs_marker] if expectation == "rootfs-loss" else []):
+        raise SystemExit("handover did not reproduce exactly the expected rootfs outcome")
+    if missing:
+        Path(output, "expected-rootfs-loss.txt").write_text(fixtures[rootfs_marker]["error"] + "\n")
+# This records the actual overlay upperdir/clone backing, not an inference from
+# the manager option. Kernel paths contain only this disposable runner's state.
+inner = ["docker", "exec", "--user", "dev", sandbox["Id"], "docker"]
+for attempt in range(60):
+    if subprocess.run([*inner, "info"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                      timeout=10, check=False).returncode == 0:
+        break
+    time.sleep(1)
+else:
+    raise SystemExit("inner Docker did not become ready after cold handover")
+expected_image = json.loads(Path(baseline).read_text())["nested_image_id"]
+loaded = json.loads(run([*inner, "image", "inspect", expected_image]))
+if len(loaded) != 1 or loaded[0]["Id"] != expected_image:
+    raise SystemExit("cold handover lost the previously imported inner image")
+# Read every retained layer before run_checks can import the image again.
+# Metadata alone would miss lost content that the later load could repair.
+subprocess.run([*inner, "image", "save", expected_image], stdout=subprocess.DEVNULL,
+               stderr=subprocess.PIPE, timeout=120, check=True)
+state = {"services": services, "fixtures": fixtures, "inner_image_id": loaded[0]["Id"],
+         "inner_image_content_readable": True,
+         "init_root_mount": root_mounts[0], "init_pid": pid, "expectation": expectation}
+if phase == "after":
+    retained_paths = set(fixtures) - ({rootfs_marker} if expectation == "rootfs-loss" else set())
+    if any(fixtures[path] != previous["fixtures"][path] for path in retained_paths) or loaded[0]["Id"] != previous["inner_image_id"]:
+        raise SystemExit("cold handover changed populated state")
+with Path(output, phase + ".json").open("x") as handle:
+    json.dump(state, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+PY
+  python3 "$smoke_tmpdir/handover-state.py" before "$PROJECT" "$UMBRA_SYSBOX_HANDOVER_DIR" "$UMBRA_NESTED_RECEIPT" "$UMBRA_SYSBOX_HANDOVER_EXPECT"
+  compose stop --timeout 20
+  bash "$ROOT/ops/verify/sysbox-compatibility.sh" switch-runtime "$PROJECT"
+  # start cannot recreate a container. Do not use up, restore, or reseed here.
+  compose start
+  python3 "$smoke_tmpdir/handover-state.py" after "$PROJECT" "$UMBRA_SYSBOX_HANDOVER_DIR" "$UMBRA_NESTED_RECEIPT" "$UMBRA_SYSBOX_HANDOVER_EXPECT"
+  export UMBRA_NESTED_EXPECT=success
+  export UMBRA_NESTED_RECEIPT="$UMBRA_SYSBOX_HANDOVER_DIR/nested-candidate.json"
+  run_checks
+  python3 - "$UMBRA_SYSBOX_HANDOVER_DIR" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+before = json.loads((root / "before.json").read_text())
+after = json.loads((root / "after.json").read_text())
+receipt = {
+    "status": "passed", "same_container_ids": {key: value["id"] for key, value in before["services"].items()},
+    "rootfs_outcome": after["expectation"],
+    "same_image_runtime_and_named_volume_bindings": before["services"] == after["services"],
+    "preserved_files": after["fixtures"], "preserved_inner_image_id": after["inner_image_id"],
+    "inner_image_content_readable_before_reload": before["inner_image_content_readable"] and after["inner_image_content_readable"],
+    "old_init_root_mount": before["init_root_mount"], "candidate_init_root_mount": after["init_root_mount"],
+    "baseline_nested_container_start": "unsafe-procfs control" if after["expectation"] == "rootfs-loss" else "none and bridge passed",
+    "candidate_fresh_nested_containers": "none and bridge passed; direct bridge egress denied",
+    "not_exercised": ["migration of already-cloned rootfs", "running nested container migration", "arbitrary user data recovery", "dstack boot", "TDX attestation", "KMS key continuity"],
+}
+with (root / "handover.json").open("x") as handle:
+    json.dump(receipt, handle, indent=2)
+    handle.write("\n")
+PY
+fi
 
 echo "dev_compose_smoke: ok"
