@@ -88,7 +88,8 @@ The SC runs an asynchronous background loop to synchronize the Dev CVM routing m
 The SC MUST poll the Console at `GET <CONSOLE_URL>/internal/sc-control/cvms` every **5 seconds** (± 1s jitter) by default. Operators MAY override cadence with `SC_CONTROL_INTERVAL_SECONDS` and `SC_CONTROL_JITTER_SECONDS` for non-production tuning.
 
 * **Auth**: `Authorization: Bearer <CONSOLE_INGEST_TOKEN>`.
-* **Caching**: The SC MUST include the `If-None-Match: <ETag>` header from the previous successful response. If the Console returns `304 Not Modified`, the SC sleeps until the next tick.
+* **Caching**: The SC MUST include the `If-None-Match: <ETag>` header from the previous successful response. An authenticated `304 Not Modified` refreshes the policy's age.
+* **Freshness**: After 60 seconds without an authenticated policy response or revalidation, the SC MUST reject HTTP and CONNECT admission with `503` and drop WebSocket application frames until the policy is refreshed. The SC measures this interval with a monotonic clock.
 * **Atomic Swap**: On `200 OK`, the SC MUST update its internal routing map atomically. Ongoing proxy connections MUST NOT be interrupted. Terminated Dev CVMs that drop out of the Console's payload MUST be immediately evicted from the SC's local map.
 
 ### 4.2 Strict Policy Schema Validation
@@ -354,7 +355,7 @@ To fulfill the requirements while minimizing architectural complexity, the SC re
 
 ### 8.1 Reproducible Image Publication
 
-Security CVM image verification and publication MUST use the shared `umbra-release` builder: BuildKit 0.34.1 pinned by image digest, exporter compatibility version 30, the digest-pinned Dockerfile 1.26.0 frontend, and the exact Buildx 0.34.0 client. The source commit timestamp is passed as `SOURCE_DATE_EPOCH`, every exporter rewrites timestamps, and every release attempt performs two cache-disabled linux/amd64 builds from independent detached worktrees at that commit. Their runnable runtime-manifest digests MUST match. Each local result index MUST independently pass runtime-label, subject-binding, SPDX, and max-mode SLSA validation. Result-index digests are not compared because BuildKit provenance carries a unique invocation ID and wall-clock start/finish times.
+Security CVM image verification and publication MUST use the shared `umbra-release` builder: BuildKit 0.34.2 pinned by image digest, exporter compatibility version 30, the digest-pinned Dockerfile 1.26.0 frontend, and the exact Buildx 0.34.0 client. The source commit timestamp is passed as `SOURCE_DATE_EPOCH`, every exporter rewrites timestamps, and every release attempt performs two cache-disabled linux/amd64 builds from independent detached worktrees at that commit. Their runnable runtime-manifest digests MUST match. Each local result index MUST independently pass runtime-label, subject-binding, SPDX, and max-mode SLSA validation. Result-index digests are not compared because BuildKit provenance carries a unique invocation ID and wall-clock start/finish times.
 
 After the two local runtime subjects match, publication MUST perform one tagless push-by-digest registry build and MUST NOT create or rely on a source-commit tag. The remotely-read immutable index, runtime labels, subject-bound attestation manifest, and parsed SPDX/SLSA predicates MUST match the reviewed build inputs, and its runtime MUST equal both local subjects. The helper returns only the runnable `repository@sha256:<runtime-manifest>` reference beneath the attestation index, and deployment MUST use that digest reference.
 

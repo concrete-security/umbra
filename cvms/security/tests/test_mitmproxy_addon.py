@@ -76,6 +76,18 @@ def response_factory(status_code: int, content: bytes, headers: Mapping[str, str
     return FakeResponse(status_code=status_code, raw_content=content, headers=headers)
 
 
+def test_proxy_admission_with_expired_policy_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An expired allow rule cannot admit a new request."""
+    monkeypatch.setattr("umbra_security_cvm.control_loop.monotonic", lambda: 0.0)
+    proxy, _ = addon()
+    monkeypatch.setattr("umbra_security_cvm.control_loop.monotonic", lambda: 60.0)
+    flow = FakeFlow()
+
+    proxy.request(flow)
+
+    assert flow.response is not None and flow.response.status_code == 503
+
+
 def addon(policy_body: dict[str, object] | None = None) -> tuple[SecurityCVMProxyAddon, TrafficLogQueue]:
     queue = TrafficLogQueue(max_entries=100, max_bytes=100_000)
     client = TrafficLogClient(console_url="https://console.example.com", ingest_token="ingest")

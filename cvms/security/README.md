@@ -25,7 +25,7 @@ Policy flow:
 
 1. Admins author profiles through the CLI and Console.
 2. Console computes effective policy for each Dev CVM.
-3. Security CVM polls and atomically swaps validated state.
+3. Security CVM polls and atomically swaps validated state. It rejects admission and drops WebSocket application frames when the policy has gone 60 seconds without authenticated refresh or revalidation.
 4. A request authenticates with its per-CVM bearer.
 5. The matching policy runs fail closed.
 6. The outcome is emitted to Console traffic logs.
