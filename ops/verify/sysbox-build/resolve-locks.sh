@@ -10,6 +10,10 @@ for component in sysbox-runc sysbox-fs sysbox-mgr; do
   if [[ "$component" = sysbox-runc || "$component" = sysbox-fs ]]; then
     go get github.com/cilium/ebpf@v0.22.0
   fi
+  go get golang.org/x/net@v0.62.0
+  if [[ "$component" = sysbox-runc || "$component" = sysbox-mgr ]]; then
+    go get go.opentelemetry.io/otel/trace@v1.47.0
+  fi
   go mod tidy
   go mod verify
   mkdir -p "/out/locks/$component"
