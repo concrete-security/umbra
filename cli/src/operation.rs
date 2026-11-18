@@ -19,7 +19,9 @@ use std::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{cli::WaitArgs, console, exit::ExitStatus, style};
+use crate::{
+    cli::WaitArgs, commands::auth, config::ResolvedConfig, console, exit::ExitStatus, style,
+};
 
 /// Console async operation envelope.
 ///
@@ -142,14 +144,15 @@ pub(crate) fn print_operation(operation: &Operation, json_output: bool, stderr: 
 /// operator sees per-step progress; audit-export passes `false` because its
 /// async lifecycle is a single async step with no intermediate progress.
 pub(crate) fn wait_for_operation(
-    console_url: &str,
-    access_token: &str,
+    config: &ResolvedConfig,
+    initial_session: &crate::session::Session,
     mut operation: Operation,
     timeout: Duration,
     json_output: bool,
     wire_steps: bool,
 ) -> Result<Operation, (ExitStatus, String)> {
     let started = Instant::now();
+    let mut current_session = initial_session.clone();
     let mut excluded = Duration::ZERO;
     // Section 6.3 + 12.4: drive the steps template against stderr during the
     // polling phase. The JSON path renders no steps so structured output stays
@@ -220,7 +223,14 @@ pub(crate) fn wait_for_operation(
             return Err((ExitStatus::WaitTimeout, String::new()));
         }
         thread::sleep(Duration::from_secs(1));
-        match fetch_operation(console_url, access_token, &operation.id)? {
+        // A saga can outlive the access token used to submit it. Reload the
+        // current session and use the normal expiry/refresh contract for each
+        // read; never repeat the accepted mutation or retry a rejected bearer.
+        current_session = auth::session_for_operation(config, &current_session)?;
+        let console_url = config
+            .require_console_url()
+            .map_err(|message| (ExitStatus::Usage, message))?;
+        match fetch_operation(console_url, &current_session.access_token, &operation.id)? {
             OperationPoll::Operation(next) => operation = *next,
             OperationPoll::RateLimited(delay) => {
                 thread::sleep(delay);
@@ -255,8 +265,8 @@ where
 /// and the usual `(ExitStatus, String)` on failure so the caller's
 /// `try_or_eprintln!` reports it. `wire_steps` matches [`wait_for_operation`].
 pub(crate) fn await_result<T>(
-    console_url: &str,
-    access_token: &str,
+    config: &ResolvedConfig,
+    initial_session: &crate::session::Session,
     op: Operation,
     wait: &WaitArgs,
     json_output: bool,
@@ -271,8 +281,8 @@ where
         return Ok(None);
     }
     let op = wait_for_operation(
-        console_url,
-        access_token,
+        config,
+        initial_session,
         op,
         Duration::from_secs(u64::from(wait.wait_timeout_seconds)),
         json_output,
@@ -287,6 +297,15 @@ where
 mod tests {
     use super::*;
     use crate::cli::WaitArgs;
+
+    fn unused_config() -> ResolvedConfig {
+        ResolvedConfig::resolve(crate::config::ConfigOverrides {
+            config_dir: Some(
+                std::env::temp_dir().join(format!("umbra-unused-{}", uuid::Uuid::new_v4())),
+            ),
+            ..Default::default()
+        })
+    }
 
     fn op(status: &str, result: Option<Value>) -> Operation {
         Operation {
@@ -316,8 +335,8 @@ mod tests {
             wait_timeout_seconds: 60,
         };
         let out: Result<Option<Value>, _> = await_result(
-            "http://unused",
-            "tok",
+            &unused_config(),
+            &crate::test_support::fake_authenticated_session(),
             op("running", None),
             &wait,
             true,
@@ -336,8 +355,8 @@ mod tests {
             wait_timeout_seconds: 60,
         };
         let out: Result<Option<Value>, _> = await_result(
-            "http://unused",
-            "tok",
+            &unused_config(),
+            &crate::test_support::fake_authenticated_session(),
             op("succeeded", Some(serde_json::json!({ "id": "c1" }))),
             &wait,
             true,
@@ -348,6 +367,318 @@ mod tests {
             .expect("terminal succeeded extracts")
             .expect("some result");
         assert_eq!(value["id"], serde_json::json!("c1"));
+    }
+
+    #[derive(Clone, Copy)]
+    enum PollCase {
+        Expired,
+        ExternalRotation,
+        ConcurrentLogin,
+        ConcurrentLogout,
+        MissingRefresh,
+        RejectedRefresh,
+        UnauthorizedPoll,
+        RateLimited,
+    }
+
+    type PollOutcome = Result<Option<Value>, (ExitStatus, String)>;
+
+    /// Real local HTTP exchanges prove bearer selection and resource submission count.
+    fn run_poll_case(case: PollCase) -> (PollOutcome, Vec<String>) {
+        use crate::{config::ConfigOverrides, session, test_support::fake_authenticated_session};
+        use std::{
+            fs,
+            io::{BufRead, BufReader, Read, Write},
+            net::TcpListener,
+        };
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let console_url = format!("http://{}", listener.local_addr().unwrap());
+        let config = ResolvedConfig::resolve(ConfigOverrides {
+            config_dir: Some(
+                std::env::temp_dir().join(format!("umbra-poll-{}", uuid::Uuid::new_v4())),
+            ),
+            console_url: Some(console_url.clone()),
+            ..Default::default()
+        });
+        let mut stored = fake_authenticated_session();
+        stored.access_token = "fixture-submit-token".into();
+        stored.refresh_token = if matches!(case, PollCase::MissingRefresh) {
+            None
+        } else {
+            Some("fixture-refresh-token".into())
+        };
+        stored.expires_at = chrono::Utc::now() + chrono::Duration::hours(1);
+        stored.refresh_expires_at = Some(chrono::Utc::now() + chrono::Duration::days(1));
+        session::write_atomic(&config.config_dir, &stored).unwrap();
+        let config_dir = config.config_dir.clone();
+        let initial_session = stored.clone();
+        let server = thread::spawn(move || {
+            let refresh = matches!(
+                case,
+                PollCase::Expired
+                    | PollCase::RejectedRefresh
+                    | PollCase::RateLimited
+                    | PollCase::ConcurrentLogin
+                    | PollCase::ConcurrentLogout
+            );
+            let complete = matches!(case, PollCase::Expired | PollCase::RateLimited);
+            let count = 2 + usize::from(refresh) + usize::from(complete);
+            let mut observed = Vec::new();
+            for step in 0..count {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(Instant::now() < deadline, "mock poll request deadline");
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(_) => panic!("mock poll accept failed"),
+                    }
+                };
+                stream.set_nonblocking(false).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(10)))
+                    .unwrap();
+                let mut reader = BufReader::new(&stream);
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let request = line
+                    .split_whitespace()
+                    .take(2)
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let mut authorization = None;
+                let mut length = 0;
+                loop {
+                    line.clear();
+                    assert!(reader.read_line(&mut line).unwrap() > 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some((name, value)) = line.split_once(':') {
+                        if name.eq_ignore_ascii_case("authorization") {
+                            authorization = Some(value.trim().to_string());
+                        }
+                        if name.eq_ignore_ascii_case("content-length") {
+                            length = value.trim().parse::<usize>().unwrap();
+                        }
+                    }
+                }
+                assert!(length <= 8192);
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).unwrap();
+                drop(reader);
+                let resource_submit = step == 0;
+                let first_poll = step == 1;
+                let token_refresh = step == 2 && refresh;
+                let expected = if resource_submit {
+                    "POST /api/v1/cvms/c1/actions/update"
+                } else if token_refresh {
+                    "POST /api/v1/auth/refresh"
+                } else {
+                    "GET /api/v1/operations/op-1"
+                };
+                assert_eq!(request, expected);
+                if token_refresh {
+                    assert!(authorization.is_none());
+                    assert!(
+                        serde_json::from_slice::<Value>(&body).unwrap()["refresh_token"]
+                            == "fixture-refresh-token"
+                    );
+                } else {
+                    let expected_token = if step < 2 {
+                        "Bearer fixture-submit-token"
+                    } else {
+                        "Bearer fixture-poll-token"
+                    };
+                    assert!(
+                        authorization.as_deref() == Some(expected_token),
+                        "unexpected poll credential"
+                    );
+                }
+                observed.push(request);
+                let mut status = 200;
+                let mut headers = "";
+                let response = if token_refresh {
+                    // Same-user login/logout during the HTTP refresh must survive CAS.
+                    if matches!(case, PollCase::ConcurrentLogin) {
+                        stored.access_token = "fixture-foreign-token".into();
+                        stored.refresh_token = Some("fixture-foreign-refresh".into());
+                        session::write_atomic(&config_dir, &stored).unwrap();
+                    }
+                    if matches!(case, PollCase::ConcurrentLogout) {
+                        session::remove(&config_dir).unwrap();
+                    }
+                    if matches!(case, PollCase::RejectedRefresh) {
+                        status = 401;
+                        serde_json::json!({"error":{"code":"UNAUTHORIZED","message":"invalid refresh"}})
+                    } else {
+                        serde_json::json!({"access_token":"fixture-poll-token","refresh_token":"fixture-rotated-refresh","expires_in":3600,"refresh_expires_in":86400})
+                    }
+                } else if first_poll && matches!(case, PollCase::UnauthorizedPoll) {
+                    status = 401;
+                    serde_json::json!({"error":{"code":"UNAUTHORIZED","message":"invalid bearer token"}})
+                } else {
+                    if first_poll {
+                        stored.expires_at = chrono::Utc::now() - chrono::Duration::seconds(1);
+                        if matches!(case, PollCase::ExternalRotation) {
+                            stored.access_token = "fixture-foreign-token".into();
+                            stored.refresh_token = Some("fixture-foreign-refresh".into());
+                            stored.expires_at = chrono::Utc::now() + chrono::Duration::hours(1);
+                        }
+                        if matches!(case, PollCase::MissingRefresh) {
+                            stored.refresh_token = None;
+                        }
+                        session::write_atomic(&config_dir, &stored).unwrap();
+                    }
+                    if first_poll && matches!(case, PollCase::RateLimited) {
+                        status = 429;
+                        headers = "Retry-After: 1\r\n";
+                        serde_json::json!({})
+                    } else {
+                        serde_json::to_value(if resource_submit || first_poll {
+                            op("running", None)
+                        } else {
+                            op("succeeded", Some(serde_json::json!({"id":"c1"})))
+                        })
+                        .unwrap()
+                    }
+                };
+                let body = response.to_string();
+                write!(stream,"HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{headers}Connection: close\r\n\r\n{body}",body.len()).unwrap();
+                stream.flush().unwrap();
+            }
+            observed
+        });
+        let accepted: Operation = console::post_json(
+            &console_url,
+            "fixture-submit-token",
+            "/api/v1/cvms/c1/actions/update",
+            &serde_json::json!({}),
+            "submit fixture update",
+        )
+        .unwrap();
+        let result = await_result(
+            &config,
+            &initial_session,
+            accepted,
+            &WaitArgs {
+                no_wait: false,
+                wait_timeout_seconds: 8,
+            },
+            true,
+            false,
+            "CVM update",
+        );
+        let observed = server.join().expect("bounded mock Console exchanges");
+        if matches!(case, PollCase::ConcurrentLogin | PollCase::ExternalRotation) {
+            assert!(
+                session::load(&config.config_dir)
+                    .unwrap()
+                    .unwrap()
+                    .access_token
+                    == "fixture-foreign-token",
+                "another login must survive"
+            );
+        }
+        if matches!(case, PollCase::ConcurrentLogout) {
+            assert!(
+                session::load(&config.config_dir).unwrap().is_none(),
+                "logout must survive"
+            );
+        }
+        fs::remove_dir_all(&config.config_dir).unwrap();
+        (result, observed)
+    }
+
+    /// This operation's own refresh changes the next poll bearer without resubmission.
+    #[rstest::rstest]
+    #[case::expired(PollCase::Expired, 1)]
+    #[case::rate_limited_expiry(PollCase::RateLimited, 1)]
+    fn polling_session_changes_complete_without_resubmission_success(
+        #[case] case: PollCase,
+        #[case] refreshes: usize,
+    ) {
+        let (result, requests) = run_poll_case(case);
+        assert_eq!(result.unwrap().unwrap()["id"], "c1");
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|r| r.as_str() == "POST /api/v1/cvms/c1/actions/update")
+                .count(),
+            1
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|r| r.as_str() == "POST /api/v1/auth/refresh")
+                .count(),
+            refreshes
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|r| r.as_str() == "GET /api/v1/operations/op-1")
+                .count(),
+            2
+        );
+    }
+
+    /// Auth failures and another login/logout never leak its credentials or resubmit.
+    #[rstest::rstest]
+    #[case::missing_refresh(PollCase::MissingRefresh, 0)]
+    #[case::rejected_refresh(PollCase::RejectedRefresh, 1)]
+    #[case::unauthorized_poll(PollCase::UnauthorizedPoll, 0)]
+    #[case::external_rotation(PollCase::ExternalRotation, 0)]
+    #[case::same_user_login_during_refresh(PollCase::ConcurrentLogin, 1)]
+    #[case::logout_during_refresh(PollCase::ConcurrentLogout, 1)]
+    fn polling_auth_failure_does_not_retry_or_resubmit_failure(
+        #[case] case: PollCase,
+        #[case] refreshes: usize,
+    ) {
+        let (result, requests) = run_poll_case(case);
+        let (status, message) = result.unwrap_err();
+        assert!(matches!(status, ExitStatus::AuthRequired));
+        assert!(
+            !message.contains("fixture-submit-token") && !message.contains("fixture-refresh-token")
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|r| r.as_str() == "POST /api/v1/cvms/c1/actions/update")
+                .count(),
+            1
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|r| r.as_str() == "POST /api/v1/auth/refresh")
+                .count(),
+            refreshes
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|r| r.as_str() == "GET /api/v1/operations/op-1")
+                .count(),
+            1
+        );
+    }
+
+    /// An elapsed wait never refreshes or polls and leaves the operation running.
+    #[test]
+    fn elapsed_wait_stops_before_session_reload_failure() {
+        let result = wait_for_operation(
+            &unused_config(),
+            &crate::test_support::fake_authenticated_session(),
+            op("running", None),
+            Duration::ZERO,
+            true,
+            false,
+        );
+        assert!(matches!(result, Err((ExitStatus::WaitTimeout, _))));
     }
 
     /// A malformed terminal payload must not be copied into the CLI diagnostic.
@@ -390,8 +721,8 @@ mod tests {
             details: None,
         });
         let out: Result<Option<Value>, _> = await_result(
-            "http://unused",
-            "tok",
+            &unused_config(),
+            &crate::test_support::fake_authenticated_session(),
             operation,
             &wait,
             true,

@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = "==3.12.*"
 
 [manifest]
@@ -471,6 +471,11 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/b3/3f/3582293d1e185e71d19d7c731c3e2ee20ba21981c4a1115c0806c1f62120/sqlalchemy-2.0.52-py3-none-any.whl", hash = "sha256:3b81b8363a919ce53453591cdb93702e6bd54ade6c4fa2f468fc053baee5ed89", size = 1950700, upload-time = "2026-08-11T20:47:21.603Z" },
 ]
 
+[package.optional-dependencies]
+asyncio = [
+    { name = "greenlet" },
+]
+
 [[package]]
 name = "starlette"
 version = "1.6.0"
@@ -525,6 +530,7 @@ dependencies = [
     { name = "google-re2" },
     { name = "httpx" },
     { name = "pyjwt", extra = ["crypto"] },
+    { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "structlog" },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -543,6 +549,7 @@ requires-dist = [
     { name = "google-re2", specifier = ">=1,<2" },
     { name = "httpx", specifier = ">=0.27,<1" },
     { name = "pyjwt", extras = ["crypto"], specifier = ">=2.15,<3" },
+    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2,<3" },
     { name = "structlog", specifier = ">=25,<26" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30,<1" },
 ]

@@ -98,6 +98,61 @@ Runner image tests do not establish genuine TDX attestation, provider lifecycle,
 real OIDC login, or Sysbox behavior. Live staging must verify those properties
 against the selected immutable artifacts before production promotion.
 
+## Sysbox compatibility experiment
+
+`Sysbox compatibility` runs on a disposable GitHub-hosted Ubuntu 24.04 runner.
+It compares checksum-pinned upstream Sysbox 0.6.7 with a locked 0.7.1 source
+candidate against the same fixed Dev release digest. Both arms run on the same host; installation must not
+change the outer Docker components. The workflow installs host runtime packages
+and therefore must never run on a developer machine, self-hosted runner or CVM.
+
+The existing Compose smoke keeps `runc` by default. This experiment opts into
+`sysbox-runc`, retains the production Compose file, uses synthetic keys and CA
+material, and checks SSH, tunnels, internal networking and missing-policy denial.
+A pinned Ubuntu image is streamed into the inner Docker daemon without a pull or
+host socket mount. Fresh nested containers exercise both `none` and `bridge`
+networks; the candidate also checks blocked direct bridge egress.
+
+The baseline must reproduce the exact `unsafe procfs` / `openat2` / cross-device
+failure after the inner daemon is ready. An installation, startup or different
+runtime error makes the comparison inconclusive. The candidate must run the
+commands successfully. The receipt records image IDs, runtime versions, host
+kernel, user namespace mappings and package/binary hashes. The package source
+pins come from the upstream [0.6.7](https://github.com/nestybox/sysbox/releases/tag/v0.6.7)
+and [0.7.1](https://github.com/nestybox/sysbox/releases/tag/v0.7.1) releases.
+
+A separate job scans all three exact candidate Go binaries with Trivy's `rootfs`
+analyzer. Missing inventories, scanner errors and known HIGH/CRITICAL dependency
+advisories fail the job; repository ignore exceptions do not apply. Manual runs
+can set `run_compatibility=false` to repeat only this scan.
+
+The default candidate compiles the coherent 0.7.1 source set with pinned Go
+1.27.4, snapshot native build packages and committed dependency locks. A small
+source patch adapts its cgroup device filter to the fixed eBPF library while
+preserving raw kernel attachment semantics. Existing filter-generation tests
+run during the build. A private runner cgroup checks allowed and denied device
+opens, enforcement after the loader exits, explicit detach and invalid targets.
+The candidate must
+reproduce the reviewed binary checksums before scanning. Only after the scan and
+inventory gates pass does the disposable runner install those exact bytes and
+compare them against 0.6.7. The smoke also checks sandbox restart, exec and a
+saved home-directory file. No build output is published or installed on a CVM.
+
+Manual `resolve_locks=true` adds a separate maintenance job that exports proposed
+Go module locks. It builds no runtime and cannot feed the qualification job.
+Review and commit those locks before rebuilding; a changed binary hash still
+fails the mandatory checksum gate until its new pin is reviewed and committed.
+
+Manual `rebuild_candidate=false` selects the checksum-pinned upstream package
+for a separate diagnostic. It must pass the same unsuppressed binary scan;
+compatibility success does not override known dependency advisories.
+
+This is a diagnostic experiment, not a release or deployment approval. Upstream
+packages share the 0.6.7 component source revisions with dstack, but the runner's
+kernel, packaging and outer Docker differ. No result establishes dstack boot,
+TDX attestation, KMS key continuity, existing-data recovery or a safe host runtime
+upgrade. Production migration needs separate verification of those properties.
+
 ## Build-cache boundary
 
 The pull-request gate caches only public Cargo inputs, Cargo build output, and uv downloads. Its exact cache keys include the Python pin, Rust toolchain, and all Rust and Python locks; there are no prefix fallback keys. A clean cache miss must pass the same locked gates.
@@ -131,14 +186,7 @@ Public repositories must also have GitHub's dependency graph enabled. The
 dependency-review job deliberately fails when that repository prerequisite is
 missing; do not weaken or skip the gate to compensate for incomplete settings.
 
-The scoped Hickory DNSSEC advisory exception requires both locked Linux Cargo
-feature graphs to exclude DNSSEC. `make check` enforces that condition and
-requires reassessment when the resolver version changes. The exception expires
-on 2026-11-08; remove it when the upstream dependency permits a patched resolver.
-
-The Hickory CNAME advisory GHSA-6f2x-v7q7-m7m5 also has a scoped exception until 2026-11-08. In 0.25.2, the affected recursive implementation is in the separate `hickory-recursor` crate. Umbra's reqwest 0.12.28 calls the stub `TokioResolver::lookup_ip`, rather than that full-recursion implementation. Both lockfiles and all native release graphs exclude `hickory-recursor`. Controlled CNAME-only DNS fixtures in Atlas cover unrelated answer, authority and additional records, plus legitimate-chain controls. This exception addresses the advisory's recursive fan-out, without claiming general DNS response safety. `tools/check-cargo-dnssec.py` checks all CLI release targets and Console Linux; it rejects version, registry source, resolver caller and DNSSEC feature drift. The DNSSEC exception has its own independent condition. See the [advisory](https://github.com/advisories/GHSA-6f2x-v7q7-m7m5), [answer-section fix](https://github.com/hickory-dns/hickory-dns/commit/4689fc8d3ddd3e3f99ec1b7be4e2e9e78afd2e6b), and [chain fix](https://github.com/hickory-dns/hickory-dns/commit/ccd6952378f250c714fc2af0cb1053e1c179f832).
-
-The two pip-vendor exceptions also expire on 2026-11-08. They match Trivy's Python target and exact affected package PURLs when present; Trivy also matches a missing PURL. Before applying them, the image gate runs `tools/check-pip-vendor.py` in a read-only container without network access. The guard checks the reviewed pip/vendor pins and rejects native msgpack, PackageIndex implementations, or actual installed distributions at the excepted vulnerable versions, including alternate Python environments. A guard failure stops the image gate and requires reassessment.
+The pip-vendor exception for CVE-2025-47273 expires on 2026-12-18. The image gate checks every installed Python distribution and ensurepip wheel for the affected setuptools implementation. The pip 26.3 vendor includes `pkg_resources` only. The guard rejects a real installation at the excepted version or any vendored `PackageIndex` implementation before Trivy applies the exception.
 
 An `environment: release` declaration does not protect a publication by itself: GitHub will create an unprotected environment when the named environment is missing. Capture the `release` environment's deployment-branch policy and reviewer settings through the GitHub API before the first non-dry-run release.
 

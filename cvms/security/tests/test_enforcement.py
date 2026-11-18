@@ -10,6 +10,7 @@ from umbra_security_cvm.enforcement import (
     enforce_authenticated_request,
     enforce_connect_request,
     enforce_request,
+    extract_proxy_bearer,
     find_dlp_match,
 )
 
@@ -118,6 +119,50 @@ def test_unknown_proxy_auth_fails_closed_without_traffic_log() -> None:
     assert result.response_code == 407
     assert result.reason == "proxy_auth_unknown"
     assert result.traffic_log is None
+
+
+@pytest.mark.parametrize("entrypoint", ["request", "connect"])
+@pytest.mark.parametrize(
+    "token",
+    [
+        pytest.param("\udcff", id="surrogateescape"),
+        pytest.param("\ud800", id="high-surrogate"),
+        pytest.param("caf\u00e9", id="non-ascii"),
+        pytest.param("token\x00", id="nul"),
+        pytest.param("token\x7f", id="del"),
+        pytest.param("token,other", id="folded-headers"),
+        pytest.param("token:other", id="unsupported-punctuation"),
+        pytest.param("token=other", id="interior-padding"),
+        pytest.param("=", id="padding-only"),
+        pytest.param("token other", id="whitespace"),
+        pytest.param("", id="empty"),
+    ],
+)
+def test_malformed_proxy_bearer_is_rejected_before_hashing_failure(
+    entrypoint: str, token: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every unauthenticated enforcement path rejects unsupported token bytes before lookup."""
+    def unexpected_lookup(*_args: object) -> None:
+        pytest.fail("Malformed bearer reached token hashing")
+
+    monkeypatch.setattr(ControlMap, "lookup_proxy_token", unexpected_lookup)
+    proxy_request = request(headers={"Proxy-Authorization": f"Bearer {token}"})
+    controls = control_map()
+
+    if entrypoint == "connect":
+        result = enforce_connect_request(proxy_request, controls)
+    else:
+        result = enforce_request(proxy_request, controls)
+
+    assert result.allowed is False
+    assert result.response_code == 407
+    assert result.traffic_log is None
+
+
+@pytest.mark.parametrize("token", ["proxy-token", "Az09-._~+/=="])
+def test_supported_proxy_bearer_syntax_is_preserved_success(token: str) -> None:
+    """URL-safe issued tokens and the complete ASCII bearer alphabet remain accepted."""
+    assert extract_proxy_bearer({"proxy-authorization": f"Bearer {token}"}) == token
 
 
 def test_allowed_request_strips_proxy_auth_and_injects_real_header_after_dlp() -> None:

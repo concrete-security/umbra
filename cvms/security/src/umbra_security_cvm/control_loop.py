@@ -5,12 +5,14 @@ from datetime import datetime, timezone
 import asyncio
 import logging
 import random
+from time import monotonic
 from typing import Awaitable, Callable
 
 from umbra_security_cvm.control import ControlMap, SCControlClient
 
 
 log = logging.getLogger(__name__)
+CONTROL_POLICY_MAX_AGE_SECONDS = 60.0
 
 
 @dataclass(frozen=True)
@@ -25,17 +27,32 @@ class ControlPlaneState:
             control_map=initial or ControlMap.from_console_payload({"entries": []}),
             updated_at=datetime.now(timezone.utc),
         )
+        self.mark_validated()
 
     def snapshot(self) -> ControlPlaneSnapshot:
         return self._snapshot
 
+    def control_map_for_enforcement(self) -> ControlMap | None:
+        if monotonic() >= self._expires_at:
+            return None
+        return self.snapshot().control_map
+
+    def mark_validated(self) -> None:
+        self._expires_at = monotonic() + CONTROL_POLICY_MAX_AGE_SECONDS
+
     def replace(self, control_map: ControlMap) -> None:
         self._snapshot = ControlPlaneSnapshot(control_map=control_map, updated_at=datetime.now(timezone.utc))
+        self.mark_validated()
 
 
 async def poll_control_plane_once(client: SCControlClient, state: ControlPlaneState) -> bool:
-    result = await client.poll_once(etag=state.snapshot().control_map.etag)
-    if result.not_modified or result.control_map is None:
+    previous = state.snapshot()
+    result = await client.poll_once(etag=previous.control_map.etag)
+    if result.not_modified:
+        if result.etag is not None and result.etag == previous.control_map.etag and state.snapshot() is previous:
+            state.mark_validated()
+        return False
+    if result.control_map is None:
         return False
     state.replace(result.control_map)
     return True

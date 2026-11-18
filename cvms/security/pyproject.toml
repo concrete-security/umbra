@@ -34,21 +34,20 @@ dependencies = [
 dev = ["pytest>=9.0.3,<10"]
 
 [project.optional-dependencies]
-mitmproxy = ["mitmproxy>=12.2.3,<13"]
+mitmproxy = ["mitmproxy>=12.3.1,<13"]
 
 [tool.uv]
 constraint-dependencies = [
     "certifi>=2026.10.19",
+    "h2>=4.4.1",
+    "pyasn1>=0.6.5",
+    "urwid>=4.0.7",
     "werkzeug>=3.1.9",
 ]
-# mitmproxy 12.2.3 caps these packages below their security-fixed releases.
-# Remove the overrides when an upstream release widens these constraints.
+# mitmproxy caps Tornado below the security-fixed release.
+# Remove the override when upstream allows Tornado 6.6.1 or later.
 override-dependencies = [
-    "brotli>=1.2.1,<2",
-    "cryptography>=50,<51",
-    "h2>=4.4.1,<5",
-    "msgpack>=1.2.1,<2",
-    "tornado>=6.6,<7",
+    "tornado>=6.6.1,<7",
 ]
 
 [project.scripts]

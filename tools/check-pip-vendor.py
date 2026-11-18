@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check the absent-code guarantees behind two scoped Trivy pip SBOM exceptions."""
+"""Check the absent-code guarantees behind the scoped Trivy pip SBOM exception."""
 
 from __future__ import annotations
 
@@ -8,11 +8,12 @@ from email.parser import Parser
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import zipfile
 
-PINNED = {"pip": "26.2.2", "msgpack": "1.1.2", "setuptools": "70.3.0", "urllib3": "2.8.0"}
-IGNORED = {"msgpack": "1.1.2", "setuptools": "70.3.0"}
+PINNED = {"pip": "26.3", "msgpack": "1.2.4", "setuptools": "70.3.0", "urllib3": "2.8.0"}
+FIXED_SETUPTOOLS = (78, 1, 1)
 MSGPACK_FILES = {"COPYING", "__init__.py", "exceptions.py", "ext.py", "fallback.py"}
 MAX_ENTRIES = 500_000
 MAX_BYTES = 16 * 1024 * 1024
@@ -92,8 +93,14 @@ def check_metadata(data: bytes, location: Path) -> tuple[str, str]:
         fail(f"incomplete package metadata: {location}")
     name = metadata["Name"].lower().replace("_", "-").replace(".", "-")
     package_version = metadata["Version"]
-    if IGNORED.get(name) == package_version:
-        fail(f"real installed {name} {package_version} is not a pip vendor exception: {location}")
+    if name == "setuptools":
+        # An image SBOM row without a PURL can also match the scanner exception.
+        stable_version = re.fullmatch(
+            r"([0-9]+)\.([0-9]+)\.([0-9]+)(?:\.post[0-9]+)?(?:\+[A-Za-z0-9._-]+)?",
+            package_version,
+        )
+        if stable_version is None or tuple(map(int, stable_version.groups())) < FIXED_SETUPTOOLS:
+            fail(f"real installed {name} {package_version} is not a pip vendor exception: {location}")
     return name, package_version
 
 

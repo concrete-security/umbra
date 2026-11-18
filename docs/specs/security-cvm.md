@@ -88,7 +88,8 @@ The SC runs an asynchronous background loop to synchronize the Dev CVM routing m
 The SC MUST poll the Console at `GET <CONSOLE_URL>/internal/sc-control/cvms` every **5 seconds** (± 1s jitter) by default. Operators MAY override cadence with `SC_CONTROL_INTERVAL_SECONDS` and `SC_CONTROL_JITTER_SECONDS` for non-production tuning.
 
 * **Auth**: `Authorization: Bearer <CONSOLE_INGEST_TOKEN>`.
-* **Caching**: The SC MUST include the `If-None-Match: <ETag>` header from the previous successful response. If the Console returns `304 Not Modified`, the SC sleeps until the next tick.
+* **Caching**: The SC MUST include the `If-None-Match: <ETag>` header from the previous successful response. An authenticated `304 Not Modified` refreshes the policy's age.
+* **Freshness**: After 60 seconds without an authenticated policy response or revalidation, the SC MUST reject HTTP and CONNECT admission with `503` and drop WebSocket application frames until the policy is refreshed. The SC measures this interval with a monotonic clock.
 * **Atomic Swap**: On `200 OK`, the SC MUST update its internal routing map atomically. Ongoing proxy connections MUST NOT be interrupted. Terminated Dev CVMs that drop out of the Console's payload MUST be immediately evicted from the SC's local map.
 
 ### 4.2 Strict Policy Schema Validation
@@ -244,10 +245,12 @@ The core of the SC is an explicit intercepting proxy. mitmproxy listens on the S
 ### 5.1 Dev CVM Authentication
 Every outbound HTTP/HTTPS request from a Dev CVM MUST carry a `Proxy-Authorization: Bearer <Dev-CVM-PROXY_AUTH-token>` header. The bearer is injected by the Dev CVM's `dev-egress-forwarder` from the measured `proxy_token` compose config (`docs/specs/dev-cvm.md` §2.3, §4.5); the sandbox itself does not hold it.
 
-1. **Extraction**: The SC extracts the token and computes `SHA-256(token)`.
+1. **Extraction**: The SC accepts only an ASCII bearer token using the alphabet `[A-Za-z0-9._~+/-]` with optional trailing `=` padding ([RFC 6750 §2.1](https://www.rfc-editor.org/rfc/rfc6750#section-2.1)). Missing or malformed credentials MUST return `407 Proxy Authentication Required` before token hashing. For a valid token, it computes `SHA-256(token)`.
 2. **Lookup**: The SC searches its local Dev CVM map for a matching `proxy_token_hash`. The map is refreshed every ~5 s by the polling loop in §4.1; entries come from `GET /internal/sc-control/cvms` (`docs/specs/console.md` §4.3).
 3. **Hit**: The connection is attributed to `cvm_id`. The SC MUST immediately **strip** the `Proxy-Authorization` header before forwarding the traffic upstream so the bearer never leaks to the destination.
 4. **Miss — fail-closed (v0 behavior)**: If the hash is unknown, the SC MUST reject the connection with `407 Proxy Authentication Required` and log the rejection at `INFO` (cvm_id is unknown by definition; logging carries only the token-hash prefix for forensic correlation, never the plaintext token). The SC MUST NOT issue an out-of-band Console pull on miss in v0 — defer-and-resolve is a future revision (`docs/specs/console.md` §8.5 / §10.4). The Console's `cvm.launch` saga already waits for the SC's next pull at the `await_sc_pull` step before finalising the launch (`docs/specs/console.md` §8.3 step 7), so the user-visible window where a fresh Dev CVM hits `407` is bounded by the SC's polling cadence and the operation handle is not marked succeeded until propagation completes.
+
+Both HTTP and CONNECT hooks MUST fail closed on unexpected errors during request translation, control-state access, authentication, enforcement, or verdict application. They MUST return a generic `500` response, or terminate the flow if a response cannot be created, before forwarding can resume. A flow rejected for an unexpected error MUST NOT retain an authenticated CONNECT identity. Logs for these errors MUST contain only the exception type, never exception messages, tracebacks, headers, or body content.
 
 ### 5.2 TLS Interception
 For HTTPS traffic, the proxy dynamically generates leaf certificates signed by the boot-generated CA, completing the TLS handshake with the Dev CVM to inspect the plaintext payload. It then establishes its own upstream TLS connection to the target destination.
@@ -352,7 +355,7 @@ To fulfill the requirements while minimizing architectural complexity, the SC re
 
 ### 8.1 Reproducible Image Publication
 
-Security CVM image verification and publication MUST use the shared `umbra-release` builder: BuildKit 0.34.1 pinned by image digest, exporter compatibility version 30, the digest-pinned Dockerfile 1.26.0 frontend, and the exact Buildx 0.34.0 client. The source commit timestamp is passed as `SOURCE_DATE_EPOCH`, every exporter rewrites timestamps, and every release attempt performs two cache-disabled linux/amd64 builds from independent detached worktrees at that commit. Their runnable runtime-manifest digests MUST match. Each local result index MUST independently pass runtime-label, subject-binding, SPDX, and max-mode SLSA validation. Result-index digests are not compared because BuildKit provenance carries a unique invocation ID and wall-clock start/finish times.
+Security CVM image verification and publication MUST use the shared `umbra-release` builder: BuildKit 0.34.2 pinned by image digest, exporter compatibility version 30, the digest-pinned Dockerfile 1.26.0 frontend, and the exact Buildx 0.34.0 client. The source commit timestamp is passed as `SOURCE_DATE_EPOCH`, every exporter rewrites timestamps, and every release attempt performs two cache-disabled linux/amd64 builds from independent detached worktrees at that commit. Their runnable runtime-manifest digests MUST match. Each local result index MUST independently pass runtime-label, subject-binding, SPDX, and max-mode SLSA validation. Result-index digests are not compared because BuildKit provenance carries a unique invocation ID and wall-clock start/finish times.
 
 After the two local runtime subjects match, publication MUST perform one tagless push-by-digest registry build and MUST NOT create or rely on a source-commit tag. The remotely-read immutable index, runtime labels, subject-bound attestation manifest, and parsed SPDX/SLSA predicates MUST match the reviewed build inputs, and its runtime MUST equal both local subjects. The helper returns only the runnable `repository@sha256:<runtime-manifest>` reference beneath the attestation index, and deployment MUST use that digest reference.
 

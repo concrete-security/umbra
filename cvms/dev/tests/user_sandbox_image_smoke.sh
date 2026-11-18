@@ -22,7 +22,7 @@ fi
 
 docker run --rm --network none --platform linux/amd64 --entrypoint bash "${IMAGE_TAG}" -lc '
   set -euo pipefail
-  for cmd in claude codex node npm gh uv docker dockerd containerd; do
+  for cmd in claude codex node npm gh git uv docker dockerd containerd; do
     command -v "${cmd}" >/dev/null
   done
   read -r linux_headers_package linux_headers_version < <(dpkg-query --show linux-libc-dev)
@@ -63,6 +63,8 @@ docker run --rm --network none --platform linux/amd64 --entrypoint bash "${IMAGE
   docker compose version >/dev/null
   printf "services:\n  smoke:\n    image: scratch\n" | docker compose --project-name smoke -f - config --quiet
   gh --version >/dev/null
+  git --version | grep -Fx "git version 2.56.1"
+  test -x "$(git --exec-path)/git-remote-https"
   claude --version >/dev/null
   codex --version >/dev/null
   node --version | grep -q "^v22\\."

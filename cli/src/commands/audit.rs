@@ -191,8 +191,8 @@ fn export(config: &ResolvedConfig, args: AuditExportArgs, json_output: bool) -> 
     let (console_url, session) = try_or_eprintln!(console::console_session(config));
     let op = try_or_eprintln!(submit_export(console_url, &session.access_token, &args));
     let mut result: AuditExportResult = match try_or_eprintln!(operation::await_result(
-        console_url,
-        &session.access_token,
+        config,
+        &session,
         op,
         &args.wait,
         json_output,

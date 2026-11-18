@@ -1,0 +1,125 @@
+--- a/libcontainer/cgroups/ebpf/ebpf.go
++++ b/libcontainer/cgroups/ebpf/ebpf.go
+@@ -5,0 +6 @@
++	"github.com/cilium/ebpf/link"
+@@ -35 +36,5 @@
+-	if err := prog.Attach(dirFD, ebpf.AttachCGroupDevice, unix.BPF_F_ALLOW_MULTI); err != nil {
++	if err := link.RawAttachProgram(link.RawAttachProgramOptions{
++		Target: dirFD, Program: prog, Attach: ebpf.AttachCGroupDevice,
++		Flags: unix.BPF_F_ALLOW_MULTI,
++	}); err != nil {
++		prog.Close()
+@@ -39,2 +44,4 @@
+-		if err := prog.Detach(dirFD, ebpf.AttachCGroupDevice, unix.BPF_F_ALLOW_MULTI); err != nil {
+-			return errors.Wrap(err, "failed to call BPF_PROG_DETACH (BPF_CGROUP_DEVICE, BPF_F_ALLOW_MULTI)")
++		if err := link.RawDetachProgram(link.RawDetachProgramOptions{
++			Target: dirFD, Program: prog, Attach: ebpf.AttachCGroupDevice,
++		}); err != nil {
++			return errors.Wrap(err, "failed to call BPF_PROG_DETACH (BPF_CGROUP_DEVICE)")
+@@ -42 +49 @@
+-		return nil
++		return prog.Close()
+--- a/libcontainer/cgroups/ebpf/devicefilter/devicefilter.go
++++ b/libcontainer/cgroups/ebpf/devicefilter/devicefilter.go
+@@ -153 +153 @@
+-	p.insts[prevBlockLastIdx+1] = p.insts[prevBlockLastIdx+1].Sym(blockSym)
++	p.insts[prevBlockLastIdx+1] = p.insts[prevBlockLastIdx+1].WithSymbol(blockSym)
+@@ -166 +166 @@
+-		asm.Mov.Imm32(asm.R0, 0).Sym(blockSym),
++		asm.Mov.Imm32(asm.R0, 0).WithSymbol(blockSym),
+--- a/libcontainer/cgroups/ebpf/devicefilter/devicefilter_test.go
++++ b/libcontainer/cgroups/ebpf/devicefilter/devicefilter_test.go
+@@ -42 +42 @@
+-        1: And32Imm dst: r2 imm: 65535
++        1: AndImm32 dst: r2 imm: 65535
+@@ -44 +44 @@
+-        3: RSh32Imm dst: r3 imm: 16
++        3: RShImm32 dst: r3 imm: 16
+@@ -49 +49 @@
+-        6: Mov32Imm dst: r0 imm: 0
++        6: MovImm32 dst: r0 imm: 0
+@@ -59 +59 @@
+-         1: And32Imm dst: r2 imm: 65535
++         1: AndImm32 dst: r2 imm: 65535
+@@ -61 +61 @@
+-         3: RSh32Imm dst: r3 imm: 16
++         3: RShImm32 dst: r3 imm: 16
+@@ -69 +69 @@
+-         9: Mov32Imm dst: r0 imm: 1
++         9: MovImm32 dst: r0 imm: 1
+@@ -75 +75 @@
+-        14: Mov32Imm dst: r0 imm: 1
++        14: MovImm32 dst: r0 imm: 1
+@@ -81 +81 @@
+-        18: Mov32Imm dst: r0 imm: 1
++        18: MovImm32 dst: r0 imm: 1
+@@ -87 +87 @@
+-        23: Mov32Imm dst: r0 imm: 1
++        23: MovImm32 dst: r0 imm: 1
+@@ -93 +93 @@
+-        28: Mov32Imm dst: r0 imm: 1
++        28: MovImm32 dst: r0 imm: 1
+@@ -99 +99 @@
+-        33: Mov32Imm dst: r0 imm: 1
++        33: MovImm32 dst: r0 imm: 1
+@@ -105 +105 @@
+-        38: Mov32Imm dst: r0 imm: 1
++        38: MovImm32 dst: r0 imm: 1
+@@ -111 +111 @@
+-        43: Mov32Imm dst: r0 imm: 1
++        43: MovImm32 dst: r0 imm: 1
+@@ -117 +117 @@
+-        48: Mov32Imm dst: r0 imm: 1
++        48: MovImm32 dst: r0 imm: 1
+@@ -122,2 +122,2 @@
+-        51: Mov32Reg dst: r1 src: r3
+-        52: And32Imm dst: r1 imm: 1
++        51: MovReg32 dst: r1 src: r3
++        52: AndImm32 dst: r1 imm: 1
+@@ -125 +125 @@
+-        54: Mov32Imm dst: r0 imm: 1
++        54: MovImm32 dst: r0 imm: 1
+@@ -130,2 +130,2 @@
+-        57: Mov32Reg dst: r1 src: r3
+-        58: And32Imm dst: r1 imm: 1
++        57: MovReg32 dst: r1 src: r3
++        58: AndImm32 dst: r1 imm: 1
+@@ -133 +133 @@
+-        60: Mov32Imm dst: r0 imm: 1
++        60: MovImm32 dst: r0 imm: 1
+@@ -136 +136 @@
+-        62: Mov32Imm dst: r0 imm: 0
++        62: MovImm32 dst: r0 imm: 0
+@@ -160 +160 @@
+-        1: And32Imm dst: r2 imm: 65535
++        1: AndImm32 dst: r2 imm: 65535
+@@ -162 +162 @@
+-        3: RSh32Imm dst: r3 imm: 16
++        3: RShImm32 dst: r3 imm: 16
+@@ -167 +167 @@
+-        6: Mov32Imm dst: r0 imm: 1
++        6: MovImm32 dst: r0 imm: 1
+@@ -193 +193 @@
+-         1: And32Imm dst: r2 imm: 65535
++         1: AndImm32 dst: r2 imm: 65535
+@@ -195 +195 @@
+-         3: RSh32Imm dst: r3 imm: 16
++         3: RShImm32 dst: r3 imm: 16
+@@ -203 +203 @@
+-         9: Mov32Imm dst: r0 imm: 0
++         9: MovImm32 dst: r0 imm: 0
+@@ -207 +207 @@
+-        11: Mov32Imm dst: r0 imm: 1
++        11: MovImm32 dst: r0 imm: 1
+@@ -242 +242 @@
+-         1: And32Imm dst: r2 imm: 65535
++         1: AndImm32 dst: r2 imm: 65535
+@@ -244 +244 @@
+-         3: RSh32Imm dst: r3 imm: 16
++         3: RShImm32 dst: r3 imm: 16
+@@ -252 +252 @@
+-         9: Mov32Imm dst: r0 imm: 0
++         9: MovImm32 dst: r0 imm: 0
+@@ -256 +256 @@
+-        11: Mov32Imm dst: r0 imm: 1
++        11: MovImm32 dst: r0 imm: 1

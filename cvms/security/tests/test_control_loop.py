@@ -1,5 +1,8 @@
 import asyncio
 import hashlib
+from unittest.mock import Mock
+
+import pytest
 
 from umbra_security_cvm.control import ControlMap, PollResult
 from umbra_security_cvm.control_loop import ControlPlaneState, poll_control_plane_once, run_control_plane_poll_loop
@@ -85,6 +88,19 @@ def test_poll_loop_applies_jittered_sleep_between_iterations() -> None:
 
     assert sleeps == [6.0]
     assert state.snapshot().control_map.lookup_proxy_token("two") is not None
+
+
+def test_authenticated_revalidation_extends_policy_freshness_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A successful conditional poll refreshes the existing policy."""
+    clock = Mock(side_effect=[0.0, 40.0, 61.0])
+    monkeypatch.setattr("umbra_security_cvm.control_loop.monotonic", clock)
+    cached = payload(b"proxy-token", '"unchanged"')
+    state = ControlPlaneState(cached)
+    client = FakeClient([PollResult(control_map=None, etag='"unchanged"', not_modified=True)])
+
+    asyncio.run(poll_control_plane_once(client, state))
+
+    assert state.control_map_for_enforcement() is cached
 
 
 def test_poll_loop_keeps_running_after_transient_poll_failure() -> None:

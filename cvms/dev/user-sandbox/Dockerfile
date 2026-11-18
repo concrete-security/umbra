@@ -3,7 +3,7 @@
 # reviewed value. Release builds override it with the source commit timestamp.
 ARG SOURCE_DATE_EPOCH=0
 
-FROM golang:1.27.3-bookworm@sha256:972b4110ba0f47539a975c31e52c64765e1ff19f2d74469ae4a595c6676e80a5 AS go-base
+FROM golang:1.27.4-bookworm@sha256:4fa7c968ba93f1635670522dbb01a2c78150443e1385746924566079f36570ea AS go-base
 ENV CGO_ENABLED=0 GOTOOLCHAIN=local
 
 FROM go-base AS compose-builder
@@ -67,6 +67,7 @@ RUN set -a \
 
 FROM go-base AS gh-builder
 COPY cvms/dev/user-sandbox/tool-versions.env /tmp/tool-versions.env
+COPY cvms/dev/user-sandbox/go-net.sum /tmp/go-net.sum
 WORKDIR /src
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
@@ -76,7 +77,10 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     && curl -fsSL "https://github.com/cli/cli/archive/refs/tags/v${GH_VERSION}.tar.gz" -o /tmp/gh.tar.gz \
     && echo "${GH_SOURCE_SHA256}  /tmp/gh.tar.gz" | sha256sum -c - \
     && tar -xzf /tmp/gh.tar.gz -C /src --strip-components=1 \
-    && grep -Fq "golang.org/x/net v${GO_NET_VERSION}" go.mod \
+    && grep -Fq 'golang.org/x/net v0.60.0' go.mod \
+    && awk '$2 !~ /\/go.mod$/ {print "-require=" $1 "@" $2}' /tmp/go-net.sum | xargs go mod edit \
+    && cat /tmp/go-net.sum >>go.sum \
+    && LC_ALL=C sort -u go.sum -o go.sum \
     && cp go.sum /tmp/locked-go.sum \
     && go build -mod=readonly -trimpath -buildvcs=false \
       -ldflags "-s -w -X github.com/cli/cli/v2/internal/build.Version=${GH_VERSION}" \
@@ -86,8 +90,8 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 
 FROM rust:1-bookworm@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa AS rust-base
 RUN sed -i \
-      -e 's|URIs: http://deb.debian.org/debian$|URIs: https://snapshot.debian.org/archive/debian/20261023T000000Z|' \
-      -e 's|URIs: http://deb.debian.org/debian-security$|URIs: https://snapshot.debian.org/archive/debian-security/20261023T000000Z|' \
+      -e 's|URIs: http://deb.debian.org/debian$|URIs: https://snapshot.debian.org/archive/debian/20261117T000000Z|' \
+      -e 's|URIs: http://deb.debian.org/debian-security$|URIs: https://snapshot.debian.org/archive/debian-security/20261117T000000Z|' \
       /etc/apt/sources.list.d/debian.sources \
     && printf '%s\n' 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99snapshot \
     && apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=30 update --error-on=any \
@@ -106,7 +110,7 @@ RUN cargo build --locked --release -p umbra-atls-connect --target-dir /tmp/atls-
 
 FROM ghcr.io/astral-sh/uv:0.13.5@sha256:32a7bb39b496babbd997b0a39a4d66c126bdaf5661b302bf6f06abda8deca6ff AS uv
 
-FROM ubuntu:24.04@sha256:561618e2c15bf2397621dd04f96926663a3b5616c189cf7e38db7e82f5c538ea
+FROM ubuntu:24.04@sha256:561618e2c15bf2397621dd04f96926663a3b5616c189cf7e38db7e82f5c538ea AS ubuntu-sandbox-base
 # Global ARGs do not reach RUN; account tools also need the source timestamp
 # to keep shadow entries and backups independent of the wall-clock build day.
 ARG SOURCE_DATE_EPOCH
@@ -120,7 +124,7 @@ COPY --from=rust-base /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certi
 # after rebuilding and exercising the sandbox image; it deliberately freezes
 # all packages from the Ubuntu archive. Docker's exact amd64 package filenames
 # and content digests are pinned separately in tool-versions.env below.
-ARG UBUNTU_SNAPSHOT=20261023T000000Z
+ARG UBUNTU_SNAPSHOT=20261117T000000Z
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1
@@ -140,7 +144,8 @@ RUN sed -i \
       curl \
       openssh-server \
       dtach \
-      git \
+      liberror-perl \
+      perl \
       xz-utils \
       build-essential \
       python3 \
@@ -161,6 +166,23 @@ RUN sed -i \
     && chage --lastday -1 sshd \
     && ln -sf /usr/bin/python3 /usr/bin/python \
     && rm -f /usr/lib/python*/EXTERNALLY-MANAGED
+
+FROM ubuntu-sandbox-base AS git-builder
+# Ubuntu noble has no backport for the November Git security release yet.
+RUN apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=30 update --error-on=any \
+    && apt-get install -y --no-install-recommends \
+        gettext libcurl4-openssl-dev libexpat1-dev libpcre2-dev libssl-dev zlib1g-dev
+RUN . /tmp/tool-versions.env \
+    && curl -fsSL "https://www.kernel.org/pub/software/scm/git/git-${GIT_VERSION}.tar.xz" -o /tmp/git.tar.xz \
+    && printf '%s  %s\n' "$GIT_SOURCE_SHA256" /tmp/git.tar.xz | sha256sum -c - \
+    && mkdir /tmp/git-source \
+    && tar -xJf /tmp/git.tar.xz -C /tmp/git-source --strip-components=1 \
+    && make -C /tmp/git-source -j4 prefix=/usr NO_TCLTK=YesPlease NO_RUST=YesPlease all \
+    && make -C /tmp/git-source prefix=/usr NO_TCLTK=YesPlease NO_RUST=YesPlease DESTDIR=/out install \
+    && install -Dm644 /tmp/git-source/COPYING /out/usr/share/doc/git/copyright
+
+FROM ubuntu-sandbox-base AS dev-sandbox
+COPY --from=git-builder /out/usr/ /usr/
 
 RUN set -a \
     && . /tmp/tool-versions.env \
@@ -196,142 +218,44 @@ COPY --from=gh-builder /src/LICENSE /usr/local/share/licenses/gh/LICENSE
 COPY cvms/dev/user-sandbox/docker-daemon.json /etc/docker/daemon.json
 COPY cvms/dev/user-sandbox/codex-package ./tmp/codex-package
 COPY --from=uv /uv /uvx /bin/
-# pip's latest wheel fixes its CA store but still vendors urllib3 2.7.0.
-# Rebuild only that vendor, preserving pip's three upstream compatibility patches.
-# Use the same verified wheel for global pip and ensurepip-created environments.
+# Use the same hash-verified upstream wheel for pip and ensurepip.
 RUN python3 - <<'PYBOOTSTRAP'
-import base64
-import csv
 import hashlib
 import importlib.util
-import io
-import json
 from pathlib import Path
-import re
 import shutil
-import sys
 from urllib.request import urlopen
-import zipfile
 
-def download(url, digest):
-    data = urlopen(url, timeout=60).read()
-    if hashlib.sha256(data).hexdigest() != digest:
-        raise RuntimeError("bootstrap wheel checksum mismatch")
-    return zipfile.ZipFile(io.BytesIO(data))
-
-pip = download(
-    "https://files.pythonhosted.org/packages/3f/06/3e4420302363fbb71be3c7f35ce042f54bfca330e3e66b3a2e3c4cca579f/pip-26.2.2-py3-none-any.whl",
-    "fd7f4dfa8190e014013b9f08f3e973f4e4c26ffd179a204895533a7254813a70",
-)
-urllib3 = download(
-    "https://files.pythonhosted.org/packages/92/9d/c4e665119135114480843e7ab388fa94d8480650450e6f8e26b70d323a4c/urllib3-2.8.0-py3-none-any.whl",
-    "0cf3cae568d36aa9576b28dfb35f11328f1cb974ca7647d9475ebb86c75ac6e3",
-)
-files = {name: pip.read(name) for name in pip.namelist() if not name.startswith("pip/_vendor/urllib3/")}
-for name in urllib3.namelist():
-    if name.startswith("urllib3/") and not name.endswith("/"):
-        files["pip/_vendor/" + name] = urllib3.read(name)
-
-def replace(path, old, new, count=1):
-    source = files[path].decode()
-    if source.count(old) != count:
-        raise RuntimeError("unexpected vendored source: " + path)
-    files[path] = source.replace(old, new).encode()
-
-# Keep the same Brotli opt-out as pip's urllib3-disable-brotli.patch.
-for path, start, end, replacement in (
-    ("pip/_vendor/urllib3/response.py", "try:\n    try:\n        import brotlicffi", "\nfrom . import util", "brotli = None\n"),
-    ("pip/_vendor/urllib3/util/request.py", "try:\n    try:\n        import brotlicffi", "\ntry:\n    if sys.version_info", ""),
-):
-    source = files[path].decode()
-    if source.count(start) != 1 or source.count(end) != 1:
-        raise RuntimeError("unexpected Brotli patch context: " + path)
-    first = source.index(start)
-    last = source.index(end, first)
-    files[path] = (source[:first] + replacement + source[last:]).encode()
-replace("pip/_vendor/urllib3/contrib/pyopenssl.py",
-        "import urllib3.contrib.pyopenssl\n        urllib3.contrib.pyopenssl.inject_into_urllib3()",
-        "import urllib3.contrib.pyopenssl as pyopenssl\n        pyopenssl.inject_into_urllib3()")
-replace("pip/_vendor/urllib3/contrib/emscripten/__init__.py",
-        "import urllib3.connection\n", "import urllib3.connection as urllib3_connection\n")
-replace("pip/_vendor/urllib3/contrib/emscripten/__init__.py",
-        "    urllib3.connection.", "    urllib3_connection.", count=3)
-for name in list(files):
-    if name.startswith("pip/_vendor/urllib3/") and name.endswith(".py"):
-        source = files[name].decode()
-        source = re.sub(r"(?m)^(\s*)import (urllib3|idna)$", r"\1from pip._vendor import \2", source)
-        source = source.replace("import urllib3.", "import pip._vendor.urllib3.")
-        if re.search(r"(?m)^\s*(from|import) (urllib3|idna)\b", source):
-            raise RuntimeError("unrewritten vendor import: " + name)
-        files[name] = source.encode()
-
-license_bytes = urllib3.read("urllib3-2.8.0.dist-info/licenses/LICENSE.txt")
-files["pip/_vendor/urllib3/LICENSE.txt"] = license_bytes
-files["pip-26.2.2.dist-info/licenses/src/pip/_vendor/urllib3/LICENSE.txt"] = license_bytes
-replace("pip/_vendor/vendor.txt", "urllib3==2.7.0", "urllib3==2.8.0")
-bom_path = "pip/_vendor/bom.cdx.json"
-bom = json.loads(files[bom_path])
-components = [item for item in bom["components"] if item["name"] == "urllib3"]
-if len(components) != 1 or components[0]["version"] != "2.7.0":
-    raise RuntimeError("unexpected pip urllib3 SBOM")
-components[0]["version"] = "2.8.0"
-# Replace the component identity and every dependency reference; retain all others.
-bom_text = json.dumps(bom, indent=2, sort_keys=True)
-if bom_text.count("pkg:pypi/urllib3@2.7.0") != 4:
-    raise RuntimeError("unexpected pip urllib3 SBOM references")
-files[bom_path] = (bom_text.replace("pkg:pypi/urllib3@2.7.0", "pkg:pypi/urllib3@2.8.0") + "\n").encode()
-
-record_path = "pip-26.2.2.dist-info/RECORD"
-record = io.StringIO(newline="")
-writer = csv.writer(record, lineterminator="\n")
-for name in sorted(files):
-    if name != record_path:
-        digest = base64.urlsafe_b64encode(hashlib.sha256(files[name]).digest()).rstrip(b"=").decode()
-        writer.writerow((name, "sha256=" + digest, len(files[name])))
-writer.writerow((record_path, "", ""))
-files[record_path] = record.getvalue().encode()
-wheel_name = "pip-26.2.2-py3-none-any.whl"
+wheel_name = "pip-26.3-py3-none-any.whl"
+sha256 = "f3b60b20ffaadd4415ed7957212a38ac63fa4c5fa375bd0f4a797777940fad13"
 wheel_path = Path("/tmp") / wheel_name
-with zipfile.ZipFile(wheel_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as output:
-    for name in sorted(files):
-        info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
-        info.compress_type = zipfile.ZIP_DEFLATED
-        info.create_system = 3
-        info.external_attr = 0o100644 << 16
-        output.writestr(info, files[name])
-# Check RECORD against the actual rebuilt archive before installation.
-with zipfile.ZipFile(wheel_path) as output:
-    rows = list(csv.reader(io.StringIO(output.read(record_path).decode())))
-    if {row[0] for row in rows} != set(output.namelist()):
-        raise RuntimeError("rebuilt pip RECORD file list mismatch")
-    for name, digest, size in rows:
-        if name != record_path:
-            data = output.read(name)
-            actual = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
-            if digest != "sha256=" + actual or size != str(len(data)):
-                raise RuntimeError("rebuilt pip RECORD checksum mismatch")
-sys.path.insert(0, str(wheel_path))
-from pip._vendor import urllib3 as patched_urllib3
-if patched_urllib3.__version__ != "2.8.0" or str(wheel_path) not in patched_urllib3.__file__:
-    raise RuntimeError("rebuilt pip did not load patched urllib3")
+url = (
+    "https://files.pythonhosted.org/packages/07/25/"
+    "ee8c38ae72d66b844ce8eb9711ba905dba21ca1a8a0c960057c41cd23337/" + wheel_name
+)
+with urlopen(url, timeout=60) as response:
+    wheel = response.read()
+if hashlib.sha256(wheel).hexdigest() != sha256:
+    raise RuntimeError("pip bootstrap wheel checksum mismatch")
+wheel_path.write_bytes(wheel)
 if importlib.util.find_spec("ensurepip") is not None:
     import ensurepip
     module = Path(ensurepip.__file__)
     source = module.read_text()
-    if source.count('_PIP_VERSION = "25.0.1"') != 1:
+    old_version = '_PIP_VERSION = "25.0.1"'
+    if source.count(old_version) != 1:
         raise RuntimeError("unexpected Python ensurepip version")
     for old in module.with_name("_bundled").glob("pip-*.whl"):
         old.unlink()
     shutil.copyfile(wheel_path, module.with_name("_bundled") / wheel_name)
-    module.write_text(source.replace('_PIP_VERSION = "25.0.1"', '_PIP_VERSION = "26.2.2"'))
+    module.write_text(source.replace(old_version, '_PIP_VERSION = "26.3"'))
     shutil.rmtree(module.with_name("__pycache__"), ignore_errors=True)
-digest = hashlib.sha256(wheel_path.read_bytes()).hexdigest()
 Path("/tmp/umbra-pip-requirements.txt").write_text(
-    "pip @ file://" + str(wheel_path) + " --hash=sha256:" + digest + "\n"
+    f"pip @ file://{wheel_path} --hash=sha256:{sha256}\n"
 )
 PYBOOTSTRAP
 RUN uv pip install --python "$(command -v python3)" --system --no-deps --no-cache --no-installer-metadata --require-hashes -r /tmp/umbra-pip-requirements.txt \
-    && rm -f /tmp/pip-26.2.2-py3-none-any.whl /tmp/umbra-pip-requirements.txt \
+    && rm -f /tmp/pip-26.3-py3-none-any.whl /tmp/umbra-pip-requirements.txt \
     && rm -rf /tmp/uv-*.lock
 
 # npm 12.2.1 bundles Undici 6.29.0; replace it with the fixed 6.29.1 release.

@@ -963,7 +963,7 @@ Locked runtime closure of `umbra-security-cvm` from `cvms/security/uv.lock` incl
 | `kaitaistruct` | 0.11 | MIT | permissive | from the prose `License` field |
 | `ldap3` | 2.9.1 | LGPL-3.0-only | weak copyleft | from trove classifiers |
 | `markupsafe` | 3.0.3 | BSD-3-Clause | permissive | — |
-| `mitmproxy` | 12.2.3 | MIT | permissive | from trove classifiers |
+| `mitmproxy` | 12.3.1 | MIT | permissive | from trove classifiers |
 | `mitmproxy-linux` | 0.12.11 | _none declared_ | unknown | installed only when: sys_platform == 'linux' |
 | `mitmproxy-macos` | 0.12.11 | MIT | permissive | installed only when: sys_platform == 'darwin' |
 | `mitmproxy-rs` | 0.12.11 | _none declared_ | unknown | — |
@@ -1246,16 +1246,17 @@ Components installed into the container images (all version- and digest-/SHA-256
 | Debian (python:3.12-slim base) | Console, Security CVM images | Various (Debian per-package copyright files) | Same as above; copyright files retained in-image. |
 | Alpine base | Installer, reverse-proxy images | Various (mostly MIT/BSD; apk metadata) | Pinned complete package closure; license metadata retained by apk. |
 | Python 3.12 | Console, Security CVM images | PSF-2.0 | Permissive; retained upstream image layers unmodified. |
-| pip (26.2.2) | Dev CVM, Console and Security CVM images | MIT | The hash-pinned upstream wheel receives a local urllib3 2.8.0 vendor update; pip's compatibility patches remain, and the vendor manifest, SBOM and wheel RECORD reflect the rebuilt contents. Licenses ship in the distribution metadata. |
+| pip (26.3) | Dev CVM, Console and Security CVM images | MIT | The hash-pinned upstream wheel includes urllib3 2.8.0 and msgpack 1.2.4. Licenses ship in the distribution metadata. |
 | urllib3 (2.8.0, vendored in pip) | Dev CVM, Console and Security CVM images | MIT | Taken from the hash-pinned upstream wheel; its license is retained in both pip vendor and distribution license directories. |
-| Docker Engine, CLI, containerd, Buildx, Compose plugin | Dev CVM image | Apache-2.0 | Engine 29.9.2, CLI 29.9.2 and containerd 2.4.2 come from SHA-256-pinned official `.deb`s. Compose 5.6.1 and Buildx 0.38.1+umbra.2 are built from checksum-pinned source with Go 1.27.3. Compose applies the reviewed x/net 0.60.0, x/crypto 0.57.0, x/text 0.42.0 and x/term 0.46.0 checksums, then preserves its locked module graph during the build. Buildx retains its vendor graph with separately hash-pinned x/net 0.60.0 and go-archive 0.3.3 replacements. Official Docker package license/notice files remain in the image; Compose's `LICENSE` and `NOTICE` and Buildx's `LICENSE` are retained under `/usr/local/share/licenses/`. |
-| GitHub CLI (`gh` 2.103.0) | Dev CVM image | MIT | Built from checksum-pinned source with Go 1.27.3 and upstream's locked modules; the build rejects changes to `go.sum`. Its `LICENSE` ships at `/usr/local/share/licenses/gh/LICENSE`. |
+| Docker Engine, CLI, containerd, Buildx, Compose plugin | Dev CVM image | Apache-2.0 | Engine 29.9.3, CLI 29.9.3 and containerd 2.4.2 come from SHA-256-pinned official `.deb`s. Compose 5.6.1 and Buildx 0.38.1+umbra.2 are built from checksum-pinned source with Go 1.27.4. Compose and GitHub CLI apply the reviewed x/net 0.62.0, x/crypto 0.58.0, x/sys 0.49.0, x/text 0.43.0 and x/term 0.47.0 checksums, then preserve their locked module graphs during the build. Buildx retains its vendor graph with separately hash-pinned x/net 0.62.0 and go-archive 0.3.3 replacements. Official Docker package license/notice files remain in the image; Compose's `LICENSE` and `NOTICE` and Buildx's `LICENSE` are retained under `/usr/local/share/licenses/`. |
+| GitHub CLI (`gh` 2.103.0) | Dev CVM image | MIT | Built from checksum-pinned source with Go 1.27.4 and upstream's locked modules; the build rejects changes to `go.sum`. Its `LICENSE` ships at `/usr/local/share/licenses/gh/LICENSE`. |
+| Git (2.56.1) | Dev CVM image | GPL-2.0-only | Built from the signed upstream source release, pinned by SHA-256. Its `COPYING` ships at `/usr/share/doc/git/copyright`. |
 | npm (12.2.1) | Dev CVM image | Artistic-2.0 (plus bundled component licenses) | Installed offline from the SHA-256-pinned upstream tarball; upstream and bundled dependency license files remain in the image. |
-| Node.js (22.23.4) | Dev CVM and Console images | MIT (plus bundled component licenses) | The Dev tarball retains its `LICENSE`; Console copies the upstream image's runtime and license. |
+| Node.js (22.23.5) | Dev CVM and Console images | MIT (plus bundled component licenses) | The Dev tarball retains its `LICENSE`; Console copies the upstream image's runtime and license. |
 | uv | All Python images (build stage) and Dev CVM image | Apache-2.0 OR MIT | Permissive dual license; binary copied from the digest-pinned upstream image; noticed here. |
-| nginx (1.30.6-alpine3.24) | Installer and reverse-proxy images | BSD-2-Clause | Permissive; unmodified official image; noticed here. |
+| nginx (1.30.7-alpine3.24) | Installer and reverse-proxy images | BSD-2-Clause | Permissive; unmodified official image; noticed here. |
 | mitmproxy (11.x) | Security CVM image | MIT (dependency graph inventoried above) | Installed from the locked `mitmproxy` extra; per-package obligations covered by the generated inventory. |
-| PostgreSQL (postgres:16) | Compose deployment (pulled by the operator, not redistributed by Umbra) | PostgreSQL License | Referenced by digest in `docker-compose.yml`; the operator pulls the official image directly, so Umbra redistributes nothing. |
+| PostgreSQL (16.16) | Compose deployment (pulled by the operator, not redistributed by Umbra) | PostgreSQL License | Referenced by digest in `docker-compose.yml`; the operator pulls the official image directly, so Umbra redistributes nothing. |
 
 ## Maintainer review queue
 

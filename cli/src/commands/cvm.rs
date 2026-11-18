@@ -404,8 +404,8 @@ fn launch(config: &ResolvedConfig, args: CvmLaunchArgs, json_output: bool) -> Ex
     let launch = try_or_eprintln!(prepare_launch(config, console_url, &session, &args));
     let op = try_or_eprintln!(submit_launch(console_url, &session.access_token, &launch));
     let result: CvmLaunchResult = match try_or_eprintln!(operation::await_result(
-        console_url,
-        &session.access_token,
+        config,
+        &session,
         op,
         &args.wait,
         json_output,
@@ -544,8 +544,8 @@ fn update(config: &ResolvedConfig, args: CvmUpdateArgs, json_output: bool) -> Ex
         &etag
     ));
     let result: CvmLaunchResult = match try_or_eprintln!(operation::await_result(
-        console_url,
-        &session.access_token,
+        config,
+        &session,
         op,
         &args.wait,
         json_output,
@@ -597,8 +597,8 @@ fn terminate(config: &ResolvedConfig, args: CvmTerminateArgs, json_output: bool)
         &etag
     ));
     let cvm: Cvm = match try_or_eprintln!(operation::await_result(
-        console_url,
-        &session.access_token,
+        config,
+        &session,
         op,
         &args.wait,
         json_output,

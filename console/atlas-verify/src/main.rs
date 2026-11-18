@@ -309,6 +309,10 @@ impl CliError {
             AtlsVerificationError::EventLogParse(message) => {
                 CliError::new(ATTESTATION_QUOTE_INVALID, "event_log_parse_failed").message(message)
             }
+            AtlsVerificationError::EventLogDigestMismatch { event } => {
+                CliError::new(ATTESTATION_RTMR_MISMATCH, "event_log_digest_mismatch")
+                    .detail("event", event)
+            }
             AtlsVerificationError::TeeTypeMismatch(message) => {
                 CliError::new(ATTESTATION_QUOTE_INVALID, "tee_type_mismatch").message(message)
             }
@@ -330,6 +334,17 @@ impl CliError {
                         Value::Array(allowed.into_iter().map(Value::String).collect()),
                     )
             }
+            AtlsVerificationError::TcbInfoError(message) => {
+                CliError::new(ATTESTATION_QUOTE_INVALID, "tcb_info_invalid").message(message)
+            }
+            AtlsVerificationError::GracePeriodExpired {
+                status,
+                tcb_date,
+                grace_period_secs,
+            } => CliError::new(ATTESTATION_QUOTE_INVALID, "tcb_grace_period_expired")
+                .detail("status", status)
+                .detail("tcb_date", tcb_date)
+                .detail("grace_period_secs", grace_period_secs),
             AtlsVerificationError::ReportDataMismatch { expected, actual } => {
                 CliError::new(ATTESTATION_SESSION_BINDING_INVALID, "report_data_mismatch")
                     .detail("expected", expected)
@@ -342,6 +357,10 @@ impl CliError {
             AtlsVerificationError::Other(error) => {
                 CliError::new(ATTESTATION_QUOTE_INVALID, "verifier_failed")
                     .message(error.to_string())
+            }
+            AtlsVerificationError::Reattestation { source } => {
+                CliError::new(ATTESTATION_QUOTE_INVALID, "reattestation_failed")
+                    .detail("cause", CliError::from_atlas(*source).code)
             }
         }
     }
