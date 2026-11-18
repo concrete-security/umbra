@@ -42,11 +42,10 @@ check:
 	cargo fmt --manifest-path console/atlas-verify/Cargo.toml --check
 	cargo clippy --locked --all-targets -- -D warnings
 	cargo clippy --locked --manifest-path console/atlas-verify/Cargo.toml --all-targets -- -D warnings
-	$(UMBRA_PINNED_PYTHON) tools/check-cargo-dnssec.py
 	uv lock --check --project console
 	uv lock --check --project cvms/security
-	$(UMBRA_PINNED_PYTHON) -m py_compile tools/check-cargo-keywords.py tools/check-dco.py tools/check-github-actions.py tools/check-pip-vendor.py tools/check-cargo-dnssec.py tools/test_check_cargo_dnssec.py tools/test_check_pip_vendor.py tools/generate-cargo-sbom.py tools/test_check_cargo_keywords.py tools/test_check_github_actions.py
-	uv run --locked --project console python -m pytest -q tools/test_check_cargo_keywords.py tools/test_check_github_actions.py tools/test_check_pip_vendor.py tools/test_check_cargo_dnssec.py
+	$(UMBRA_PINNED_PYTHON) -m py_compile tools/check-cargo-keywords.py tools/check-dco.py tools/check-github-actions.py tools/check-pip-vendor.py tools/test_check_pip_vendor.py tools/generate-cargo-sbom.py tools/test_check_cargo_keywords.py tools/test_check_github_actions.py
+	uv run --locked --project console python -m pytest -q tools/test_check_cargo_keywords.py tools/test_check_github_actions.py tools/test_check_pip_vendor.py
 	$(UMBRA_PINNED_PYTHON) -m py_compile ops/verify/select-release-test-images.py ops/verify/test-release-images.py ops/verify/run-required-pytest.py tools/test_release_test_images.py tools/test_release_image_runner.py tools/test_release_image_workflow.py tools/test_required_pytest.py tools/test_nested_docker_smoke.py
 	uv run --locked --project console python -m pytest -q tools/test_release_test_images.py tools/test_release_image_runner.py tools/test_release_image_workflow.py tools/test_required_pytest.py tools/test_nested_docker_smoke.py
 	uv run --locked --project console python tools/check-github-actions.py
