@@ -75,7 +75,7 @@ class PipVendorGuardTests(unittest.TestCase):
                 elif variant == "global-real":
                     metadata(packages, "setuptools", "70.3.0")
                 elif variant == "app-real":
-                    metadata(app, "setuptools", "70.3.0")
+                    metadata(app, "setuptools", "78.1.1rc1")
                 elif variant == "duplicate-real":
                     metadata(app, "setuptools", "70.3.0", "z-duplicate.dist-info")
                 elif variant == "egg-file":
@@ -113,7 +113,7 @@ class PipVendorGuardTests(unittest.TestCase):
                     "renamed-class": "PackageIndex implementation",
                     "bytecode": "PackageIndex implementation",
                     "global-real": "real installed setuptools 70.3.0",
-                    "app-real": "real installed setuptools 70.3.0",
+                    "app-real": "real installed setuptools 78.1.1rc1",
                     "duplicate-real": "real installed setuptools 70.3.0",
                     "egg-file": "real installed setuptools 70.3.0",
                     "egg-directory": "real installed setuptools 70.3.0",
