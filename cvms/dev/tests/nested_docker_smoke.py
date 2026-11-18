@@ -13,6 +13,10 @@ import time
 
 
 MARKER = "umbra-nested-docker-sysbox-ok"
+HISTORICAL_DEV_IMAGE = (
+    "ghcr.io/concrete-security/umbra-dev-cvm@"
+    "sha256:8ceb3590898d28f7ee54bc06b46ad4487473988c24719bee6ab69bd80c2fb0f9"
+)
 BRIDGE_PROBE = (
     'command -v timeout >/dev/null && command -v bash >/dev/null || exit 8; '
     'probe() { timeout 3 bash -c \'exec 3<>/dev/tcp/$1/$2\' bash "$1" "$2"; }; '
@@ -120,7 +124,15 @@ def verify(args: argparse.Namespace) -> dict:
         raise RuntimeError("nested Docker daemon never became ready; baseline is inconclusive")
     version = json.loads(run([*inner, "version", "--format", "{{json .Server}}"] ).stdout)
     components = {item["Name"]: item["Version"] for item in version["Components"]}
-    if version["Version"] != "29.9.3" or components.get("containerd", "").removeprefix("v") != "2.4.2" or components.get("runc", "").removeprefix("v") != "1.5.3":
+    # The Sysbox comparison deliberately holds this historical Dev image fixed
+    # across both outer runtimes. All other images must report the current pins.
+    expected = ("29.9.2", "2.4.2", "1.5.2") if dev_reference == HISTORICAL_DEV_IMAGE else ("29.9.3", "2.4.2", "1.5.3")
+    actual = (
+        version["Version"],
+        components.get("containerd", "").removeprefix("v"),
+        components.get("runc", "").removeprefix("v"),
+    )
+    if actual != expected:
         raise RuntimeError(f"unexpected release inner runtime versions: {components}")
     image = json.loads(run(["docker", "image", "inspect", args.image]).stdout)[0]
     if args.image not in image.get("RepoDigests", []) or image["Os"] != "linux" or image["Architecture"] != "amd64":
