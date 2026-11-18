@@ -27,16 +27,16 @@ def fixture(root: Path) -> tuple[Path, Path, Path]:
     packages = root / "usr/local/lib/python3.12/site-packages"
     app = root / "app/.venv/lib/python3.12/site-packages"
     pip = packages / "pip"
-    metadata(packages, "pip", "26.2.2")
-    write(pip / "__init__.py", '__version__ = "26.2.2"\n')
-    versions = {"msgpack": "1.1.2", "setuptools": "70.3.0", "urllib3": "2.8.0"}
+    metadata(packages, "pip", "26.3")
+    write(pip / "__init__.py", '__version__ = "26.3"\n')
+    versions = {"msgpack": "1.2.4", "setuptools": "70.3.0", "urllib3": "2.8.0"}
     write(pip / "_vendor/vendor.txt", "".join(f"{name}=={version}\n" for name, version in versions.items()))
     write(pip / "_vendor/bom.cdx.json", json.dumps({"components": [{"name": name, "version": version} for name, version in versions.items()]}))
     for name in ["COPYING", "exceptions.py", "ext.py", "fallback.py"]:
         write(pip / "_vendor/msgpack" / name, "")
-    write(pip / "_vendor/msgpack/__init__.py", '__version__ = "1.1.2"\n')
+    write(pip / "_vendor/msgpack/__init__.py", '__version__ = "1.2.4"\n')
     write(pip / "_vendor/pkg_resources/__init__.py", "")
-    metadata(app, "msgpack", "1.2.1")
+    metadata(app, "msgpack", "1.2.4")
     metadata(app, "setuptools", "78.1.1")
     return packages, app, pip
 
@@ -75,30 +75,30 @@ class PipVendorGuardTests(unittest.TestCase):
                 elif variant == "global-real":
                     metadata(packages, "setuptools", "70.3.0")
                 elif variant == "app-real":
-                    metadata(app, "msgpack", "1.1.2")
+                    metadata(app, "setuptools", "70.3.0")
                 elif variant == "duplicate-real":
                     metadata(app, "setuptools", "70.3.0", "z-duplicate.dist-info")
                 elif variant == "egg-file":
-                    write(app / "msgpack.egg-info", "Name: msgpack\nVersion: 1.1.2\n")
+                    write(app / "setuptools.egg-info", "Name: setuptools\nVersion: 70.3.0\n")
                 elif variant == "egg-directory":
                     write(app / "setuptools.egg-info/PKG-INFO", "Name: setuptools\nVersion: 70.3.0\n")
                 elif variant == "bad-metadata":
                     write(app / "unknown.dist-info/METADATA", "Name: msgpack\n")
                 elif variant == "pip-drift":
-                    metadata(packages, "pip", "26.2.3", "pip-26.2.2.dist-info")
+                    metadata(packages, "pip", "26.3.1", "pip-26.3.dist-info")
                 elif variant == "vendor-drift":
                     write(vendor / "msgpack/__init__.py", '__version__ = "1.2.0"\n')
                 elif variant == "zipped-egg":
                     with zipfile.ZipFile(app / "setuptools.egg", "w") as archive:
                         archive.writestr("EGG-INFO/PKG-INFO", "Name: setuptools\nVersion: 70.3.0\n")
                 elif variant == "target-real":
-                    metadata(root / "opt/vendor", "msgpack", "1.1.2")
+                    metadata(root / "opt/vendor", "setuptools", "70.3.0")
                 elif variant == "symlink-metadata":
                     source = root / "opt/metadata"
                     write(source / "METADATA", "Name: setuptools\nVersion: 70.3.0\n")
                     (app / "linked.dist-info").symlink_to(source, target_is_directory=True)
                 elif variant == "bundled-native":
-                    wheel = root / "usr/local/lib/python3.12/ensurepip/_bundled/pip-26.2.2-py3-none-any.whl"
+                    wheel = root / "usr/local/lib/python3.12/ensurepip/_bundled/pip-26.3-py3-none-any.whl"
                     wheel.parent.mkdir(parents=True)
                     with zipfile.ZipFile(wheel, "w") as archive:
                         for path in pip.rglob("*"):
@@ -113,15 +113,15 @@ class PipVendorGuardTests(unittest.TestCase):
                     "renamed-class": "PackageIndex implementation",
                     "bytecode": "PackageIndex implementation",
                     "global-real": "real installed setuptools 70.3.0",
-                    "app-real": "real installed msgpack 1.1.2",
+                    "app-real": "real installed setuptools 70.3.0",
                     "duplicate-real": "real installed setuptools 70.3.0",
-                    "egg-file": "real installed msgpack 1.1.2",
+                    "egg-file": "real installed setuptools 70.3.0",
                     "egg-directory": "real installed setuptools 70.3.0",
                     "bad-metadata": "incomplete package metadata",
                     "pip-drift": "pip version drift",
                     "vendor-drift": "reviewed pure-Python subset",
                     "bundled-native": "reviewed pure-Python subset",
-                    "target-real": "real installed msgpack 1.1.2",
+                    "target-real": "real installed setuptools 70.3.0",
                     "symlink-metadata": "real installed setuptools 70.3.0",
                     "zipped-egg": "real installed setuptools 70.3.0",
                 }[variant]

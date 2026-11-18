@@ -3,7 +3,8 @@ FROM nginx:1.30.7-alpine3.24@sha256:bef154735288bc38d99fac41ae63730684bcc6615036
 
 # Pin the complete added package closure. Alpine stable repositories replace
 # revisions in place; an unavailable reviewed version must fail closed.
-RUN apk add --no-cache \
+RUN printf '%s\n' '@alpine-security https://dl-cdn.alpinelinux.org/alpine/edge/main' >> /etc/apk/repositories \
+    && apk add --no-cache \
       brotli-libs=1.2.1-r0 \
       ca-certificates=20261020-r0 \
       ca-certificates-bundle=20261020-r0 \
@@ -13,6 +14,9 @@ RUN apk add --no-cache \
       libexpat=2.10.0-r0 \
       libgomp=15.2.0-r5 \
       libssl3=3.5.9-r0 \
+      libxml2@alpine-security=2.13.9-r3 \
+      musl@alpine-security=1.2.6-r6 \
+      musl-utils@alpine-security=1.2.6-r6 \
     # The server only serves install.sh; its curl calls run on the client.
     && apk del --no-cache curl libcurl \
     && ! apk info -e curl \

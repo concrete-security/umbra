@@ -52,7 +52,7 @@ Malformed bearers are rejected with `407` before hashing. Unexpected HTTP or CON
 
 ## Build and test
 
-The repository pins Python 3.12 in `.python-version`, matching the Security CVM container. `uv` provisions it when necessary; newer Python minors are not part of the supported or release-tested runtime. The image uses a reviewed Debian snapshot for system package upgrades, including CA distrust updates. Container headers do not change the provider-managed guest kernel. pip stays at 26.2.2 with a local, hash-verified urllib3 2.8.0 vendor update; global pip and ensurepip use the same rebuilt wheel, with its license, SBOM and RECORD updated. Unavailable reviewed inputs fail the build instead of resolving newer packages.
+The repository pins Python 3.12 in `.python-version`, matching the Security CVM container. `uv` provisions it when necessary; newer Python minors are not part of the supported or release-tested runtime. The image uses a reviewed Debian snapshot for system package upgrades, including CA distrust updates. Container headers do not change the provider-managed guest kernel. Global pip and ensurepip use the same hash-verified upstream pip 26.3 wheel, which includes fixed urllib3 and msgpack vendors. Unavailable reviewed inputs fail the build instead of resolving newer packages.
 
 ```bash
 make check
@@ -73,4 +73,4 @@ Security CVM reuses the Dev canary's private dstack guest MRTD measurement.
 
 V0 does not provide multiple active Security CVMs per entity, outbound WebSocket frame filtering, response-body filtering, arbitrary request signing, dynamic SSH-key revocation, or multi-entity Security CVMs. Unknown identity or invalid policy fails closed.
 
-The locked mitmproxy extra overrides Brotli to `>=1.2.1,<2`, because mitmproxy 12.2.3 caps the decoder below the CVE-2026-111497 fix. Keep the patched decoder when updating the proxy dependency.
+The locked mitmproxy 12.3.1 extra requires patched Brotli and no longer installs a separate msgpack distribution. Umbra overrides its Tornado cap to use the security-fixed 6.6.1 release.

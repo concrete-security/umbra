@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check the absent-code guarantees behind two scoped Trivy pip SBOM exceptions."""
+"""Check the absent-code guarantees behind the scoped Trivy pip SBOM exception."""
 
 from __future__ import annotations
 
@@ -11,8 +11,8 @@ from pathlib import Path
 import sys
 import zipfile
 
-PINNED = {"pip": "26.2.2", "msgpack": "1.1.2", "setuptools": "70.3.0", "urllib3": "2.8.0"}
-IGNORED = {"msgpack": "1.1.2", "setuptools": "70.3.0"}
+PINNED = {"pip": "26.3", "msgpack": "1.2.4", "setuptools": "70.3.0", "urllib3": "2.8.0"}
+IGNORED = {"setuptools": "70.3.0"}
 MSGPACK_FILES = {"COPYING", "__init__.py", "exceptions.py", "ext.py", "fallback.py"}
 MAX_ENTRIES = 500_000
 MAX_BYTES = 16 * 1024 * 1024

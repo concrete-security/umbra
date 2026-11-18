@@ -1,9 +1,9 @@
 # syntax=docker/dockerfile:1.26.0@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
 FROM nginx:1.30.7-alpine3.24@sha256:bef154735288bc38d99fac41ae63730684bcc661503673a04a0f9bc526ba8598
 
-# The urllib3 fix is not yet in stable; only these Python 3.14 packages may
-# resolve from the tagged edge repository. Keep the complete closure pinned.
-RUN printf '%s\n' '@urllib3-security https://dl-cdn.alpinelinux.org/alpine/edge/main' >> /etc/apk/repositories \
+# The urllib3, libxml2, and musl fixes are available from Alpine edge.
+# Only the exact listed packages use this repository.
+RUN printf '%s\n' '@alpine-security https://dl-cdn.alpinelinux.org/alpine/edge/main' >> /etc/apk/repositories \
     && apk add --no-cache \
       brotli-libs=1.2.1-r0 \
       ca-certificates=20261020-r0 \
@@ -17,9 +17,12 @@ RUN printf '%s\n' '@urllib3-security https://dl-cdn.alpinelinux.org/alpine/edge/
       libexpat=2.10.0-r0 \
       libffi=3.5.2-r1 \
       libgomp=15.2.0-r5 \
+      libxml2@alpine-security=2.13.9-r3 \
       libpanelw=6.6_p20260516-r0 \
       libssl3=3.5.9-r0 \
       mpdecimal=4.0.1-r0 \
+      musl@alpine-security=1.2.6-r6 \
+      musl-utils@alpine-security=1.2.6-r6 \
       pcre2=10.49-r0 \
       py3-acme=5.6.0-r0 \
       py3-acme-pyc=5.6.0-r0 \
@@ -63,8 +66,8 @@ RUN printf '%s\n' '@urllib3-security https://dl-cdn.alpinelinux.org/alpine/edge/
       py3-typing-extensions-pyc=4.15.0-r1 \
       py3-tz=2026.6-r0 \
       py3-tz-pyc=2026.6-r0 \
-      py3-urllib3@urllib3-security=2.8.0-r0 \
-      py3-urllib3-pyc@urllib3-security=2.8.0-r0 \
+      py3-urllib3@alpine-security=2.8.0-r0 \
+      py3-urllib3-pyc@alpine-security=2.8.0-r0 \
       pyc=3.14.10-r1 \
       python3=3.14.10-r1 \
       python3-pyc=3.14.10-r1 \
