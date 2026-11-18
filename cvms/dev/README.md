@@ -12,7 +12,7 @@ The Dev CVM is a per-developer TDX sandbox for agents, shells, builds, nested Do
 | `umbra-atls-connect` | atlas-rs helper that locally verifies the Security CVM session. |
 | `umbra-ca-refresh` | Watcher that atomically installs a rotated Security CVM CA. |
 
-> Temporary security deviation: the aTLS helper currently removes SC runtime-image pins after validating the delivered policy. Genuine quote, TCB, certificate, EKM, and RTMR verification remains. See [`docs/sc-policy-check-disabled.md`](../../docs/sc-policy-check-disabled.md).
+> Temporary security deviation: for legacy certificate-event policies, the aTLS helper removes SC runtime-image pins after validating the delivered policy. Genuine quote, TCB, certificate, EKM, and RTMR verification remains. Policies using `report-data-v2` require the helper to enforce the runtime pins. See [`docs/sc-policy-check-disabled.md`](../../docs/sc-policy-check-disabled.md).
 
 ## Security model
 
@@ -43,6 +43,8 @@ Umbra governs network connections opened inside the Dev CVM. Hosted editor or br
 | `SANDBOX_ENV_PLACEHOLDERS_B64` | Non-secret sandbox environment values. |
 
 The forwarder MAY bind `:3128` without a policy so the Dev CVM remains reachable for measurement, but before its first upstream SC connection or `200 Connection Established` it MUST use `DEV_CVM_CONTROL_TOKEN` to fetch the complete stored SC policy from the Console, strictly validate it, and atomically install it. A missing, disabled, incomplete, invalid, blank, stub, or dev policy, or failure to fetch one within the bounded bootstrap budget, returns fail-closed `502` and opens no upstream connection; no bypass is permitted. The same endpoint supplies periodic policy refreshes afterward.
+
+The forwarder refreshes authorization every 30 seconds and grants at most 60 seconds from the start of each successful policy request. A restart requires a fresh fetch. Console refusal, lease expiry, or a policy or CA change closes relays using the previous authorization.
 
 ## Files and checks
 

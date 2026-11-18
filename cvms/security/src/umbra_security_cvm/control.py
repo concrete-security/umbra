@@ -80,7 +80,7 @@ class SCControlClient:
         if self.http is not None:
             response = await self.http.get(f"{self.console_url}/internal/sc-control/cvms", headers=headers)
         else:
-            async with httpx.AsyncClient(timeout=10.0) as http:
+            async with httpx.AsyncClient(timeout=10.0, trust_env=False, follow_redirects=False) as http:
                 response = await http.get(f"{self.console_url}/internal/sc-control/cvms", headers=headers)
         next_etag = response.headers.get("ETag", etag)
         if response.status_code == 304:

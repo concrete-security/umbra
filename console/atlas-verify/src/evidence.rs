@@ -1,5 +1,6 @@
 //! Quote-anchored RTMR3 replay states. Never export event payloads.
 use super::{CliError, ATTESTATION_QUOTE_INVALID, ATTESTATION_RTMR_MISMATCH};
+use atlas_rs::CertificateBinding;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256, Sha384};
 use std::{
@@ -27,6 +28,9 @@ impl<S> RecordingStream<S> {
     }
     pub fn response(&self) -> &[u8] {
         &self.response
+    }
+    pub fn into_inner(self) -> S {
+        self.inner
     }
 }
 
@@ -95,17 +99,32 @@ pub struct ReplayState {
     tls_certificate_event: bool,
 }
 
+/// The authenticated replay must contain the accepted state. Only certificate
+/// events can extend that state. Report-data-v2 never marks a certificate event.
+pub fn replay_accepts_prior_digest(history: &[ReplayState], prior_digest: &str) -> bool {
+    history
+        .iter()
+        .position(|state| state.digest == prior_digest)
+        .is_some_and(|index| {
+            history[index + 1..]
+                .iter()
+                .all(|state| state.tls_certificate_event)
+        })
+}
+
 fn invalid() -> CliError {
     CliError::new(ATTESTATION_QUOTE_INVALID, "invalid_rtmr3_evidence")
 }
 
 /// Validate metadata as well as replay: an unverified event label cannot grant
 /// the certificate exception. The terminal state must equal Atlas's VERIFIED
-/// report, and the last certificate must match this same TLS session.
+/// report. Legacy certificate events must match this same TLS session.
+/// With report-data-v2, Atlas has already verified the leaf from the quote.
 pub fn replay_evidence(
     response: &[u8],
     verified_rtmr3: &str,
     peer_cert: &[u8],
+    certificate_binding: CertificateBinding,
 ) -> Result<Vec<ReplayState>, CliError> {
     if response.len() > MAX_RESPONSE_BYTES
         || !(response.starts_with(b"HTTP/1.1 200 ") || response.starts_with(b"HTTP/1.0 200 "))
@@ -144,8 +163,9 @@ pub fn replay_evidence(
         if recorded.as_slice() != expected {
             return Err(invalid());
         }
-        let certificate =
-            event.event_type == DSTACK_EVENT_TYPE && event.event == "New TLS Certificate";
+        let certificate = certificate_binding == CertificateBinding::EventLog
+            && event.event_type == DSTACK_EVENT_TYPE
+            && event.event == "New TLS Certificate";
         if certificate {
             if payload.len() != 64
                 || !payload
@@ -171,7 +191,9 @@ pub fn replay_evidence(
             "rtmr3_evidence_mismatch",
         ));
     }
-    if last_certificate.as_deref() != Some(hex::encode(Sha256::digest(peer_cert)).as_bytes()) {
+    if certificate_binding == CertificateBinding::EventLog
+        && last_certificate.as_deref() != Some(hex::encode(Sha256::digest(peer_cert)).as_bytes())
+    {
         return Err(invalid());
     }
     Ok(history)
@@ -224,7 +246,7 @@ mod tests {
             ),
         ];
         let (response, mr) = fixture(&events);
-        let history = replay_evidence(&response, &mr, cert).unwrap();
+        let history = replay_evidence(&response, &mr, cert, CertificateBinding::EventLog).unwrap();
         assert_eq!(
             history
                 .iter()
@@ -252,9 +274,10 @@ mod tests {
             hex::encode(Sha256::digest(cert)).as_bytes(),
         ));
         let (response, mr) = fixture(&events);
-        let history = replay_evidence(&response, &mr, cert).unwrap();
+        let history = replay_evidence(&response, &mr, cert, CertificateBinding::EventLog).unwrap();
         assert_eq!(history[1].digest, old_mr);
         assert!(history[2].tls_certificate_event);
+        assert!(replay_accepts_prior_digest(&history, &old_mr));
     }
     /// Relabeling an unexpected event without recomputing its measured digest must fail.
     #[test]
@@ -266,7 +289,7 @@ mod tests {
         );
         e["event"] = json!("New TLS Certificate");
         let (response, mr) = fixture(&[e]);
-        assert!(replay_evidence(&response, &mr, cert).is_err());
+        assert!(replay_evidence(&response, &mr, cert, CertificateBinding::EventLog).is_err());
     }
     /// A valid event log from another report cannot authorize this quote's drift.
     #[test]
@@ -277,9 +300,14 @@ mod tests {
             hex::encode(Sha256::digest(cert)).as_bytes(),
         )]);
         assert_eq!(
-            replay_evidence(&response, &"a".repeat(96), cert)
-                .unwrap_err()
-                .code,
+            replay_evidence(
+                &response,
+                &"a".repeat(96),
+                cert,
+                CertificateBinding::EventLog
+            )
+            .unwrap_err()
+            .code,
             ATTESTATION_RTMR_MISMATCH
         );
     }
@@ -290,14 +318,20 @@ mod tests {
             "New TLS Certificate",
             hex::encode(Sha256::digest(b"other cert")).as_bytes(),
         )]);
-        assert!(replay_evidence(&response, &mr, b"current cert").is_err());
+        assert!(replay_evidence(
+            &response,
+            &mr,
+            b"current cert",
+            CertificateBinding::EventLog
+        )
+        .is_err());
     }
 
     /// Correctly measured metadata still needs the exact certificate payload format.
     #[test]
     fn measured_malformed_certificate_failure() {
         let (response, mr) = fixture(&[event("New TLS Certificate", b"arbitrary configuration")]);
-        assert!(replay_evidence(&response, &mr, b"cert").is_err());
+        assert!(replay_evidence(&response, &mr, b"cert", CertificateBinding::EventLog).is_err());
     }
 
     /// A known name under an unknown extension type cannot receive the exception.
@@ -313,8 +347,29 @@ mod tests {
         digest.update(payload.as_bytes());
         unknown["digest"] = json!(hex::encode(digest.finalize()));
         let (response, mr) = fixture(&[unknown, event("New TLS Certificate", payload.as_bytes())]);
-        let history = replay_evidence(&response, &mr, cert).unwrap();
+        let history = replay_evidence(&response, &mr, cert, CertificateBinding::EventLog).unwrap();
         assert!(!history[0].tls_certificate_event);
+    }
+
+    /// A leaf bound by verified report data permits replay without a certificate event.
+    #[test]
+    fn report_data_binding_replays_without_certificate_event_success() {
+        let (response, mr) = fixture(&[event("system-ready", b"")]);
+        assert!(replay_evidence(&response, &mr, b"cert", CertificateBinding::ReportDataV2).is_ok());
+    }
+
+    /// The new binding must not classify an RTMR extension as certificate rotation.
+    #[test]
+    fn report_data_binding_rejects_certificate_drift_failure() {
+        let events = [
+            event("system-ready", b""),
+            event("New TLS Certificate", b"arbitrary data"),
+        ];
+        let (_, original_rtmr3) = fixture(&events[..1]);
+        let (response, mr) = fixture(&events);
+        let history =
+            replay_evidence(&response, &mr, b"cert", CertificateBinding::ReportDataV2).unwrap();
+        assert!(!replay_accepts_prior_digest(&history, &original_rtmr3));
     }
 
     /// Capture every original byte once, even when reads arrive in fragments.

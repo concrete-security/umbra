@@ -22,6 +22,7 @@ dependencies = [
     "alembic>=1.13,<2",
     "sqlalchemy[asyncio]>=2,<3",
     "asyncpg>=0.29,<1",
+    "cryptography>=50,<51",
     "fastapi>=0.115,<1",
     "google-re2>=1,<2",
     "httpx>=0.27,<1",

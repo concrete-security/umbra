@@ -3,6 +3,7 @@ import asyncio
 from uuid import UUID
 
 import httpx
+import pytest
 
 from umbra_security_cvm.control import ControlMap, SCControlClient
 
@@ -86,6 +87,23 @@ def test_control_map_drops_malformed_policy_to_deny_all() -> None:
         method="GET",
         path="/",
     ).allowed
+
+
+def test_sc_control_client_uses_direct_transport_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The default Console poll owns proxy, CA, and redirect settings."""
+    client_class = httpx.AsyncClient
+    options: list[tuple[object, object]] = []
+
+    def make_client(**kwargs):
+        options.append((kwargs.get("trust_env"), kwargs.get("follow_redirects")))
+        transport = httpx.MockTransport(lambda _: httpx.Response(200, json={"entries": []}))
+        return client_class(transport=transport, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", make_client)
+    client = SCControlClient(console_url="https://console.example.com", ingest_token="ingest")
+    asyncio.run(client.poll_once())
+
+    assert options == [(False, False)]
 
 
 def test_sc_control_client_sends_auth_and_etag() -> None:

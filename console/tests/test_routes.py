@@ -1,6 +1,6 @@
 import asyncio
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID
@@ -994,7 +994,7 @@ def test_dev_control_security_cvm_atls_policy_requires_verified_sc() -> None:
             },
             "expected_image_measurement": "a" * 96,
             "image_measurement": "a" * 96,
-            "attestation_verified_at": datetime(2026, 5, 28, 12, 0, tzinfo=timezone.utc),
+            "attestation_verified_at": datetime.now(timezone.utc),
             "error_reason": None,
         }
     )
@@ -1053,7 +1053,20 @@ def test_dev_control_security_cvm_atls_policy_rejects_unverified_sc() -> None:
     assert exc.value.detail["error"]["details"]["state"] == "security_cvm_attestation_unverified"
 
 
-def test_dev_control_security_cvm_atls_policy_rejects_drifted_sc() -> None:
+@pytest.mark.parametrize(
+    "endpoint",
+    [get_dev_security_cvm_atls_policy, get_dev_security_cvm_ca],
+    ids=["atls-policy", "ca"],
+)
+@pytest.mark.parametrize(
+    ("age_seconds", "error_reason"),
+    [(10, "ATTESTATION_DRIFT"), (10, "ATTESTATION_UNREACHABLE"), (3661, None)],
+    ids=["drift", "unreachable", "expired"],
+)
+def test_dev_control_rejects_stale_or_failed_sc_failure(monkeypatch, endpoint, age_seconds, error_reason) -> None:
+    """Both trust routes refuse expired or failed SC attestation."""
+    monkeypatch.setenv("RECONCILER_ATTESTATION_INTERVAL_SECONDS", "3600")
+    monkeypatch.setenv("RECONCILER_ATTESTATION_UNREACHABLE_GRACE_SECONDS", "60")
     conn = DevControlPolicyConn(
         {
             "cvm_id": UUID("00000000-0000-4000-8000-000000000031"),
@@ -1063,8 +1076,8 @@ def test_dev_control_security_cvm_atls_policy_rejects_drifted_sc() -> None:
             "metadata": {"atls_policy": {"type": "dstack_tdx"}},
             "expected_image_measurement": "a" * 96,
             "image_measurement": "a" * 96,
-            "attestation_verified_at": datetime(2026, 5, 28, 12, 0, tzinfo=timezone.utc),
-            "error_reason": "ATTESTATION_DRIFT",
+            "attestation_verified_at": datetime.now(timezone.utc) - timedelta(seconds=age_seconds),
+            "error_reason": error_reason,
         }
     )
     principal = SimpleNamespace(
@@ -1074,7 +1087,7 @@ def test_dev_control_security_cvm_atls_policy_rejects_drifted_sc() -> None:
 
     with pytest.raises(HTTPException) as exc:
         asyncio.run(
-            get_dev_security_cvm_atls_policy(
+            endpoint(
                 response=SimpleNamespace(headers={}),
                 current_principal=principal,
                 pool=FakePool(conn),
@@ -1085,7 +1098,10 @@ def test_dev_control_security_cvm_atls_policy_rejects_drifted_sc() -> None:
     assert exc.value.detail["error"]["details"]["state"] == "security_cvm_attestation_unverified"
 
 
-def test_dev_control_security_cvm_ca_returns_ca_for_verified_sc() -> None:
+def test_dev_control_security_cvm_ca_returns_ca_for_verified_sc(monkeypatch) -> None:
+    """Keep serving CA during the configured transient grace window."""
+    monkeypatch.setenv("RECONCILER_ATTESTATION_INTERVAL_SECONDS", "3600")
+    monkeypatch.setenv("RECONCILER_ATTESTATION_UNREACHABLE_GRACE_SECONDS", "60")
     conn = DevControlPolicyConn(
         {
             "cvm_id": UUID("00000000-0000-4000-8000-000000000031"),
@@ -1094,7 +1110,7 @@ def test_dev_control_security_cvm_ca_returns_ca_for_verified_sc() -> None:
             "ca_cert_pem": "-----BEGIN CERTIFICATE-----\nMIIB\n",
             "expected_image_measurement": "a" * 96,
             "image_measurement": "a" * 96,
-            "attestation_verified_at": datetime(2026, 5, 28, 12, 0, tzinfo=timezone.utc),
+            "attestation_verified_at": datetime.now(timezone.utc) - timedelta(seconds=3630),
             "error_reason": None,
         }
     )

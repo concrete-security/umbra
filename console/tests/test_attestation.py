@@ -1,9 +1,13 @@
 import asyncio
+from datetime import datetime, timedelta, timezone
 import json
 import sys
 from uuid import UUID
 
 import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives.asymmetric import ed25519
+from cryptography.hazmat.primitives.serialization import Encoding
 
 from umbra_console.attestation import (
     AtlasVerifierClient,
@@ -26,6 +30,41 @@ def test_parse_attestation_report_accepts_measurements_success() -> None:
     assert report.image_measurement == "a" * 96
     assert report.rtmr3_digest == "b" * 96
     assert report.rtmr3_history == ()
+
+
+def test_parse_attestation_report_passes_verified_ca_success() -> None:
+    """A CA export accepts one self-signed CA certificate."""
+    key = ed25519.Ed25519PrivateKey.generate()
+    subject = x509.Name([x509.NameAttribute(x509.NameOID.COMMON_NAME, "Local test CA")])
+    now = datetime.now(timezone.utc)
+    certificate = (
+        x509.CertificateBuilder().subject_name(subject).issuer_name(subject)
+        .public_key(key.public_key()).serial_number(1)
+        .not_valid_before(now - timedelta(minutes=1)).not_valid_after(now + timedelta(days=1))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
+        .sign(key, algorithm=None)
+    )
+    pem = certificate.public_bytes(Encoding.PEM).decode("ascii")
+    report = parse_attestation_report(json.dumps({
+        "image_measurement": "a" * 96, "rtmr3_digest": "b" * 96, "ca_cert_pem": pem,
+    }).encode(), expect_ca=True)
+
+    assert report.ca_cert_pem == pem
+
+
+@pytest.mark.parametrize("certificate", [
+    pytest.param(None, id="old-helper"),
+    pytest.param("-----BEGIN CERTIFICATE-----\ninvalid\n-----END CERTIFICATE-----\n", id="malformed"),
+])
+def test_parse_attestation_report_requires_attested_ca_failure(certificate) -> None:
+    """An old helper or malformed certificate must not complete CA export."""
+    payload = {"image_measurement": "a" * 96, "rtmr3_digest": "b" * 96}
+    if certificate is not None:
+        payload["ca_cert_pem"] = certificate
+    with pytest.raises(AttestationVerifierError) as exc:
+        parse_attestation_report(json.dumps(payload).encode(), expect_ca=True)
+
+    assert exc.value.code == "CA_FETCH_FAILED"
 
 
 def test_parse_attestation_report_rejects_malformed_measurement() -> None:
@@ -128,6 +167,7 @@ def test_build_dev_cvm_attestation_request_preserves_full_app_compose() -> None:
             "metadata": {
                 "policy_bundle": {
                     "compose_template": "services: {}\n",
+                    "certificate_binding": "report-data-v2",
                     "app_compose_json": (
                         '{"allowed_envs":[],"docker_compose_file":"stale",'
                         '"features":["kms","tproxy-net"],"runner":"docker-compose"}'
@@ -146,6 +186,7 @@ def test_build_dev_cvm_attestation_request_preserves_full_app_compose() -> None:
         }
     )
 
+    assert request["policy"]["certificate_binding"] == "report-data-v2"
     assert request["policy"]["app_compose"] == {
         "allowed_envs": [],
         "docker_compose_file": "services: {}\n",
@@ -219,7 +260,7 @@ def test_build_security_cvm_attestation_request_uses_full_runtime_policy() -> No
         _SC_SNAPSHOT,
         token_hashes={"INGEST": "B" * 64, "CA_EXPORT": "C" * 64},
         console_url="https://console.example.com",
-        shade_policy=_SC_SHADE_POLICY,
+        shade_policy={**_SC_SHADE_POLICY, "certificate_binding": "report-data-v2"},
     )
 
     assert request == {
@@ -227,6 +268,7 @@ def test_build_security_cvm_attestation_request_uses_full_runtime_policy() -> No
         "fqdn": "sc.example.com",
         "policy": {
             "type": "dstack_tdx",
+            "certificate_binding": "report-data-v2",
             "expected_image_measurement": "a" * 96,
             "app_compose": {
                 "manifest_version": 2,

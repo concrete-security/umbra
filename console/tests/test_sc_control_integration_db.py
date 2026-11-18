@@ -170,6 +170,55 @@ FIXED_TS = datetime(2026, 7, 7, 12, 0, tzinfo=timezone.utc)
 WIRE_KEYS = {"cvm_id", "fqdn", "proxy_token_hash", "merged_policy", "policy_version", "updated_at"}
 
 
+@pytest.mark.parametrize("kind", ["provision", "update"])
+def test_ca_persist_requires_current_attestation_success(migrated_database, monkeypatch, kind) -> None:
+    """Only the CA fetched for the currently accepted quote advances the operation."""
+    from umbra_console import scheduler
+
+    operation_id = uuid.uuid4()
+    digest = "a" * 96
+
+    async def exercise():
+        pool = await asyncpg.create_pool(_asyncpg_form(migrated_database), min_size=1, max_size=1)
+        async with pool:
+            async def get_pool():
+                return pool
+
+            monkeypatch.setattr(scheduler, "get_pool", get_pool)
+            persist = (
+                scheduler.persist_security_cvm_ca_pem if kind == "provision"
+                else scheduler.persist_security_cvm_update_ca_pem
+            )
+            await pool.execute(
+                "INSERT INTO entities (id, name, domain) VALUES ($1, 'CA fixture', 'ca.example.com')",
+                ENTITY_ID,
+            )
+            await pool.execute(
+                """
+                INSERT INTO security_cvms (
+                    id, entity_id, state, fqdn, instance_type, region, proxy_port, rtmr3_digest
+                ) VALUES ($1, $2, 'RUNNING', 'sc.ca.example.com', 'tdx.small', 'FR-PARIS-1', 8080, $3)
+                """,
+                SC_ID, ENTITY_ID, digest,
+            )
+            await pool.execute(
+                """
+                INSERT INTO operations (id, target_id, kind, status, progress_step)
+                VALUES ($1, $2, $3, 'running', 'fetch_ca')
+                """,
+                operation_id, SC_ID, f"security_cvm.{kind}",
+            )
+            await persist(operation_id, security_cvm_id=SC_ID, expected_rtmr3="b" * 96, ca_pem="stale CA")
+            stale_step = await pool.fetchval("SELECT progress_step FROM operations WHERE id = $1", operation_id)
+            stale_ca = await pool.fetchval("SELECT ca_cert_pem FROM security_cvms WHERE id = $1", SC_ID)
+            await persist(operation_id, security_cvm_id=SC_ID, expected_rtmr3=digest, ca_pem="current CA")
+            current_step = await pool.fetchval("SELECT progress_step FROM operations WHERE id = $1", operation_id)
+            current_ca = await pool.fetchval("SELECT ca_cert_pem FROM security_cvms WHERE id = $1", SC_ID)
+            return (stale_step, stale_ca), (current_step, current_ca)
+
+    assert asyncio.run(exercise()) == (("fetch_ca", None), ("finalise", "current CA"))
+
+
 def _value_from_injection(inj_id: str, secret_name: str, host: str) -> dict:
     return {
         "id": inj_id,

@@ -848,6 +848,7 @@ def test_build_cvm_policy_bundle_uses_shade_policy_and_binding() -> None:
             },
             "expected_bootchain": {"mrtd": "d" * 96},
             "os_image_hash": "e" * 64,
+            "certificate_binding": "report-data-v2",
         },
         rtmr3_binding=binding,
         deploy_compose_yaml="services:\n  generated:\n",
@@ -868,6 +869,7 @@ def test_build_cvm_policy_bundle_uses_shade_policy_and_binding() -> None:
     )
     assert bundle["expected_bootchain"] == {"mrtd": "d" * 96}
     assert bundle["os_image_hash"] == "e" * 64
+    assert bundle["certificate_binding"] == "report-data-v2"
     assert bundle["rtmr3_binding"] == binding
     assert bundle["deploy_compose_yaml"] == "services:\n  generated:\n"
     assert bundle["security_cvm_fqdn"] == "sc-abc.sc.example.com"
@@ -893,6 +895,17 @@ def test_render_dev_cvm_shade_config_routes_tunnel_websocket(monkeypatch) -> Non
     assert "dev-tunnel:" in shade
     assert "path: /umbra/tunnel" in shade
     assert "websocket: true" in shade
+
+
+@pytest.mark.parametrize(
+    ("guest", "expected"),
+    [("dstack-0.5.12", ()), ("dstack-0.6.3", ("  attestation:", "    certificate_binding: report-data-v2"))],
+    ids=["legacy", "patched"],
+)
+def test_shade_guest_attestation_config_uses_explicit_guest_pin_success(monkeypatch, guest, expected) -> None:
+    """Older guest pins keep the legacy Shade config."""
+    monkeypatch.setenv("PHALA_OS_IMAGE", guest)
+    assert scheduler.shade_guest_attestation_config() == expected
 
 
 def test_render_dev_cvm_shade_config_routes_extra_tunnel_paths(monkeypatch) -> None:
@@ -2264,13 +2277,20 @@ def test_persist_attestation_certificate_refresh_stale_prefix_failure(monkeypatc
         "image_measurement": "a" * 96,
         "rtmr3_digest": "c" * 96,
         "attestation_verified_at": scheduler.datetime.now(scheduler.timezone.utc),
+        "error_reason": None,
     }
 
     class ConcurrentRefreshConn:
         async def execute(self, query, *args):
             assert "rtmr3_digest IS NOT DISTINCT FROM $6" in query
             assert "attestation_verified_at IS NOT DISTINCT FROM $7" in query
-            assert args[4:] == (row["image_measurement"], row["rtmr3_digest"], row["attestation_verified_at"])
+            assert "error_reason IS NOT DISTINCT FROM $8" in query
+            assert args[4:] == (
+                row["image_measurement"],
+                row["rtmr3_digest"],
+                row["attestation_verified_at"],
+                row["error_reason"],
+            )
             return "UPDATE 0"
 
     async def unexpected_audit(_conn, **kwargs):
@@ -2653,7 +2673,7 @@ def test_security_cvm_fetch_ca_failure_compensates_before_marking_failed(monkeyp
     async def fake_fetch(_conn, _operation_id):
         return snapshot
 
-    async def fake_ca(*, fqdn, ca_export_token, connect_host):
+    async def fake_ca(_snapshot, *, connect_host):
         raise scheduler.SecurityCVMCAFetchError(http_status=502, reason="connect")
 
     async def fake_resolve(_fqdn, *, timeout_seconds):
@@ -2749,6 +2769,7 @@ def test_security_cvm_fetch_ca_connects_by_pinned_ip(monkeypatch) -> None:
         "fqdn": "sc-abc.sc.example.com",
         "ca_cert_pem": None,
         "ca_export_token_plaintext": "ca-export-plaintext",
+        "rtmr3_digest": "d" * 96,
     }
 
     async def fake_fetch(_conn, _operation_id):
@@ -2757,12 +2778,13 @@ def test_security_cvm_fetch_ca_connects_by_pinned_ip(monkeypatch) -> None:
     async def fake_resolve(_fqdn, *, timeout_seconds):
         return "10.0.0.5"
 
-    async def fake_ca(*, fqdn, ca_export_token, connect_host):
-        captured["fqdn"] = fqdn
+    async def fake_ca(snapshot, *, connect_host):
+        captured["fqdn"] = snapshot["fqdn"]
         captured["connect_host"] = connect_host
         return "-----BEGIN CERTIFICATE-----\nx\n-----END CERTIFICATE-----\n"
 
-    async def fake_persist(_operation_id, *, security_cvm_id, ca_pem):
+    async def fake_persist(_operation_id, *, security_cvm_id, expected_rtmr3, ca_pem):
+        assert expected_rtmr3 == "d" * 96
         captured["persisted"] = True
 
     async def fake_get_pool():
@@ -2783,6 +2805,44 @@ def test_security_cvm_fetch_ca_connects_by_pinned_ip(monkeypatch) -> None:
     assert captured["connect_host"] == "10.0.0.5"
     assert captured["fqdn"] == "sc-abc.sc.example.com"
     assert captured.get("persisted") is True
+
+
+def test_security_cvm_ca_export_uses_attestation_request_success(monkeypatch) -> None:
+    """Pass the stored policy, expected replay state, and bearer to the same-stream verifier."""
+    from umbra_console.attestation import AtlasVerifierClient, AttestationReport
+
+    snapshot = {
+        **security_cvm_snapshot(),
+        "expected_image_measurement": "a" * 96,
+        "rtmr3_digest": "b" * 96,
+        "ca_export_token_plaintext": "fixture-token",
+        "metadata": {"atls_policy": {
+            "app_compose": {"docker_compose_file": "services: {}\n"},
+            "expected_bootchain": {"mrtd": "a" * 96},
+            "os_image_hash": "c" * 64,
+        }},
+    }
+    captured = {}
+
+    class Verifier:
+        async def verify(self, request, *, timeout_seconds):
+            captured.update(request)
+            return AttestationReport("a" * 96, "b" * 96, ca_cert_pem="verified CA")
+
+    async def fake_get_pool():
+        return LaunchFakePool(object())
+
+    async def fake_token_hashes(_conn, _security_cvm_id):
+        return {"INGEST": "d" * 64, "CA_EXPORT": scheduler.sha256_text("fixture-token")}
+
+    monkeypatch.setattr(AtlasVerifierClient, "from_settings", lambda: Verifier())
+    monkeypatch.setattr(scheduler, "get_pool", fake_get_pool)
+    monkeypatch.setattr(scheduler, "fetch_security_cvm_token_hashes", fake_token_hashes)
+
+    ca = asyncio.run(scheduler.fetch_security_cvm_ca_pem(snapshot, connect_host="10.0.0.5"))
+    assert (ca, captured["ca_export"]) == (
+        "verified CA", {"token": "fixture-token", "expected_rtmr3": "b" * 96, "connect_ip": "10.0.0.5"}
+    )
 
 
 class _ZeroRowCvmUpdateConn(AttestationPersistConn):
@@ -2929,24 +2989,21 @@ def test_reconcile_dev_cvm_attestation_refresh_marks_unreachable(monkeypatch) ->
 
 
 @pytest.mark.parametrize(
-    ("age_seconds", "code"),
+    ("age_seconds", "code", "reason"),
     [
-        pytest.param(22_000, "ATTESTATION_FETCH_FAILED", id="within-grace"),
-        pytest.param(90_000, "ATTESTATION_IMAGE_MISMATCH", id="mismatch-code"),
-        pytest.param(90_000, "ATTESTATION_QUOTE_INVALID", id="quote-invalid-code"),
+        pytest.param(22_000, "ATTESTATION_FETCH_FAILED", "verifier_timeout", id="within-grace"),
+        pytest.param(90_000, "ATTESTATION_QUOTE_INVALID", "policy_configuration_invalid", id="local-configuration"),
+        pytest.param(90_000, "ATTESTATION_QUOTE_INVALID", "quote_invalid", id="ambiguous-quote-error"),
     ],
 )
-def test_reconcile_dev_cvm_attestation_refresh_spares_unreachable(monkeypatch, age_seconds, code) -> None:
-    """No escalation happens for a failure still inside the grace window (transient blips stay
-    WARN-and-retry) or for a non-connectivity verifier code however old the row: a verifier
-    REFUSAL (image/RTMR/quote mismatch) is a drift-class security signal, and mislabelling it
-    ATTESTATION_UNREACHABLE would bypass the gates keyed on ATTESTATION_DRIFT."""
+def test_reconcile_dev_cvm_attestation_refresh_spares_unreachable(monkeypatch, age_seconds, code, reason) -> None:
+    """Transient failures within grace and inconclusive verifier errors leave the row alone."""
     cvm_id = UUID("00000000-0000-4000-8000-000000000031")
     conn = ReconcileAttestationConn(dev_rows=[_unreachable_dev_row(cvm_id, age_seconds=age_seconds)])
 
     class FakeVerifier:
         async def verify(self, request, *, timeout_seconds):
-            raise attestation.AttestationVerifierError(code, {"reason": "test"})
+            raise attestation.AttestationVerifierError(code, {"reason": reason})
 
     monkeypatch.setattr(attestation.AtlasVerifierClient, "from_settings", classmethod(lambda cls: FakeVerifier()))
     monkeypatch.setattr(scheduler, "insert_audit_event", _registered_audit_recorder(conn))
@@ -2956,6 +3013,64 @@ def test_reconcile_dev_cvm_attestation_refresh_spares_unreachable(monkeypatch, a
     assert advanced == []
     assert all("ATTESTATION_UNREACHABLE" not in query for query, _ in conn.execute_calls)
     assert conn.audit_calls == []
+
+
+@pytest.mark.parametrize(
+    ("kind", "code", "reason"),
+    [
+        pytest.param(scheduler.SECURITY_CVM, "ATTESTATION_IMAGE_MISMATCH", "app_compose_hash_mismatch", id="sc-image"),
+        pytest.param(scheduler.DEV_CVM, "ATTESTATION_RTMR_MISMATCH", "rtmr_mismatch", id="dev-rtmr"),
+        pytest.param(
+            scheduler.SECURITY_CVM, "ATTESTATION_SESSION_BINDING_INVALID", "report_data_mismatch", id="sc-session"
+        ),
+        pytest.param(scheduler.DEV_CVM, "ATTESTATION_QUOTE_INVALID", "tcb_status_not_allowed", id="dev-tcb"),
+    ],
+)
+def test_reconcile_cvm_attestation_refusal_records_drift_success(monkeypatch, kind, code, reason) -> None:
+    """An explicit refusal records drift without claiming a verified measurement."""
+    cvm_id = UUID("00000000-0000-4000-8000-000000000031")
+    row = _unreachable_dev_row(cvm_id, age_seconds=22_000)
+    if kind is scheduler.SECURITY_CVM:
+        conn = ReconcileAttestationConn(
+            security_rows=[row],
+            token_rows=[
+                {"purpose": "INGEST", "token_hash": "b" * 64},
+                {"purpose": "CA_EXPORT", "token_hash": "c" * 64},
+            ],
+        )
+        reconcile = scheduler.reconcile_security_cvm_attestations
+    else:
+        conn = ReconcileAttestationConn(dev_rows=[row])
+        reconcile = scheduler.reconcile_dev_cvm_attestations
+
+    class RefusingVerifier:
+        async def verify(self, request, *, timeout_seconds):
+            raise attestation.AttestationVerifierError(code, {"reason": reason})
+
+    async def fake_materialize(_snapshot):
+        return {
+            "app_compose": {"runner": "docker-compose", "docker_compose_file": "services: {}\n"},
+            "expected_bootchain": {"mrtd": "e" * 96},
+            "os_image_hash": "f" * 64,
+        }
+
+    monkeypatch.setattr(attestation.AtlasVerifierClient, "from_settings", classmethod(lambda cls: RefusingVerifier()))
+    monkeypatch.setattr(scheduler, "insert_audit_event", _registered_audit_recorder(conn))
+    monkeypatch.setattr(scheduler, "materialize_security_cvm_shade_policy_for_attestation", fake_materialize)
+
+    assert asyncio.run(reconcile(conn)) == [str(cvm_id)]
+    [(query, args)] = conn.execute_calls
+    assert "SET error_reason = 'ATTESTATION_DRIFT'" in query
+    assert "rtmr3_digest IS NOT DISTINCT FROM $2" in query
+    assert "attestation_verified_at IS NOT DISTINCT FROM $3" in query
+    assert "error_reason IS DISTINCT FROM 'ATTESTATION_DRIFT'" in query
+    assert args == (cvm_id, row["rtmr3_digest"], row["attestation_verified_at"])
+    assert conn.audit_calls[0]["action"] == f"{kind.audit_prefix}_ATTESTATION_DRIFT"
+    assert conn.audit_calls[0]["after"] == {
+        "drift_kind": "verification",
+        "source": "reconciler",
+        "failure_code": code,
+    }
 
 
 def test_reconcile_dev_cvm_attestation_refresh_unreachable_marks_once(monkeypatch) -> None:

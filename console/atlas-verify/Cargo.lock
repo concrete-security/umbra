@@ -129,6 +129,7 @@ version = "0.1.0"
 dependencies = [
  "atlas-rs",
  "hex",
+ "httparse",
  "log",
  "rustls",
  "serde",

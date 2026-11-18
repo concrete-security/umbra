@@ -222,7 +222,7 @@ fn policy_document(bundle: &PolicyBundle) -> Value {
     app_compose
         .entry("runner".to_string())
         .or_insert_with(|| Value::String("docker-compose".to_string()));
-    let policy = json!({
+    let mut policy = json!({
         "type": "dstack_tdx",
         "allowed_tcb_status": ["UpToDate"],
         "expected_bootchain": bundle.expected_bootchain.clone(),
@@ -230,6 +230,9 @@ fn policy_document(bundle: &PolicyBundle) -> Value {
         "app_compose": Value::Object(app_compose),
         "rtmr3_binding": bundle.rtmr3_binding.clone(),
     });
+    if let Some(binding) = bundle.extra.get("certificate_binding") {
+        policy["certificate_binding"] = binding.clone();
+    }
     policy
 }
 
@@ -263,11 +266,16 @@ mod tests {
 
     #[test]
     fn policy_document_maps_policy_bundle_to_atls_policy() {
-        let bundle = test_policy_bundle("00000000-0000-4000-8000-000000000001", &"e".repeat(64));
+        let mut bundle =
+            test_policy_bundle("00000000-0000-4000-8000-000000000001", &"e".repeat(64));
+        bundle
+            .extra
+            .insert("certificate_binding".into(), json!("report-data-v2"));
 
         let policy = policy_document(&bundle);
 
         assert_eq!(policy["type"], "dstack_tdx");
+        assert_eq!(policy["certificate_binding"], "report-data-v2");
         assert!(policy.get("connect_host").is_none());
         assert_eq!(
             policy["app_compose"]["docker_compose_file"],
