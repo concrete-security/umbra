@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Fetch only the immutable source inputs shared by lock resolution and builds.
 set -euo pipefail
-[[ "$(go env GOVERSION)" = go1.27.4 && "$(go env GOARCH)" = amd64 ]]
+[[ "$(go env GOVERSION)" = go1.27.3 && "$(go env GOARCH)" = amd64 ]]
 mkdir -p /src /out/evidence
 cd /src
 while read -r repository commit checksum destination; do
