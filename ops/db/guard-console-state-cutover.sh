@@ -7,7 +7,7 @@ set -euo pipefail
 
 TARGET_DB_VOLUME="umbra_console_db_data"
 VERIFIED_MARKER=".umbra-console-state-verified-v1"
-MARKER_IMAGE="${UMBRA_STATE_GUARD_IMAGE:-postgres:16@sha256:33f923b05f64ca54ac4401c01126a6b92afe839a0aa0a52bc5aeb5cc958e5f20}"
+MARKER_IMAGE="${UMBRA_STATE_GUARD_IMAGE:-postgres:16.16-trixie@sha256:dd2bf3ce2dc83a81674cf7f217fcfd8a5009a4b325dda5b843bfee82a06cff6f}"
 CONFIG_PATH="${UMBRA_STATE_GUARD_CONFIG:-ops/db/private-console-state-cutover.conf}"
 SOURCE_DB_VOLUME="${UMBRA_STATE_CUTOVER_SOURCE_VOLUME:-}"
 SOURCE_PROJECT_SHA256="${UMBRA_STATE_CUTOVER_SOURCE_PROJECT_SHA256:-}"

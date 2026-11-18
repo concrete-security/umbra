@@ -4,6 +4,16 @@ Umbra follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and will 
 
 ## Unreleased
 
+### Fixed
+
+- Async operation waiters reload and refresh the session before each poll, so a long CVM update can complete after its original access token expires. Authorization failures stop polling without resubmitting the operation.
+
+- CLI 0.1.1 can refresh a cached per-CVM aTLS policy after a recognized bootchain or OS-image mismatch. It requires explicit consent, checks the CVM and Console context, and retries full Atlas verification once. Quote, certificate, TCB, session-binding, and replay failures remain closed.
+
+### Compatibility
+
+- Upgrade older CLI binaries to 0.1.1 to use this recovery after an approved guest OS upgrade. The CLI-only rollout remains compatible with the 0.1 Console API and existing Dev and Security CVM images; policy refresh does not update or restart a CVM.
+
 ## [0.1.0] - 2026-08-19
 
 First public release of `umbra-cli`.

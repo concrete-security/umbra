@@ -12,7 +12,7 @@ set -euo pipefail
 #   defaults to console/tests/test_sc_control_integration_db.py
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
-IMAGE="${UMBRA_TEST_PG_IMAGE:-postgres:16@sha256:33f923b05f64ca54ac4401c01126a6b92afe839a0aa0a52bc5aeb5cc958e5f20}"
+IMAGE="${UMBRA_TEST_PG_IMAGE:-postgres:16.16-trixie@sha256:dd2bf3ce2dc83a81674cf7f217fcfd8a5009a4b325dda5b843bfee82a06cff6f}"
 NAME="umbra-console-db-tests-$$"
 
 if [ "$#" -gt 0 ]; then

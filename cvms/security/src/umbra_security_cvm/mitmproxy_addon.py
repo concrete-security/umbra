@@ -60,7 +60,23 @@ class SecurityCVMProxyAddon:
         self._handle_proxy_flow(flow, connect_only=False)
 
     def _handle_proxy_flow(self, flow: Any, *, connect_only: bool) -> None:
+        # mitmproxy suppresses hook exceptions and resumes forwarding. Keep the
+        # entire admission path inside this boundary, including verdict application.
+        try:
+            self._enforce_proxy_flow(flow, connect_only=connect_only)
+        except Exception as exc:
+            self._reject_internal_error(flow, exc)
+
+    def _enforce_proxy_flow(self, flow: Any, *, connect_only: bool) -> None:
         if getattr(flow, "response", None) is not None:
+            return
+        control_map = self.control_state.control_map_for_enforcement()
+        if control_map is None:
+            flow.response = self.response_factory(
+                503,
+                b"Umbra Proxy: Policy unavailable\n",
+                {"Content-Type": "text/plain; charset=utf-8"},
+            )
             return
         request = getattr(flow, "request", None)
         raw_method = getattr(request, "method", None)
@@ -81,7 +97,6 @@ class SecurityCVMProxyAddon:
             )
             logger.info("proxy_request_malformed", extra={"reason": str(exc)})
             return
-        control_map = self.control_state.snapshot().control_map
         if connect_only or proxy_request.method == "CONNECT":
             result = enforce_connect_request(proxy_request, control_map)
         elif cvm := _connect_cvm(flow, control_map, self._connect_identities):
@@ -117,17 +132,21 @@ class SecurityCVMProxyAddon:
         message = _latest_websocket_message(flow)
         if message is None:
             return
-        # Inbound only (server -> sandbox); a re-entrancy guard skips the ack
-        # frames this hook itself injects.
-        if getattr(message, "from_client", True) or getattr(message, "injected", False):
+        if getattr(message, "injected", False) or _is_websocket_control_message(message):
             return
-        if _is_websocket_control_message(message):
+        control_map = self.control_state.control_map_for_enforcement()
+        if control_map is None:
+            self._drop_websocket_frame(
+                flow, message, None, cvm_id=_flow_cvm_id(flow), reason="control_plane_stale"
+            )
+            return
+        # Envelope policy applies inbound only (server -> sandbox).
+        if getattr(message, "from_client", True):
             return
         content = _websocket_message_content(message) or b""
         metadata = _metadata(flow)
         was_governed = metadata.get("umbra_websocket_governed") is True
         flow_cvm_id = _flow_cvm_id(flow)
-        control_map = self.control_state.snapshot().control_map
         cvm = _connect_cvm(flow, control_map, self._connect_identities)
         try:
             proxy_request = proxy_request_from_flow(flow)
@@ -339,6 +358,25 @@ class SecurityCVMProxyAddon:
             _blocked_body(result),
             _blocked_headers(result),
         )
+
+    def _reject_internal_error(self, flow: Any, error: Exception) -> None:
+        try:
+            flow.response = self.response_factory(
+                500,
+                b"Umbra Proxy: Request enforcement failed\n",
+                {"Content-Type": "text/plain; charset=utf-8"},
+            )
+        except Exception:
+            flow.kill()
+        # Discard partial authorization and any deferred response log after an
+        # unexpected failure.
+        metadata = _metadata(flow)
+        for key in ("umbra_connect_allowed", "umbra_cvm_id", "umbra_websocket_governed", "umbra_traffic_log"):
+            metadata.pop(key, None)
+        if connection_key := _client_connection_key(flow):
+            self._connect_identities.pop(connection_key, None)
+        # Exception messages and tracebacks can contain headers or secret values.
+        logger.error("proxy_enforcement_failed", extra={"error_type": type(error).__name__})
 
 
 def proxy_request_from_flow(flow: Any) -> ProxyRequest:

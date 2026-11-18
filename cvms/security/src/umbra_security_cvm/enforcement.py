@@ -252,7 +252,7 @@ def extract_proxy_bearer(headers: Mapping[str, str]) -> str | None:
     raw = headers.get("proxy-authorization")
     if raw is None:
         return None
-    match = re.fullmatch(r"Bearer ([^\s]+)", raw)
+    match = re.fullmatch(r"Bearer ([A-Za-z0-9._~+/-]+=*)", raw)
     if match is None:
         return None
     return match.group(1)

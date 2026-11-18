@@ -3,7 +3,7 @@
 # reviewed value. Release builds override it with the source commit timestamp.
 ARG SOURCE_DATE_EPOCH=0
 
-FROM golang:1.27.3-bookworm@sha256:972b4110ba0f47539a975c31e52c64765e1ff19f2d74469ae4a595c6676e80a5 AS go-base
+FROM golang:1.27.4-bookworm@sha256:4fa7c968ba93f1635670522dbb01a2c78150443e1385746924566079f36570ea AS go-base
 ENV CGO_ENABLED=0 GOTOOLCHAIN=local
 
 FROM go-base AS compose-builder
@@ -86,8 +86,8 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 
 FROM rust:1-bookworm@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa AS rust-base
 RUN sed -i \
-      -e 's|URIs: http://deb.debian.org/debian$|URIs: https://snapshot.debian.org/archive/debian/20261023T000000Z|' \
-      -e 's|URIs: http://deb.debian.org/debian-security$|URIs: https://snapshot.debian.org/archive/debian-security/20261023T000000Z|' \
+      -e 's|URIs: http://deb.debian.org/debian$|URIs: https://snapshot.debian.org/archive/debian/20261117T000000Z|' \
+      -e 's|URIs: http://deb.debian.org/debian-security$|URIs: https://snapshot.debian.org/archive/debian-security/20261117T000000Z|' \
       /etc/apt/sources.list.d/debian.sources \
     && printf '%s\n' 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99snapshot \
     && apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=30 update --error-on=any \
@@ -106,7 +106,7 @@ RUN cargo build --locked --release -p umbra-atls-connect --target-dir /tmp/atls-
 
 FROM ghcr.io/astral-sh/uv:0.13.5@sha256:32a7bb39b496babbd997b0a39a4d66c126bdaf5661b302bf6f06abda8deca6ff AS uv
 
-FROM ubuntu:24.04@sha256:561618e2c15bf2397621dd04f96926663a3b5616c189cf7e38db7e82f5c538ea
+FROM ubuntu:24.04@sha256:561618e2c15bf2397621dd04f96926663a3b5616c189cf7e38db7e82f5c538ea AS ubuntu-sandbox-base
 # Global ARGs do not reach RUN; account tools also need the source timestamp
 # to keep shadow entries and backups independent of the wall-clock build day.
 ARG SOURCE_DATE_EPOCH
@@ -120,7 +120,7 @@ COPY --from=rust-base /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certi
 # after rebuilding and exercising the sandbox image; it deliberately freezes
 # all packages from the Ubuntu archive. Docker's exact amd64 package filenames
 # and content digests are pinned separately in tool-versions.env below.
-ARG UBUNTU_SNAPSHOT=20261023T000000Z
+ARG UBUNTU_SNAPSHOT=20261117T000000Z
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1
@@ -140,7 +140,8 @@ RUN sed -i \
       curl \
       openssh-server \
       dtach \
-      git \
+      liberror-perl \
+      perl \
       xz-utils \
       build-essential \
       python3 \
@@ -161,6 +162,23 @@ RUN sed -i \
     && chage --lastday -1 sshd \
     && ln -sf /usr/bin/python3 /usr/bin/python \
     && rm -f /usr/lib/python*/EXTERNALLY-MANAGED
+
+FROM ubuntu-sandbox-base AS git-builder
+# Ubuntu noble has no backport for the November Git security release yet.
+RUN apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=30 update --error-on=any \
+    && apt-get install -y --no-install-recommends \
+        gettext libcurl4-openssl-dev libexpat1-dev libpcre2-dev libssl-dev zlib1g-dev
+RUN . /tmp/tool-versions.env \
+    && curl -fsSL "https://www.kernel.org/pub/software/scm/git/git-${GIT_VERSION}.tar.xz" -o /tmp/git.tar.xz \
+    && printf '%s  %s\n' "$GIT_SOURCE_SHA256" /tmp/git.tar.xz | sha256sum -c - \
+    && mkdir /tmp/git-source \
+    && tar -xJf /tmp/git.tar.xz -C /tmp/git-source --strip-components=1 \
+    && make -C /tmp/git-source -j4 prefix=/usr NO_TCLTK=YesPlease NO_RUST=YesPlease all \
+    && make -C /tmp/git-source prefix=/usr NO_TCLTK=YesPlease NO_RUST=YesPlease DESTDIR=/out install \
+    && install -Dm644 /tmp/git-source/COPYING /out/usr/share/doc/git/copyright
+
+FROM ubuntu-sandbox-base AS dev-sandbox
+COPY --from=git-builder /out/usr/ /usr/
 
 RUN set -a \
     && . /tmp/tool-versions.env \

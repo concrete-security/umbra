@@ -8,6 +8,8 @@ import zlib
 from typing import Mapping
 from uuid import UUID
 
+import pytest
+
 from umbra_security_cvm.control import ControlMap
 from umbra_security_cvm.control_loop import ControlPlaneState
 from umbra_security_cvm.mitmproxy_addon import CONNECT_IDENTITY_TTL_SECONDS, SecurityCVMProxyAddon
@@ -154,6 +156,22 @@ def events_api_message(*, channel: str = "C0ALLOWED", user: str = "U0ALLOWED") -
             }
         ).encode("utf-8")
     )
+
+
+@pytest.mark.parametrize("from_client", [False, True], ids=["inbound", "outbound"])
+def test_websocket_data_with_expired_policy_failure(
+    from_client: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Established WebSockets cannot deliver data after policy expiry."""
+    monkeypatch.setattr("umbra_security_cvm.control_loop.monotonic", lambda: 0.0)
+    proxy_addon, _, _ = addon()
+    monkeypatch.setattr("umbra_security_cvm.control_loop.monotonic", lambda: 60.0)
+    message = events_api_message()
+    message.from_client = from_client
+
+    proxy_addon.websocket_message(FakeFlow([message]))
+
+    assert message.dropped is True
 
 
 def test_inbound_allowed_channel_not_dropped_no_ack_no_log() -> None:

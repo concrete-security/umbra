@@ -19,7 +19,7 @@ path = "src/main.rs"
 [dependencies]
 # Published atlas crate — the SAME pin the CLI uses (cli/Cargo.toml). atlas stays
 # untouched; we only consume it. atlas-rs already exposes mr_td + rt_mr3.
-atlas-rs = "=0.2.0"
+atlas-rs = "=0.2.1"
 hex = "0.4"
 # Direct handle on the `log` facade (already pulled by rustls' "logging" feature) so we can
 # claim the global logger at startup and route ALL dependency logs to stderr — see main.rs.

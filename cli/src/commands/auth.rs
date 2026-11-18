@@ -702,7 +702,7 @@ fn token(config: &ResolvedConfig) -> ExitStatus {
         println!("{}", session.access_token);
         return ExitStatus::Ok;
     }
-    match refresh_existing_session(config) {
+    match refresh_loaded_session(config, session) {
         Ok(session) => {
             println!("{}", session.access_token);
             ExitStatus::Ok
@@ -721,8 +721,32 @@ pub(crate) fn session_for_console(
     if session.expires_at > Utc::now() {
         Ok(session)
     } else {
-        refresh_existing_session(config)
+        refresh_loaded_session(config, session)
     }
+}
+
+/// A waiter may rotate its own grant, but cannot adopt an unrelated login.
+pub(crate) fn session_for_operation(
+    config: &ResolvedConfig,
+    expected: &Session,
+) -> Result<Session, (ExitStatus, String)> {
+    let session = load_session_or_auth_required(config)?;
+    if session.access_token != expected.access_token
+        || session.refresh_token != expected.refresh_token
+        || session.user_id != expected.user_id
+        || session.entity.id != expected.entity.id
+    {
+        return Err(changed_session_error());
+    }
+    if session.expires_at > Utc::now() {
+        Ok(session)
+    } else {
+        refresh_loaded_session(config, session)
+    }
+}
+
+fn changed_session_error() -> (ExitStatus, String) {
+    (ExitStatus::AuthRequired, "[auth_required] local session changed; refresh or polling stopped and the current login was preserved".to_string())
 }
 
 fn load_session_or_auth_required(config: &ResolvedConfig) -> Result<Session, (ExitStatus, String)> {
@@ -737,7 +761,14 @@ fn load_session_or_auth_required(config: &ResolvedConfig) -> Result<Session, (Ex
 }
 
 fn refresh_existing_session(config: &ResolvedConfig) -> Result<Session, (ExitStatus, String)> {
-    let mut session = load_session_or_auth_required(config)?;
+    refresh_loaded_session(config, load_session_or_auth_required(config)?)
+}
+
+fn refresh_loaded_session(
+    config: &ResolvedConfig,
+    mut session: Session,
+) -> Result<Session, (ExitStatus, String)> {
+    let original = session.clone();
     let refresh_token = Zeroizing::new(session.refresh_token.clone().ok_or_else(|| {
         (
             ExitStatus::AuthRequired,
@@ -765,8 +796,11 @@ fn refresh_existing_session(config: &ResolvedConfig) -> Result<Session, (ExitSta
     session.refresh_expires_at = token_pair
         .refresh_expires_in
         .map(|seconds| now + chrono::Duration::seconds(seconds));
-    session::write_atomic(&config.config_dir, &session)
-        .map_err(|message| (ExitStatus::Error, message))?;
+    if !session::replace_if_current(&config.config_dir, &original, &session)
+        .map_err(|message| (ExitStatus::Error, message))?
+    {
+        return Err(changed_session_error());
+    }
     Ok(session)
 }
 
