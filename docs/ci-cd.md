@@ -127,7 +127,7 @@ advisories fail the job; repository ignore exceptions do not apply. Manual runs
 can set `run_compatibility=false` to repeat only this scan.
 
 The default candidate compiles the coherent 0.7.1 source set with pinned Go
-1.27.3, snapshot native build packages and committed dependency locks. A small
+1.27.4, snapshot native build packages and committed dependency locks. A small
 source patch adapts its cgroup device filter to the fixed eBPF library while
 preserving raw kernel attachment semantics. Existing filter-generation tests
 run during the build. A private runner cgroup checks allowed and denied device

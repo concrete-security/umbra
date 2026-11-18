@@ -120,7 +120,7 @@ def verify(args: argparse.Namespace) -> dict:
         raise RuntimeError("nested Docker daemon never became ready; baseline is inconclusive")
     version = json.loads(run([*inner, "version", "--format", "{{json .Server}}"] ).stdout)
     components = {item["Name"]: item["Version"] for item in version["Components"]}
-    if version["Version"] != "29.9.2" or components.get("containerd", "").removeprefix("v") != "2.4.2" or components.get("runc", "").removeprefix("v") != "1.5.2":
+    if version["Version"] != "29.9.3" or components.get("containerd", "").removeprefix("v") != "2.4.2" or components.get("runc", "").removeprefix("v") != "1.5.3":
         raise RuntimeError(f"unexpected release inner runtime versions: {components}")
     image = json.loads(run(["docker", "image", "inspect", args.image]).stdout)[0]
     if args.image not in image.get("RepoDigests", []) or image["Os"] != "linux" or image["Architecture"] != "amd64":
