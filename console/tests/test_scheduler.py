@@ -898,21 +898,43 @@ def test_render_dev_cvm_shade_config_routes_tunnel_websocket(monkeypatch) -> Non
 
 
 @pytest.mark.parametrize(
-    ("guest", "expected"),
-    [("dstack-0.5.12", ()), ("dstack-0.6.3", ("  attestation:", "    certificate_binding: report-data-v2"))],
-    ids=["legacy", "patched"],
+    ("render", "snapshot"),
+    [
+        pytest.param(scheduler.render_dev_cvm_shade_config, launch_snapshot, id="dev"),
+        pytest.param(scheduler.render_security_cvm_shade_config, security_cvm_snapshot, id="security"),
+    ],
 )
-def test_shade_guest_attestation_config_uses_explicit_guest_pin_success(monkeypatch, guest, expected) -> None:
-    """Older guest pins keep the legacy Shade config."""
+@pytest.mark.parametrize(
+    ("guest", "report_data_v2"),
+    [
+        pytest.param("", False, id="auto"),
+        pytest.param("dstack-0.5.12", False, id="legacy"),
+        pytest.param("dstack-0.6.3", True, id="cpu-0.6.3"),
+        pytest.param("dstack-0.6.4", True, id="cpu-0.6.4"),
+        pytest.param("dstack-0.6.5", True, id="cpu-0.6.5"),
+        pytest.param("dstack-0.6.5.1", False, id="unlisted-build"),
+        pytest.param("dstack-0.6.6", False, id="unlisted-release"),
+        pytest.param("dstack-nvidia-0.6.5", False, id="gpu"),
+    ],
+)
+def test_shade_guest_attestation_config_uses_explicit_guest_pin_success(
+    monkeypatch, render, snapshot, guest, report_data_v2
+) -> None:
+    """New CVMs select report-data-v2 for exact supported CPU guest pins."""
     monkeypatch.setenv("PHALA_OS_IMAGE", guest)
-    assert scheduler.shade_guest_attestation_config() == expected
+    rendered = render(snapshot(), name="fresh-cvm")
+    assert ("  attestation:\n    certificate_binding: report-data-v2" in rendered) is report_data_v2
 
 
 @pytest.mark.parametrize("kind", ["dev", "security"])
 @pytest.mark.parametrize(
     ("launch_guest", "retained_binding"),
-    [("dstack-0.6.3", "event-log"), ("dstack-0.5.12", "report-data-v2")],
-    ids=["retain-legacy", "retain-report-data"],
+    [
+        pytest.param("dstack-0.6.3", "event-log", id="retain-legacy-after-0.6.3-pin"),
+        pytest.param("dstack-0.6.4", "event-log", id="retain-legacy-after-0.6.4-pin"),
+        pytest.param("dstack-0.6.5", "event-log", id="retain-legacy-after-0.6.5-pin"),
+        pytest.param("dstack-0.5.12", "report-data-v2", id="retain-report-data"),
+    ],
 )
 def test_app_update_preserves_verified_guest_success(monkeypatch, kind, launch_guest, retained_binding) -> None:
     """A launch-pin change cannot switch the verified mode of the retained guest."""
