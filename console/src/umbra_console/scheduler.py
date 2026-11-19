@@ -3507,11 +3507,15 @@ def dev_tunnel_paths() -> list[str]:
     return paths
 
 
+REPORT_DATA_V2_GUEST_IMAGES = frozenset({"dstack-0.6.3", "dstack-0.6.4", "dstack-0.6.5"})
+
+
 def shade_guest_attestation_config(certificate_binding: str | None = None) -> tuple[str, ...]:
-    # Launches select the mode from the requested guest. Application-only
+    # Launches select the mode from the exact guest pin. Application-only
     # updates already know the mode of the retained guest.
     if certificate_binding == "report-data-v2" or (
-        certificate_binding is None and load_settings().raw.get("PHALA_OS_IMAGE", "").strip() == "dstack-0.6.3"
+        certificate_binding is None
+        and load_settings().raw.get("PHALA_OS_IMAGE", "").strip() in REPORT_DATA_V2_GUEST_IMAGES
     ):
         return ("  attestation:", "    certificate_binding: report-data-v2")
     return ()
