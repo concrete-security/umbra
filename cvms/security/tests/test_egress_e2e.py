@@ -12,7 +12,8 @@ missing extra an error instead of an optional-suite skip.
 against installed entrypoints in the immutable release image on Docker.
 Security CVM containers never receive source mounts, and the image is never
 rebuilt. A separate unprivileged fixture container receives the test server
-module and synthetic TLS material. All traffic stays on owned runner bridges
+module and synthetic TLS material. The Security CVM receives a read-only
+fixture CA bundle for the simulated Console. All traffic stays on owned runner bridges
 and loopback listeners; no provider, external service, or attestation is used.
 """
 
@@ -481,7 +482,6 @@ class EgressHarness:
             "PATH": os.environ.get("PATH", ""),
             "PYTHONPATH": str(source),
             "PYTHONDONTWRITEBYTECODE": "1",
-            "SSL_CERT_FILE": str(ca_path),
             "CONSOLE_URL": f"https://{self.destination_host}:{console_port}",
             "ENTITY_ID": "00000000-0000-4000-8000-000000000001",
             "SC_ID": "00000000-0000-4000-8000-000000000002",
@@ -508,6 +508,7 @@ class EgressHarness:
         }
         if self.image_runtime:
             container_ca = "/umbra-fixtures/fixture-ca.pem"
+            console_ca_bundle = "/app/.venv/lib/python3.12/site-packages/certifi/cacert.pem"
             config_path = directory / "mitmproxy-fixture.yaml"
             config_path.write_text(f"ssl_verify_upstream_trusted_ca: {container_ca}\n")
             config_path.chmod(0o644)
@@ -516,13 +517,17 @@ class EgressHarness:
                 if key not in {"PATH", "PYTHONPATH", MITMPROXY_SCRIPT_ENV}
             }
             container_env.update({
-                "SSL_CERT_FILE": container_ca, "SC_MANAGEMENT_HOST": "0.0.0.0",
+                "SC_MANAGEMENT_HOST": "0.0.0.0",
                 "SC_MITMPROXY_HOST": "0.0.0.0", "SC_MANAGEMENT_PORT": "8081",
                 "SC_MITMPROXY_PORT": "8080", "SC_MITMPROXY_CONFDIR": "/tmp/mitmproxy",
             })
             self.start("mitmdump", self.image_runtime.command(
                 "mitmproxy", container_env, [(management_port, 8081)],
-                [(ca_path, container_ca), (config_path, "/tmp/mitmproxy/config.yaml")],
+                [
+                    (ca_path, container_ca),
+                    (ca_path, console_ca_bundle),
+                    (config_path, "/tmp/mitmproxy/config.yaml"),
+                ],
                 "umbra-security-mitmproxy",
             ), dict(os.environ))
             management_port = self.image_runtime.published_port("mitmproxy", 8081)
@@ -537,12 +542,20 @@ class EgressHarness:
             ), dict(os.environ))
             self.tunnel_port = self.image_runtime.published_port("proxy-tunnel", 8082)
         else:
-            # Keep the production option builder and startup addon. The only
-            # extra option trusts the fixture issuer for upstream TLS.
+            # Supply a fixture trust bundle only inside this child process.
+            # Keep the production option builder, startup addon, and TLS checks.
+            mitmdump_launcher = (
+                "import sys\n"
+                "import certifi\n"
+                "fixture_ca_bundle = sys.argv.pop(1)\n"
+                "certifi.where = lambda: fixture_ca_bundle\n"
+                "from mitmproxy.tools.main import mitmdump\n"
+                "mitmdump()\n"
+            )
             args = mitmdump_args(env=env)
             self.start(
                 "mitmdump",
-                [sys.executable, "-c", "from mitmproxy.tools.main import mitmdump; mitmdump()", *args[1:],
+                [sys.executable, "-c", mitmdump_launcher, str(ca_path), *args[1:],
                  "--set", f"ssl_verify_upstream_trusted_ca={ca_path}"], env,
             )
             self.start("proxy-tunnel", [sys.executable, "-m", "umbra_security_cvm.proxy_tunnel"], tunnel_env)

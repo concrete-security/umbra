@@ -1383,8 +1383,7 @@ async def execute_security_cvm_fetch_ca_operation(operation_id: Any) -> None:
         return
     try:
         ca_pem = await fetch_security_cvm_ca_pem(
-            fqdn=fqdn,
-            ca_export_token=_row_value(snapshot, "ca_export_token_plaintext"),
+            snapshot,
             connect_host=connect_host,
         )
     except SecurityCVMCAFetchError as exc:
@@ -1403,7 +1402,10 @@ async def execute_security_cvm_fetch_ca_operation(operation_id: Any) -> None:
             details={"http_status": exc.http_status, "reason": exc.reason},
         )
         return
-    await persist_security_cvm_ca_pem(operation_id, security_cvm_id=_row_value(snapshot, "id"), ca_pem=ca_pem)
+    await persist_security_cvm_ca_pem(
+        operation_id, security_cvm_id=_row_value(snapshot, "id"),
+        expected_rtmr3=_row_value(snapshot, "rtmr3_digest"), ca_pem=ca_pem,
+    )
 
 
 async def execute_security_cvm_finalise_operation(operation_id: Any) -> None:
@@ -1493,7 +1495,7 @@ async def execute_security_cvm_update_phala_operation(operation_id: Any) -> None
         )
         return
     try:
-        update_material = security_cvm_update_material()
+        update_material = security_cvm_update_material(snapshot)
     except ValueError as exc:
         await mark_security_cvm_update_failed(
             operation_id,
@@ -1510,7 +1512,9 @@ async def execute_security_cvm_update_phala_operation(operation_id: Any) -> None
     try:
         name = security_cvm_provider_name_from_metadata(snapshot)
         shade_result = await ShadeClient.from_settings().build(
-            shade_config_yaml=render_security_cvm_shade_config(snapshot, name=name),
+            shade_config_yaml=render_security_cvm_shade_config(
+                snapshot, name=name, certificate_binding=update_material["certificate_binding"]
+            ),
             app_compose_yaml=update_material["compose_config"],
         )
         bearers = mint_security_cvm_provision_bearers()
@@ -1786,10 +1790,7 @@ async def execute_security_cvm_update_fetch_ca_operation(operation_id: Any) -> N
         await mark_security_cvm_update_failed(operation_id, code="CA_EXPORT_TTL_EXPIRED", details={})
         return
     try:
-        ca_pem = await fetch_security_cvm_ca_pem(
-            fqdn=_row_value(snapshot, "fqdn"),
-            ca_export_token=_row_value(snapshot, "ca_export_token_plaintext"),
-        )
+        ca_pem = await fetch_security_cvm_ca_pem(snapshot)
     except SecurityCVMCAFetchError as exc:
         log.warning(
             "security_cvm_ca_fetch_failed",
@@ -1806,7 +1807,10 @@ async def execute_security_cvm_update_fetch_ca_operation(operation_id: Any) -> N
             details={"http_status": exc.http_status, "reason": exc.reason},
         )
         return
-    await persist_security_cvm_update_ca_pem(operation_id, security_cvm_id=_row_value(snapshot, "id"), ca_pem=ca_pem)
+    await persist_security_cvm_update_ca_pem(
+        operation_id, security_cvm_id=_row_value(snapshot, "id"),
+        expected_rtmr3=_row_value(snapshot, "rtmr3_digest"), ca_pem=ca_pem,
+    )
 
 
 async def execute_security_cvm_update_finalise_operation(operation_id: Any) -> None:
@@ -2449,7 +2453,7 @@ async def execute_cvm_update_phala_operation(operation_id: Any) -> None:
         await mark_cvm_update_failed(operation_id, code="PROVIDER_DEPLOYMENT_MISSING", details={"field": "metadata.deployment_id"})
         return
     try:
-        update_material = dev_cvm_update_material()
+        update_material = dev_cvm_update_material(snapshot)
     except ValueError as exc:
         await mark_cvm_update_failed(operation_id, code=str(exc), details={"component": "dev_cvm_update_config"})
         return
@@ -2469,7 +2473,10 @@ async def execute_cvm_update_phala_operation(operation_id: Any) -> None:
         )
         shade_client = ShadeClient.from_settings()
         shade_result = await shade_client.build(
-            shade_config_yaml=render_dev_cvm_shade_config(snapshot, name=cvm_provider_name_from_metadata(snapshot)),
+            shade_config_yaml=render_dev_cvm_shade_config(
+                snapshot, name=cvm_provider_name_from_metadata(snapshot),
+                certificate_binding=update_material["certificate_binding"],
+            ),
             app_compose_yaml=update_material["compose_config"],
         )
         deploy_result = await cvm_provider_from_settings(
@@ -3500,7 +3507,17 @@ def dev_tunnel_paths() -> list[str]:
     return paths
 
 
-def render_dev_cvm_shade_config(snapshot: Any, *, name: str) -> str:
+def shade_guest_attestation_config(certificate_binding: str | None = None) -> tuple[str, ...]:
+    # Launches select the mode from the requested guest. Application-only
+    # updates already know the mode of the retained guest.
+    if certificate_binding == "report-data-v2" or (
+        certificate_binding is None and load_settings().raw.get("PHALA_OS_IMAGE", "").strip() == "dstack-0.6.3"
+    ):
+        return ("  attestation:", "    certificate_binding: report-data-v2")
+    return ()
+
+
+def render_dev_cvm_shade_config(snapshot: Any, *, name: str, certificate_binding: str | None = None) -> str:
     route_lines: list[str] = []
     for path in dev_tunnel_paths():
         route_lines.extend(
@@ -3525,6 +3542,7 @@ def render_dev_cvm_shade_config(snapshot: Any, *, name: str) -> str:
             f"  domain: {_row_value(snapshot, 'fqdn')}",
             f"  instance_type: {_row_value(snapshot, 'instance_type')}",
             f"  region: {_row_value(snapshot, 'region')}",
+            *shade_guest_attestation_config(certificate_binding),
             "  routes:",
             *route_lines,
             "",
@@ -3532,7 +3550,7 @@ def render_dev_cvm_shade_config(snapshot: Any, *, name: str) -> str:
     )
 
 
-def render_security_cvm_shade_config(snapshot: Any, *, name: str) -> str:
+def render_security_cvm_shade_config(snapshot: Any, *, name: str, certificate_binding: str | None = None) -> str:
     # The SC leaf cert MUST be Let's Encrypt PRODUCTION (publicly trusted): the attestation
     # verifier's aTLS client (atlas-rs connect.rs) validates the TLS handshake against the
     # webpki public roots before binding the leaf to the quote, so an LE *staging* ("Fake LE")
@@ -3554,6 +3572,7 @@ def render_security_cvm_shade_config(snapshot: Any, *, name: str) -> str:
             f"  domain: {_row_value(snapshot, 'fqdn')}",
             f"  instance_type: {_row_value(snapshot, 'instance_type')}",
             f"  region: {_row_value(snapshot, 'region')}",
+            *shade_guest_attestation_config(certificate_binding),
             "  routes:",
             "    - path: /umbra/proxy",
             "      service: proxy-tunnel",
@@ -3875,6 +3894,8 @@ def build_cvm_policy_bundle(
         bundle["expected_bootchain"] = expected_bootchain
     if isinstance(shade_policy.get("os_image_hash"), str):
         bundle["os_image_hash"] = shade_policy["os_image_hash"]
+    if "certificate_binding" in shade_policy:
+        bundle["certificate_binding"] = shade_policy["certificate_binding"]
     return bundle
 
 
@@ -4128,6 +4149,7 @@ async def persist_security_cvm_update_provider_result(
                     image_measurement = NULL,
                     rtmr3_digest = NULL,
                     attestation_verified_at = NULL,
+                    ca_cert_pem = NULL,
                     updated_at = now()
                 WHERE id = $1
                   AND state IN ('RUNNING', 'STOPPED', 'FAILED')
@@ -4177,11 +4199,13 @@ async def persist_security_cvm_dns_record(operation_id: Any, snapshot: Any, *, f
             await advance_security_cvm_provision_step_with_conn(conn, operation_id, next_step)
 
 
-async def persist_security_cvm_ca_pem(operation_id: Any, *, security_cvm_id: Any, ca_pem: str) -> None:
+async def persist_security_cvm_ca_pem(
+    operation_id: Any, *, security_cvm_id: Any, expected_rtmr3: str, ca_pem: str,
+) -> None:
     pool = await get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
-            await conn.execute(
+            result = await conn.execute(
                 """
                 UPDATE security_cvms
                 SET ca_cert_pem = $2,
@@ -4189,18 +4213,29 @@ async def persist_security_cvm_ca_pem(operation_id: Any, *, security_cvm_id: Any
                 WHERE id = $1
                   AND state = 'RUNNING'
                   AND deleted_at IS NULL
+                  AND rtmr3_digest = $3
+                  AND EXISTS (
+                      SELECT 1 FROM operations
+                      WHERE id = $4 AND target_id = $1 AND kind = 'security_cvm.provision'
+                        AND status = 'running' AND progress_step = 'fetch_ca'
+                  )
                 """,
                 security_cvm_id,
                 ca_pem,
+                expected_rtmr3,
+                operation_id,
             )
-            await advance_security_cvm_provision_step_with_conn(conn, operation_id, "finalise")
+            if result == "UPDATE 1":
+                await advance_security_cvm_provision_step_with_conn(conn, operation_id, "finalise")
 
 
-async def persist_security_cvm_update_ca_pem(operation_id: Any, *, security_cvm_id: Any, ca_pem: str) -> None:
+async def persist_security_cvm_update_ca_pem(
+    operation_id: Any, *, security_cvm_id: Any, expected_rtmr3: str, ca_pem: str,
+) -> None:
     pool = await get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
-            await conn.execute(
+            result = await conn.execute(
                 """
                 UPDATE security_cvms
                 SET ca_cert_pem = $2,
@@ -4208,11 +4243,20 @@ async def persist_security_cvm_update_ca_pem(operation_id: Any, *, security_cvm_
                 WHERE id = $1
                   AND state IN ('RUNNING', 'STOPPED', 'FAILED')
                   AND deleted_at IS NULL
+                  AND rtmr3_digest = $3
+                  AND EXISTS (
+                      SELECT 1 FROM operations
+                      WHERE id = $4 AND target_id = $1 AND kind = 'security_cvm.update'
+                        AND status = 'running' AND progress_step = 'fetch_ca'
+                  )
                 """,
                 security_cvm_id,
                 ca_pem,
+                expected_rtmr3,
+                operation_id,
             )
-            await advance_security_cvm_update_step_with_conn(conn, operation_id, "finalise")
+            if result == "UPDATE 1":
+                await advance_security_cvm_update_step_with_conn(conn, operation_id, "finalise")
 
 
 async def advance_security_cvm_provision_step(operation_id: Any, next_step: str) -> None:
@@ -4824,47 +4868,56 @@ class SecurityCVMCAFetchError(RuntimeError):
         self.reason = reason
 
 
-async def fetch_security_cvm_ca_pem(*, fqdn: str, ca_export_token: str, connect_host: str | None = None) -> str:
-    import ssl
-
-    # Connect to a pre-resolved IP when supplied so the freshly-created gateway CNAME's
-    # intermittent NXDOMAIN cannot fail this single-shot connect; TLS SNI and HTTP Host
-    # stay the FQDN (the leaf cert and gateway routing key remain the FQDN).
-    target_host = connect_host or fqdn
-    request = (
-        "GET /ca.pem HTTP/1.1\r\n"
-        f"Host: {fqdn}\r\n"
-        f"Authorization: Bearer {ca_export_token}\r\n"
-        "Connection: close\r\n"
-        "\r\n"
+async def fetch_security_cvm_ca_pem(snapshot: Any, *, connect_host: str | None = None) -> str:
+    from umbra_console.attestation import (
+        AtlasVerifierClient,
+        AttestationVerifierError,
+        AttestationVerifierUnavailable,
+        build_security_cvm_attestation_request,
+        verify_with_fetch_retries,
     )
+    from umbra_console.shade_provider.shade import ShadeError
+
+    # Re-attest in the durable fetch_ca step. The verifier owns the TLS
+    # connection and sends the bearer only on the stream it just verified.
+    expected_rtmr3 = _row_value(snapshot, "rtmr3_digest")
+    if not isinstance(expected_rtmr3, str):
+        raise SecurityCVMCAFetchError(http_status=0, reason="missing_expected_rtmr3")
     try:
-        context = ssl.create_default_context()
-        reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(target_host, 443, ssl=context, server_hostname=fqdn),
-            timeout=15.0,
+        verifier = AtlasVerifierClient.from_settings()
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            token_hashes = await fetch_security_cvm_token_hashes(conn, _row_value(snapshot, "id"))
+        metadata = json_payload(_row_value(snapshot, "metadata") or {})
+        shade_policy = metadata.get("atls_policy") if isinstance(metadata, dict) else None
+        if not isinstance(shade_policy, dict):
+            shade_policy = await materialize_security_cvm_shade_policy_for_attestation(snapshot)
+        request = build_security_cvm_attestation_request(
+            snapshot, token_hashes=token_hashes,
+            console_url=load_settings().raw.get("CONSOLE_URL", "http://localhost:8000"),
+            shade_policy=shade_policy,
         )
-        writer.write(request.encode("utf-8"))
-        await writer.drain()
-        raw_response = await asyncio.wait_for(reader.read(), timeout=15.0)
-        writer.close()
-        await writer.wait_closed()
-    except (OSError, TimeoutError, ssl.SSLError) as exc:
-        raise SecurityCVMCAFetchError(http_status=0, reason=f"{type(exc).__name__}: {exc}") from exc
-    header_bytes, separator, body_bytes = raw_response.partition(b"\r\n\r\n")
-    if not separator:
-        raise SecurityCVMCAFetchError(http_status=0, reason="no_http_separator")
-    status_line = header_bytes.splitlines()[0].decode("iso-8859-1", errors="replace")
-    try:
-        status_code = int(status_line.split()[1])
-    except (IndexError, ValueError) as exc:
-        raise SecurityCVMCAFetchError(http_status=0, reason="bad_status_line") from exc
-    if status_code != 200:
-        raise SecurityCVMCAFetchError(http_status=status_code, reason="non_200")
-    body = body_bytes.decode("utf-8", errors="replace")
-    if "-----BEGIN CERTIFICATE-----" not in body or "-----END CERTIFICATE-----" not in body:
-        raise SecurityCVMCAFetchError(http_status=200, reason="no_certificate_in_body")
-    return body
+        request["ca_export"] = {
+            "token": _row_value(snapshot, "ca_export_token_plaintext"),
+            "expected_rtmr3": expected_rtmr3,
+            "connect_ip": connect_host,
+        }
+        report = await verify_with_fetch_retries(
+            verifier, request, timeout_seconds=security_cvm_attestation_timeout_seconds(),
+        )
+    except AttestationVerifierUnavailable as exc:
+        raise SecurityCVMCAFetchError(http_status=0, reason="verifier_unavailable") from exc
+    except ShadeError as exc:
+        raise SecurityCVMCAFetchError(http_status=0, reason="shade_policy_unavailable") from exc
+    except AttestationVerifierError as exc:
+        status = exc.details.get("http_status", 0)
+        raise SecurityCVMCAFetchError(
+            http_status=status if type(status) is int and 100 <= status <= 599 else 0,
+            reason=exc.code.lower(),
+        ) from exc
+    if report.ca_cert_pem is None:
+        raise SecurityCVMCAFetchError(http_status=0, reason="missing_attested_ca")
+    return report.ca_cert_pem
 
 
 def security_cvm_ca_export_stash_available(snapshot: Any) -> bool:
@@ -4916,35 +4969,76 @@ def provider_app_id(metadata: Any) -> str | None:
     return app_id if isinstance(app_id, str) and app_id else None
 
 
-def dev_cvm_update_material() -> dict[str, str]:
+def retained_guest_baseline(snapshot: Any, *, policy_key: str, active_policy: Any = None) -> tuple[str, str]:
+    """Use the verified policy of the retained guest, including after a failed update.
+
+    The provider-result step resets the current measurements before re-attesting.
+    The prior verified policy remains active until the updated guest verifies.
+    """
+    from umbra_console.attestation import _full_app_compose_from_shade_policy
+
+    expected = _row_value(snapshot, "expected_image_measurement")
+    measured = _row_value(snapshot, "image_measurement")
+    if not isinstance(expected, str) or not is_hex_measurement(expected):
+        raise ValueError("CVM_GUEST_BASELINE_UNAVAILABLE")
+    try:
+        policy = json_payload(active_policy)
+        if policy is None:
+            metadata = json_payload(_row_value(snapshot, "metadata"))
+            policy = metadata.get(policy_key) if isinstance(metadata, dict) else None
+        app_compose = _full_app_compose_from_shade_policy(policy) if isinstance(policy, dict) else None
+    except json.JSONDecodeError:
+        raise ValueError("CVM_GUEST_BASELINE_UNAVAILABLE") from None
+    if not isinstance(policy, dict) or not app_compose:
+        raise ValueError("CVM_GUEST_BASELINE_UNAVAILABLE")
+    compose = app_compose.get("docker_compose_file")
+    os_image_hash = policy.get("os_image_hash")
+    bootchain = policy.get("expected_bootchain")
+    mrtd = bootchain.get("mrtd") if isinstance(bootchain, dict) else None
+    if (
+        not isinstance(compose, str) or not compose
+        or not isinstance(os_image_hash, str) or not os_image_hash
+        or not isinstance(mrtd, str) or not is_hex_measurement(mrtd.lower())
+        or policy.get("disable_runtime_verification", False) is not False
+    ):
+        raise ValueError("CVM_GUEST_BASELINE_UNAVAILABLE")
+    if mrtd.lower() != expected or (measured is not None and measured != expected):
+        raise ValueError("CVM_GUEST_BASELINE_MISMATCH")
+    binding = policy.get("certificate_binding", "event-log")
+    if binding not in ("event-log", "report-data-v2"):
+        raise ValueError("CVM_CERTIFICATE_BINDING_INVALID")
+    return expected, binding
+
+
+def dev_cvm_update_material(snapshot: Any) -> dict[str, str]:
     raw = load_settings().raw
     image = raw.get("DEV_CVM_IMAGE", "").strip()
-    measurement = raw.get("DEV_CVM_IMAGE_MEASUREMENT", "").strip().lower()
     if not image:
         raise ValueError("DEV_CVM_IMAGE_UNCONFIGURED")
-    if not is_hex_measurement(measurement):
-        raise ValueError("DEV_CVM_IMAGE_MEASUREMENT_UNCONFIGURED")
+    measurement, binding = retained_guest_baseline(
+        snapshot, policy_key="policy_bundle", active_policy=snapshot.get("atls_policy_bundle"),
+    )
     from umbra_console.routes import render_dev_cvm_compose_config
 
     return {
         "compose_config": render_dev_cvm_compose_config({"image": image}),
         "expected_image_measurement": measurement,
+        "certificate_binding": binding,
     }
 
 
-def security_cvm_update_material() -> dict[str, str]:
+def security_cvm_update_material(snapshot: Any) -> dict[str, str]:
     raw = load_settings().raw
     image = raw.get("SECURITY_CVM_IMAGE_REF", "").strip()
-    measurement = raw.get("SECURITY_CVM_IMAGE_MEASUREMENT", "").strip().lower()
     if not image:
         raise ValueError("SECURITY_CVM_IMAGE_UNCONFIGURED")
-    if not is_hex_measurement(measurement):
-        raise ValueError("SECURITY_CVM_IMAGE_MEASUREMENT_UNCONFIGURED")
+    measurement, binding = retained_guest_baseline(snapshot, policy_key="atls_policy")
     from umbra_console.routes import render_security_cvm_compose_config
 
     return {
         "compose_config": render_security_cvm_compose_config({"image_ref": image}),
         "expected_image_measurement": measurement,
+        "certificate_binding": binding,
     }
 
 
@@ -6152,12 +6246,16 @@ async def reconcile_security_cvm_attestations(conn: Any) -> list[str]:
                 security_cvm_id=str(_row_value(row, "id")),
                 code=exc.code,
             )
-            if exc.code == "ATTESTATION_FETCH_FAILED" and _attestation_overdue_past_grace(
-                _row_value(row, "attestation_verified_at"), interval, unreachable_grace
+            if await _record_cvm_attestation_refresh_failure(
+                conn,
+                row,
+                SECURITY_CVM,
+                code=exc.code,
+                reason=exc.details.get("reason"),
+                interval=interval,
+                grace=unreachable_grace,
             ):
-                async with conn.transaction():
-                    if await _record_cvm_attestation_refresh_unreachable(conn, row, SECURITY_CVM, code=exc.code):
-                        advanced.append(str(_row_value(row, "id")))
+                advanced.append(str(_row_value(row, "id")))
             continue
 
         drift_kind = attestation_drift_kind(
@@ -6240,12 +6338,16 @@ async def reconcile_dev_cvm_attestations(conn: Any) -> list[str]:
                 cvm_id=str(_row_value(row, "id")),
                 code=exc.code,
             )
-            if exc.code == "ATTESTATION_FETCH_FAILED" and _attestation_overdue_past_grace(
-                _row_value(row, "attestation_verified_at"), interval, unreachable_grace
+            if await _record_cvm_attestation_refresh_failure(
+                conn,
+                row,
+                DEV_CVM,
+                code=exc.code,
+                reason=exc.details.get("reason"),
+                interval=interval,
+                grace=unreachable_grace,
             ):
-                async with conn.transaction():
-                    if await _record_cvm_attestation_refresh_unreachable(conn, row, DEV_CVM, code=exc.code):
-                        advanced.append(str(_row_value(row, "id")))
+                advanced.append(str(_row_value(row, "id")))
             continue
 
         drift_kind = attestation_drift_kind(
@@ -6319,8 +6421,8 @@ async def _persist_cvm_attestation_refresh(conn: Any, row: Any, report: Any, kin
     """Shared reconciler attestation-refresh writer for Dev CVMs and Security CVMs. Returns
     True iff the row was still RUNNING and persisted. The reconciler claims candidates then
     releases the row lock before the (slow) verify, so the CVM may have been terminated/failed
-    concurrently. The accepted prefix may also have advanced on another probe. Guard both
-    state and the captured baseline; a stale report emits no verified audit or progress."""
+    concurrently. Another probe may have advanced the prefix or recorded a refusal.
+    A stale report emits no verified audit or progress."""
     verified_at = datetime.now(timezone.utc)
     result = await conn.execute(
         f"""
@@ -6336,6 +6438,7 @@ async def _persist_cvm_attestation_refresh(conn: Any, row: Any, report: Any, kin
           AND image_measurement IS NOT DISTINCT FROM $5
           AND rtmr3_digest IS NOT DISTINCT FROM $6
           AND attestation_verified_at IS NOT DISTINCT FROM $7
+          AND error_reason IS NOT DISTINCT FROM $8
           {kind.protected_error_reason_guard("error_reason")}
         """,
         _row_value(row, "id"),
@@ -6345,6 +6448,7 @@ async def _persist_cvm_attestation_refresh(conn: Any, row: Any, report: Any, kin
         _row_value(row, "image_measurement"),
         _row_value(row, "rtmr3_digest"),
         _row_value(row, "attestation_verified_at"),
+        _row_value(row, "error_reason"),
     )
     if result != "UPDATE 1":
         log.warning(
@@ -6376,10 +6480,11 @@ async def _persist_cvm_attestation_refresh(conn: Any, row: Any, report: Any, kin
 
 
 async def _record_cvm_attestation_refresh_drift(
-    conn: Any, row: Any, report: Any, kind: CvmKind, *, drift_kind: str
+    conn: Any, row: Any, report: Any, kind: CvmKind, *, drift_kind: str, failure_code: str | None = None
 ) -> bool:
     """Returns True iff the still-RUNNING row was marked drifted. See
     _persist_cvm_attestation_refresh for why the rowcount is guarded."""
+    dedupe_guard = "AND error_reason IS DISTINCT FROM 'ATTESTATION_DRIFT'" if failure_code is not None else ""
     result = await conn.execute(
         f"""
         UPDATE {kind.table}
@@ -6391,6 +6496,7 @@ async def _record_cvm_attestation_refresh_drift(
           AND rtmr3_digest IS NOT DISTINCT FROM $2
           AND attestation_verified_at IS NOT DISTINCT FROM $3
           {kind.protected_error_reason_guard("error_reason")}
+          {dedupe_guard}
         """,
         _row_value(row, "id"),
         _row_value(row, "rtmr3_digest"),
@@ -6403,6 +6509,11 @@ async def _record_cvm_attestation_refresh_drift(
             result=result,
         )
         return False
+    after: dict[str, Any] = {"drift_kind": drift_kind, "source": "reconciler"}
+    if failure_code is None:
+        after.update(image_measurement=report.image_measurement, rtmr3_digest=report.rtmr3_digest)
+    else:
+        after["failure_code"] = failure_code
     await insert_audit_event(
         conn,
         entity_id=_row_value(row, "entity_id"),
@@ -6415,12 +6526,7 @@ async def _record_cvm_attestation_refresh_drift(
             "image_measurement": _row_value(row, "image_measurement"),
             "rtmr3_digest": _row_value(row, "rtmr3_digest"),
         },
-        after={
-            "image_measurement": report.image_measurement,
-            "rtmr3_digest": report.rtmr3_digest,
-            "drift_kind": drift_kind,
-            "source": "reconciler",
-        },
+        after=after,
     )
     return True
 
@@ -6429,6 +6535,48 @@ def _attestation_overdue_past_grace(verified_at: Any, interval: int, grace: int)
     if verified_at is None:
         return False
     return verified_at < datetime.now(timezone.utc) - timedelta(seconds=interval + grace)
+
+
+def security_cvm_attestation_is_current(row: Any) -> bool:
+    expected = _row_value(row, "expected_image_measurement")
+    verified_at = _row_value(row, "attestation_verified_at")
+    return (
+        expected is not None
+        and _row_value(row, "image_measurement") == expected
+        and isinstance(verified_at, datetime)
+        and _row_value(row, "error_reason") not in ("ATTESTATION_DRIFT", "ATTESTATION_UNREACHABLE")
+        and not _attestation_overdue_past_grace(
+            verified_at, reconciler_attestation_interval_seconds(), reconciler_attestation_unreachable_grace_seconds()
+        )
+    )
+
+
+async def _record_cvm_attestation_refresh_failure(
+    conn: Any, row: Any, kind: CvmKind, *, code: str, reason: object, interval: int, grace: int
+) -> bool:
+    # QUOTE_INVALID also covers local request errors, helper output errors and
+    # collateral acquisition. Mark drift only for errors that establish a rejection.
+    if code in ("ATTESTATION_IMAGE_MISMATCH", "ATTESTATION_RTMR_MISMATCH", "ATTESTATION_SESSION_BINDING_INVALID") or (
+        code == "ATTESTATION_QUOTE_INVALID"
+        and reason in (
+            "event_log_parse_failed",
+            "invalid_rtmr3_evidence",
+            "missing_server_certificate",
+            "tcb_grace_period_expired",
+            "tcb_status_not_allowed",
+            "tee_type_mismatch",
+        )
+    ):
+        async with conn.transaction():
+            return await _record_cvm_attestation_refresh_drift(
+                conn, row, None, kind, drift_kind="verification", failure_code=code
+            )
+    if code == "ATTESTATION_FETCH_FAILED" and _attestation_overdue_past_grace(
+        _row_value(row, "attestation_verified_at"), interval, grace
+    ):
+        async with conn.transaction():
+            return await _record_cvm_attestation_refresh_unreachable(conn, row, kind, code=code)
+    return False
 
 
 async def _record_cvm_attestation_refresh_unreachable(conn: Any, row: Any, kind: CvmKind, *, code: str) -> bool:

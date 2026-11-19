@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import hashlib
 import importlib.util
 import json
 import os
@@ -203,21 +204,34 @@ def set_forwarder_env(helper: Path) -> None:
     os.environ["SECURITY_CVM_PROXY_PORT"] = "8080"
     os.environ["SECURITY_CVM_PROXY_TOKEN"] = "real-proxy-token"
     os.environ["DEV_CVM_CONTROL_TOKEN"] = "real-dev-control-token"
-    os.environ["SECURITY_CVM_CA_CERT_B64"] = base64.b64encode(b"-----BEGIN CERTIFICATE-----\nMIIB\n").decode("ascii")
+    pem = b"-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"
+    os.environ["SECURITY_CVM_CA_CERT_B64"] = base64.b64encode(pem).decode("ascii")
     os.environ["CONSOLE_URL"] = "https://console.example.com"
     os.environ["DEV_EGRESS_ATLS_CONNECT_CMD"] = str(helper)
+    os.environ["DEV_EGRESS_CA_DISTRIBUTION_PATH"] = str(helper.parent / "ca" / "security-cvm-ca.pem")
+    os.environ["DEV_EGRESS_CA_BINDING_PATH"] = str(helper.parent / "ca" / "security-cvm-ca.json")
 
 
-def install_test_policy(forwarder, config):
+def test_policy_candidate(forwarder, config, **overrides):
     policy = {
         "type": "dstack_tdx",
         "expected_bootchain": {"mrtd": "a" * 96},
         "app_compose": {"docker_compose_file": "services: {}\n"},
         "os_image_hash": "b" * 64,
+        **overrides,
     }
     payload = json.dumps(policy, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    forwarder.write_private_file(config.atls_policy_path, payload, 0o444)
-    return policy
+    state, ca = forwarder.read_ca_distribution(config)
+    assert state == "valid"
+    return forwarder.AtlsPolicyCandidate(payload, hashlib.sha256(ca).hexdigest())
+
+
+def authorize_test_policy(forwarder, config):
+    forwarder.seed_ca_distribution(config)
+    candidate = test_policy_candidate(forwarder, config)
+    forwarder.write_private_file(config.atls_policy_path, candidate.contents, 0o444)
+    config.atls_authorization.current = forwarder.AtlsAuthorization(candidate, time.monotonic() + 60)
+    return config.atls_authorization.current
 
 
 async def smoke():
@@ -229,15 +243,14 @@ async def smoke():
         runtime_dir = Path(temp) / "run"
         set_forwarder_env(helper)
         config = forwarder.load_config(runtime_dir)
+        forwarder.seed_ca_distribution(config)
         policy_fetches = 0
         original_fetch = forwarder.fetch_refreshed_atls_policy
 
-        def fake_initial_policy_fetch(_config, *, force=False):
+        def fake_initial_policy_fetch(_config):
             nonlocal policy_fetches
-            assert force is True
             policy_fetches += 1
-            install_test_policy(forwarder, _config)
-            return forwarder.RefreshedAtlsPolicy(policy_path=_config.atls_policy_path)
+            return test_policy_candidate(forwarder, _config)
 
         forwarder.fetch_refreshed_atls_policy = fake_initial_policy_fetch
         try:
@@ -271,12 +284,10 @@ async def smoke():
     with tempfile.TemporaryDirectory() as temp:
         temp_path = Path(temp)
         helper = write_refresh_only_fake_connect_helper(temp_path, relay_port)
-        refresh_policy_path = temp_path / "refreshed-policy.json"
-        refresh_policy_path.write_text(json.dumps({"type": "dstack_tdx", "refresh": True}), encoding="utf-8")
         runtime_dir = temp_path / "run"
         set_forwarder_env(helper)
         config = forwarder.load_config(runtime_dir)
-        install_test_policy(forwarder, config)
+        old = authorize_test_policy(forwarder, config)
 
         original_fetch = forwarder.fetch_refreshed_atls_policy
 
@@ -285,13 +296,7 @@ async def smoke():
         def fake_fetch_refreshed_atls_policy(_config):
             nonlocal refresh_fetches
             refresh_fetches += 1
-            _config.atls_policy_refresh_path.write_text(
-                refresh_policy_path.read_text(encoding="utf-8"),
-                encoding="utf-8",
-            )
-            return forwarder.RefreshedAtlsPolicy(
-                policy_path=_config.atls_policy_refresh_path,
-            )
+            return test_policy_candidate(forwarder, _config, refresh=True)
 
         forwarder.fetch_refreshed_atls_policy = fake_fetch_refreshed_atls_policy
         try:
@@ -308,6 +313,7 @@ async def smoke():
             response = await reader.readuntil(b"\r\n\r\n")
             assert b"200 Connection Established" in response
             assert await reader.readexactly(5) == b"HELLO"
+            assert old.revoked.is_set()
             writer.close()
             await writer.wait_closed()
             reader, writer = await asyncio.open_connection("127.0.0.1", forwarder_port)
@@ -338,7 +344,7 @@ async def smoke():
         runtime_dir = Path(temp) / "run"
         set_forwarder_env(helper)
         config = forwarder.load_config(runtime_dir)
-        install_test_policy(forwarder, config)
+        authorize_test_policy(forwarder, config)
         server = await asyncio.start_server(lambda r, w: forwarder.handle_client(r, w, config), "127.0.0.1", 0)
         forwarder_port = server.sockets[0].getsockname()[1]
         reader, writer = await asyncio.open_connection("127.0.0.1", forwarder_port)
@@ -367,7 +373,7 @@ async def smoke():
         runtime_dir = Path(temp) / "run"
         set_forwarder_env(helper)
         config = forwarder.load_config(runtime_dir)
-        install_test_policy(forwarder, config)
+        authorize_test_policy(forwarder, config)
         server = await asyncio.start_server(lambda r, w: forwarder.handle_client(r, w, config), "127.0.0.1", 0)
         forwarder_port = server.sockets[0].getsockname()[1]
         reader, writer = await asyncio.open_connection("127.0.0.1", forwarder_port)
@@ -447,21 +453,16 @@ async def smoke():
     # Concurrent first requests share one authenticated fetch flight.
     with tempfile.TemporaryDirectory() as temp:
         temp_path = Path(temp)
-        config = SimpleNamespace(
-            console_url="https://console.example.com",
-            atls_policy_path=temp_path / "run" / "security-cvm.atls-policy.json",
-            atls_policy_refresh_path=temp_path / "run" / "security-cvm.atls-policy.refresh.json",
-            atls_policy_fetch_lock=asyncio.Lock(),
-        )
+        set_forwarder_env(temp_path / "unused-helper")
+        config = forwarder.load_config(temp_path / "run")
+        forwarder.seed_ca_distribution(config)
         fetches = 0
 
-        def delayed_policy_fetch(_config, *, force=False):
+        def delayed_policy_fetch(_config):
             nonlocal fetches
-            assert force is True
             fetches += 1
             time.sleep(0.05)
-            install_test_policy(forwarder, _config)
-            return forwarder.RefreshedAtlsPolicy(policy_path=_config.atls_policy_path)
+            return test_policy_candidate(forwarder, _config)
 
         original_fetch = forwarder.fetch_refreshed_atls_policy
         forwarder.fetch_refreshed_atls_policy = delayed_policy_fetch
@@ -475,24 +476,25 @@ async def smoke():
     # the Security CVM, while the listener remains available for later retries.
     with tempfile.TemporaryDirectory() as temp:
         temp_path = Path(temp)
-        config = SimpleNamespace(
-            console_url="https://console.example.com",
-            atls_policy_path=temp_path / "run" / "security-cvm.atls-policy.json",
-            atls_policy_refresh_path=temp_path / "run" / "security-cvm.atls-policy.refresh.json",
-            atls_policy_fetch_lock=asyncio.Lock(),
-        )
+        set_forwarder_env(temp_path / "unused-helper")
+        config = forwarder.load_config(temp_path / "run")
+        persisted = authorize_test_policy(forwarder, config)
+        set_forwarder_env(temp_path / "unused-helper")
+        config = forwarder.load_config(temp_path / "run")
+        assert config.atls_authorization.current is None and persisted.is_current()
+        assert config.atls_policy_path.is_file()
         upstream_calls = 0
 
-        async def forbidden_upstream(_config):
+        async def forbidden_upstream(_config, *, policy_path):
             nonlocal upstream_calls
             upstream_calls += 1
             raise AssertionError("upstream must not open without an authenticated policy")
 
         original_fetch = forwarder.fetch_refreshed_atls_policy
-        original_upstream = forwarder.open_verified_upstream
+        original_upstream = forwarder.open_verified_upstream_with_policy
         original_attempts = forwarder.ATLS_POLICY_FETCH_MAX_ATTEMPTS
-        forwarder.fetch_refreshed_atls_policy = lambda _config, *, force=False: None
-        forwarder.open_verified_upstream = forbidden_upstream
+        forwarder.fetch_refreshed_atls_policy = lambda _config: None
+        forwarder.open_verified_upstream_with_policy = forbidden_upstream
         forwarder.ATLS_POLICY_FETCH_MAX_ATTEMPTS = 1
         try:
             server = await asyncio.start_server(lambda r, w: forwarder.handle_client(r, w, config), "127.0.0.1", 0)
@@ -510,7 +512,7 @@ async def smoke():
             await server.wait_closed()
         finally:
             forwarder.fetch_refreshed_atls_policy = original_fetch
-            forwarder.open_verified_upstream = original_upstream
+            forwarder.open_verified_upstream_with_policy = original_upstream
             forwarder.ATLS_POLICY_FETCH_MAX_ATTEMPTS = original_attempts
 
 
@@ -637,20 +639,24 @@ def ca_distribution_smoke():
             ca_cert_path=launch_path,
             ca_distribution_path=path,
             ca_distribution_binding_path=binding_path,
-            atls_policy_path=Path(temp) / "run" / "security-cvm.atls-policy.json",
-            atls_policy_refresh_path=Path(temp) / "run" / "security-cvm.atls-policy.refresh.json",
         )
         original_connection = forwarder.http.client.HTTPSConnection
         forwarder.http.client.HTTPSConnection = FakeConnection
         try:
-            bootstrapped = forwarder.fetch_refreshed_atls_policy(refresh_config, force=True)
-            assert bootstrapped is not None
-            assert bootstrapped.policy_path == refresh_config.atls_policy_path
-            assert json.loads(bootstrapped.policy_path.read_text(encoding="utf-8")) == policy
-
             refreshed = forwarder.fetch_refreshed_atls_policy(refresh_config)
             assert refreshed is not None
-            assert json.loads(refreshed.policy_path.read_text(encoding="utf-8")) == policy
+            assert json.loads(refreshed.contents) == policy
+            assert refreshed.ca_sha256 == hashlib.sha256(rotated.encode("utf-8")).hexdigest()
+
+            FakeResponse.status = 409
+            try:
+                forwarder.fetch_refreshed_atls_policy(refresh_config)
+            except forwarder.AtlsPolicyDenied:
+                pass
+            else:
+                raise AssertionError("an explicit attestation refusal must revoke the lease")
+            finally:
+                FakeResponse.status = 200
 
             # Disabled and incomplete control-plane documents are never installed.
             payload = json.dumps(
@@ -660,7 +666,7 @@ def ca_distribution_smoke():
                     "atls_policy": {**policy, "disable_runtime_verification": True},
                 }
             ).encode("utf-8")
-            assert forwarder.fetch_refreshed_atls_policy(refresh_config, force=True) is None
+            assert forwarder.fetch_refreshed_atls_policy(refresh_config) is None
             payload = json.dumps(
                 {
                     "security_cvm_fqdn": "sc.example.com",
@@ -668,7 +674,7 @@ def ca_distribution_smoke():
                     "atls_policy": {"type": "dstack_tdx"},
                 }
             ).encode("utf-8")
-            assert forwarder.fetch_refreshed_atls_policy(refresh_config, force=True) is None
+            assert forwarder.fetch_refreshed_atls_policy(refresh_config) is None
 
             # A candidate that does not match the most recently accepted CA
             # remains fail-closed.
@@ -680,7 +686,12 @@ def ca_distribution_smoke():
                 }
             ).encode("utf-8")
             assert forwarder.write_ca_distribution(config, pem) is True
-            assert forwarder.fetch_refreshed_atls_policy(refresh_config) is None
+            try:
+                forwarder.fetch_refreshed_atls_policy(refresh_config)
+            except forwarder.AtlsPolicyDenied:
+                pass
+            else:
+                raise AssertionError("the previous CA must not authorize a new lease")
         finally:
             forwarder.http.client.HTTPSConnection = original_connection
 
@@ -744,6 +755,127 @@ def ca_distribution_smoke():
     print("ca_distribution_smoke: OK")
 
 
+async def policy_lease_smoke():
+    """Refusal or expiry closes live relays and prevents use of an on-disk policy."""
+    from types import SimpleNamespace
+
+    forwarder = load_forwarder_module()
+    forwarder.ATLS_POLICY_FETCH_MAX_ATTEMPTS = 1
+
+    with tempfile.TemporaryDirectory() as temp:
+        directory = Path(temp)
+        set_forwarder_env(directory / "unused-helper")
+        config = forwarder.load_config(directory / "run")
+        authorized = authorize_test_policy(forwarder, config)
+        authorized.expires_at = time.monotonic() + 0.25
+        waiter = asyncio.create_task(authorized.wait_until_invalid())
+        await asyncio.sleep(0)
+        forwarder.fetch_refreshed_atls_policy = lambda _config: authorized.policy
+        try:
+            async with config.atls_policy_fetch_lock:
+                assert await forwarder.refresh_atls_policy_locked(config) is authorized
+            await asyncio.sleep(0.3)
+            assert not waiter.done(), "an unchanged renewal must preserve active relays"
+        finally:
+            config.atls_authorization.revoke()
+            await asyncio.wait_for(waiter, timeout=2)
+
+    received = asyncio.Queue()
+
+    async def hold_security_cvm(reader, writer):
+        await reader.readuntil(b"\r\n\r\n")
+        writer.write(b"HTTP/1.1 101 Switching Protocols\r\n\r\n")
+        await writer.drain()
+        request = await reader.readuntil(b"\r\n\r\n")
+        await received.put(request)
+        if request.startswith(b"CONNECT "):
+            writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            await writer.drain()
+        # Leave both tunnels and incomplete HTTP bodies open until revocation.
+        await received.put(await reader.read())
+        writer.close()
+        await writer.wait_closed()
+
+    security = await asyncio.start_server(hold_security_cvm, "127.0.0.1", 0)
+    security_port = security.sockets[0].getsockname()[1]
+    upstream_attempts = 0
+
+    async def open_test_relay(config, *, policy_path):
+        nonlocal upstream_attempts
+        upstream_attempts += 1
+        reader, writer = await asyncio.open_connection("127.0.0.1", security_port)
+        return forwarder.VerifiedUpstream(reader, writer, SimpleNamespace(returncode=0))
+
+    forwarder.open_verified_upstream_with_policy = open_test_relay
+
+    async def client(port, request):
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        writer.write(request)
+        await writer.drain()
+        return reader, writer
+
+    connect = b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n"
+    http = b"POST http://example.com/ HTTP/1.1\r\nHost: example.com\r\nContent-Length: 5\r\n\r\n"
+    async with security:
+        for explicit_refusal in (True, False):
+            with tempfile.TemporaryDirectory() as temp:
+                directory = Path(temp)
+                set_forwarder_env(directory / "unused-helper")
+                config = forwarder.load_config(directory / "run")
+                authorized = authorize_test_policy(forwarder, config)
+                fetches = 0
+
+                def fetch(_config):
+                    nonlocal fetches
+                    fetches += 1
+                    if explicit_refusal:
+                        raise forwarder.AtlsPolicyDenied("fixture Console refusal")
+                    return None
+
+                forwarder.fetch_refreshed_atls_policy = fetch
+                if not explicit_refusal:
+                    authorized.expires_at = time.monotonic() + 0.5
+                server = await asyncio.start_server(
+                    lambda r, w: forwarder.handle_client(r, w, config), "127.0.0.1", 0
+                )
+                async with server:
+                    port = server.sockets[0].getsockname()[1]
+                    connect_reader, connect_writer = await client(port, connect)
+                    assert b"200 Connection Established" in await asyncio.wait_for(
+                        connect_reader.readuntil(b"\r\n\r\n"), timeout=2
+                    )
+                    http_reader, http_writer = await client(port, http)
+                    assert (await asyncio.wait_for(received.get(), timeout=2)).startswith(b"CONNECT ")
+                    assert (await asyncio.wait_for(received.get(), timeout=2)).startswith(b"POST ")
+                    if explicit_refusal:
+                        try:
+                            async with config.atls_policy_fetch_lock:
+                                await forwarder.refresh_atls_policy_locked(config)
+                        except forwarder.AtlsPolicyDenied:
+                            pass
+                        else:
+                            raise AssertionError("Console refusal must revoke the active lease")
+                    assert await asyncio.wait_for(connect_reader.read(), timeout=2) == b""
+                    assert b"502 Bad Gateway" in await asyncio.wait_for(http_reader.read(), timeout=2)
+                    assert await asyncio.wait_for(received.get(), timeout=2) == b""
+                    assert await asyncio.wait_for(received.get(), timeout=2) == b""
+                    for writer in (connect_writer, http_writer):
+                        writer.close()
+                        await writer.wait_closed()
+
+                    attempts = upstream_attempts
+                    burst = await asyncio.gather(*(client(port, connect) for _ in range(12)))
+                    for reader, writer in burst:
+                        assert b"502 Bad Gateway" in await asyncio.wait_for(reader.read(), timeout=2)
+                        writer.close()
+                        await writer.wait_closed()
+                    assert upstream_attempts == attempts
+                    assert fetches == 1, "denied arrivals must share one attempt and back off"
+                    assert config.atls_policy_path.is_file(), "disk state must not reopen admission"
+    print("policy_lease_smoke: OK")
+
+
 if __name__ == "__main__":
     ca_distribution_smoke()
     asyncio.run(smoke())
+    asyncio.run(policy_lease_smoke())

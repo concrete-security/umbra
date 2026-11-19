@@ -23,6 +23,7 @@ from umbra_console.internal_auth import (
 from umbra_console.log_config import logger
 from umbra_console.profile_secrets import expand_policy_secret_values_for_owner
 from umbra_console.resources import json_payload, timestamp
+from umbra_console.scheduler import security_cvm_attestation_is_current
 
 log = logger()
 
@@ -256,14 +257,7 @@ async def get_dev_security_cvm_atls_policy(
             "Security CVM CA certificate is unavailable",
             {"component": "security_cvm_ca"},
         )
-    expected = row["expected_image_measurement"]
-    actual = row["image_measurement"]
-    if (
-        expected is None
-        or actual != expected
-        or row["attestation_verified_at"] is None
-        or row["error_reason"] == "ATTESTATION_DRIFT"
-    ):
+    if not security_cvm_attestation_is_current(row):
         raise api_error(
             409,
             "CONFLICT",
@@ -277,7 +271,7 @@ async def get_dev_security_cvm_atls_policy(
         "security_cvm_fqdn": row["security_cvm_fqdn"],
         "ca_cert_sha256": sha256_hex(ca_cert_pem),
         "atls_policy": policy,
-        "image_measurement": actual,
+        "image_measurement": row["image_measurement"],
         "attestation_verified_at": timestamp(row["attestation_verified_at"]),
     }
 
@@ -331,14 +325,7 @@ async def get_dev_security_cvm_ca(
             "Security CVM CA certificate is unavailable",
             {"component": "security_cvm_ca"},
         )
-    expected = row["expected_image_measurement"]
-    actual = row["image_measurement"]
-    if (
-        expected is None
-        or actual != expected
-        or row["attestation_verified_at"] is None
-        or row["error_reason"] == "ATTESTATION_DRIFT"
-    ):
+    if not security_cvm_attestation_is_current(row):
         raise api_error(
             409,
             "CONFLICT",

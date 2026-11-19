@@ -13,7 +13,8 @@ import stat
 import sys
 import tempfile
 import time
-from dataclasses import dataclass
+from contextlib import suppress
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -22,6 +23,10 @@ MAX_HEADER_BYTES = 65536
 READ_SIZE = 65536
 ATLS_POLICY_FETCH_MAX_ATTEMPTS = 12
 ATLS_POLICY_FETCH_RETRY_SECONDS = 1.0
+ATLS_POLICY_FETCH_TIMEOUT_SECONDS = 5.0
+ATLS_POLICY_FETCH_MIN_INTERVAL_SECONDS = 2.5
+ATLS_POLICY_MAX_AGE_SECONDS = 60.0
+ATLS_POLICY_REFRESH_SECONDS = 30.0
 DEFAULT_SECURITY_CVM_PROXY_PATH = "/umbra/proxy"
 DEFAULT_SECURITY_CVM_PROXY_UPGRADE = "umbra-proxy"
 PEM_BEGIN = "-----BEGIN CERTIFICATE-----"
@@ -40,6 +45,49 @@ HOP_BY_HOP_HEADERS = {
 
 
 @dataclass(frozen=True)
+class AtlsPolicyCandidate:
+    contents: bytes
+    ca_sha256: str
+
+
+class AtlsPolicyDenied(ConnectionError):
+    pass
+
+
+@dataclass
+class AtlsAuthorization:
+    policy: AtlsPolicyCandidate
+    expires_at: float
+    revoked: asyncio.Event = field(default_factory=asyncio.Event)
+
+    def is_current(self) -> bool:
+        return not self.revoked.is_set() and time.monotonic() < self.expires_at
+
+    def require_current(self) -> None:
+        if not self.is_current():
+            raise AtlsPolicyDenied("Security CVM aTLS policy authorization expired or was revoked")
+
+    async def wait_until_invalid(self) -> None:
+        while self.is_current():
+            try:
+                await asyncio.wait_for(self.revoked.wait(), timeout=self.expires_at - time.monotonic())
+            except (TimeoutError, asyncio.TimeoutError):
+                # An unchanged policy may have renewed the lease while we waited.
+                continue
+
+
+@dataclass
+class AtlsAuthorizationState:
+    current: AtlsAuthorization | None = None
+    next_fetch_at: float = 0.0
+
+    def revoke(self) -> None:
+        if self.current is not None:
+            self.current.revoked.set()
+            self.current = None
+
+
+@dataclass(frozen=True)
 class ForwarderConfig:
     listen_host: str
     listen_port: int
@@ -51,7 +99,6 @@ class ForwarderConfig:
     dev_control_token: str
     console_url: str | None
     atls_policy_path: Path
-    atls_policy_refresh_path: Path
     atls_policy_fetch_lock: asyncio.Lock
     ca_cert_path: Path
     atls_connect_cmd: tuple[str, ...]
@@ -59,6 +106,7 @@ class ForwarderConfig:
     ca_distribution_path: Path
     ca_distribution_binding_path: Path
     ca_refresh_interval_seconds: float
+    atls_authorization: AtlsAuthorizationState = field(default_factory=AtlsAuthorizationState)
 
 
 @dataclass(frozen=True)
@@ -76,9 +124,24 @@ class VerifiedUpstream:
     process: asyncio.subprocess.Process
 
 
-@dataclass(frozen=True)
-class RefreshedAtlsPolicy:
-    policy_path: Path
+@dataclass
+class AuthorizedWriter:
+    stream: asyncio.StreamWriter
+    authorization: AtlsAuthorization
+    started: bool = False
+
+    def write(self, data: bytes) -> None:
+        self.authorization.require_current()
+        self.started = True
+        self.stream.write(data)
+
+    async def drain(self) -> None:
+        self.authorization.require_current()
+        await self.stream.drain()
+
+    def write_eof(self) -> None:
+        self.authorization.require_current()
+        self.stream.write_eof()
 
 
 def log(message: str) -> None:
@@ -199,7 +262,6 @@ def load_config(runtime_dir: Path = Path("/run/umbra")) -> ForwarderConfig:
         dev_control_token=dev_control_token,
         console_url=optional_url_env("CONSOLE_URL"),
         atls_policy_path=policy_path,
-        atls_policy_refresh_path=runtime_dir / "security-cvm.atls-policy.refresh.json",
         atls_policy_fetch_lock=asyncio.Lock(),
         ca_cert_path=ca_path,
         atls_connect_cmd=argv,
@@ -362,47 +424,38 @@ async def open_verified_upstream_with_policy(
     return VerifiedUpstream(reader=reader, writer=writer, process=process)
 
 
-async def open_verified_upstream(config: ForwarderConfig) -> VerifiedUpstream:
-    primary_error: Exception | None = None
-    if config.atls_policy_refresh_path.exists():
-        try:
-            return await open_verified_upstream_with_policy(
-                config,
-                policy_path=config.atls_policy_refresh_path,
-            )
-        except (ConnectionError, OSError) as exc:
-            log(f"atls_cached_refresh_failed reason={exc}")
-
+async def open_verified_upstream(config: ForwarderConfig) -> tuple[VerifiedUpstream, AtlsAuthorization]:
+    authorization = await ensure_atls_policy(config)
     try:
-        return await open_verified_upstream_with_policy(
-            config,
-            policy_path=config.atls_policy_path,
-        )
+        upstream = await open_verified_upstream_with_policy(config, policy_path=config.atls_policy_path)
     except (ConnectionError, OSError) as exc:
-        primary_error = exc
         log(f"atls_primary_failed reason={exc}")
+        # A rollout can make a still-fresh policy fail. Retry only with a
+        # freshly authenticated candidate, never a previously accepted file.
+        async with config.atls_policy_fetch_lock:
+            renewed = current_atls_policy(config)
+            if renewed is authorization or renewed is None:
+                await asyncio.sleep(max(0.0, config.atls_authorization.next_fetch_at - time.monotonic()))
+                renewed = await refresh_atls_policy_locked(config)
+        if renewed is None:
+            raise ConnectionError("aTLS verification failed and refresh did not recover") from exc
+        authorization = renewed
+        authorization.require_current()
+        upstream = await open_verified_upstream_with_policy(config, policy_path=config.atls_policy_path)
+    if not authorization.is_current():
+        await close_verified_upstream(upstream)
+        authorization.require_current()
+    return upstream, authorization
 
-    refreshed = await asyncio.to_thread(fetch_refreshed_atls_policy, config)
-    if refreshed is not None:
-        try:
-            return await open_verified_upstream_with_policy(
-                config,
-                policy_path=refreshed.policy_path,
-            )
-        except (ConnectionError, OSError) as exc:
-            log(f"atls_console_refresh_failed reason={exc}")
 
-    if primary_error is not None:
-        raise ConnectionError(f"aTLS verification failed and refresh did not recover: {primary_error}") from primary_error
-    raise ConnectionError("aTLS verification failed and refresh did not recover")
-
-
-def fetch_refreshed_atls_policy(config: ForwarderConfig, *, force: bool = False) -> RefreshedAtlsPolicy | None:
+def fetch_refreshed_atls_policy(config: ForwarderConfig) -> AtlsPolicyCandidate | None:
     if config.console_url is None:
         return None
     parsed = urlsplit(config.console_url)
     path = "/internal/dev-control/security-cvm-atls-policy"
-    connection = http.client.HTTPSConnection(parsed.hostname, parsed.port or 443, timeout=5)
+    connection = http.client.HTTPSConnection(
+        parsed.hostname, parsed.port or 443, timeout=ATLS_POLICY_FETCH_TIMEOUT_SECONDS
+    )
     try:
         connection.request(
             "GET",
@@ -413,15 +466,19 @@ def fetch_refreshed_atls_policy(config: ForwarderConfig, *, force: bool = False)
             },
         )
         response = connection.getresponse()
+        if response.status in {401, 403, 409}:
+            raise AtlsPolicyDenied(f"Console refused Security CVM aTLS policy: HTTP {response.status}")
+        if response.status != 200:
+            log(f"atls_console_refresh_unavailable status={response.status}")
+            return None
         body = response.read(1024 * 1024 + 1)
-    except OSError as exc:
+    except AtlsPolicyDenied:
+        raise
+    except (OSError, http.client.HTTPException) as exc:
         log(f"atls_console_refresh_fetch_failed reason={exc}")
         return None
     finally:
         connection.close()
-    if response.status != 200:
-        log(f"atls_console_refresh_unavailable status={response.status}")
-        return None
     if len(body) > 1024 * 1024:
         log("atls_console_refresh_rejected reason=response_too_large")
         return None
@@ -438,54 +495,106 @@ def fetch_refreshed_atls_policy(config: ForwarderConfig, *, force: bool = False)
         return None
     distribution_state, distributed_ca = read_ca_distribution(config)
     if distribution_state != "valid" or distributed_ca is None:
-        log(f"atls_console_refresh_rejected reason=ca_distribution_{distribution_state}")
-        return None
+        raise AtlsPolicyDenied(f"Security CVM CA distribution is {distribution_state}")
     # The persisted CA is replaced only by launch-bound seeding or after the
     # authenticated CA endpoint passes the bound-FQDN and digest checks. Binding
     # policy refresh to that same CA lets rotation converge without accepting an
     # unbound or stale file left by a different launch configuration.
     expected_ca_sha256 = hashlib.sha256(distributed_ca).hexdigest()
     if payload.get("ca_cert_sha256") != expected_ca_sha256:
-        log("atls_console_refresh_rejected reason=ca_changed")
-        return None
+        raise AtlsPolicyDenied("Console policy does not match the current Security CVM CA")
     policy = payload.get("atls_policy")
     if not isinstance(policy, dict) or policy.get("type") != "dstack_tdx":
         log("atls_console_refresh_rejected reason=invalid_policy")
         return None
-    if policy.get("disable_runtime_verification") is True:
+    if policy.get("disable_runtime_verification", False) is not False:
         log("atls_console_refresh_rejected reason=runtime_verification_disabled")
         return None
     if not all(policy.get(field) for field in ("expected_bootchain", "app_compose", "os_image_hash")):
         log("atls_console_refresh_rejected reason=runtime_verification_fields_missing")
         return None
     data = json.dumps(policy, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    policy_path = config.atls_policy_path if force else config.atls_policy_refresh_path
-    write_private_file(policy_path, data, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
-    if force:
-        config.atls_policy_refresh_path.unlink(missing_ok=True)
-        log("atls_console_bootstrap_installed")
-    else:
-        log("atls_console_refresh_installed")
-    return RefreshedAtlsPolicy(policy_path=policy_path)
+    return AtlsPolicyCandidate(data, expected_ca_sha256)
 
 
-async def ensure_atls_policy(config: ForwarderConfig) -> None:
-    """Install one authenticated full SC policy before opening an upstream."""
-    if config.atls_policy_path.is_file():
-        return
+def current_atls_policy(config: ForwarderConfig) -> AtlsAuthorization | None:
+    current = config.atls_authorization.current
+    if current is None or not current.is_current() or not config.atls_policy_path.is_file():
+        return None
+    state, ca = read_ca_distribution(config)
+    if state != "valid" or ca is None or hashlib.sha256(ca).hexdigest() != current.policy.ca_sha256:
+        config.atls_authorization.revoke()
+        return None
+    return current
+
+
+async def refresh_atls_policy_locked(config: ForwarderConfig) -> AtlsAuthorization | None:
+    # Count the authorization window from request start, so a slow response
+    # cannot turn already aged Console evidence into a fresh local lease.
+    started = time.monotonic()
+    if started < config.atls_authorization.next_fetch_at:
+        return None
+    config.atls_authorization.next_fetch_at = started + ATLS_POLICY_FETCH_MIN_INTERVAL_SECONDS
+    expires_at = started + ATLS_POLICY_MAX_AGE_SECONDS
+    try:
+        candidate = await asyncio.wait_for(
+            asyncio.to_thread(fetch_refreshed_atls_policy, config), timeout=ATLS_POLICY_FETCH_TIMEOUT_SECONDS
+        )
+    except AtlsPolicyDenied:
+        config.atls_authorization.revoke()
+        raise
+    except (TimeoutError, asyncio.TimeoutError):
+        log("atls_console_refresh_timed_out")
+        return None
+    if candidate is None or time.monotonic() >= expires_at:
+        return None
+    current = config.atls_authorization.current
+    if current is not None and current.is_current() and current.policy == candidate:
+        if not config.atls_policy_path.is_file():
+            write_private_file(config.atls_policy_path, candidate.contents, 0o444)
+        current.expires_at = expires_at
+        return current
+    config.atls_authorization.revoke()
+    write_private_file(config.atls_policy_path, candidate.contents, 0o444)
+    authorization = AtlsAuthorization(candidate, expires_at)
+    config.atls_authorization.current = authorization
+    log("atls_console_policy_installed")
+    return authorization
+
+
+async def ensure_atls_policy(config: ForwarderConfig) -> AtlsAuthorization:
+    """Require a current process-local authorization before opening an upstream."""
+    if (current := current_atls_policy(config)) is not None:
+        return current
     if config.console_url is None:
         raise ConnectionError("Security CVM aTLS policy fetch requires CONSOLE_URL")
     async with config.atls_policy_fetch_lock:
-        if config.atls_policy_path.is_file():
-            return
+        if (current := current_atls_policy(config)) is not None:
+            return current
+        if time.monotonic() < config.atls_authorization.next_fetch_at:
+            raise ConnectionError("Security CVM aTLS policy fetch is backing off")
         for attempt in range(1, ATLS_POLICY_FETCH_MAX_ATTEMPTS + 1):
-            refreshed = await asyncio.to_thread(fetch_refreshed_atls_policy, config, force=True)
-            if refreshed is not None and refreshed.policy_path == config.atls_policy_path:
-                return
+            if (current := await refresh_atls_policy_locked(config)) is not None:
+                return current
             if attempt < ATLS_POLICY_FETCH_MAX_ATTEMPTS:
                 log(f"atls_console_policy_fetch_retry attempt={attempt}")
-                await asyncio.sleep(ATLS_POLICY_FETCH_RETRY_SECONDS)
+                await asyncio.sleep(max(
+                    ATLS_POLICY_FETCH_RETRY_SECONDS, config.atls_authorization.next_fetch_at - time.monotonic()
+                ))
     raise ConnectionError("Security CVM aTLS policy fetch exhausted its bounded retries")
+
+
+async def atls_policy_refresh_loop(config: ForwarderConfig) -> None:
+    while True:
+        await asyncio.sleep(ATLS_POLICY_REFRESH_SECONDS)
+        async with config.atls_policy_fetch_lock:
+            # Leave bootstrap to the first client. After that, renew even
+            # during a single long-lived CONNECT with no new requests.
+            if config.atls_authorization.current is not None:
+                try:
+                    await refresh_atls_policy_locked(config)
+                except (AtlsPolicyDenied, OSError) as exc:
+                    log(f"atls_console_refresh_failed reason={exc}")
 
 
 def extract_validated_ca(payload: object, expected_fqdn: str) -> str | None:
@@ -531,15 +640,19 @@ def fetch_security_cvm_ca(config: ForwarderConfig) -> str | None:
             },
         )
         response = connection.getresponse()
+        if response.status in {401, 403, 409}:
+            raise AtlsPolicyDenied(f"Console refused Security CVM CA: HTTP {response.status}")
+        if response.status != 200:
+            log(f"ca_fetch_unavailable status={response.status}")
+            return None
         body = response.read(1024 * 1024 + 1)
-    except OSError as exc:
+    except AtlsPolicyDenied:
+        raise
+    except (OSError, http.client.HTTPException) as exc:
         log(f"ca_fetch_failed reason={exc}")
         return None
     finally:
         connection.close()
-    if response.status != 200:
-        log(f"ca_fetch_unavailable status={response.status}")
-        return None
     if len(body) > 1024 * 1024:
         log("ca_fetch_rejected reason=response_too_large")
         return None
@@ -707,9 +820,19 @@ async def ca_distribution_loop(config: ForwarderConfig) -> None:
         return
     while True:
         try:
-            ca_pem = await asyncio.to_thread(fetch_security_cvm_ca, config)
-            if ca_pem is not None:
-                await asyncio.to_thread(write_ca_distribution, config, ca_pem)
+            async with config.atls_policy_fetch_lock:
+                try:
+                    ca_pem = await asyncio.wait_for(
+                        asyncio.to_thread(fetch_security_cvm_ca, config), timeout=ATLS_POLICY_FETCH_TIMEOUT_SECONDS
+                    )
+                except AtlsPolicyDenied:
+                    config.atls_authorization.revoke()
+                    raise
+                if ca_pem is not None:
+                    current = config.atls_authorization.current
+                    if current is not None and hashlib.sha256(ca_pem.encode("utf-8")).hexdigest() != current.policy.ca_sha256:
+                        config.atls_authorization.revoke()
+                    await asyncio.to_thread(write_ca_distribution, config, ca_pem)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # keep the proxy serving even if CA refresh fails
@@ -751,7 +874,8 @@ async def read_response_headers(reader: asyncio.StreamReader) -> bytes:
 
 async def close_verified_upstream(upstream: VerifiedUpstream) -> None:
     upstream.writer.close()
-    await upstream.writer.wait_closed()
+    with suppress(OSError):
+        await upstream.writer.wait_closed()
     if upstream.process.returncode is None:
         upstream.process.terminate()
         try:
@@ -773,7 +897,7 @@ async def write_response(writer: asyncio.StreamWriter, status: str, body: bytes 
     await writer.drain()
 
 
-async def copy_stream(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, counter: dict[str, int]) -> None:
+async def copy_stream(reader: asyncio.StreamReader, writer: AuthorizedWriter, counter: dict[str, int]) -> None:
     while True:
         data = await reader.read(READ_SIZE)
         if not data:
@@ -788,7 +912,7 @@ async def copy_stream(reader: asyncio.StreamReader, writer: asyncio.StreamWriter
 
 
 async def relay_fixed_request_body(
-    reader: asyncio.StreamReader, writer: asyncio.StreamWriter, request: ProxyRequest
+    reader: asyncio.StreamReader, writer: AuthorizedWriter, request: ProxyRequest
 ) -> int:
     content_length = parse_content_length(request)
     if content_length > 0 and transfer_encoding_is_chunked(request):
@@ -824,7 +948,7 @@ async def relay_fixed_request_body(
     return 0
 
 
-async def relay_response_until_close(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> int:
+async def relay_response_until_close(reader: asyncio.StreamReader, writer: AuthorizedWriter) -> int:
     total = 0
     while True:
         data = await reader.read(READ_SIZE)
@@ -865,7 +989,7 @@ def response_transfer_encoding_is_chunked(response_headers: bytes) -> bool:
     return any(coding.strip() == "chunked" for coding in codings)
 
 
-async def relay_chunked_response_body(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> int:
+async def relay_chunked_response_body(reader: asyncio.StreamReader, writer: AuthorizedWriter) -> int:
     relayed = 0
     while True:
         line = await reader.readuntil(b"\r\n")
@@ -892,7 +1016,7 @@ async def relay_chunked_response_body(reader: asyncio.StreamReader, writer: asyn
 
 async def relay_response_body(
     reader: asyncio.StreamReader,
-    writer: asyncio.StreamWriter,
+    writer: AuthorizedWriter,
     response_headers: bytes,
 ) -> int:
     if response_transfer_encoding_is_chunked(response_headers):
@@ -908,21 +1032,55 @@ async def relay_response_body(
 
 async def bridge(
     left_reader: asyncio.StreamReader,
-    left_writer: asyncio.StreamWriter,
+    left_writer: AuthorizedWriter,
     right_reader: asyncio.StreamReader,
-    right_writer: asyncio.StreamWriter,
+    right_writer: AuthorizedWriter,
 ) -> tuple[int, int]:
     left_count = {"bytes": 0}
     right_count = {"bytes": 0}
     left_to_right = asyncio.create_task(copy_stream(left_reader, right_writer, left_count))
     right_to_left = asyncio.create_task(copy_stream(right_reader, left_writer, right_count))
-    done, pending = await asyncio.wait({left_to_right, right_to_left}, return_when=asyncio.FIRST_COMPLETED)
-    for task in pending:
-        task.cancel()
-    await asyncio.gather(*pending, return_exceptions=True)
-    for task in done:
-        task.result()
+    tasks = (left_to_right, right_to_left)
+    try:
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            task.result()
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
     return left_count["bytes"], right_count["bytes"]
+
+
+async def forward_request(
+    reader: asyncio.StreamReader,
+    downstream: AuthorizedWriter,
+    upstream: VerifiedUpstream,
+    request: ProxyRequest,
+    config: ForwarderConfig,
+) -> tuple[int, int]:
+    authorization = downstream.authorization
+    authorization.require_current()
+    await open_security_proxy_tunnel(upstream, config)
+    upstream_writer = AuthorizedWriter(upstream.writer, authorization)
+    upstream_writer.write(
+        encode_request_line_and_headers(request, config.proxy_token, close_after_response=request.method != "CONNECT")
+    )
+    await upstream_writer.drain()
+
+    if request.method == "CONNECT":
+        response = await read_response_headers(upstream.reader)
+        downstream.write(response)
+        await downstream.drain()
+        status_parts = response.split(b"\r\n", 1)[0].split()
+        status_code = status_parts[1] if len(status_parts) >= 2 and response.startswith(b"HTTP/") else b"000"
+        if status_code != b"200":
+            return 0, await relay_response_body(upstream.reader, downstream, response)
+        return await bridge(reader, downstream, upstream.reader, upstream_writer)
+
+    client_bytes = await relay_fixed_request_body(reader, upstream_writer, request)
+    upstream_bytes = await relay_response_until_close(upstream.reader, downstream)
+    return client_bytes, upstream_bytes
 
 
 async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, config: ForwarderConfig) -> None:
@@ -930,6 +1088,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
     started = time.monotonic()
     destination = "-"
     upstream: VerifiedUpstream | None = None
+    downstream: AuthorizedWriter | None = None
     client_bytes = 0
     upstream_bytes = 0
     try:
@@ -944,40 +1103,34 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             validate_absolute_target(request.target)
             destination = request.target
 
-        await ensure_atls_policy(config)
-        upstream = await open_verified_upstream(config)
-        await open_security_proxy_tunnel(upstream, config)
-        upstream.writer.write(
-            encode_request_line_and_headers(
-                request,
-                config.proxy_token,
-                close_after_response=request.method != "CONNECT",
-            )
-        )
-        await upstream.writer.drain()
-
-        if request.method == "CONNECT":
-            response = await read_response_headers(upstream.reader)
-            writer.write(response)
-            await writer.drain()
-            status_parts = response.split(b"\r\n", 1)[0].split()
-            status_code = status_parts[1] if len(status_parts) >= 2 and response.startswith(b"HTTP/") else b"000"
-            if status_code != b"200":
-                upstream_bytes = await relay_response_body(upstream.reader, writer, response)
-                return
-            client_bytes, upstream_bytes = await bridge(reader, writer, upstream.reader, upstream.writer)
-        else:
-            client_bytes = await relay_fixed_request_body(reader, upstream.writer, request)
-            upstream_bytes = await relay_response_until_close(upstream.reader, writer)
+        upstream, authorization = await open_verified_upstream(config)
+        downstream = AuthorizedWriter(writer, authorization)
+        relaying = asyncio.create_task(forward_request(reader, downstream, upstream, request, config))
+        watching = asyncio.create_task(authorization.wait_until_invalid())
+        try:
+            done, _ = await asyncio.wait((relaying, watching), return_when=asyncio.FIRST_COMPLETED)
+            if watching in done:
+                authorization.require_current()
+            client_bytes, upstream_bytes = relaying.result()
+        finally:
+            for task in (relaying, watching):
+                task.cancel()
+            await asyncio.gather(relaying, watching, return_exceptions=True)
     except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, ConnectionError, ValueError, OSError) as exc:
         log(f"connection_error peer={peer!r} destination={destination!r} reason={exc}")
-        if not writer.is_closing():
+        if isinstance(exc, AtlsPolicyDenied):
+            if upstream is not None:
+                upstream.writer.transport.abort()
+            if downstream is not None and downstream.started:
+                writer.transport.abort()
+        if not writer.is_closing() and (downstream is None or not downstream.started):
             await write_response(writer, "502 Bad Gateway", b"egress forwarder failed closed\n")
     finally:
         if upstream is not None:
             await close_verified_upstream(upstream)
         writer.close()
-        await writer.wait_closed()
+        with suppress(OSError):
+            await writer.wait_closed()
         duration_ms = int((time.monotonic() - started) * 1000)
         log(
             "connection_closed "
@@ -990,6 +1143,7 @@ async def main() -> None:
     config = load_config()
     seed_ca_distribution(config)
     ca_task = asyncio.create_task(ca_distribution_loop(config))
+    policy_task = asyncio.create_task(atls_policy_refresh_loop(config))
     server = await asyncio.start_server(lambda r, w: handle_client(r, w, config), config.listen_host, config.listen_port)
     sockets = ", ".join(str(sock.getsockname()) for sock in server.sockets or [])
     log(f"listening on {sockets}")
@@ -998,6 +1152,8 @@ async def main() -> None:
             await server.serve_forever()
     finally:
         ca_task.cancel()
+        policy_task.cancel()
+        await asyncio.gather(ca_task, policy_task, return_exceptions=True)
 
 
 if __name__ == "__main__":

@@ -7,6 +7,10 @@ import re
 import shlex
 from typing import Any
 
+from cryptography import x509
+from cryptography.exceptions import InvalidSignature, UnsupportedAlgorithm
+from cryptography.hazmat.primitives.serialization import Encoding
+
 from umbra_console.config import load_settings
 from umbra_console.resources import json_payload
 
@@ -17,10 +21,12 @@ ATTESTATION_ERROR_CODES = {
     "ATTESTATION_IMAGE_MISMATCH",
     "ATTESTATION_RTMR_MISMATCH",
     "ATTESTATION_SESSION_BINDING_INVALID",
+    "CA_FETCH_FAILED",
 }
 HEX64_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 HEX96_RE = re.compile(r"^[0-9a-fA-F]{96}$")
 IMAGE_MEASUREMENT_RE = HEX96_RE
+MAX_CA_PEM_BYTES = 16 * 1024
 
 
 @dataclass(frozen=True)
@@ -31,6 +37,7 @@ class AttestationReport:
     # Each flag classifies the event which produced that state. No payloads leave
     # the verifier. Older helpers omit this evidence and cannot authorize drift.
     rtmr3_history: tuple[tuple[str, bool], ...] = ()
+    ca_cert_pem: str | None = None
 
 
 class AttestationVerifierUnavailable(RuntimeError):
@@ -89,7 +96,7 @@ class AtlasVerifierClient:
             ) from exc
         if process.returncode != 0:
             raise verifier_error_from_output(stdout)
-        return parse_attestation_report(stdout)
+        return parse_attestation_report(stdout, expect_ca="ca_export" in request)
 
 
 async def verify_with_fetch_retries(
@@ -124,7 +131,12 @@ async def verify_with_fetch_retries(
             attempt_timeout = max(1, min(per_attempt_timeout_seconds, timeout_seconds, int(remaining + 0.999)))
             return await verifier.verify(request, timeout_seconds=attempt_timeout)
         except AttestationVerifierError as exc:
-            if exc.code != "ATTESTATION_FETCH_FAILED":
+            ca_transport_failure = (
+                "ca_export" in request
+                and exc.code == "CA_FETCH_FAILED"
+                and exc.details.get("reason") in ("ca_connection_failed", "ca_response_timeout")
+            )
+            if exc.code != "ATTESTATION_FETCH_FAILED" and not ca_transport_failure:
                 raise
             last_fetch_error = exc
             remaining = deadline - loop.time()
@@ -170,22 +182,26 @@ def _dstack_tdx_request(
     expected_bootchain: dict[str, Any],
     os_image_hash: str,
     rtmr3_binding: dict[str, Any],
+    policy_source: dict[str, Any],
 ) -> dict[str, Any]:
     """Assemble the verifier request the Dev and SC builders both emit: a full-runtime
     ``dstack_tdx`` policy (never ``dev()``) wrapped with the CVM kind + FQDN. The two builders
     differ only in how they source ``app_compose`` and ``rtmr3_binding``; everything else is
     this shared envelope."""
+    policy = {
+        "type": "dstack_tdx",
+        "expected_image_measurement": _row_value(snapshot, "expected_image_measurement"),
+        "app_compose": app_compose,
+        "expected_bootchain": expected_bootchain,
+        "os_image_hash": os_image_hash,
+        "rtmr3_binding": rtmr3_binding,
+    }
+    if "certificate_binding" in policy_source:
+        policy["certificate_binding"] = policy_source["certificate_binding"]
     return {
         "kind": kind,
         "fqdn": _row_value(snapshot, "fqdn"),
-        "policy": {
-            "type": "dstack_tdx",
-            "expected_image_measurement": _row_value(snapshot, "expected_image_measurement"),
-            "app_compose": app_compose,
-            "expected_bootchain": expected_bootchain,
-            "os_image_hash": os_image_hash,
-            "rtmr3_binding": rtmr3_binding,
-        },
+        "policy": policy,
     }
 
 
@@ -228,6 +244,7 @@ def build_dev_cvm_attestation_request(snapshot: Any) -> dict[str, Any]:
         expected_bootchain=expected_bootchain,
         os_image_hash=os_image_hash,
         rtmr3_binding=rtmr3_binding,
+        policy_source=policy_bundle,
     )
 
 
@@ -304,6 +321,7 @@ def build_security_cvm_attestation_request(
         app_compose=app_compose,
         expected_bootchain=expected_bootchain,
         os_image_hash=os_image_hash,
+        policy_source=shade_policy,
         rtmr3_binding={
             "CONSOLE_URL": console_url,
             "entity_id": str(_row_value(snapshot, "entity_id")),
@@ -329,7 +347,7 @@ def verifier_error_from_output(stdout: bytes) -> AttestationVerifierError:
     return AttestationVerifierError(code, details if isinstance(details, dict) else {})
 
 
-def parse_attestation_report(stdout: bytes) -> AttestationReport:
+def parse_attestation_report(stdout: bytes, *, expect_ca: bool = False) -> AttestationReport:
     try:
         payload = json.loads(stdout.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -367,7 +385,27 @@ def parse_attestation_report(stdout: bytes) -> AttestationReport:
             history.append((entry["digest"].lower(), entry["tls_certificate_event"]))
         if history[-1][0] != rtmr3_digest or len({digest for digest, _ in history}) != len(history):
             raise AttestationVerifierError("ATTESTATION_QUOTE_INVALID", {"reason": "invalid_rtmr3_history"})
-    return AttestationReport(image_measurement=image_measurement, rtmr3_digest=rtmr3_digest, rtmr3_history=tuple(history))
+    ca_pem = _parse_attested_ca(payload.get("ca_cert_pem")) if expect_ca else None
+    return AttestationReport(
+        image_measurement=image_measurement, rtmr3_digest=rtmr3_digest,
+        rtmr3_history=tuple(history), ca_cert_pem=ca_pem,
+    )
+
+
+def _parse_attested_ca(pem: Any) -> str:
+    if not isinstance(pem, str) or not 1 <= len(pem) <= MAX_CA_PEM_BYTES or not pem.isascii():
+        raise AttestationVerifierError("CA_FETCH_FAILED", {"reason": "missing_or_invalid_attested_ca"})
+    try:
+        encoded = pem.encode("ascii")
+        cert = x509.load_pem_x509_certificate(encoded)
+        cert.verify_directly_issued_by(cert)
+        if cert.public_bytes(Encoding.PEM) != encoded or not cert.extensions.get_extension_for_class(
+            x509.BasicConstraints
+        ).value.ca:
+            raise ValueError("expected a single root CA certificate")
+    except (ValueError, InvalidSignature, UnsupportedAlgorithm, x509.ExtensionNotFound, x509.DuplicateExtension) as exc:
+        raise AttestationVerifierError("CA_FETCH_FAILED", {"reason": "invalid_attested_ca"}) from exc
+    return pem
 
 
 def _row_value(row: Any, key: str) -> Any:

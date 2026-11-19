@@ -101,9 +101,9 @@ dependencies = [
 
 [[package]]
 name = "atlas-rs"
-version = "0.2.1"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b0498793f0d01bdd3b9943c89b119f7cef96a111ab06ce593a5a3912634dc281"
+checksum = "2cc49a8f6e212de444b4fcde92204914e35e38d12516d0932af5e5c22b9ad70d"
 dependencies = [
  "anyhow",
  "chrono",

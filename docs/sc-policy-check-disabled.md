@@ -2,6 +2,8 @@
 
 **Status: temporary mitigation. Remove when a robust solution lands.**
 
+This exception applies to legacy certificate-event policies only. Atlas requires full runtime verification for `report-data-v2`, so the Dev helper retains the Security CVM workload pins in that mode. The Console still supplies those pins. Independent authorization for the workload remains open.
+
 This document is the single pointer to a deliberately-hardcoded weakening of the Dev CVM's egress attestation, and the exact steps to undo it. If you are hardening the platform, this is the thing to remove.
 
 ## Why this exists

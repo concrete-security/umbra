@@ -12,11 +12,14 @@
 //! passed by the Console but not consumed here: the Console persists rtmr3_digest and
 //! does drift detection on it. `rtmr3_history` contains replay states and validated
 //! certificate classifications from the same quote response Atlas consumed. Event
-//! payloads never leave this process. Atlas remains an unpatched published dependency.
+//! payloads never leave this process. When requested, export the Security CVM CA
+//! over the same stream, after verifying the expected measurement and RTMR3.
+mod ca_export;
 mod evidence;
 
 use atlas_rs::{connect::tls_handshake, AtlsVerificationError, AtlsVerifier, Policy, Report};
-use evidence::{replay_evidence, RecordingStream};
+use ca_export::CaExport;
+use evidence::{replay_accepts_prior_digest, replay_evidence, RecordingStream};
 use rustls::crypto::aws_lc_rs::default_provider;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -29,12 +32,14 @@ const ATTESTATION_QUOTE_INVALID: &str = "ATTESTATION_QUOTE_INVALID";
 const ATTESTATION_IMAGE_MISMATCH: &str = "ATTESTATION_IMAGE_MISMATCH";
 const ATTESTATION_RTMR_MISMATCH: &str = "ATTESTATION_RTMR_MISMATCH";
 const ATTESTATION_SESSION_BINDING_INVALID: &str = "ATTESTATION_SESSION_BINDING_INVALID";
+const CA_FETCH_FAILED: &str = "CA_FETCH_FAILED";
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct VerifyRequest {
     kind: String,
     fqdn: String,
     policy: Value,
+    ca_export: Option<CaExport>,
 }
 
 /// stdout is the machine-readable channel: the Console parses it as the single JSON result
@@ -99,8 +104,30 @@ async fn run() -> Result<String, CliError> {
 
     let expected_image_measurement = expected_image_measurement(&request.policy)?;
     let policy = policy_from_request(&request.policy)?;
+    let Policy::DstackTdx(tdx_policy) = &policy;
+    let certificate_binding = tdx_policy.certificate_binding;
+    if let Some(export) = &request.ca_export {
+        if request.kind != "security_cvm"
+            || expected_image_measurement.is_none()
+            || tdx_policy.disable_runtime_verification
+        {
+            return Err(CliError::new(
+                ATTESTATION_QUOTE_INVALID,
+                "invalid_ca_export_policy",
+            ));
+        }
+        export.validate(fqdn, &request.policy)?;
+    }
 
-    let tcp = TcpStream::connect((fqdn, 443)).await.map_err(|exc| {
+    let tcp = match request
+        .ca_export
+        .as_ref()
+        .and_then(|export| export.connect_ip)
+    {
+        Some(ip) => TcpStream::connect((ip, 443)).await,
+        None => TcpStream::connect((fqdn, 443)).await,
+    }
+    .map_err(|exc| {
         CliError::new(ATTESTATION_FETCH_FAILED, "tcp_connect_failed").message(exc.to_string())
     })?;
     // Capture the plaintext response consumed by Atlas, on the same EKM-bound
@@ -116,7 +143,12 @@ async fn run() -> Result<String, CliError> {
         .map_err(CliError::from_atlas)?;
 
     let (image_measurement, rtmr3_digest) = tdx_measurements(&report)?;
-    let history = replay_evidence(stream.response(), &rtmr3_digest, &peer_cert)?;
+    let history = replay_evidence(
+        stream.response(),
+        &rtmr3_digest,
+        &peer_cert,
+        certificate_binding,
+    )?;
     if let Some(expected) = expected_image_measurement {
         if image_measurement != expected {
             return Err(
@@ -127,12 +159,21 @@ async fn run() -> Result<String, CliError> {
         }
     }
 
-    Ok(json!({
+    let mut output = json!({
         "image_measurement": image_measurement,
         "rtmr3_digest": rtmr3_digest,
         "rtmr3_history": history,
-    })
-    .to_string())
+    });
+    if let Some(export) = &request.ca_export {
+        if !replay_accepts_prior_digest(&history, &export.expected_rtmr3) {
+            return Err(CliError::new(
+                ATTESTATION_RTMR_MISMATCH,
+                "ca_export_rtmr3_mismatch",
+            ));
+        }
+        output["ca_cert_pem"] = Value::String(export.fetch(&mut stream.into_inner(), fqdn).await?);
+    }
+    Ok(output.to_string())
 }
 
 fn expected_image_measurement(policy: &Value) -> Result<Option<String>, CliError> {

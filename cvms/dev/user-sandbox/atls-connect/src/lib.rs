@@ -3,7 +3,7 @@ use std::fmt::{Display, Formatter};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use atlas_rs::Policy;
+use atlas_rs::{CertificateBinding, Policy};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug)]
@@ -73,9 +73,8 @@ pub fn load_policy(path: &Path) -> Result<Policy> {
         .map_err(|error| HelperError::new(format!("invalid aTLS policy JSON: {error}")))?;
     validate_policy(&policy)?;
     // ===== UMBRA TEMPORARY: SC aTLS image-policy check disabled (delete to re-enable) =====
-    // The delivered policy is still validated above (strict, well-formed). Here we strip the
-    // image/runtime pins so the Dev egress forwarder accepts any genuine SC TEE at the bound
-    // FQDN regardless of its app image, avoiding fleet-wide Dev CVM updates on SC image bumps.
+    // Apply the existing exception only to the legacy certificate-event protocol.
+    // The new report-data binding requires all runtime pins to be enforced.
     // See docs/sc-policy-check-disabled.md.
     let policy = force_disable_sc_runtime_verification(policy);
     // ===== END UMBRA TEMPORARY =====
@@ -92,12 +91,13 @@ pub fn load_policy(path: &Path) -> Result<Policy> {
 // strict policy on the delivered input. See docs/sc-policy-check-disabled.md.
 fn force_disable_sc_runtime_verification(mut policy: Policy) -> Policy {
     match &mut policy {
-        Policy::DstackTdx(tdx) => {
+        Policy::DstackTdx(tdx) if tdx.certificate_binding == CertificateBinding::EventLog => {
             tdx.disable_runtime_verification = true;
             tdx.expected_bootchain = None;
             tdx.app_compose = None;
             tdx.os_image_hash = None;
         }
+        Policy::DstackTdx(_) => {}
     }
     policy
 }
@@ -206,6 +206,22 @@ mod tests {
         }
     }
     // ===== END UMBRA TEMPORARY =====
+
+    /// Preserve the complete runtime policy on the patched guest's attestation protocol.
+    #[test]
+    fn report_data_binding_keeps_full_runtime_policy_success() {
+        let temp = tempdir().unwrap();
+        let policy_path = temp.path().join("policy.json");
+        let mut document: serde_json::Value = serde_json::from_str(strict_policy_json()).unwrap();
+        document["certificate_binding"] = serde_json::json!("report-data-v2");
+        fs::write(&policy_path, document.to_string()).unwrap();
+
+        let Policy::DstackTdx(policy) = load_policy(&policy_path).unwrap();
+        assert!(!policy.disable_runtime_verification);
+        assert!(policy.expected_bootchain.is_some());
+        assert!(policy.app_compose.is_some());
+        assert!(policy.os_image_hash.is_some());
+    }
 
     #[test]
     fn rejects_runtime_verification_bypass() {

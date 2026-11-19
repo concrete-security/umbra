@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 
+import pytest
+
 from umbra_security_cvm.mitmproxy_runtime import (
     MITMPROXY_SCRIPT_ENV,
     build_runtime_addon_from_env,
@@ -26,6 +28,14 @@ def test_build_runtime_addon_materializes_same_ca_mitmproxy_uses(tmp_path) -> No
     confdir = tmp_path / "mitmproxy"
     assert (confdir / "mitmproxy-ca.pem").read_bytes() == addon.runtime.ca.private_key_pem + addon.runtime.ca.ca_pem
     assert (confdir / "mitmproxy-ca-cert.pem").read_bytes() == addon.runtime.ca.ca_pem
+
+
+def test_build_runtime_addon_rejects_unsafe_console_url_before_ca_failure(tmp_path) -> None:
+    """The production addon must fail before it creates a CA for an unsafe Console URL."""
+    source = {**env(tmp_path), "CONSOLE_URL": "http://console.example.com"}
+    with pytest.raises(ValueError, match="CONSOLE_URL must use HTTPS except for loopback HTTP"):
+        build_runtime_addon_from_env(source)
+    assert not (tmp_path / "mitmproxy").exists()
 
 
 def test_build_runtime_addon_consumes_os_environ_plaintext_tokens(monkeypatch, tmp_path) -> None:
