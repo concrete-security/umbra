@@ -50,6 +50,47 @@ def test_runtime_config_builds_boot_binding_from_plaintexts() -> None:
     assert "ca-export-plaintext" not in binding.canonical_json()
 
 
+@pytest.mark.parametrize("console_url", [
+    pytest.param("https://console.example.com/control/", id="https"),
+    pytest.param("http://LOCALHOST:8000/control/", id="localhost"),
+    pytest.param("http://127.0.0.2:8000/", id="ipv4-loopback"),
+    pytest.param("http://[::1]:8000/", id="ipv6-loopback"),
+])
+def test_runtime_preserves_valid_console_url_in_boot_binding_success(console_url: str) -> None:
+    """Validation must preserve the supplied URL bytes in the boot binding."""
+    config = SecurityCVMRuntimeConfig.from_env({**env(), "CONSOLE_URL": console_url})
+    assert config.boot_binding().payload()["CONSOLE_URL"] == console_url
+
+
+@pytest.mark.parametrize(
+    "console_url",
+    [
+        pytest.param("http://console.example.com", id="remote-http"),
+        pytest.param("http://10.0.0.1:8000", id="private-http"),
+        pytest.param("http://localhost.example.com", id="loopback-name-prefix"),
+        pytest.param("http://127.0.0.1.example.com", id="loopback-ip-prefix"),
+        pytest.param("http://[::ffff:127.0.0.1]", id="mapped-loopback"),
+        pytest.param("http://[::1%lo0]", id="scoped-ipv6"),
+        pytest.param("https://name:raw-fixture-password@console.example.com", id="userinfo"),
+        pytest.param("https://@console.example.com", id="empty-userinfo"),
+        pytest.param("https://console.example.com?", id="empty-query"),
+        pytest.param("https://console.example.com#fragment", id="fragment"),
+        pytest.param("https:///no-authority", id="missing-host"),
+        pytest.param("https://console.example.com:65536", id="invalid-port"),
+    ],
+)
+def test_runtime_rejects_unsafe_console_url_failure(console_url: str) -> None:
+    """Fail startup before any Console client can use an unsafe base URL."""
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^CONSOLE_URL must (?:use HTTPS except for loopback HTTP"
+            r"|be an absolute base URL without credentials, query or fragment)$"
+        ),
+    ):
+        SecurityCVMRuntimeConfig.from_env({**env(), "CONSOLE_URL": console_url})
+
+
 def test_runtime_build_wires_ca_control_state_and_traffic_clients_without_persisting_ca_key() -> None:
     config = SecurityCVMRuntimeConfig.from_env(env())
 

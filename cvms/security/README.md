@@ -30,7 +30,7 @@ Policy flow:
 5. The matching policy runs fail closed.
 6. The outcome is emitted to Console traffic logs.
 
-Control polling and traffic delivery use direct connections to the configured Console origin. The clients ignore ambient proxy and CA settings and disable redirects on requests that carry credentials.
+Control polling and traffic delivery use direct HTTPS connections to the configured Console. Local development can use HTTP with `localhost`, an IPv4 loopback address, or `::1`. The clients reject credentials, queries, and fragments in the base URL. They ignore ambient proxy and CA settings and disable redirects on requests that carry credentials.
 
 Source IP is not the identity boundary; the per-CVM bearer is.
 

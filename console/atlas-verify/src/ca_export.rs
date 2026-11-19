@@ -92,7 +92,7 @@ async fn read_ca_response<S: AsyncRead + Unpin>(stream: &mut S) -> Result<String
             .await
             .map_err(|_| connection_failed())?;
         if read == 0 {
-            return Err(invalid_response());
+            return Err(connection_failed());
         }
         bytes.extend_from_slice(&chunk[..read]);
         if let Some(end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
@@ -147,7 +147,7 @@ async fn read_ca_response<S: AsyncRead + Unpin>(stream: &mut S) -> Result<String
     stream
         .read_exact(&mut bytes[buffered..])
         .await
-        .map_err(|_| invalid_response())?;
+        .map_err(|_| connection_failed())?;
     String::from_utf8(bytes.split_off(header_end)).map_err(|_| invalid_response())
 }
 

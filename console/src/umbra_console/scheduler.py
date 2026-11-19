@@ -1495,7 +1495,7 @@ async def execute_security_cvm_update_phala_operation(operation_id: Any) -> None
         )
         return
     try:
-        update_material = security_cvm_update_material()
+        update_material = security_cvm_update_material(snapshot)
     except ValueError as exc:
         await mark_security_cvm_update_failed(
             operation_id,
@@ -1512,7 +1512,9 @@ async def execute_security_cvm_update_phala_operation(operation_id: Any) -> None
     try:
         name = security_cvm_provider_name_from_metadata(snapshot)
         shade_result = await ShadeClient.from_settings().build(
-            shade_config_yaml=render_security_cvm_shade_config(snapshot, name=name),
+            shade_config_yaml=render_security_cvm_shade_config(
+                snapshot, name=name, certificate_binding=update_material["certificate_binding"]
+            ),
             app_compose_yaml=update_material["compose_config"],
         )
         bearers = mint_security_cvm_provision_bearers()
@@ -2451,7 +2453,7 @@ async def execute_cvm_update_phala_operation(operation_id: Any) -> None:
         await mark_cvm_update_failed(operation_id, code="PROVIDER_DEPLOYMENT_MISSING", details={"field": "metadata.deployment_id"})
         return
     try:
-        update_material = dev_cvm_update_material()
+        update_material = dev_cvm_update_material(snapshot)
     except ValueError as exc:
         await mark_cvm_update_failed(operation_id, code=str(exc), details={"component": "dev_cvm_update_config"})
         return
@@ -2471,7 +2473,10 @@ async def execute_cvm_update_phala_operation(operation_id: Any) -> None:
         )
         shade_client = ShadeClient.from_settings()
         shade_result = await shade_client.build(
-            shade_config_yaml=render_dev_cvm_shade_config(snapshot, name=cvm_provider_name_from_metadata(snapshot)),
+            shade_config_yaml=render_dev_cvm_shade_config(
+                snapshot, name=cvm_provider_name_from_metadata(snapshot),
+                certificate_binding=update_material["certificate_binding"],
+            ),
             app_compose_yaml=update_material["compose_config"],
         )
         deploy_result = await cvm_provider_from_settings(
@@ -3502,15 +3507,17 @@ def dev_tunnel_paths() -> list[str]:
     return paths
 
 
-def shade_guest_attestation_config() -> tuple[str, ...]:
-    # Only an explicitly pinned guest selects the new binding protocol. Shade
-    # records it in the built compose so existing deployments keep their mode.
-    if load_settings().raw.get("PHALA_OS_IMAGE", "").strip() == "dstack-0.6.3":
+def shade_guest_attestation_config(certificate_binding: str | None = None) -> tuple[str, ...]:
+    # Launches select the mode from the requested guest. Application-only
+    # updates already know the mode of the retained guest.
+    if certificate_binding == "report-data-v2" or (
+        certificate_binding is None and load_settings().raw.get("PHALA_OS_IMAGE", "").strip() == "dstack-0.6.3"
+    ):
         return ("  attestation:", "    certificate_binding: report-data-v2")
     return ()
 
 
-def render_dev_cvm_shade_config(snapshot: Any, *, name: str) -> str:
+def render_dev_cvm_shade_config(snapshot: Any, *, name: str, certificate_binding: str | None = None) -> str:
     route_lines: list[str] = []
     for path in dev_tunnel_paths():
         route_lines.extend(
@@ -3535,7 +3542,7 @@ def render_dev_cvm_shade_config(snapshot: Any, *, name: str) -> str:
             f"  domain: {_row_value(snapshot, 'fqdn')}",
             f"  instance_type: {_row_value(snapshot, 'instance_type')}",
             f"  region: {_row_value(snapshot, 'region')}",
-            *shade_guest_attestation_config(),
+            *shade_guest_attestation_config(certificate_binding),
             "  routes:",
             *route_lines,
             "",
@@ -3543,7 +3550,7 @@ def render_dev_cvm_shade_config(snapshot: Any, *, name: str) -> str:
     )
 
 
-def render_security_cvm_shade_config(snapshot: Any, *, name: str) -> str:
+def render_security_cvm_shade_config(snapshot: Any, *, name: str, certificate_binding: str | None = None) -> str:
     # The SC leaf cert MUST be Let's Encrypt PRODUCTION (publicly trusted): the attestation
     # verifier's aTLS client (atlas-rs connect.rs) validates the TLS handshake against the
     # webpki public roots before binding the leaf to the quote, so an LE *staging* ("Fake LE")
@@ -3565,7 +3572,7 @@ def render_security_cvm_shade_config(snapshot: Any, *, name: str) -> str:
             f"  domain: {_row_value(snapshot, 'fqdn')}",
             f"  instance_type: {_row_value(snapshot, 'instance_type')}",
             f"  region: {_row_value(snapshot, 'region')}",
-            *shade_guest_attestation_config(),
+            *shade_guest_attestation_config(certificate_binding),
             "  routes:",
             "    - path: /umbra/proxy",
             "      service: proxy-tunnel",
@@ -4142,6 +4149,7 @@ async def persist_security_cvm_update_provider_result(
                     image_measurement = NULL,
                     rtmr3_digest = NULL,
                     attestation_verified_at = NULL,
+                    ca_cert_pem = NULL,
                     updated_at = now()
                 WHERE id = $1
                   AND state IN ('RUNNING', 'STOPPED', 'FAILED')
@@ -4866,6 +4874,7 @@ async def fetch_security_cvm_ca_pem(snapshot: Any, *, connect_host: str | None =
         AttestationVerifierError,
         AttestationVerifierUnavailable,
         build_security_cvm_attestation_request,
+        verify_with_fetch_retries,
     )
     from umbra_console.shade_provider.shade import ShadeError
 
@@ -4893,7 +4902,9 @@ async def fetch_security_cvm_ca_pem(snapshot: Any, *, connect_host: str | None =
             "expected_rtmr3": expected_rtmr3,
             "connect_ip": connect_host,
         }
-        report = await verifier.verify(request, timeout_seconds=90)
+        report = await verify_with_fetch_retries(
+            verifier, request, timeout_seconds=security_cvm_attestation_timeout_seconds(),
+        )
     except AttestationVerifierUnavailable as exc:
         raise SecurityCVMCAFetchError(http_status=0, reason="verifier_unavailable") from exc
     except ShadeError as exc:
@@ -4958,35 +4969,76 @@ def provider_app_id(metadata: Any) -> str | None:
     return app_id if isinstance(app_id, str) and app_id else None
 
 
-def dev_cvm_update_material() -> dict[str, str]:
+def retained_guest_baseline(snapshot: Any, *, policy_key: str, active_policy: Any = None) -> tuple[str, str]:
+    """Use the verified policy of the retained guest, including after a failed update.
+
+    The provider-result step resets the current measurements before re-attesting.
+    The prior verified policy remains active until the updated guest verifies.
+    """
+    from umbra_console.attestation import _full_app_compose_from_shade_policy
+
+    expected = _row_value(snapshot, "expected_image_measurement")
+    measured = _row_value(snapshot, "image_measurement")
+    if not isinstance(expected, str) or not is_hex_measurement(expected):
+        raise ValueError("CVM_GUEST_BASELINE_UNAVAILABLE")
+    try:
+        policy = json_payload(active_policy)
+        if policy is None:
+            metadata = json_payload(_row_value(snapshot, "metadata"))
+            policy = metadata.get(policy_key) if isinstance(metadata, dict) else None
+        app_compose = _full_app_compose_from_shade_policy(policy) if isinstance(policy, dict) else None
+    except json.JSONDecodeError:
+        raise ValueError("CVM_GUEST_BASELINE_UNAVAILABLE") from None
+    if not isinstance(policy, dict) or not app_compose:
+        raise ValueError("CVM_GUEST_BASELINE_UNAVAILABLE")
+    compose = app_compose.get("docker_compose_file")
+    os_image_hash = policy.get("os_image_hash")
+    bootchain = policy.get("expected_bootchain")
+    mrtd = bootchain.get("mrtd") if isinstance(bootchain, dict) else None
+    if (
+        not isinstance(compose, str) or not compose
+        or not isinstance(os_image_hash, str) or not os_image_hash
+        or not isinstance(mrtd, str) or not is_hex_measurement(mrtd.lower())
+        or policy.get("disable_runtime_verification", False) is not False
+    ):
+        raise ValueError("CVM_GUEST_BASELINE_UNAVAILABLE")
+    if mrtd.lower() != expected or (measured is not None and measured != expected):
+        raise ValueError("CVM_GUEST_BASELINE_MISMATCH")
+    binding = policy.get("certificate_binding", "event-log")
+    if binding not in ("event-log", "report-data-v2"):
+        raise ValueError("CVM_CERTIFICATE_BINDING_INVALID")
+    return expected, binding
+
+
+def dev_cvm_update_material(snapshot: Any) -> dict[str, str]:
     raw = load_settings().raw
     image = raw.get("DEV_CVM_IMAGE", "").strip()
-    measurement = raw.get("DEV_CVM_IMAGE_MEASUREMENT", "").strip().lower()
     if not image:
         raise ValueError("DEV_CVM_IMAGE_UNCONFIGURED")
-    if not is_hex_measurement(measurement):
-        raise ValueError("DEV_CVM_IMAGE_MEASUREMENT_UNCONFIGURED")
+    measurement, binding = retained_guest_baseline(
+        snapshot, policy_key="policy_bundle", active_policy=snapshot.get("atls_policy_bundle"),
+    )
     from umbra_console.routes import render_dev_cvm_compose_config
 
     return {
         "compose_config": render_dev_cvm_compose_config({"image": image}),
         "expected_image_measurement": measurement,
+        "certificate_binding": binding,
     }
 
 
-def security_cvm_update_material() -> dict[str, str]:
+def security_cvm_update_material(snapshot: Any) -> dict[str, str]:
     raw = load_settings().raw
     image = raw.get("SECURITY_CVM_IMAGE_REF", "").strip()
-    measurement = raw.get("SECURITY_CVM_IMAGE_MEASUREMENT", "").strip().lower()
     if not image:
         raise ValueError("SECURITY_CVM_IMAGE_UNCONFIGURED")
-    if not is_hex_measurement(measurement):
-        raise ValueError("SECURITY_CVM_IMAGE_MEASUREMENT_UNCONFIGURED")
+    measurement, binding = retained_guest_baseline(snapshot, policy_key="atls_policy")
     from umbra_console.routes import render_security_cvm_compose_config
 
     return {
         "compose_config": render_security_cvm_compose_config({"image_ref": image}),
         "expected_image_measurement": measurement,
+        "certificate_binding": binding,
     }
 
 

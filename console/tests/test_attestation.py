@@ -358,7 +358,13 @@ def test_atlas_verifier_client_uses_stdin_stdout_contract(tmp_path) -> None:
     assert report.rtmr3_digest == "b" * 96
 
 
-def test_verify_with_fetch_retries_retries_transient_fetch_failure(monkeypatch) -> None:
+@pytest.mark.parametrize(("request_fields", "code", "reason"), [
+    pytest.param({}, "ATTESTATION_FETCH_FAILED", "tls_handshake_failed", id="tls"),
+    pytest.param({"ca_export": {}}, "CA_FETCH_FAILED", "ca_connection_failed", id="attested-ca-connection"),
+    pytest.param({"ca_export": {}}, "CA_FETCH_FAILED", "ca_response_timeout", id="attested-ca-timeout"),
+])
+def test_verify_with_fetch_retries_retries_transient_fetch_success(monkeypatch, request_fields, code, reason) -> None:
+    """Transient CA transport failures only retry through a fresh attestation request."""
     attempts: list[int] = []
 
     class FakeVerifier:
@@ -366,8 +372,8 @@ def test_verify_with_fetch_retries_retries_transient_fetch_failure(monkeypatch) 
             attempts.append(timeout_seconds)
             if len(attempts) == 1:
                 raise AttestationVerifierError(
-                    "ATTESTATION_FETCH_FAILED",
-                    {"reason": "tls_handshake_failed"},
+                    code,
+                    {"reason": reason},
                 )
             return parse_attestation_report(
                 json.dumps({"image_measurement": "a" * 96, "rtmr3_digest": "b" * 96}).encode("utf-8")
@@ -381,7 +387,7 @@ def test_verify_with_fetch_retries_retries_transient_fetch_failure(monkeypatch) 
     report = asyncio.run(
         verify_with_fetch_retries(
             FakeVerifier(),
-            {"kind": "security_cvm"},
+            {"kind": "security_cvm", **request_fields},
             timeout_seconds=30,
             initial_delay_seconds=0,
             max_delay_seconds=0,
@@ -392,7 +398,14 @@ def test_verify_with_fetch_retries_retries_transient_fetch_failure(monkeypatch) 
     assert len(attempts) == 2
 
 
-def test_verify_with_fetch_retries_does_not_retry_attestation_content_errors(monkeypatch) -> None:
+@pytest.mark.parametrize(("request_fields", "code", "reason"), [
+    pytest.param({}, "ATTESTATION_RTMR_MISMATCH", "rtmr_mismatch", id="rtmr"),
+    pytest.param({"ca_export": {}}, "CA_FETCH_FAILED", "invalid_ca_response", id="malformed-ca"),
+    pytest.param({"ca_export": {}}, "CA_FETCH_FAILED", "ca_http_status", id="denied-ca"),
+    pytest.param({}, "CA_FETCH_FAILED", "ca_connection_failed", id="no-ca-request"),
+])
+def test_verify_with_fetch_retries_does_not_retry_permanent_failure(monkeypatch, request_fields, code, reason) -> None:
+    """Untrusted evidence, invalid CA content and refusals end the attempt immediately."""
     attempts = 0
 
     class FakeVerifier:
@@ -400,8 +413,8 @@ def test_verify_with_fetch_retries_does_not_retry_attestation_content_errors(mon
             nonlocal attempts
             attempts += 1
             raise AttestationVerifierError(
-                "ATTESTATION_RTMR_MISMATCH",
-                {"reason": "rtmr_mismatch"},
+                code,
+                {"reason": reason},
             )
 
     async def fail_sleep(_delay):
@@ -413,12 +426,12 @@ def test_verify_with_fetch_retries_does_not_retry_attestation_content_errors(mon
         asyncio.run(
             verify_with_fetch_retries(
                 FakeVerifier(),
-                {"kind": "security_cvm"},
+                {"kind": "security_cvm", **request_fields},
                 timeout_seconds=30,
             )
         )
 
-    assert exc.value.code == "ATTESTATION_RTMR_MISMATCH"
+    assert exc.value.code == code
     assert attempts == 1
 
 

@@ -77,7 +77,7 @@ The explicit `dstack-0.6.3` pin renders Shade's `report-data-v2` certificate bin
 
 Review the guest OS pin together with `DEV_CVM_IMAGE_MEASUREMENT` and `SECURITY_CVM_IMAGE_MEASUREMENT`. Use an approved canary to establish the selected guest's MRTD before changing both measurement values. An application-image release alone does not change those values. This setting applies to new CVMs; ordinary in-place application updates retain the existing guest OS and do not perform a guest OS migration.
 
-Existing CVMs retain their captured MRTD for reconciliation after a baseline rotation. However, `umbra cvm update` and `umbra security-cvm update` select the current configured MRTD while retaining the guest OS. An update of an older guest will therefore fail attestation after a different MRTD is configured. Plan an approved guest migration or replacement before updating those instances.
+Existing CVMs retain their captured MRTD and certificate-binding mode for application updates and reconciliation after a baseline rotation. Umbra checks the retained guest baseline against the stored verified policy before sending an application update to the provider. A missing or inconsistent baseline blocks the update. Plan an approved guest migration or replacement to change the OS of an existing CVM.
 
 Umbra also invokes a pinned shade checkout. Set `SHADE_DIR` in the private admin layer. The Console image builds and includes its atlas verification helper; `ATLAS_VERIFIER_CMD` normally remains `/usr/local/bin/umbra-atlas-verify`.
 

@@ -197,6 +197,25 @@ def test_require_cvm_update_supported_legacy_marker_failure() -> None:
     assert "`umbra cvm update` is not a recovery path" in exc.value.detail["error"]["message"]
 
 
+@pytest.mark.parametrize("body", [b"", b" {\n } \t"])
+def test_update_accepts_empty_payload_success(body) -> None:
+    """Allow supported option-free requests while preserving their idempotency hash."""
+    assert routes_module.update_action_body_sha256(body) == routes_module.request_body_sha256(body)
+
+
+@pytest.mark.parametrize("handler", [routes_module.update_cvm, routes_module.update_security_cvm])
+def test_update_guest_override_is_rejected_failure(handler) -> None:
+    """Reject guest settings before either update request can queue an operation."""
+    async def body():
+        return b'{"image_measurement":"override"}'
+
+    user = SimpleNamespace(require_entity=lambda _: None, require_permission=lambda _: None)
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(handler(UUID(int=1), SimpleNamespace(body=body), current_user=user, pool=None))
+
+    assert exc.value.status_code == 422
+
+
 def test_lock_cvm_for_lifecycle_action_selects_error_reason_success() -> None:
     """The row lock carries the legacy marker into the update guard."""
 

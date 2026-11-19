@@ -121,6 +121,12 @@ def test_emitter_flushes_when_entry_threshold_is_reached() -> None:
     assert [item["path"] for item in body["logs"]] == ["/one", "/two"]
 
 
+def test_traffic_log_client_rejects_remote_http_failure() -> None:
+    """Direct callers cannot configure plaintext traffic delivery to a remote host."""
+    with pytest.raises(ValueError, match="CONSOLE_URL must use HTTPS except for loopback HTTP"):
+        TrafficLogClient(console_url="http://console.example.com", ingest_token="ingest")
+
+
 def test_traffic_log_client_uses_direct_transport_success(monkeypatch: pytest.MonkeyPatch) -> None:
     """The default bearer-bearing upload owns proxy, CA, and redirect settings."""
     client_class = httpx.AsyncClient

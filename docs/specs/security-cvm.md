@@ -28,7 +28,7 @@ The SC runs inside a Confidential VM. At boot, it MUST establish trust, generate
 
 ### 2.1 Environment Injection
 The Console injects the following configuration via the deployment environment. These values MUST NOT be written to persistent storage:
-* `CONSOLE_URL`: The base URL of the control plane.
+* `CONSOLE_URL`: The absolute HTTPS base URL of the control plane. Local development may use HTTP with `localhost`, an IPv4 loopback address, or `::1`. The SC MUST reject URLs without a host or with userinfo, a query, or a fragment before starting its credential-bearing clients.
 * `ENTITY_ID`: The UUID of the entity this SC serves.
 * `SC_ID`: The UUID of this Security CVM.
 * `CONSOLE_INGEST_TOKEN`: The plaintext service-principal bearer for polling the Console and submitting logs.
@@ -341,7 +341,7 @@ Implementations MUST uphold the following properties. Violations are spec bugs.
 2. **CA Ephemerality**: The `mitmproxy` CA private key MUST exist only in `tmpfs` and process memory. It is generated at boot and destroyed on termination.
 3. **No Plaintext Logging**: The SC MUST NOT log the `Proxy-Authorization` plaintexts, the `CONSOLE_INGEST_TOKEN`, the `CA_EXPORT_TOKEN`, injected secret values, rendered injection headers, or any detected secrets to its own stdout/stderr.
 4. **Token Hygiene**: The SC MUST remove `CONSOLE_INGEST_TOKEN` and `CA_EXPORT_TOKEN` from the process environment after reading them at boot (`env.pop`). Injected-secret plaintexts live only in the current in-memory policy snapshot and MUST NOT be logged. Full memory zeroization of Python strings is best-effort; the contract is no durable storage and no logging of these values.
-5. **Redirect Tamper Detection**: Because `CONSOLE_URL` is measured into the RTMR at boot, any infrastructure-level attempt to hijack log emission to an attacker's server will alter the RTMR3 digest, instantly tripping the Console's reconciler drift detection (Console Spec T-11/T-30).
+5. **Console transport.** Polls and log uploads MUST follow the Console URL restrictions in §2.1 and disable redirects and ambient proxy and CA settings. Independent verification of the expected launch binding remains open under §2.2.
 
 ## 8. Implementation Stack
 

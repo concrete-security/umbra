@@ -10,10 +10,10 @@ from uuid import UUID
 
 import httpx
 
+from umbra_security_cvm.console_transport import validate_console_base
+from umbra_security_cvm.policy import EffectivePolicy, PolicyValidationError, parse_effective_policy, valid_proxy_token_hash
 
 log = logging.getLogger(__name__)
-
-from umbra_security_cvm.policy import EffectivePolicy, PolicyValidationError, parse_effective_policy, valid_proxy_token_hash
 
 
 @dataclass(frozen=True)
@@ -65,11 +65,9 @@ class PollResult:
 
 class SCControlClient:
     def __init__(self, *, console_url: str, ingest_token: str, http: httpx.AsyncClient | None = None) -> None:
-        if not console_url:
-            raise ValueError("console_url is required")
+        self.console_url = validate_console_base(console_url)
         if not ingest_token:
             raise ValueError("ingest_token is required")
-        self.console_url = console_url.rstrip("/")
         self.ingest_token = ingest_token
         self.http = http
 

@@ -10,6 +10,7 @@ from typing import Awaitable, Callable, Mapping
 
 from umbra_security_cvm.binding import BootBinding, REQUIRED_ENV
 from umbra_security_cvm.ca import InMemoryRootCA, generate_root_ca
+from umbra_security_cvm.console_transport import validate_console_base
 from umbra_security_cvm.control import SCControlClient
 from umbra_security_cvm.control_loop import ControlPlaneState, run_control_plane_poll_loop
 from umbra_security_cvm.management_http import serve_management_http
@@ -36,6 +37,11 @@ class SecurityCVMRuntimeConfig:
     control_interval_seconds: float = 5.0
     control_jitter_seconds: float = 1.0
     traffic_flush_interval_seconds: float = 1.0
+
+    def __post_init__(self) -> None:
+        # Reject the URL before creating a CA or starting credential-bearing loops.
+        # Retain the supplied bytes for the boot-binding payload.
+        validate_console_base(self.console_url)
 
     @classmethod
     def from_env(

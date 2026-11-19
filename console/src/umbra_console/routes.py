@@ -4748,6 +4748,18 @@ async def stop_cvm(
     )
 
 
+def update_action_body_sha256(body: bytes) -> str:
+    payload = body.strip(b" \t\r\n")
+    if payload and re.fullmatch(rb"\{[ \t\r\n]*\}", payload) is None:
+        raise api_error(
+            422,
+            "VALIDATION_ERROR",
+            "CVM application updates do not accept request options",
+            {"field": "body"},
+        )
+    return request_body_sha256(body)
+
+
 @router.post("/cvms/{cvm_id}/actions/update", status_code=202)
 async def update_cvm(
     cvm_id: UUID,
@@ -4759,7 +4771,7 @@ async def update_cvm(
 ) -> Any:
     idempotency_key_value = optional_idempotency_key(idempotency_key)
     route = f"POST /api/v1/cvms/{cvm_id}/actions/update"
-    body_sha256 = request_body_sha256(await request.body())
+    body_sha256 = update_action_body_sha256(await request.body())
     operation_id = uuid4()
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -6154,7 +6166,7 @@ async def update_security_cvm(
     current_user.require_permission("SECURITY_CVM_CONFIGURE")
     idempotency_key_value = optional_idempotency_key(idempotency_key)
     route = f"POST /api/v1/entities/{entity_id}/security-cvm/actions/update"
-    body_sha256 = request_body_sha256(await request.body())
+    body_sha256 = update_action_body_sha256(await request.body())
     operation_id = uuid4()
     async with pool.acquire() as conn:
         async with conn.transaction():

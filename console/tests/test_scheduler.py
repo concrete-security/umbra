@@ -908,6 +908,60 @@ def test_shade_guest_attestation_config_uses_explicit_guest_pin_success(monkeypa
     assert scheduler.shade_guest_attestation_config() == expected
 
 
+@pytest.mark.parametrize("kind", ["dev", "security"])
+@pytest.mark.parametrize(
+    ("launch_guest", "retained_binding"),
+    [("dstack-0.6.3", "event-log"), ("dstack-0.5.12", "report-data-v2")],
+    ids=["retain-legacy", "retain-report-data"],
+)
+def test_app_update_preserves_verified_guest_success(monkeypatch, kind, launch_guest, retained_binding) -> None:
+    """A launch-pin change cannot switch the verified mode of the retained guest."""
+    monkeypatch.setenv("PHALA_OS_IMAGE", launch_guest)
+    monkeypatch.setenv("DEV_CVM_IMAGE", "example/dev:updated")
+    monkeypatch.setenv("SECURITY_CVM_IMAGE_REF", "example/sc:updated")
+    monkeypatch.setenv("DEV_CVM_IMAGE_MEASUREMENT", "a" * 96)
+    monkeypatch.setenv("SECURITY_CVM_IMAGE_MEASUREMENT", "a" * 96)
+    policy = security_atls_policy()
+    if retained_binding == "report-data-v2":
+        policy["certificate_binding"] = retained_binding
+    if kind == "dev":
+        metadata = {"policy_bundle": policy, "pending_policy_bundle": {"certificate_binding": "ignored"}}
+        snapshot = launch_snapshot(metadata=metadata, expected_image_measurement="b" * 96, image_measurement=None)
+        if retained_binding == "report-data-v2":
+            snapshot["atls_policy_bundle"] = json.dumps(policy)
+            metadata["policy_bundle"] = {"certificate_binding": "ignored"}
+        material = scheduler.dev_cvm_update_material(snapshot)
+        render = scheduler.render_dev_cvm_shade_config
+    else:
+        snapshot = security_cvm_snapshot(metadata={"atls_policy": policy})
+        material = scheduler.security_cvm_update_material(snapshot)
+        render = scheduler.render_security_cvm_shade_config
+
+    rendered = render(snapshot, name="app-update", certificate_binding=material["certificate_binding"])
+    assert (
+        material["expected_image_measurement"],
+        "certificate_binding: report-data-v2" in rendered,
+    ) == ("b" * 96, retained_binding == "report-data-v2")
+
+
+@pytest.mark.parametrize(
+    ("policy", "error"),
+    [
+        pytest.param(None, "CVM_GUEST_BASELINE_UNAVAILABLE", id="missing"),
+        pytest.param(security_atls_policy(expected_bootchain={"mrtd": "a" * 96}),
+                     "CVM_GUEST_BASELINE_MISMATCH", id="mrtd-mismatch"),
+        pytest.param(security_atls_policy(certificate_binding="unknown"),
+                     "CVM_CERTIFICATE_BINDING_INVALID", id="unknown-protocol"),
+    ],
+)
+def test_app_update_rejects_unsupported_guest_evidence_failure(monkeypatch, policy, error) -> None:
+    """An application update requires a matching, complete previously verified policy."""
+    monkeypatch.setenv("SECURITY_CVM_IMAGE_REF", "example/sc:updated")
+    snapshot = security_cvm_snapshot(metadata={"atls_policy": policy})
+    with pytest.raises(ValueError, match=error):
+        scheduler.security_cvm_update_material(snapshot)
+
+
 def test_render_dev_cvm_shade_config_routes_extra_tunnel_paths(monkeypatch) -> None:
     """Operator-configured aliases render as additional routes to the same tunnel."""
     monkeypatch.setenv("DEV_TUNNEL_EXTRA_PATHS", "/legacy-cli/tunnel, /umbra/tunnel,")
@@ -1375,6 +1429,8 @@ def test_execute_cvm_launch_phala_deploy_persists_hash_only(monkeypatch) -> None
 
 
 def test_execute_cvm_update_persists_thin_pending_policy_bundle(monkeypatch) -> None:
+    prior_policy = security_atls_policy()
+
     class CvmUpdateDeployConn(LaunchFakeConn):
         async def fetchrow(self, query, *args):
             if "FROM operations o" in query and "JOIN cvms c" in query:
@@ -1388,8 +1444,10 @@ def test_execute_cvm_update_persists_thin_pending_policy_bundle(monkeypatch) -> 
                         "provider": "phala",
                         "deployment_id": "dep-123",
                         "name": "umbra-v0-cvm-0000000000004000",
-                        "policy_bundle": {"old": True},
+                        "policy_bundle": prior_policy,
                     },
+                    expected_image_measurement="b" * 96,
+                    image_measurement="b" * 96,
                     security_cvm_id=UUID("00000000-0000-4000-8000-000000000041"),
                 )
             return await super().fetchrow(query, *args)
@@ -1406,6 +1464,7 @@ def test_execute_cvm_update_persists_thin_pending_policy_bundle(monkeypatch) -> 
             return cls()
 
         async def build(self, *, shade_config_yaml, app_compose_yaml):
+            captured["shade_config_yaml"] = shade_config_yaml
             captured["app_compose_yaml"] = app_compose_yaml
             return SimpleNamespace(compose_yaml="services:\n  app:\n    image: updated\n")
 
@@ -1417,24 +1476,24 @@ def test_execute_cvm_update_persists_thin_pending_policy_bundle(monkeypatch) -> 
             return SimpleNamespace(deployment_id="dep-123", gateway_host="gateway.example.com", status="RUNNING")
 
     monkeypatch.setattr(scheduler, "get_pool", fake_get_pool)
-    monkeypatch.setattr(
-        scheduler,
-        "dev_cvm_update_material",
-        lambda: {"compose_config": "services:\n  app:\n    image: updated-source\n", "expected_image_measurement": "b" * 96},
-    )
+    monkeypatch.setenv("DEV_CVM_IMAGE", "example/dev:updated")
+    monkeypatch.setenv("DEV_CVM_IMAGE_MEASUREMENT", "a" * 96)
+    monkeypatch.setenv("PHALA_OS_IMAGE", "dstack-0.6.3")
     monkeypatch.setattr("umbra_console.shade_provider.shade.ShadeClient", FakeShadeClient)
     monkeypatch.setattr("umbra_console.tee_provider.cvm_provider_from_settings", lambda timeout_seconds=None: FakeProvider())
 
     asyncio.run(scheduler.execute_cvm_update_phala_operation(UUID("00000000-0000-4000-8000-000000000030")))
 
     assert captured["deployment_id"] == "dep-123"
-    assert captured["app_compose_yaml"] == "services:\n  app:\n    image: updated-source\n"
+    assert 'image: "example/dev:updated"' in captured["app_compose_yaml"]
+    assert "certificate_binding:" not in captured["shade_config_yaml"]
     assert captured["compose_yaml"] == "services:\n  app:\n    image: updated\n"
     metadata_calls = [args for query, args in conn.execute_calls if "UPDATE cvms" in query and "compose_config = $3" in query]
     assert len(metadata_calls) == 1
     metadata = json.loads(metadata_calls[0][1])
     pending_bundle = metadata["pending_policy_bundle"]
-    assert metadata["policy_bundle"] == {"old": True}
+    assert metadata_calls[0][3] == "b" * 96
+    assert metadata["policy_bundle"] == prior_policy
     assert "connect_host" not in pending_bundle
     assert pending_bundle["deploy_compose_yaml"] == "services:\n  app:\n    image: updated\n"
     assert "app_compose" not in pending_bundle

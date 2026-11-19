@@ -131,7 +131,12 @@ async def verify_with_fetch_retries(
             attempt_timeout = max(1, min(per_attempt_timeout_seconds, timeout_seconds, int(remaining + 0.999)))
             return await verifier.verify(request, timeout_seconds=attempt_timeout)
         except AttestationVerifierError as exc:
-            if exc.code != "ATTESTATION_FETCH_FAILED":
+            ca_transport_failure = (
+                "ca_export" in request
+                and exc.code == "CA_FETCH_FAILED"
+                and exc.details.get("reason") in ("ca_connection_failed", "ca_response_timeout")
+            )
+            if exc.code != "ATTESTATION_FETCH_FAILED" and not ca_transport_failure:
                 raise
             last_fetch_error = exc
             remaining = deadline - loop.time()
