@@ -42,6 +42,8 @@ cleanup() {
     if "${developer_cli[@]}" cvm terminate "${launched_dev_cvm_id}" \
       --wait-timeout-seconds "${UMBRA_VERIFY_DEV_CVM_TERMINATE_WAIT_TIMEOUT_SECONDS:-600}" >/dev/null; then
       echo "journey cleanup: terminated Dev CVM ${launched_dev_cvm_id}" >&2
+    elif [ -n "${release_receipt:-}" ]; then
+      echo "journey cleanup: FAILED to terminate Dev CVM ${launched_dev_cvm_id}; resolve this test CVM before retrying locked release verification" >&2
     else
       echo "journey cleanup: FAILED to terminate Dev CVM ${launched_dev_cvm_id}; the next run reconciles it at step 7, or terminate it now with umbra cvm terminate ${launched_dev_cvm_id}" >&2
     fi
@@ -143,6 +145,26 @@ ensure_verify_session() {
   "${session_cli[@]}" auth login --device >/dev/null
 }
 
+# The private staging wrapper supplies lock-derived values. Capture these before
+# reading the deployment environment, which is itself under verification.
+readonly release_receipt="${UMBRA_VERIFY_RELEASE_RECEIPT:-}"
+readonly release_lock_digest="${UMBRA_VERIFY_RELEASE_LOCK_DIGEST:-}"
+readonly release_security_image="${UMBRA_VERIFY_RELEASE_SECURITY_IMAGE:-}"
+readonly release_security_mrtd="${UMBRA_VERIFY_RELEASE_SECURITY_MRTD:-}"
+readonly release_dev_image="${UMBRA_VERIFY_RELEASE_DEV_IMAGE:-}"
+readonly release_dev_mrtd="${UMBRA_VERIFY_RELEASE_DEV_MRTD:-}"
+
+check_release_cvms() {
+  docker compose exec -T console python - "$@" <"${ROOT}/ops/verify/verify-release-cvms.py"
+}
+
+if [ -n "${release_receipt}" ]; then
+  if ! [[ "${release_receipt}" == /* && ! -e "${release_receipt}" && ! -L "${release_receipt}" \
+    && "${release_lock_digest}" =~ ^[0-9a-f]{64}$ ]]; then
+    fail "journey preflight: invalid staging verification receipt request"
+  fi
+fi
+
 if [ -f .env ]; then
   set -a
   . ./.env
@@ -165,6 +187,11 @@ command -v jq >/dev/null || fail "journey preflight: jq is required"
 command -v ssh-keygen >/dev/null || fail "journey preflight: ssh-keygen is required"
 curl -fsS "${CONSOLE_URL}/healthz" >/dev/null \
   || fail "journey preflight: Console health check failed at ${CONSOLE_URL}/healthz; run make up first"
+if [ -n "${release_receipt}" ]; then
+  check_release_cvms pins "${release_security_image}" "${release_security_mrtd}" \
+    "${release_dev_image}" "${release_dev_mrtd}" \
+    || fail "journey preflight: running Console does not match the release lock"
+fi
 
 # Live contract check for the instance-type catalog adapter: the Console parser
 # only needs `result[].items[].id` to survive schema drift; assert the real
@@ -335,7 +362,10 @@ if [ -n "${UMBRA_VERIFY_SECURITY_CVM_REGION:-}" ]; then
 fi
 
 security_cvm_json=""
-if existing_security_cvm_json="$("${admin_cli[@]}" security-cvm show 2>/dev/null)"; then
+if [ -n "${release_receipt}" ]; then
+  check_release_cvms fresh "${entity_id}" \
+    || fail "journey step 4: locked release verification requires a fresh Security and Dev CVM"
+elif existing_security_cvm_json="$("${admin_cli[@]}" security-cvm show 2>/dev/null)"; then
   existing_security_cvm_state="$(printf '%s\n' "${existing_security_cvm_json}" | jq -r '.state // ""')" \
     || existing_security_cvm_state=""
   if [ "${existing_security_cvm_state}" = "RUNNING" ]; then
@@ -377,6 +407,15 @@ verified="$(printf '%s\n' "${attestation_json}" | jq -er '.verdict.verified')" \
 if [ "${verified}" != "true" ]; then
   failure_reason="$(printf '%s\n' "${attestation_json}" | jq -r '.verdict.failure_reason // "unknown"')"
   fail "journey step 4: Security CVM attestation was not verified (${failure_reason})"
+fi
+if [ -n "${release_receipt}" ]; then
+  security_rtmr3="$(printf '%s\n' "${attestation_json}" | jq -er --arg mrtd "${release_security_mrtd}" '
+    select(.expected_image_measurement == $mrtd and .verdict.image_measurement_seen == $mrtd)
+    | .verdict.rtmr3_digest_seen
+  ')" || fail "journey step 4: Security CVM report does not match its locked MRTD"
+  check_release_cvms security "${entity_id}" "${security_cvm_id}" "${release_security_image}" \
+    "${release_security_mrtd}" "${security_rtmr3}" \
+    || fail "journey step 4: Security CVM was not attested against the locked image"
 fi
 
 step 5 "profile authoring"
@@ -542,9 +581,11 @@ fi
 # inside the verifier's own entity, and the verify-profile marker keeps it to Dev
 # CVMs a journey created: the verifier identity is an ordinary user, so its own
 # entity also holds production Dev CVMs (see reconcile_journey_dev_cvms).
-reconcile_journey_dev_cvms 7 developer_cli "${profile_id}" "${profile_name}" \
-  swept_journey_dev_cvm_ids foreign_dev_cvms \
-  || fail "journey step 7: could not reconcile leftover journey Dev CVMs"
+if [ -z "${release_receipt}" ]; then
+  reconcile_journey_dev_cvms 7 developer_cli "${profile_id}" "${profile_name}" \
+    swept_journey_dev_cvm_ids foreign_dev_cvms \
+    || fail "journey step 7: could not reconcile leftover journey Dev CVMs"
+fi
 
 ssh_key_dir="$(mktemp -d)"
 tmp_files+=("${ssh_key_dir}")
@@ -592,6 +633,14 @@ printf '%s\n' "${cvm_json}" | jq -e '
   (.image_measurement | type == "string") and
   (.rtmr3_digest | type == "string")
 ' >/dev/null || fail "journey step 7: Dev CVM ${cvm_id} missing attestation fields"
+if [ -n "${release_receipt}" ]; then
+  dev_rtmr3="$(printf '%s\n' "${cvm_json}" | jq -er --arg mrtd "${release_dev_mrtd}" '
+    select(.expected_image_measurement == $mrtd and .image_measurement == $mrtd) | .rtmr3_digest
+  ')" || fail "journey step 7: Dev CVM report does not match its locked MRTD"
+  check_release_cvms dev "${entity_id}" "${cvm_id}" "${release_dev_image}" \
+    "${release_dev_mrtd}" "${dev_rtmr3}" \
+    || fail "journey step 7: Dev CVM was not attested against the locked image"
+fi
 policy_file_path="$(printf '%s\n' "${cvm_json}" | jq -er '.policy_file_path')" \
   || fail "journey step 7: umbra cvm launch did not return policy_file_path"
 if [ ! -s "${policy_file_path}" ]; then
@@ -830,6 +879,9 @@ launched_dev_cvm_id=""
 security_cvm_teardown_outcome="$(teardown_journey_security_cvm 11 admin_cli \
   "${security_cvm_id}" "${journey_created_security_cvm}" "${#foreign_dev_cvms[@]}")" \
   || fail "journey step 11: Security CVM teardown failed for ${security_cvm_id}"
+if [ -n "${release_receipt}" ] && [ "${security_cvm_teardown_outcome}" != "terminated" ]; then
+  fail "journey step 11: locked release verification requires teardown of Security CVM ${security_cvm_id}"
+fi
 
 teardown_audit_json="$("${admin_cli[@]}" audit events --limit "${audit_limit}")" \
   || fail "journey step 11: umbra audit events failed after teardown or audit hash-chain verification failed"
@@ -884,4 +936,8 @@ if [ "${retained_provider_cvms}" -gt 0 ]; then
   echo "journey step 11: leaving ${retained_provider_cvms} Umbra-managed Phala CVM(s) this run did not create: $(printf '%s\n' "${umbra_phala_cvm_names}" | paste -sd, - | sed 's/,/, /g')" >&2
 fi
 
+if [ -n "${release_receipt}" ]; then
+  (umask 077; set -C; printf 'fresh-cvms-v1:%s\n' "${release_lock_digest}" >"${release_receipt}") \
+    || fail "journey complete: could not record successful staging verification"
+fi
 step "complete" "full journey passed"
